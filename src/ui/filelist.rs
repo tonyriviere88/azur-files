@@ -51,7 +51,10 @@ pub const STATUS_HEIGHT: f32 = 22.0;
 ///
 /// 16, which is the size the shell small image list is drawn at — so a row does not
 /// reflow when a painted fallback glyph is replaced by the real icon a frame later.
-const GLYPH: f32 = 16.0;
+///
+/// Reachable from [`crate::ui::grid`], which draws a tree's *folder* rows exactly as this view does
+/// — the whole point of that mode is that only the files become tiles.
+pub(crate) const GLYPH: f32 = 16.0;
 /// Space either side of a cell's text.
 const CELL_PAD: f32 = space::S3;
 /// Two points off the top of every cell's text in a row.
@@ -73,13 +76,13 @@ const GRIP: f32 = 4.0;
 /// Fourteen — [`crate::ui::TOOL_ICON`]'s size, which is what every other painted glyph in this
 /// window's chrome is drawn at — in a box the height of the row. What it is *hit* on is that whole
 /// box and not the chevron's ink: a 6-point arrowhead is not a click target.
-const TWISTY: f32 = 14.0;
+pub(crate) const TWISTY: f32 = 14.0;
 /// Where a row's own column starts: indented by how far down the tree it is.
 ///
 /// `row.left() + CELL_PAD + 2.0` for every row of every other listing, where `depth` is 0 — the
 /// two modes share one expression rather than branching, so an ordinary listing cannot drift from
 /// the top level of a tree.
-fn stem_x(row: Rect, depth: usize) -> f32 {
+pub(crate) fn stem_x(row: Rect, depth: usize) -> f32 {
     row.left() + CELL_PAD + 2.0 + depth as f32 * INDENT
 }
 
@@ -100,7 +103,7 @@ pub(crate) fn twisty_rect(row: Rect, depth: usize) -> Rect {
 /// It also keeps the step cheap, which matters because the indent comes out of the Name column and
 /// nothing else: a tree eight folders deep at Explorer's own 19-point step would have spent 152
 /// points before the first letter of a name.
-const INDENT: f32 = TWISTY;
+pub(crate) const INDENT: f32 = TWISTY;
 /// How big a git badge is, and where on the row's icon it sits.
 ///
 /// Eleven points of a sixteen-point icon, in the bottom-left corner: the shell's own proportion and
@@ -112,7 +115,7 @@ const INDENT: f32 = TWISTY;
 /// at the left edge of a row is where the selection bar lives and where the pane's own border is a few
 /// points further on — so the badge read as clipped even when it was not.
 const BADGE: f32 = 10.0;
-fn badge_rect(icon: Rect) -> Rect {
+pub(crate) fn badge_rect(icon: Rect) -> Rect {
     Rect::from_min_size(
         pos2(icon.left() - 1.0, icon.bottom() - BADGE + 3.0),
         egui::Vec2::splat(BADGE),
@@ -218,6 +221,9 @@ pub fn show(
     focused: bool,
     icons_cache: &mut crate::shell::icons::Icons,
     links_cache: &mut crate::shell::links::Links,
+    // The shell's thumbnails, for the tiles. Handed in whichever view is showing, because the
+    // switch is on the status line and the next frame may be the other one.
+    thumbs: &mut crate::shell::thumbs::Thumbs,
     cut: &[std::path::PathBuf],
     status: Option<&str>,
     // Whether this pane's console is open, for the switch at the left of the status line.
@@ -244,12 +250,23 @@ pub fn show(
         drop_area: Rect::NOTHING,
     };
 
-    let header = Rect::from_min_size(rect.min, vec2(rect.width(), HEADER_HEIGHT));
+    // **Tiles have no column header.** Four draggable dividers over a grid would be four dividers
+    // about nothing: there are no columns under them to size. Which does cost something and it is
+    // worth naming — the header is where sorting is done, so in this view the sort is whatever the
+    // details view was last set to. It is per tab and it survives the switch, so setting it once is
+    // enough; a *sort* control for the grid would be new furniture and is not what was asked for.
+    let tiles = tab.view_mode.is_icons();
+    let header = Rect::from_min_size(
+        rect.min,
+        vec2(rect.width(), if tiles { 0.0 } else { HEADER_HEIGHT }),
+    );
     // A pane squeezed shorter than its own furniture would give an inverted body
     // rect, which turns into an empty visible range and an underflow downstream. The
     // header and the status line are worth more than a row nobody could read.
     if rect.bottom() - reserved <= header.bottom() + ROW_HEIGHT {
-        header_strip(ui, t, header, pane, tab, &resolved_widths(tab, rect.width()), out);
+        if !tiles {
+            header_strip(ui, t, header, pane, tab, &resolved_widths(tab, rect.width()), out);
+        }
         status_line(
             ui, t, floor, pane, tab, console_open, status, now, scratch, out,
         );
@@ -262,13 +279,18 @@ pub fn show(
     outcome.drop_area = body;
 
     // Columns have to be resolved before the header can be drawn, and measuring
-    // needs a painter — so this happens first, once per listing.
-    if !tab.widths_measured {
-        measure_columns(ui, t, tab, scratch);
-    }
-    let widths = resolved_widths(tab, body.width());
-
-    header_strip(ui, t, header, pane, tab, &widths, out);
+    // needs a painter — so this happens first, once per listing. Skipped entirely for tiles: it is a
+    // pass over the folder for three widths nothing is going to use.
+    let widths = if tiles {
+        [0.0; 4]
+    } else {
+        if !tab.widths_measured {
+            measure_columns(ui, t, tab, scratch);
+        }
+        let widths = resolved_widths(tab, body.width());
+        header_strip(ui, t, header, pane, tab, &widths, out);
+        widths
+    };
 
     // Whether any rows were drawn, and so whether anything is listening for a click over
     // the body. See [`bare_body`].
@@ -319,6 +341,11 @@ pub fn show(
             t.text.tertiary,
             message,
         );
+    } else if tiles {
+        crate::ui::grid::show(
+            ui, t, zone, body, pane, tab, focused, icons_cache, thumbs, cut, out, &mut outcome,
+        );
+        listed = true;
     } else {
         rows(
             ui,
@@ -614,7 +641,7 @@ const FIELD_HEIGHT: f32 = 20.0;
 /// One closed polyline rather than four dashed edges: `dashed_line` walks the points it is
 /// given, so a rectangle handed over as five points comes back with its dashes in step all the
 /// way round instead of restarting at every corner.
-fn cursor_ring(painter: &egui::Painter, rect: Rect, color: Color32) {
+pub(crate) fn cursor_ring(painter: &egui::Painter, rect: Rect, color: Color32) {
     const DASH: f32 = 2.0;
     const GAP: f32 = 2.0;
     // Half-pixel centres, so a one-pixel stroke lands on one row of pixels rather than
@@ -1505,8 +1532,9 @@ fn rows(
         below,
     );
 
-    if tab.band.is_some() {
-        band(&mut child, t, body, pane, tab);
+    if tab.band.is_some() && band_move(&mut child, body, tab, count as f32 * ROW_HEIGHT) {
+        tab.apply_band();
+        band_paint(&child, t, body, tab);
     }
 }
 
@@ -1515,7 +1543,7 @@ fn rows(
 /// `press_origin` rather than the current position: those are different pixels — a drag has
 /// to travel before egui calls it one — and anchoring at the later of the two loses whatever
 /// the pointer crossed on the way, so a quick flick would select nothing.
-fn start_band(ui: &Ui, body: Rect, tab: &mut Tab, origin: Option<egui::Pos2>) {
+pub(crate) fn start_band(ui: &Ui, body: Rect, tab: &mut Tab, origin: Option<egui::Pos2>) {
     let anchor = content_pos(ui, body, tab, origin);
     let modifiers = ui.input(|i| i.modifiers);
     tab.band = Some(crate::pane::Band {
@@ -1536,14 +1564,23 @@ fn content_pos(ui: &Ui, body: Rect, tab: &Tab, at: Option<egui::Pos2>) -> egui::
     pos2(at.x, at.y - body.top() + tab.scroll_y)
 }
 
-/// Track, apply and paint a rubber-band selection.
-fn band(ui: &mut Ui, t: &Theme, body: Rect, pane: PaneId, tab: &mut Tab) {
+/// Track a rubber-band selection: follow the pointer, auto-scroll past the edges, and let go when
+/// the button does. Answers whether there is still a band.
+///
+/// **Split from applying it and from painting it**, because the middle step is the one thing the two
+/// views cannot share: a row is covered when the band crosses its `y`, and a tile when the band
+/// overlaps its box. So the caller does this, then works out its own coverage, then
+/// [`band_paint`]s — and neither view has its own copy of the auto-scroll.
+///
+/// `content` is how tall the whole listing is, which is what bounds the scroll. In rows that is a
+/// multiplication; in the grid it is [`crate::ui::grid::Layout::height`].
+pub(crate) fn band_move(ui: &mut Ui, body: Rect, tab: &mut Tab, content: f32) -> bool {
     let held = ui.input(|i| i.pointer.any_down());
     let pointer = ui.ctx().pointer_interact_pos();
 
     if !held || pointer.is_none() {
         tab.band = None;
-        return;
+        return false;
     }
 
     // Auto-scroll when the band is dragged past an edge, at a rate that grows with
@@ -1558,8 +1595,7 @@ fn band(ui: &mut Ui, t: &Theme, body: Rect, pane: PaneId, tab: &mut Tab) {
         0.0
     };
     if overshoot != 0.0 {
-        let rows = tab.order.len() as f32 * ROW_HEIGHT;
-        let limit = (rows - body.height()).max(0.0);
+        let limit = (content - body.height()).max(0.0);
         let step = (overshoot * 0.35).clamp(-ROW_HEIGHT * 3.0, ROW_HEIGHT * 3.0);
         let next = (tab.scroll_y + step).clamp(0.0, limit);
         if next != tab.scroll_y {
@@ -1575,10 +1611,14 @@ fn band(ui: &mut Ui, t: &Theme, body: Rect, pane: PaneId, tab: &mut Tab) {
     if let Some(band) = &mut tab.band {
         band.current = current;
     }
-    tab.apply_band();
+    true
+}
 
-    // Painted last, so it lies over the rows it is selecting. Clipped to the body, or
-    // a band dragged past the edge would spill onto the status line.
+/// Paint the band.
+///
+/// Last of everything, so it lies over what it is selecting. Clipped to the body, or a band dragged
+/// past the edge would spill onto the status line.
+pub(crate) fn band_paint(ui: &Ui, t: &Theme, body: Rect, tab: &Tab) {
     let Some(band) = &tab.band else { return };
     let to_screen = |p: egui::Pos2| pos2(p.x, p.y + body.top() - tab.scroll_y);
     let rect = Rect::from_two_pos(to_screen(band.anchor), to_screen(band.current))
@@ -1599,7 +1639,6 @@ fn band(ui: &mut Ui, t: &Theme, body: Rect, pane: PaneId, tab: &mut Tab) {
         Stroke::new(1.0, accent),
         StrokeKind::Inside,
     );
-    let _ = pane;
 }
 
 /// How much of a name a rename should start with selected: the stem, not the extension.
@@ -1637,6 +1676,31 @@ fn select_stem(ctx: &egui::Context, id: Id, name: &str, is_dir: bool) {
     state.store(ctx, id);
 }
 
+/// The same field, over a rect a caller already knows — which is what [`crate::ui::grid`] has: the
+/// label under a tile, or the name cell of a folder's row in a tree.
+///
+/// A thin wrapper rather than a second implementation, because everything awkward about an in-place
+/// rename is the same wherever it opens: the caret, the stem being what starts selected, the two
+/// points of vertical alignment, the focus ring being taken off, and Enter / Escape / clicking away.
+/// `at` is where the *text* goes — its left and right edges, and its vertical middle. `limit` is how
+/// far right the field may grow when the name needs more than `at` gives it, which over a tile is the
+/// pane's own edge: a name too long for two lines of a label is precisely the one somebody is
+/// renaming, and a field the width of the tile would be that name seen through a letterbox.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn rename_over(
+    ui: &mut Ui,
+    t: &Theme,
+    pane: PaneId,
+    tab: &mut Tab,
+    entry: usize,
+    at: Rect,
+    limit: f32,
+    out: &mut Vec<Action>,
+) {
+    let room = Rect::from_min_max(at.min, pos2(limit.max(at.right()), at.max.y));
+    rename_field(ui, t, pane, tab, entry, at.left(), at.right(), room, out);
+}
+
 /// The in-place rename field, drawn over the name cell.
 ///
 /// Explorer renames where the name sits rather than in a dialog, which keeps the
@@ -1671,6 +1735,9 @@ fn select_stem(ctx: &egui::Context, id: Id, name: &str, is_dir: bool) {
 /// is a *control's* colour and drew a grey slab over the row. Opaque rather than transparent
 /// though, because covering the Size, Type and Modified cells it runs over is the whole point of
 /// being wider than the column.
+///
+/// [`rename_over`] is the same field over a rect a caller already knows, which is how
+/// [`crate::ui::grid`] opens one under a tile.
 #[allow(clippy::too_many_arguments)]
 fn rename_field(
     ui: &mut Ui,
@@ -1806,7 +1873,7 @@ fn bare_body(ui: &Ui, body: Rect, pane: PaneId, tab: &Tab, out: &mut Vec<Action>
 /// decide *what* it is for and *where* it goes. Showing it is deferred to the
 /// application through an action, because `TrackPopupMenuEx` is modal: it must not run
 /// with the listing borrowed and half-drawn.
-fn context_menu(
+pub(crate) fn context_menu(
     ui: &Ui,
     response: &egui::Response,
     pane: PaneId,
@@ -1906,6 +1973,26 @@ fn chain_ahead(folders: &str, elided: bool, into: &mut String) {
         into.push_str(folder);
         into.push_str(CONTEXT);
     }
+}
+
+/// A merged chain's Name cell, from the row's stored name and how many folders are merged into it.
+///
+/// The two halves of that — [`chain_split`] then [`chain_galley`] — as one call, so
+/// [`crate::ui::grid`] cannot get the division wrong in its own copy of it. A tree's folder rows are
+/// drawn there exactly as they are here, chains included.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn chain_cell(
+    painter: &egui::Painter,
+    name: &str,
+    merged: usize,
+    font: egui::FontId,
+    color: egui::Color32,
+    dim: egui::Color32,
+    width: f32,
+    ahead: &mut String,
+) -> std::sync::Arc<egui::Galley> {
+    let (_, chain) = chain_split(name, merged);
+    chain_galley(painter, chain, font, color, dim, width, ahead)
 }
 
 /// The Name cell of a merged chain: `src > main > java > com`, cut from the **front** when it will
@@ -2049,7 +2136,7 @@ fn name_galley(
 ///
 /// `None` for a row that is not there. `scratch` is borrowed for the formatters and left holding
 /// rubbish, which is what it is for.
-fn row_tooltip(
+pub(crate) fn row_tooltip(
     tab: &Tab,
     zone: &LocalZone,
     position: usize,
@@ -2155,12 +2242,12 @@ fn status_geometry(painter: &egui::Painter, t: &Theme, rect: Rect) -> (Rect, Rec
     (band, line, baseline)
 }
 
-/// The console's switch and what git says, then — from the other end — how long the folder took,
+/// The pane's two switches and what git says, then — from the other end — how long the folder took,
 /// how much is in it, and how much of that is selected.
 ///
 /// # Two groups, and the left one wins
 ///
-/// The left is a *control* and a fact about the repository; the right is arithmetic about the
+/// The left is two *controls* and a fact about the repository; the right is arithmetic about the
 /// folder. When the bar is too narrow for both, the right gives way — the scan's figure first, then
 /// the size, and the counts last, because the counts are the part of this line a listing cannot be
 /// read without. The left is never dropped: a switch nobody can see is a switch nobody can find,
@@ -2200,18 +2287,52 @@ fn status_line(
         Stroke::new(1.0, t.stroke.subtle),
     );
 
-    // ---- The console's switch, at the left edge --------------------------
+    // ---- The two switches, at the left edge -------------------------------
     //
-    // A control rather than a status, and the only one on this line. It is here because this is
-    // where the console *is* — the band it opens is directly above this bar — and because a panel
-    // whose only door is a keystroke is a panel most people never find.
-    let switch = Rect::from_min_size(
-        pos2(
-            line.left() + space::S2,
-            (line.center().y - SWITCH * 0.5).round(),
-        ),
-        vec2(SWITCH, SWITCH),
-    );
+    // Controls rather than statuses, and the only ones on this line that are not a fact about the
+    // folder. They are here because the left group is the one that never gives way — a switch nobody
+    // can see is a switch nobody can find — and they are **in front of** the figures because that is
+    // where a control belongs on a bar that is otherwise read left to right.
+    //
+    // **The view switch first**, and the console's after it. The order is the order of what they are
+    // about: one changes the listing filling the pane above, the other opens a band at the bottom of
+    // it, and the further-reaching of the two goes first.
+    //
+    // **One glyph each, latched**, rather than a pair that swap places. That is the rule every other
+    // toggle in this window follows — see [`crate::icons::flatten`] and [`crate::icons::eye`], which
+    // say it at length: what a toggle draws is the thing it is *about*, and whether it is on is said
+    // by the fill and the ink [`crate::ui::tool_button`] gives a latched button. A button whose art
+    // changed under the pointer would have to be read rather than recognised.
+    let middle = (line.center().y - SWITCH * 0.5).round();
+    let tiles = tab.view_mode.is_icons();
+    let view = Rect::from_min_size(pos2(line.left() + space::S2, middle), vec2(SWITCH, SWITCH));
+    if crate::ui::tool_button(
+        ui,
+        t,
+        view,
+        Id::new(("view-switch", pane)),
+        &icons::grid_view,
+        if tiles {
+            "Show details instead"
+        } else {
+            "Show large icons, with a thumbnail on anything that has one"
+        },
+        true,
+        tiles,
+        t.bg.layer_alt,
+    )
+    .clicked()
+    {
+        out.push(Action::SetView {
+            pane,
+            mode: tab.view_mode.toggled(),
+        });
+    }
+
+    // `space-2` between the two and `space-3` after them: they are one group — the pane's own two
+    // switches — and the gap inside a group has to read as smaller than the gap that follows it.
+    // Four points is enough that two latched fills read as two buttons rather than one wide one.
+    let switch = Rect::from_min_size(pos2(view.right() + space::S2, middle), vec2(SWITCH, SWITCH));
     if crate::ui::tool_button(
         ui,
         t,
@@ -2232,6 +2353,9 @@ fn status_line(
         out.push(Action::ToggleConsole(pane));
     }
     let mut left = switch.right() + space::S3;
+    // Where the right-hand groups have to stop: the bar's own edge, since both switches are at the
+    // other one.
+    let edge = line.right() - space::S3;
     // Cloned, so the rest of this can paint while `ui` is still available for the hit rects the
     // tooltips need.
     let painter = ui.painter().clone();
@@ -2263,7 +2387,7 @@ fn status_line(
             text,
             t.fonts.caption.clone(),
             t.text.primary,
-            (line.right() - space::S3 - left).max(0.0),
+            (edge - left).max(0.0),
         );
         galley_on_baseline(&painter, left, baseline, galley);
         return;
@@ -2285,7 +2409,7 @@ fn status_line(
                 word,
                 t.fonts.caption.clone(),
                 t.text.tertiary,
-                (line.right() - space::S3 - left).max(0.0),
+                (edge - left).max(0.0),
             );
             galley_on_baseline(&painter, left, baseline, galley);
         }
@@ -2354,7 +2478,7 @@ fn status_line(
         ink(SEPARATOR, t.text.tertiary),
     ]);
 
-    let mut right = line.right() - space::S3;
+    let mut right = edge;
     let mut counted: Option<Rect> = None;
     for (which, run) in runs.iter().enumerate() {
         let width: f32 = run.iter().map(|galley| galley.size().x).sum();
@@ -2443,6 +2567,8 @@ fn git_summary(
 
     let Some(repo) = &tab.git else { return left };
     let caption = t.fonts.caption.clone();
+    // The same edge `status_line` measures its own groups inwards from.
+    let edge = line.right() - space::S3;
 
     // Left to right, in the order they matter: the branch — the one thing that says the rest of this
     // is git at all — and then what is between it and its remote, and then the working tree. The
@@ -2515,7 +2641,7 @@ fn git_summary(
             } else {
                 0.0
             };
-        if x + width > line.right() - space::S3 {
+        if x + width > edge {
             break;
         }
         let slot = pressable.then(|| painter.add(egui::Shape::Noop));

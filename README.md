@@ -178,7 +178,7 @@ measured rather than assumed:
 | --- | --- | --- |
 | top | nothing — the title bar's own controls all start below `TOP_BAND` | none |
 | left | a sidebar row's left padding | none worth naming |
-| bottom | the console's switch and `N changed`, on the status line | their lowest point of 18 |
+| bottom | the pane's two switches and `N changed`, on the status line | their lowest point of 18 |
 | right | the outer 4 of a 10-point scrollbar | 6 points left to grab |
 
 The scrollbar is the only real one, so it has a test that drags it from one point inside the band and
@@ -188,9 +188,11 @@ slack to dodge a 4-point band with — so its lowest point belongs to the window
 does not light up is what says so. It was two points until the whole line moved up one; halving it was
 not the reason for that and is what it bought. The rest has a test that finds the switch by sweeping
 the bar for something under the pointer, because a control that cannot be reached is a control that
-does not work, however right its rect looks. `N changed`, at the other end of the same group, is the
-second control down there and has the same sweep for the same reason. A maximised window skips the bands entirely, since there is
-nothing to resize.
+does not work, however right its rect looks. The **view switch** in front of it and `N changed` at the
+other end of the group are the second and third controls down there, and each has the same sweep for
+the same reason — the view switch's also checks that the two 18-point switches four points apart are
+still two targets and still in the order they were asked for, which is not something a rect can be read
+to prove. A maximised window skips the bands entirely, since there is nothing to resize.
 
 **The weld is real, not just matching paint.** The title bar draws a `stroke-subtle` hairline
 along its bottom to say where it ends — which matters against the sidebar, whose fill is the same
@@ -1607,6 +1609,209 @@ its left edge. Grey and dashed is what every list on the platform marked this st
 any of them had a theme, and it cannot be read as a selection at a glance. Drawn as one closed
 polyline rather than four dashed edges, so the dashes stay in step round the corners.
 
+## Rows or tiles
+
+The first switch on [the status line](#the-status-line) turns the pane into Explorer's **Large icons**:
+a grid of 96-point tiles with a thumbnail on anything that has one.
+
+```
+┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐
+│  ▓▓▓▓▓▓  │ │  ▒▒▒▒▒▒  │ │   ⌸      │ │   ⌸      │
+│  ▓▓▓▓▓▓  │ │  ▒▒▒▒▒▒  │ │          │ │          │
+│ img20.j… │ │ img21.j… │ │ Cargo.t… │ │ README.… │
+└──────────┘ └──────────┘ └──────────┘ └──────────┘
+```
+
+**Both views are the same listing.** The order, the sort, the filter, the selection, the cursor and the
+rubber band are all the tab's, and a tile is identified by its *position in the display order* exactly
+as a row is — so every gesture in the program reaches the same code from a different rectangle: a
+paste, a delete, a drag out, a shell menu, `Ctrl+A`, type-ahead, F2. Switching costs a frame and never
+a re-read, which is the same claim [the two flatten modes](#the-tree-is-the-same-listing-re-ordered)
+make.
+
+What genuinely differs is geometry, and it is three things rather than one. Hit-testing is
+`(column, row)` arithmetic instead of a division by the row height. The band covers a *rectangle* of
+cells rather than a range of rows, which is why `Tab::apply_band_at` exists beside `apply_band` — and
+why the gap between two tiles belongs to the folder, so a band can still be started between them.
+And the arrow keys go to whichever axis the view has: `Down` is a whole line of tiles, `Left` and
+`Right` are one.
+
+**It is per tab, it is not remembered, and going anywhere puts it back.** Which is the one place this
+and the flatten mode part company, and it is deliberate: which way you want a *tree* shown is a habit —
+so that one is a window preference and lives in the settings file — where whether a folder is worth
+looking at as pictures is a fact about *that folder*. A folder of photographs and the folder of source
+you open out of it want opposite answers, so an answer about one is not an answer about the other.
+
+So `Tab::go_to` puts it back to the details view beside the flatten and the filter, which are the other
+two questions asked of a folder rather than of the window, and there is no `view=` key in the settings
+at all: **every folder opens in the details view, every time.** A *refresh* keeps it, because a refresh
+is the same folder read again and every file operation ends in one — a paste that dropped you back into
+rows would be the view undoing itself under your hands — and so does flattening, which is another
+question about the folder you are already looking at. Two panes can therefore be in different views at
+once, which is most of the point.
+
+**There is no column header over tiles**, because four draggable dividers over a grid would be four
+dividers about nothing. That costs one thing and it is worth saying plainly: the header is where sorting
+is done, so in this view the sort is whatever the details view was last set to. It is per tab and it
+survives the switch, so setting it once is enough.
+
+### A tree keeps its folders as rows
+
+Flattened as a **list**, the pane is one grid over the whole order and the arithmetic is a division:
+nothing is cached, nothing walked, and 300,000 files cost what forty do.
+
+Flattened as a **tree**, the folders stay rows — indented, with a twisty, exactly as in the details view
+— and each folder's files become a grid of its own:
+
+```
+  ⌸ ⌸ ⌸ ⌸            ← the files of the folder being listed
+∨ 📁 a nested folder
+    ⌸ ⌸ ⌸ ⌸          ← its files, at its indent
+  ∨ 📁 deeper
+      ⌸
+∨ 📁 another
+```
+
+**A folder's files come immediately after its own row and before the folders under it.** Which is the
+only arrangement that works: the alternative puts a folder's contents below its entire subtree, so
+looking at what is in the folder you just opened means scrolling past everything inside everything
+inside it. The files of the folder being *listed* are therefore the first thing on the pane — the same
+rule with nothing above it.
+
+That shape has no closed form for "how tall is this" or "which block is at *y*", because a grid's height
+depends on how many columns fit at its indent. So both are precomputed into `grid::Layout` — a run of
+blocks with their tops, walked once per order and per width, and looked up by binary search — and
+invalidated on `Tab::order_gen` rather than on the order's *length*, since a click on a column header
+leaves the length alone and moves every row.
+
+### Explorer's thumbnails, not a decoder
+
+`IShellItemImageFactory::GetImage`, which is the call Explorer's own views make, so a tile shows what
+Explorer would have shown. Three reasons it is the shell rather than the `image` crate that is already
+in this binary:
+
+1. **It has already been done.** Windows keeps a per-user thumbnail cache that Explorer fills; a folder
+   you have looked at there comes back instantly, and one you have not is extracted once and cached for
+   both programs.
+2. **It answers for everything.** Camera RAW, HEIC from a phone, PSD, PDF, `.mp4` — each has a
+   thumbnail provider registered by whatever produced it, and not one of them is a codec this program
+   would be right to embed.
+3. **A file with no thumbnail still needs a picture**, and the same call gives it: the file's *large*
+   icon at the size asked for. A tile drawn from the 16-point image list behind the details view would
+   be a blur. One call covers both halves of a folder, which is what makes the grid one code path.
+
+What it costs is a shell call **per file** rather than the per-*type* answer
+[the row icons](#why-it-is-fast) are built around. It is affordable here
+for one reason: a tile is 96 points, so a screenful is a hundred-odd of them rather than forty rows ×
+nothing, and only cells actually on screen are ever asked about. Everything else is the shape the icon
+service already has — one worker thread with an apartment that lasts, a short queue, questions from a
+folder you have left dropped rather than answered, and a painted glyph on the tile until the answer
+arrives.
+
+**An atlas of pages, and it is also the cache.** Tiles are drawn from an atlas rather than a texture
+each, because egui begins a new draw call whenever the texture changes between primitives and
+`egui_glow`'s painter leaks per draw call — a texture per thumbnail would break a frame's primitive
+stream at every tile.
+
+It is a *stack* of 144-cell pages rather than one big texture, and that is the second thing this got
+wrong. A single fixed atlas makes the cache's size the atlas's size, so a window showing more tiles than
+there are cells has tiles that can never hold a picture — and every one of those cells is being drawn,
+so there is nothing to evict either. It showed up as a band of plain glyphs that filled in only when you
+scrolled. So a page is added when a cell on it is first claimed: one for a laptop window, two for
+2560 × 1392, four for a maximised 4K panel, six at the cap. A session that stays in the details view
+allocates none of it, and the pages cost one draw call each only because the tiles are painted in a
+single batch that is **sorted by texture** first.
+
+**A cell that is on screen is never taken from the tile drawing it**, which is the rule underneath both.
+Plain least-recently-used is not enough and the failure is not subtle once you have seen it: with more
+tiles than cells, every visible tile is drawn every frame, so every entry is equally recent, so LRU picks
+one of *them* — that tile loses its picture, falls back to its glyph, asks again, and its answer takes a
+cell off another visible tile. Round it goes, every frame, for ever: a wall of thumbnails flickering as
+though each were being replaced by its neighbour, which is exactly what is happening.
+
+### The cell that belonged to nothing
+
+**The bug that stopped the view working at all**, and it took four rounds of guessing to find because
+its symptom is nothing like its cause. Its trace line was this:
+
+```
+thumbs   71 known /   71 drawn /  0 gaveup /  0 queued /  140 asks / 6 pages /    0 spare
+```
+
+864 cells handed out — six pages — and **71 entries left**. So 793 cells belonged to no entry and were
+not on the free list either: unreachable and unusable. The atlas exhausted while holding seventy-one
+pictures, so nothing new could ever be placed, so a screenful of tiles kept their painted glyphs for
+ever. Scrolling made a couple of the drawn cells stale, which freed a couple of cells, which is why
+scrolling loaded *some but not all* of what was missing. Every symptom of the report falls out of that
+one number.
+
+The leak was one line: an answer for a file that already had a cell replaced its entry, and the cell the
+old entry was holding was dropped on the floor. So `remember` now puts a displaced cell back on the free
+list — and separately, the *reason* duplicates arrived at all is closed: the worker used to release its
+claim on a path when it finished with the file, which left a window one frame wide before the answer was
+written down. A tile asking inside that window found no entry and no claim and started a second job for
+the same file. With 140 tiles asking every frame, **every answer was exposed to it**. The claim is now
+released when the answer is recorded.
+
+`no_cell_is_ever_lost` asserts the invariant rather than the symptom — every cell is held by an entry, on
+the free list, or never handed out — across a picture, a duplicate, a refusal landing over a picture, and
+an eviction. It fails on the old line, one cell short of 864.
+
+`--trace` grew the numbers that found it: `known` against `drawn`, plus `gaveup`, `queued`, `asks` and
+`spare`. Between them they say which end is stuck, and each points at a different fix. `known` sitting
+below `pages × 144` is this one.
+
+### The frame it is polled in is part of the rule
+
+The first version asked for a cell to have been quiet for **two** frames, because answers were taken
+delivery of at the top of a frame like everything else this program polls — and from there a cell drawn
+one frame ago is indistinguishable from one about to be drawn again.
+
+Those two frames were a bug, and the shape of it is worth keeping because it is the shape of every
+paint-on-demand bug. **Switch a scrolled grid from a tree to a list**: the tiles are all new, every cell
+is held by a file you scrolled past, and none has been quiet for two frames yet — so nothing is asked
+for, nothing arrives, *nothing asks for a repaint*, and the window sits on a grid of painted glyphs until
+you scroll and force some frames by hand.
+
+So delivery moved to the **end** of the frame, where "no tile drew this cell" is a fact rather than a
+guess, and one quiet frame is enough. Belt and braces, a tile that is refused for want of room books a
+repaint before giving up, so a view that is genuinely at the cap still fills itself in as cells free up
+rather than waiting for the pointer to move.
+`shell::thumbs`' `a_visible_cell_is_never_taken_from_the_tile_drawing_it` fills the atlas by hand and
+holds both halves; it fails outright on the two-frame rule.
+
+Two smaller things that are easy to get wrong and were:
+
+- **The alpha comes back premultiplied.** `ColorImage::from_rgba_unmultiplied` multiplies it *in*, so
+  premultiplied pixels through that constructor go twice: a 50%-opaque edge comes out at a quarter of
+  its colour, which is a dark fringe round every icon and a grey halo round every soft-edged thumbnail.
+  At sixteen points that is a pixel nobody sees, which is why the small icon path has always been able
+  to ignore it; at ninety-six it is the edge of the picture.
+- **A failure is not an answer about the file.** `GetImage` fails under contention — for a thumbnail
+  Explorer is extracting at that moment, for a cache it is writing, for a file another window of this
+  program is asking about — and it does not confine itself to the documented `E_PENDING` when it does.
+  It is reproducible, which is how it was found: two threads of one process asking about one file get
+  exactly one answer between them, and the tests that reach the shell hold a lock over each other to
+  say so.
+
+  Cached as "this file has no picture", a failure is a tile that keeps its painted glyph for as long as
+  the folder is open — and it **accumulates**. Every scroll-and-switch asks a few hundred files at once,
+  a slice of them fail while the shell is busy with the rest, and each of those is written off for good.
+  Round again and another slice goes, until the files asked first have pictures and everything asked
+  since is a wall of glyphs. So there is no such answer: a failure is a *not yet*, retried four times
+  with the wait growing — a tenth of a second, then half, then a second and a half, then five. The
+  growing is the part that matters. Three attempts inside three frames is fifty milliseconds, all of it
+  inside the same busy window that caused the first failure, which is one attempt with extra steps. A
+  file the shell genuinely cannot draw costs five calls in total and then nothing, and a tile sitting
+  out a wait books the frame its next attempt comes due in, because nothing else would ask for one.
+
+A **frame** is drawn round the picture, and only where the file really is one. A photograph with a
+white sky or a dark one bleeds into the pane without it, which is why Explorer frames its thumbnails; an
+icon is a shape on transparency and a box round one would be a box round nothing. The file's extension
+is what tells them apart, since the shell does not say which of the two it handed back. A picture
+smaller than the tile is drawn at its own size rather than blown up — a 32-pixel icon stretched to 96 is
+a blur, and a blur is a worse answer than a small icon.
+
 ## The status line
 
 **It is the floor of the pane**, across its whole width and under everything in it — the listing, the
@@ -1619,26 +1824,33 @@ It used to be the listing's to place, and that looked right for exactly as long 
 went along the bottom — where it lands above the line either way. Docked to the **right** it did not:
 the line stopped where the panel began and the panel ran on down to the pane's own edge.
 
-Two groups, one bar. On the left a **control** and a fact about the repository; on the right
-arithmetic about the folder.
+Two groups, one bar. On the left the pane's two **controls** and a fact about the repository; on the
+right arithmetic about the folder.
 
 ```
-[>_]  ⑂ master ↑2 ↓1  13 changed            0.3 ms  ·  1016 KB  ·  4 / 19 (3)
+[▦] [>_]  ⑂ master ↑2 ↓1  13 changed        0.3 ms  ·  1016 KB  ·  4 / 19 (3)
 ```
 
 | | |
 | --- | --- |
-| the switch | show or hide this pane's console — the same thing `Ctrl+²` does |
+| `▦` | rows or tiles — see [Rows or tiles](#rows-or-tiles) |
+| `>_` | show or hide this pane's console — the same thing `Ctrl+²` does |
 | ⑂ `master` `↑2` `↓1` `13 changed` | see [Git, by asking git](#git-by-asking-git) |
 | `13 changed` | and it is a **button**: press it for a listing of exactly those thirteen |
 | `0.3 ms` | how long this folder took to read |
 | `1016 KB` | the folder's size, or the selection's the moment there is one |
 | `4 / 19 (3)` | selected, on show, and not on show |
 
-**The switch is there because that is where the console is** — it opens the band directly above
-this bar — and because a panel whose only door is a keystroke is a panel most people never find. It
-is subtle until the pointer is on it, and latched while the console is open, which is what every
-other toggle in this window does.
+**Both switches are at this end because the left group is the one that never gives way** — a switch
+nobody can see is a switch nobody can find — and they are in front of the figures because that is where
+a control belongs on a bar read left to right. The console's is here for a second reason of its own: it
+opens the band directly above this bar, and a panel whose only door is a keystroke is a panel most
+people never find. The **view switch goes first** of the two, because the order is the order of what
+they are about: one changes the listing filling the pane, the other opens a band at the bottom of it.
+
+Each is subtle until the pointer is on it and latched while its thing is showing, which is what every
+other toggle in this window does. Four points apart rather than eight: they are one group, and the gap
+inside a group has to read as smaller than the gap after it.
 
 **`13 changed` is the one fact on this line that is also a question**, so it is the second control on
 it. Pressed, it flattens the folder and puts `@git` in the filter box — the two together are the
@@ -3818,6 +4030,7 @@ Deliberately:
 | `--compare` | select the first two pictures and open the panel on them, so a capture can show the comparison |
 | `--console[=<a;b;c>]` | open the console panel, and run these commands in it |
 | `--flat`, `--flat=list\|tree` | open every pane flattened, for looking at that view without pressing the button — and in a stated mode, so photographing the other one does not mean editing the settings and remembering to put them back |
+| `--tiles` | open every pane as [large icons](#rows-or-tiles). The one view with *no* other way in for a capture run: it is behind a click on a switch, and deliberately not a setting |
 | `--stack` | open the extra `--open=` paths *below* rather than beside, for the same reason |
 | `--trace` | print a line whenever the window's size, scale, focus or minimised flag changes, and the memory, handle and cache figures every three seconds |
 | `--walk=<dir>` | browse subfolder after subfolder by itself, four a second, so `--trace` can measure a real session |

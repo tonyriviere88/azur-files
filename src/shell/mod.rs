@@ -37,6 +37,7 @@ pub mod icons;
 pub mod links;
 pub mod menu;
 pub mod ops;
+pub mod thumbs;
 
 /// Initialise COM for the calling thread as a single-threaded apartment.
 ///

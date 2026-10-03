@@ -28,6 +28,15 @@
 //!
 //! A `path` before any `pane` line is a file from the version that remembered tabs and
 //! not panes, and every tab in it goes into one pane — which is what that version did.
+//!
+//! # What is deliberately not here
+//!
+//! **Whether a listing is showing rows or tiles.** Everything in this file is a *habit* — where the
+//! preview panel goes, which shell a console opens on, which way a tree is drawn — and that one is
+//! not: it is a question asked of the folder in front of you, so every tab opens in the details view
+//! and going anywhere puts it back. See [`crate::pane::ViewMode`], which carries the argument.
+//! `the_window_comes_back_the_way_it_was_left` checks no `view=` key appears, because a setting
+//! added back by reflex is how that reasoning would be undone without anybody noticing.
 
 use std::path::{Path, PathBuf};
 
@@ -537,6 +546,17 @@ mod tests {
         // turned it off, has to come back off.
         assert!(!back.regroup);
         assert!(older.regroup, "on by default");
+        // And **nothing at all about rows or tiles**, which is the one listing setting this file
+        // deliberately does not carry: a tab always opens in the details view. A `view=` key written
+        // by hand is ignored, and one appearing here again would mean the argument on
+        // `crate::pane::ViewMode` had been undone without anybody noticing.
+        // Matched with the newline in front of it, or `preview=` would satisfy it and the assertion
+        // would pass whatever this file wrote.
+        assert!(
+            !saved.to_text().contains("\nview="),
+            "a `view=` key is being written: {}",
+            saved.to_text()
+        );
         // Which slash the path field writes. The other way round from the two above — its default is
         // *off*, so it is the missing line that has to come back false and the `1` that has to
         // survive. A preference nobody can keep is worse than no preference: the whole point of it is

@@ -148,6 +148,7 @@ fn main() -> eframe::Result {
     let mut rename = false;
     let mut path: Option<String> = None;
     let mut stack = false;
+    let mut tiles = false;
     let mut preview = false;
     let mut find: Option<String> = None;
     let mut compare = false;
@@ -184,6 +185,8 @@ fn main() -> eframe::Result {
             rename = true;
         } else if let Some(text) = arg.strip_prefix("--path=") {
             path = Some(text.to_owned());
+        } else if arg == "--tiles" {
+            tiles = true;
         } else if arg == "--preview" {
             preview = true;
         } else if arg == "--compare" {
@@ -319,6 +322,7 @@ fn main() -> eframe::Result {
                 menu,
                 rename,
                 path,
+                tiles,
                 preview,
                 console,
                 find,
@@ -520,6 +524,12 @@ struct Window {
     /// the completion dropdown. Behind `Ctrl+L` and then a keystroke, which a capture run has no
     /// keyboard for — the same reason `--rename` exists.
     path: Option<String>,
+    /// `--tiles`: show the listing as large icons rather than as rows.
+    ///
+    /// Behind a click on the switch at the left of the status line, and behind nothing else at all —
+    /// the view is deliberately not a setting, so unlike `--flat` there is no config key a capture run
+    /// could reach it through. See `App::show_tiles_here`.
+    tiles: bool,
     /// `--preview`: put the keyboard on the first previewable file in the listing and open the
     /// preview panel on it, for the same reason — it is behind `Ctrl+P` and a focused row.
     preview: bool,
@@ -602,6 +612,12 @@ impl eframe::App for Window {
         }
         // The same window, for the same reason: the panel follows the keyboard, and a scan
         // landing afterwards would move the keyboard off the row that was chosen for it.
+        // Before the preview flag and before the frame, so the tiles are what the pane draws from its
+        // very first pass rather than a listing that turns into a grid three frames in.
+        if self.tiles {
+            self.tiles = false;
+            self.app.show_tiles_here();
+        }
         if self.preview && self.shot.as_ref().is_some_and(|s| s.frame >= 8) && self.app.has_rows() {
             self.preview = false;
             if self.compare {
@@ -643,7 +659,8 @@ impl eframe::App for Window {
         if (self.app.menu_pending()
             || self.app.preview_pending()
             || self.app.console_busy()
-            || self.app.git_pending())
+            || self.app.git_pending()
+            || self.app.thumbs_pending())
             && self.waited < PATIENCE
         {
             self.waited += 1;

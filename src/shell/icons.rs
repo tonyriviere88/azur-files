@@ -884,7 +884,7 @@ fn bitmap(index: i32) -> Option<ColorImage> {
         let colour = info.hbmColor;
         let mask = info.hbmMask;
 
-        let result = read_bgra(colour, mask);
+        let result = read_bgra(colour, mask, false);
 
         if !colour.is_invalid() {
             let _ = DeleteObject(colour.into());
@@ -904,7 +904,23 @@ fn bitmap(index: i32) -> Option<ColorImage> {
 #[cfg(windows)]
 pub fn bitmap_of(bitmap: windows::Win32::Graphics::Gdi::HBITMAP) -> Option<ColorImage> {
     // SAFETY: the handle belongs to the caller and is only read; nothing is freed here.
-    unsafe { read_bgra(bitmap, windows::Win32::Graphics::Gdi::HBITMAP::default()) }
+    unsafe { read_bgra(bitmap, windows::Win32::Graphics::Gdi::HBITMAP::default(), false) }
+}
+
+/// The same, **treating the alpha as already multiplied into the colour**.
+///
+/// Which is what `IShellItemImageFactory::GetImage` hands back — see [`crate::shell::thumbs`] — and
+/// the difference is visible at the size that service draws at. `ColorImage::from_rgba_unmultiplied`
+/// multiplies the alpha *in*, so premultiplied pixels go through it twice: a 50%-opaque edge comes
+/// out at 25% of its colour, which reads as a dark fringe round every icon and a grey halo round
+/// every thumbnail with a soft edge. At sixteen points that is a pixel nobody sees, which is why the
+/// small path above has always been able to ignore it; at ninety-six it is the edge of the picture.
+#[cfg(windows)]
+pub fn bitmap_premultiplied(
+    bitmap: windows::Win32::Graphics::Gdi::HBITMAP,
+) -> Option<ColorImage> {
+    // SAFETY: the handle belongs to the caller and is only read; nothing is freed here.
+    unsafe { read_bgra(bitmap, windows::Win32::Graphics::Gdi::HBITMAP::default(), true) }
 }
 
 /// Read a 32-bit icon bitmap into an egui image, using the mask for anything that
@@ -912,10 +928,14 @@ pub fn bitmap_of(bitmap: windows::Win32::Graphics::Gdi::HBITMAP) -> Option<Color
 ///
 /// Monochrome and 24-bit icons still exist in the wild — a lot of shell extensions
 /// ship them — and without the mask they come out as opaque black rectangles.
+///
+/// `premultiplied` says which of the two ways the alpha in the bitmap is meant: see
+/// [`bitmap_premultiplied`], which is the one caller that says yes.
 #[cfg(windows)]
 unsafe fn read_bgra(
     colour: windows::Win32::Graphics::Gdi::HBITMAP,
     mask: windows::Win32::Graphics::Gdi::HBITMAP,
+    premultiplied: bool,
 ) -> Option<ColorImage> {
     use windows::Win32::Graphics::Gdi::{
         CreateCompatibleDC, DeleteDC, GetDIBits, GetObjectW, BITMAP, BITMAPINFO, BITMAPINFOHEADER,
@@ -936,7 +956,11 @@ unsafe fn read_bgra(
         return None;
     }
     let (w, h) = (header.bmWidth as usize, header.bmHeight as usize);
-    if w > 512 || h > 512 {
+    // A sanity bound and nothing more: an image list cell is 16 or 48 square and a thumbnail is
+    // whatever [`crate::shell::thumbs::CELL`] asked for. 1024 is past both with room to spare and
+    // still refuses the case this is here for — a handle that is not the bitmap it claims to be,
+    // where the header's figures are whatever happened to be in memory.
+    if w > 1024 || h > 1024 {
         return None;
     }
 
@@ -1003,6 +1027,18 @@ unsafe fn read_bgra(
     // GDI hands back BGRA; egui wants RGBA.
     for pixel in pixels.chunks_exact_mut(4) {
         pixel.swap(0, 2);
+    }
+    if premultiplied {
+        // Straight across, because that is already the form epaint holds a colour in — see
+        // [`bitmap_premultiplied`] for what putting it through the other constructor costs.
+        return Some(ColorImage {
+            size: [w, h],
+            pixels: pixels
+                .chunks_exact(4)
+                .map(|p| egui::Color32::from_rgba_premultiplied(p[0], p[1], p[2], p[3]))
+                .collect(),
+            source_size: egui::vec2(w as f32, h as f32),
+        });
     }
     Some(ColorImage::from_rgba_unmultiplied([w, h], &pixels))
 }

@@ -16,6 +16,7 @@ pub mod chrome;
 pub mod console;
 pub mod deps;
 pub mod filelist;
+pub mod grid;
 pub mod menu;
 pub mod preview;
 pub mod sidebar;

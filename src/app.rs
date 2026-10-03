@@ -82,6 +82,14 @@ pub enum Action {
     /// Show a flattened tree as a list or as a tree — the window's preference, so every pane
     /// showing one follows. See [`crate::pane::FlatMode`].
     SetFlatMode(crate::pane::FlatMode),
+    /// Rows or tiles, for the tab in front of this pane — the switch at the left of its status line.
+    /// See [`crate::pane::ViewMode`].
+    ///
+    /// The mode rather than a toggle, so that `--tiles` and the switch are the same operation: a flag
+    /// that set `Tab::view_mode` by hand would quietly miss whatever switching has to do besides, which
+    /// it already did — the scroll fix-up below. `SetFlatMode` beside it is the same shape for the same
+    /// reason.
+    SetView { pane: PaneId, mode: crate::pane::ViewMode },
     /// Show a chain of folders with nothing in them but each other as one row, or stop — the
     /// window's preference again, so every pane showing a tree follows.
     SetRegroup(bool),
@@ -184,6 +192,7 @@ impl Action {
             Self::ToggleHidden(_) => "ToggleHidden",
             Self::ToggleFlat(_) => "ToggleFlat",
             Self::SetFlatMode(_) => "SetFlatMode",
+            Self::SetView { .. } => "SetView",
             Self::SetRegroup(_) => "SetRegroup",
             Self::SetForwardSlashes(_) => "SetForwardSlashes",
             Self::ShowChanges(_) => "ShowChanges",
@@ -293,6 +302,8 @@ pub struct App {
     complete: PathComplete,
     /// The shell icons, resolved once per file type and held for the session.
     icons: crate::shell::icons::Icons,
+    /// The shell's thumbnails, for the tiles in the large-icon view. See [`crate::shell::thumbs`].
+    thumbs: crate::shell::thumbs::Thumbs,
     /// What each shortcut row points at, asked once per row per view.
     links: crate::shell::links::Links,
     /// Asks git about the folder each pane is showing, once per view of it.
@@ -564,11 +575,15 @@ struct Scrolling {
 
 impl Scrolling {
     /// A step every frame, as fast as the window will paint.
-    fn step(&mut self, rows: usize) -> Option<f32> {
-        if !self.on || rows == 0 {
+    ///
+    /// `span` is how tall the listing is — which is not `rows × ROW_HEIGHT` in the large-icon view, so
+    /// the caller works it out from whichever view is showing. Handed the row figure, a grid of tiles
+    /// would sweep to an offset several times its own height and spend nearly the whole cycle clamped
+    /// against the bottom, which measures the one position that is not moving.
+    fn step(&mut self, span: f32) -> Option<f32> {
+        if !self.on || span <= 0.0 {
             return None;
         }
-        let span = rows as f32 * crate::pane::ROW_HEIGHT;
         // Two seconds top to bottom at 60fps, which is faster than a wheel and slower than a
         // dragged scrollbar.
         let step = 1.0 / 120.0;
@@ -778,6 +793,7 @@ impl App {
             crumbs: CrumbMenu::default(),
             complete: PathComplete::default(),
             icons: crate::shell::icons::Icons::new(),
+            thumbs: crate::shell::thumbs::Thumbs::new(ctx),
             links: crate::shell::links::Links::new(ctx),
             git: crate::git::Git::new(ctx),
             git_waiting: 0,
@@ -998,8 +1014,19 @@ impl App {
         // `--scroll`: keep the listing moving, so the painting is measured and not just the
         // reading.
         if self.scrolling.on {
-            let rows = self.panes.iter().find(|p| p.id == self.focused).map_or(0, |p| p.tab().order.len());
-            if let Some(to) = self.scrolling.step(rows) {
+            let span = self
+                .panes
+                .iter()
+                .find(|p| p.id == self.focused)
+                .map_or(0.0, |p| {
+                    let tab = p.tab();
+                    if tab.view_mode.is_icons() {
+                        tab.grid.height()
+                    } else {
+                        tab.order.len() as f32 * crate::pane::ROW_HEIGHT
+                    }
+                });
+            if let Some(to) = self.scrolling.step(span) {
                 if let Some(pane) = self.panes.iter_mut().find(|p| p.id == self.focused) {
                     pane.tab_mut().scroll_to = Some(to);
                 }
@@ -1019,13 +1046,19 @@ impl App {
                 let (private, gdi, user) = process_memory();
                 let (dirs, entries) = self.loader.held();
                 let (kinds, paths, textures) = self.icons.held();
+                let (known, pictures, pages, spare) = self.thumbs.held();
+                let (gaveup, queued) = self.thumbs.stuck();
                 println!(
                     "{now:8.1}  private {:>7} KB   gdi {gdi:>5}   user {user:>4}   \
                      cache {dirs:>3} folders / {entries:>8} entries   \
-                     icons {kinds:>4} kinds / {paths:>5} paths / {textures:>4} textures /                      {} bitmaps / {} uploads",
+                     icons {kinds:>4} kinds / {paths:>5} paths / {textures:>4} textures /                      {} bitmaps / {} uploads   \
+                     thumbs {known:>4} known / {pictures:>4} drawn / {gaveup:>4} gaveup / {queued:>3} queued / {:>4} asks / {pages} pages / {spare:>4} spare / {} fetched / {} uploads",
                     private / 1024,
                     self.icons.bitmaps,
-                    self.icons.uploads
+                    self.icons.uploads,
+                    self.thumbs.asks,
+                    self.thumbs.fetched,
+                    self.thumbs.uploads,
                 );
             }
         }
@@ -1049,6 +1082,12 @@ impl App {
             .map(|tab| tab.view)
             .collect();
         self.icons.only(&views);
+        // Which folders the tiles' pictures may still be wanted for, for the same reason: one that has
+        // been scrolled away from must not hold up the one in front of it.
+        //
+        // **Delivery is at the *end* of the frame** rather than here beside the icons' — see
+        // [`crate::shell::thumbs::Thumbs::poll`], which is where that has to happen and why.
+        self.thumbs.only(&views);
         self.deliver_icons();
         self.deliver_links();
         self.collect_previews(&ctx, now);
@@ -1163,6 +1202,14 @@ impl App {
         self.keyboard(&ctx);
         self.thumb_buttons(&ctx);
         self.apply(&ctx);
+
+        // **The tiles' pictures are taken delivery of here, after the panes have been drawn**, and the
+        // position in this function is the whole of what makes the atlas's eviction rule exact: a cell
+        // is reusable precisely when no tile drew it in the frame that has just finished, and that is
+        // only knowable once the frame has finished. Polled at the top of the frame, as everything else
+        // here is, the newest information would be a frame old and "on screen" would have to be guessed
+        // at. See [`crate::shell::thumbs::Thumbs::poll`].
+        self.thumbs.poll();
     }
 
     /// Divide the window up and lay the panes out, without drawing anything.
@@ -1473,6 +1520,7 @@ impl App {
             scratch,
             zone,
             icons,
+            thumbs,
             links,
             cut,
             notice,
@@ -1495,7 +1543,7 @@ impl App {
             regroup, slashes, actions,
         );
         let outcome = filelist::show(
-            &mut child, t, zone, list, floor, id, tab, focused, icons, links, cut, status,
+            &mut child, t, zone, list, floor, id, tab, focused, icons, links, thumbs, cut, status,
             console_open, reserved, scratch, actions,
         );
         // After the listing, so the panel's surface is over it rather than under: the listing
@@ -2434,6 +2482,15 @@ impl App {
         self.git_waiting > 0
     }
 
+    /// Whether a capture should keep waiting for the tiles' pictures.
+    ///
+    /// The same reason as [`App::git_pending`]: the shell answers in tens of milliseconds and a
+    /// capture settles in twelve frames, so without this a screenshot of the large-icon view is a grid
+    /// of painted placeholder glyphs — a photograph of the loading state rather than of the view.
+    pub fn thumbs_pending(&self) -> bool {
+        self.thumbs.pending()
+    }
+
     /// Whether a capture should keep waiting for the console: a shell still to start, or a command
     /// still to answer.
     ///
@@ -2448,6 +2505,31 @@ impl App {
                     .as_ref()
                     .is_some_and(crate::console::Session::running)
         })
+    }
+
+    /// `--tiles`: show every pane's listing as large icons.
+    ///
+    /// The same family as `--menu`, `--rename` and `--preview`, and it exists for the same reason each
+    /// of those does — **a capture run has no other way to reach this view.** It is behind a click on a
+    /// switch, and deliberately not in the settings file: rows or tiles is a question about the folder
+    /// in front of you, so there is no `view=` key for a screenshot run to set. See
+    /// [`crate::pane::ViewMode`].
+    ///
+    /// Every pane rather than the focused one, unlike the three above: the flag is for looking at the
+    /// view, and a split window with tiles in one half is a capture of the switch rather than of the
+    /// grid.
+    ///
+    /// Through [`Action::SetView`] rather than by assignment, which is what `open_preview_here` does and
+    /// for the same reason: switching the view is not only a field, and a flag that wrote the field would
+    /// keep missing whatever else it comes to involve.
+    pub fn show_tiles_here(&mut self) {
+        let panes: Vec<PaneId> = self.panes.iter().map(|pane| pane.id).collect();
+        for pane in panes {
+            self.actions.push(Action::SetView {
+                pane,
+                mode: crate::pane::ViewMode::Icons,
+            });
+        }
     }
 
     /// Put the keyboard on the first previewable file in the focused pane and open the panel.
@@ -3382,12 +3464,33 @@ impl App {
         let Some(index) = self.panes.iter().position(|p| p.id == pane) else {
             return;
         };
-        let rows_per_page = self
+        // **How far one step of the cursor goes, and it is not always one.**
+        //
+        // In the grid, `Down` means "the tile below this one", which is a whole line of tiles along
+        // the display order — so the step is the column count the view last laid out, and `Left` and
+        // `Right` become the ±1 that `Down` is in a listing of rows.
+        //
+        // Except in a **tree**, where the step stays one and the two horizontal keys stay the tree's:
+        // `Right` opens a folder and `Left` shuts it or steps out, which is what those keys mean in
+        // every tree control on the platform and is worth more than moving one cell. A tree's grid
+        // columns are per folder anyway — see [`crate::ui::grid::Layout::columns`], which answers 1
+        // there for exactly this reason.
+        let (step, page) = self
             .panes
             .iter()
             .find(|p| p.id == pane)
-            .map(|p| ((p.rect.height() - 80.0) / crate::pane::ROW_HEIGHT).max(1.0) as isize)
-            .unwrap_or(20);
+            .map(|p| {
+                let tab = p.tab();
+                let height = (p.rect.height() - 80.0).max(1.0);
+                if tab.view_mode.is_icons() {
+                    let columns = tab.grid.columns.max(1) as isize;
+                    let lines = (height / crate::ui::grid::CELL_H).max(1.0) as isize;
+                    (columns, lines * columns)
+                } else {
+                    (1, (height / crate::pane::ROW_HEIGHT).max(1.0) as isize)
+                }
+            })
+            .unwrap_or((1, 20));
 
         let mut open: Option<(bool, PathBuf)> = None;
         let mut typed: Vec<char> = Vec::new();
@@ -3397,16 +3500,16 @@ impl App {
             ctx.input(|i| {
                 let extend = i.modifiers.shift;
                 if i.key_pressed(K::ArrowDown) {
-                    tab.move_cursor(1, extend);
+                    tab.move_cursor(step, extend);
                 }
                 if i.key_pressed(K::ArrowUp) {
-                    tab.move_cursor(-1, extend);
+                    tab.move_cursor(-step, extend);
                 }
                 if i.key_pressed(K::PageDown) {
-                    tab.move_cursor(rows_per_page, extend);
+                    tab.move_cursor(page, extend);
                 }
                 if i.key_pressed(K::PageUp) {
-                    tab.move_cursor(-rows_per_page, extend);
+                    tab.move_cursor(-page, extend);
                 }
                 if i.key_pressed(K::Home) {
                     tab.move_cursor_to(0, extend);
@@ -3425,11 +3528,25 @@ impl App {
                 //
                 // No `extend`: opening a branch is not a selection gesture, and `Shift+Left` in a
                 // tree that grew four hundred rows would select whatever the arithmetic landed on.
-                if !extend && i.key_pressed(K::ArrowRight) {
-                    tab.set_collapsed_at_cursor(false);
-                }
-                if !extend && i.key_pressed(K::ArrowLeft) && !tab.set_collapsed_at_cursor(true) {
-                    tab.move_cursor_to_parent();
+                //
+                // In a **grid** that is not a tree they are the neighbouring tile instead, which is
+                // the same statement from the other end: the two keys go to whichever axis the view
+                // has, and a grid of tiles is the one listing here with two.
+                let sideways = tab.view_mode.is_icons() && !tab.is_tree();
+                if sideways {
+                    if i.key_pressed(K::ArrowRight) {
+                        tab.move_cursor(1, extend);
+                    }
+                    if i.key_pressed(K::ArrowLeft) {
+                        tab.move_cursor(-1, extend);
+                    }
+                } else {
+                    if !extend && i.key_pressed(K::ArrowRight) {
+                        tab.set_collapsed_at_cursor(false);
+                    }
+                    if !extend && i.key_pressed(K::ArrowLeft) && !tab.set_collapsed_at_cursor(true) {
+                        tab.move_cursor_to_parent();
+                    }
                 }
                 if i.key_pressed(K::Escape) {
                     tab.clear_selection();
@@ -3695,6 +3812,30 @@ impl App {
             // leave the other one disagreeing with the tick in a menu that claims to be about
             // both. Tabs that are not flattened take the mode for the next time their button is
             // pressed, which is what `Tab::set_flat_mode` does for nothing.
+            // Rows or tiles, for **this tab and no other** — and nothing is remembered: no window
+            // preference, no settings key, and the next folder this tab opens is back in the details
+            // view. See [`crate::pane::ViewMode`], which is where that argument lives, and
+            // `SetFlatMode` just below for the preference this deliberately is not.
+            //
+            // The listing is not touched: both views are drawn over the same order, the same
+            // selection and the same cursor. What does have to move is the *scroll*, because the
+            // offset means a different place in each — row 40 of a listing and line 40 of a grid are
+            // hundreds of files apart — so the view opens on the cursor if there is one and at the top
+            // if there is not, which is the same rule a changed filter follows.
+            Action::SetView { pane, mode } => {
+                let Some(p) = self.pane_mut(pane) else { return };
+                let tab = p.tab_mut();
+                if tab.view_mode == mode {
+                    return;
+                }
+                tab.view_mode = mode;
+                if tab.cursor.is_some() {
+                    tab.scroll_to_cursor = true;
+                } else {
+                    tab.scroll_y = 0.0;
+                    tab.scroll_to = Some(0.0);
+                }
+            }
             Action::SetFlatMode(mode) => {
                 self.flat_mode = mode;
                 for p in &mut self.panes {
@@ -5269,6 +5410,73 @@ mod click_tests {
         fn tab(&self, index: usize) -> &Tab {
             self.app.panes[index].tab()
         }
+
+        /// How many textured quads the last frame drew.
+        ///
+        /// In the large-icon view that *is* the number of tiles showing a picture: a tile with one draws
+        /// an image out of [`crate::shell::thumbs`]' atlas, and a tile without draws a painted glyph,
+        /// which is shapes out of the font atlas rather than an image. Counting the paint rather than
+        /// asking the service is deliberate — the question is what is on screen.
+        fn images(&self) -> usize {
+            fn walk(shape: &egui::Shape, found: &mut usize) {
+                match shape {
+                    // `Painter::image` builds a one-quad `Mesh` carrying the texture, which is what
+                    // makes this countable at all; text is still a `Text` shape at this stage and only
+                    // becomes a mesh in the tessellator. The font atlas is `Managed(0)`, so anything
+                    // else is an atlas quad — a thumbnail, or a shell icon on a tree's folder row.
+                    egui::Shape::Mesh(mesh) if mesh.texture_id != egui::TextureId::default() => {
+                        *found += 1;
+                    }
+                    egui::Shape::Vec(shapes) => {
+                        for shape in shapes {
+                            walk(shape, found);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let mut found = 0;
+            for shape in &self.shapes {
+                walk(shape, &mut found);
+            }
+            found
+        }
+
+        /// Run frames **only while the window asks for them**, and answer how many pictures ended up on
+        /// screen.
+        ///
+        /// The "only while it asks" is the whole point and it took a wrong version of this to see why.
+        /// A loop that simply runs six hundred frames cannot catch the failure it was written for: this
+        /// program **paints on demand**, and the bug was a view that could not fill itself in *without*
+        /// frames it never asked for. Handed frames for free it filled in perfectly, and the test passed
+        /// against the broken code and the fixed one alike — which is worse than no test.
+        ///
+        /// So this waits instead. A frame is drawn while egui says one is wanted; when nothing is, it
+        /// sits for [`QUIET`] and only carries on if something asks — a worker landing an answer calls
+        /// `request_repaint`, so real work still wakes it. Nothing asking for [`QUIET`] means the window
+        /// is genuinely idle and whatever is on screen is what the user would be looking at.
+        fn pictures_once_settled(&mut self) -> usize {
+            /// Longer than the heartbeat `Thumbs::request` books when it has nowhere to put an answer,
+            /// so a view that recovers slowly is counted as recovering rather than as stuck.
+            const QUIET: std::time::Duration = std::time::Duration::from_millis(900);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            let mut best = 0;
+            while std::time::Instant::now() < deadline {
+                self.frame(Vec::new());
+                best = best.max(self.images());
+                if self.ctx.has_requested_repaint() {
+                    continue;
+                }
+                let quiet = std::time::Instant::now() + QUIET;
+                while std::time::Instant::now() < quiet && !self.ctx.has_requested_repaint() {
+                    std::thread::sleep(std::time::Duration::from_millis(2));
+                }
+                if !self.ctx.has_requested_repaint() {
+                    break;
+                }
+            }
+            best
+        }
     }
 
 
@@ -5779,6 +5987,98 @@ mod click_tests {
         );
         assert!(h.app.panes[0].console_open, "the console did not open");
         h.app.panes[0].console_open = false;
+    }
+
+    /// The view switch takes a click, and what it switches to can be clicked as well.
+    ///
+    /// **Two claims, and both of them are only checkable this way.**
+    ///
+    /// The switch sits in the status line, which the window's bottom resize band overlaps — and
+    /// `chrome::resize_borders` is registered last, so it wins the pointer wherever the two meet. It is
+    /// also the *first* thing on that bar now, with the console's switch four points to its right, so
+    /// there are two 18-point targets to tell apart in a 22-point strip. So the bar is swept for
+    /// something under the pointer before anything is asserted about a click, and the sweep runs
+    /// **outwards from the left**, where a version of this that had drifted onto its neighbour would
+    /// show up as the wrong id being hovered rather than as nothing at all.
+    ///
+    /// Then the grid itself. A tile is not a widget — the whole view is one interaction with the cell
+    /// derived from the pointer — so "the tiles are where the arithmetic says" is not something
+    /// `read_response` can be asked. It is asked by clicking and seeing what gets selected, and the
+    /// first line is *swept* rather than computed: the tiles are spread across the pane, so where the
+    /// first one's box begins is arithmetic this test would only be restating.
+    #[test]
+    fn the_view_switch_is_reachable_and_its_tiles_can_be_clicked() {
+        let mut h = Harness::new();
+        let pane = h.app.panes[0].id;
+        let rect = h.pane_rect(0);
+        let y = rect.bottom() - crate::ui::filelist::STATUS_HEIGHT * 0.5;
+        let id = Id::new(("view-switch", pane));
+        let at = (0..60)
+            .step_by(2)
+            .map(|dx| pos2(rect.left() + dx as f32, y))
+            .find(|at| h.hovers(id, *at))
+            .expect("the view switch is not reachable along its own bar");
+        // And it is in *front* of the console's, which is the position that was asked for. Checked
+        // from the far side of the pointer's own reach: the console switch has to be somewhere to the
+        // right of where this one answered.
+        let console = (0..120)
+            .step_by(2)
+            .map(|dx| pos2(rect.left() + dx as f32, y))
+            .find(|probe| h.hovers(Id::new(("console-switch", pane)), *probe))
+            .expect("the console switch went missing when the view switch moved in beside it");
+        assert!(
+            console.x > at.x,
+            "the view switch is at {} and the console's at {}, which is the wrong way round",
+            at.x,
+            console.x
+        );
+
+        assert_eq!(
+            h.tab(0).view_mode,
+            crate::pane::ViewMode::Details,
+            "it starts in the details view"
+        );
+        let done = h.click_at(at);
+        assert!(
+            done.contains(&"SetView"),
+            "the switch did not fire, got {done:?}"
+        );
+        assert_eq!(h.tab(0).view_mode, crate::pane::ViewMode::Icons);
+
+        // A frame of the grid, then a sweep along its first line of tiles for a click that lands on
+        // one. The selection is cleared between tries, since a click in the gap between two tiles is
+        // a click on the folder and cancels it — which is the other half of what is being checked.
+        h.settle();
+        let body_top = h.pane_content_top(0) + crate::ui::breadcrumb::HEIGHT;
+        let line = body_top + crate::ui::grid::CELL_H * 0.5;
+        let mut landed = None;
+        for dx in (0..260).step_by(6) {
+            let at = pos2(rect.left() + dx as f32, line);
+            h.click_at(at);
+            if h.tab(0).selected_count == 1 {
+                landed = Some(at);
+                break;
+            }
+        }
+        landed.expect("no click along the first line of tiles selected anything");
+        assert_eq!(h.tab(0).selected_count, 1);
+        assert_eq!(
+            h.tab(0).cursor,
+            Some(0),
+            "the leftmost tile of the first line is the first row of the order"
+        );
+
+        // And the switch goes back, which is the whole of what a two-state switch has to do. Found
+        // again rather than reused, so that a latched switch is proved reachable as well as an
+        // unlatched one — a fill is drawn under it in that state and a hit rect is not a fill.
+        let back = (0..60)
+            .step_by(2)
+            .map(|dx| pos2(rect.left() + dx as f32, y))
+            .find(|at| h.hovers(id, *at))
+            .expect("the switch is not reachable while it is latched");
+        let done = h.click_at(back);
+        assert!(done.contains(&"SetView"), "got {done:?}");
+        assert_eq!(h.tab(0).view_mode, crate::pane::ViewMode::Details);
     }
 
     /// The status line's `N changed` is a button, and pressing it shows what has changed.
@@ -10247,6 +10547,158 @@ mod click_tests {
             h.tab(0).filter,
             "n",
             "clicking into the filter and typing appended instead of replacing"
+        );
+    }
+
+    /// In the grid, `Down` goes to the tile below and `Right` to the one beside it.
+    ///
+    /// **Which is a different number of rows for each key**, and getting it wrong is a listing where
+    /// the arrow keys walk the folder in an order that has nothing to do with what is on screen. So
+    /// the step is measured against the column count the view actually laid out — `Layout::columns` —
+    /// rather than against a number restated here, and the pane is deliberately left at the harness's
+    /// own width so that more than one column fits.
+    ///
+    /// `Home` and `End` are checked as well, because they are the two that must *not* change: the
+    /// first tile and the last are still the first and last rows of the order however it is arranged.
+    #[test]
+    fn in_the_grid_the_arrows_move_by_a_line_of_tiles() {
+        let mut h = Harness::new();
+        let pane = h.app.panes[0].id;
+        let ctx = h.ctx.clone();
+        // `src`, which has enough files to fill more than one line of tiles.
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        h.app.perform(&ctx, Action::Navigate { pane, path });
+        h.settle();
+        h.app.perform(&ctx, Action::SetView { pane, mode: h.tab(0).view_mode.toggled() });
+        h.settle();
+
+        let columns = h.tab(0).grid.columns;
+        assert!(
+            columns > 1,
+            "the harness's pane fits only {columns} column, so this test cannot tell a line from a row"
+        );
+        assert!(h.tab(0).order.len() > columns * 2, "and not enough rows to move through");
+
+        h.frame(tap(egui::Key::Home));
+        assert_eq!(h.tab(0).cursor, Some(0), "Home is the first tile");
+        h.frame(tap(egui::Key::ArrowRight));
+        assert_eq!(h.tab(0).cursor, Some(1), "Right is the next tile along");
+        h.frame(tap(egui::Key::ArrowDown));
+        assert_eq!(
+            h.tab(0).cursor,
+            Some(1 + columns),
+            "Down should be a whole line of tiles"
+        );
+        h.frame(tap(egui::Key::ArrowUp));
+        assert_eq!(h.tab(0).cursor, Some(1));
+        h.frame(tap(egui::Key::ArrowLeft));
+        assert_eq!(h.tab(0).cursor, Some(0));
+        // And off the left edge of the first line is still the first tile rather than an underflow.
+        h.frame(tap(egui::Key::ArrowLeft));
+        assert_eq!(h.tab(0).cursor, Some(0));
+        h.frame(tap(egui::Key::End));
+        assert_eq!(h.tab(0).cursor, Some(h.tab(0).order.len() - 1), "End is the last");
+
+        // Back in the details view the same two keys are one row and the tree's, which is the other
+        // half of the rule.
+        h.app.perform(&ctx, Action::SetView { pane, mode: h.tab(0).view_mode.toggled() });
+        h.settle();
+        h.frame(tap(egui::Key::Home));
+        h.frame(tap(egui::Key::ArrowDown));
+        assert_eq!(h.tab(0).cursor, Some(1), "a row is one step in the details view");
+    }
+
+    /// **A scrolled grid switched from one flatten mode to the other still gets its pictures.**
+    ///
+    /// The bug this is for, and it is a *paint-on-demand* bug rather than a caching one. Scroll a grid
+    /// of tiles far enough and every cell of the thumbnail atlas is held by a file you have gone past.
+    /// Switch the flatten mode and the tiles are all new, all their cells are held by those files, and
+    /// the cells only become reusable once a frame has gone by without them being drawn. Nothing on
+    /// screen is moving, so nothing asks for that frame — and the window sits on a grid of painted
+    /// glyphs until you scroll and force some frames by hand. Which is exactly what it did.
+    ///
+    /// So the shape of the test is the shape of the report: fill the atlas, then switch, then run frames
+    /// **without touching anything** and require the pictures to arrive. `Thumbs::poll` moving to the end
+    /// of the frame is what makes that possible, and the repaint booked on a refused request is what
+    /// makes it happen when the answer needs a frame that nobody else would ask for.
+    ///
+    /// **What is counted is textured quads**, which in this view is exactly "tiles with a picture": a
+    /// tile that has one draws an image out of the atlas, and a tile that has not draws a painted glyph
+    /// out of the font atlas. So the first show establishes the number, and the number has to come back.
+    ///
+    /// The folder is a few hundred `.txt` files in the sandbox rather than anything real. What matters
+    /// is the *count* — enough tiles to fill the atlas twice over between the two views — and `.txt` is
+    /// the cheapest thing the shell reliably draws: no thumbnail handler, so it answers from the icon
+    /// every time and the test does not depend on what is in the files.
+    ///
+    /// **What this does and does not prove**, because that is worth being straight about. It holds the
+    /// end-to-end invariant: switch a scrolled grid's mode, touch nothing, and the pictures come back.
+    /// It does *not* discriminate against the version of the bug that was found, on this fixture and
+    /// this window — 420 files over a 2560-wide pane never fills the atlas, so there is no starvation
+    /// for the ordering to rescue, and the test passes against both. What discriminates is
+    /// `shell::thumbs`' own `a_visible_cell_is_never_taken_from_the_tile_drawing_it`, which fails
+    /// outright on the two-frame rule this replaced. This one is here for the *next* change: it is the
+    /// only test that runs the whole path with frames drawn only when the window asks for them.
+    ///
+    /// `#[ignore]`d because it drives several hundred real shell calls and takes a few seconds, which is
+    /// not what `cargo test` is for.
+    #[test]
+    #[ignore = "drives a few hundred real shell calls; run explicitly"]
+    fn a_scrolled_grid_that_changes_mode_still_fills_in() {
+        // Twenty folders of twenty files: enough rows that a scrolled tree and the top of a list have
+        // nothing in common, which is the whole condition.
+        let root = crate::sandbox::dir("tiles-refill");
+        for folder in 0..20 {
+            let sub = root.join(format!("f{folder:02}"));
+            std::fs::create_dir_all(&sub).expect("the sandbox is writable");
+            for file in 0..20 {
+                let at = sub.join(format!("{folder:02}-{file:02}.txt"));
+                if !at.exists() {
+                    std::fs::write(&at, b"x").expect("the sandbox is writable");
+                }
+            }
+        }
+
+        let mut h = Harness::with_panes(1);
+        // Big enough to want a lot of tiles at once, which is the condition the report has.
+        h.size = vec2(2560.0, 1392.0);
+        let pane = h.app.panes[0].id;
+        let ctx = h.ctx.clone();
+
+        h.app.perform(&ctx, Action::Navigate { pane, path: root });
+        h.settle();
+        h.app.perform(&ctx, Action::SetView { pane, mode: h.tab(0).view_mode.toggled() });
+        h.app.perform(&ctx, Action::ToggleFlat(pane));
+        h.settle();
+        assert!(h.tab(0).order.len() > 400, "not enough rows to fill the atlas");
+
+        // ---- The first show, which is the case that always worked ----------
+        let first = h.pictures_once_settled();
+        assert!(
+            first > 50,
+            "only {first} tiles drew a picture on the first show — this window is too small to \
+             tell the bug from the arithmetic"
+        );
+
+        // ---- Fill the atlas with files the list will not be showing --------
+        h.app.perform(&ctx, Action::SetFlatMode(crate::pane::FlatMode::Tree));
+        h.settle();
+        for step in 1..=8 {
+            h.app.panes[0].tab_mut().scroll_to = Some(step as f32 * 1200.0);
+            let _ = h.pictures_once_settled();
+        }
+
+        // ---- The switch back, and then **nothing but frames** --------------
+        //
+        // No pointer, no keys, no scrolling. This is the whole report: the window is left alone, and it
+        // has to fill itself in.
+        h.app.perform(&ctx, Action::SetFlatMode(crate::pane::FlatMode::List));
+        let again = h.pictures_once_settled();
+        assert_eq!(
+            again, first,
+            "{} of {first} tiles never got a picture back after the mode changed, without the view \
+             being touched",
+            first.saturating_sub(again)
         );
     }
 

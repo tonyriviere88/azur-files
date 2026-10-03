@@ -1102,3 +1102,24 @@ pub fn split_down(p: &Painter, rect: Rect, color: Color32) {
     p.rect_filled(g.rect(3.2, 8.8, 12.8, 11.8), g.radius(0.6), color);
 }
 
+/// Four tiles — *show this folder as large icons*.
+///
+/// Filled rather than outlined, which is the one thing that makes it read at eleven points on the
+/// status line: four 5-unit squares in outline would be four rings a pixel and a half wide with a
+/// pixel of air inside each, and at that size a ring is a blot. The same arithmetic as [`flatten`]
+/// and [`fit`], arrived at the same way.
+///
+/// The convention it appears to break is the set's own — "folders are filled, files are outlined" —
+/// and it does not: these are not files. They are the *cells of a grid*, which is what the button is
+/// about, and every icon-view button on every platform is drawn as four squares for exactly that
+/// reason.
+///
+/// The ink spans 2..14 on both axes, symmetric about the centre of the grid, so centring the box
+/// centres the drawing — see [`pencil`], where getting that wrong cost two units.
+pub fn grid_view(p: &Painter, rect: Rect, color: Color32) {
+    let g = Grid::new(rect);
+    for (x, y) in [(2.0, 2.0), (9.0, 2.0), (2.0, 9.0), (9.0, 9.0)] {
+        p.rect_filled(g.rect(x, y, x + 5.0, y + 5.0), g.radius(0.8), color);
+    }
+}
+

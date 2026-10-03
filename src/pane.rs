@@ -85,6 +85,51 @@ impl FlatMode {
     }
 }
 
+/// How a folder is drawn: as a table of rows, or as a grid of large icons.
+///
+/// **Both are the same listing**, exactly as [`FlatMode`]'s two are: the order, the selection, the
+/// cursor and the filter are all the view's and none of them changes with this. What changes is the
+/// arithmetic that puts a row on screen — [`crate::ui::filelist`] for one, [`crate::ui::grid`] for
+/// the other — so switching costs a frame and never a re-read.
+///
+/// **Per tab, and a question asked of the folder in front of you** — which is why it is neither
+/// remembered between sessions nor carried to the next folder. [`Tab::go_to`] puts it back to
+/// [`Self::Details`], exactly as it does [`Tab::flat`] and the filter, and for the same reason: a
+/// folder of photographs and a folder of source want opposite answers, so an answer about one is not
+/// an answer about the other. `Details` is therefore what every tab opens as, every time.
+///
+/// The other way round — a window preference, saved, applied everywhere, which is what [`FlatMode`]
+/// is — was tried first and is wrong here for that reason. Which way you want a *tree* shown is a
+/// habit; whether a folder is worth looking at as pictures is a fact about the folder.
+///
+/// A refresh keeps it, because a refresh is the same folder read again rather than a different one,
+/// and so does [`Tab::toggle_flat`] — flattening is another question about the folder you are already
+/// looking at.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ViewMode {
+    /// The details view: a sticky header over virtualised rows. See [`crate::ui::filelist`].
+    #[default]
+    Details,
+    /// Large icons: a grid of tiles, each with the shell's own thumbnail on it. See
+    /// [`crate::ui::grid`].
+    Icons,
+}
+
+impl ViewMode {
+    /// The other one — what the switch on the status line does.
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Details => Self::Icons,
+            Self::Icons => Self::Details,
+        }
+    }
+
+    #[inline]
+    pub fn is_icons(self) -> bool {
+        matches!(self, Self::Icons)
+    }
+}
+
 /// A rubber-band selection in progress.
 ///
 /// Both corners are in *content* coordinates — distance from the top of the whole
@@ -218,6 +263,14 @@ pub struct Tab {
 
     /// Display order: indices into `dir.entries`, sorted and filtered.
     pub order: Vec<u32>,
+    /// A number no build of [`Tab::order`] has had before.
+    ///
+    /// What [`crate::ui::grid::Layout`] validates its cached geometry against. The length of the
+    /// order is not enough on its own — a click on a column header leaves it exactly as long and
+    /// every row somewhere else — and a grid that trusted the length would go on drawing the old
+    /// arrangement with the new rows in it, which is the sort of wrongness that looks like a
+    /// scrolling bug.
+    pub order_gen: u64,
     /// One per row of [`Tab::order`], and only in a tree: how far in the row is drawn, and how many
     /// folders are merged into its name. Empty in every other listing. See [`sort::TreeRow`].
     ///
@@ -285,6 +338,16 @@ pub struct Tab {
     pub widths: [f32; 4],
     /// Cleared whenever the listing changes, so the fitted columns are re-measured.
     pub widths_measured: bool,
+
+    /// Whether this tab is showing its folder as rows or as tiles. See [`ViewMode`].
+    pub view_mode: ViewMode,
+    /// Where the tiles go, when it is showing tiles.
+    ///
+    /// Cached rather than worked out per frame, because in a tree it is not arithmetic: a folder's
+    /// files are gathered into a grid of their own and the blocks have to be walked to say how tall
+    /// the whole thing is. Rebuilt when the order or the width changes and not otherwise — see
+    /// [`crate::ui::grid::Layout::ensure`].
+    pub grid: crate::ui::grid::Layout,
 
     /// Select this name as soon as the listing lands.
     ///
@@ -425,6 +488,17 @@ fn next_view() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
+/// A number no build of any tab's display order has had before. See [`Tab::order_gen`].
+///
+/// Its own counter rather than a share of [`next_view`]'s, because the two are not the same clock:
+/// one order is built many times per view — every sort, every filter, every twisty — and a reader
+/// comparing generations must not be able to mistake one for the other.
+fn next_order_gen() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
 impl Tab {
     pub fn new(path: impl Into<PathBuf>) -> Self {
         let path = path.into();
@@ -445,6 +519,7 @@ impl Tab {
             git_answered: false,
             git_settled_at: None,
             order: Vec::new(),
+            order_gen: next_order_gen(),
             tree: Vec::new(),
             // Type, not Name: a folder read by type comes up grouped — every source
             // file together, every image together — and within a group it is still in
@@ -467,6 +542,9 @@ impl Tab {
             anchor: None,
             widths: DEFAULT_WIDTHS,
             widths_measured: false,
+            // Details, always: nothing is remembered and nothing is inherited. See [`ViewMode`].
+            view_mode: ViewMode::default(),
+            grid: crate::ui::grid::Layout::default(),
             reveal: None,
             keep_selected: Vec::new(),
             rename_revealed: false,
@@ -506,6 +584,13 @@ impl Tab {
         tab.collapsed = self.collapsed.clone();
         tab.widths = self.widths;
         tab.widths_measured = self.widths_measured;
+        // Rows or tiles, because "as it currently looks" is the whole of what a duplicate is — and
+        // this is the *same folder*, which is the one thing [`ViewMode`] is a question about. The
+        // moment the copy navigates anywhere it goes back to the details view, like any other tab.
+        //
+        // The grid's own geometry is deliberately not carried across: it is a cache over an order
+        // this tab is about to build for itself, and one frame of arithmetic beats a stale copy.
+        tab.view_mode = self.view_mode;
         // Open the same way, but reading for itself — see `Preview::duplicate`, which explains
         // why the decoded content is deliberately not carried across.
         tab.preview = self.preview.duplicate();
@@ -616,7 +701,13 @@ impl Tab {
         self.file_icons.shrink_to_fit();
         self.links = std::collections::HashMap::new();
         self.order.clear();
+        self.order_gen = next_order_gen();
         self.tree.clear();
+        // The tiles' geometry, which described an order this tab no longer has. Dropped rather than
+        // left to be noticed as stale: a tree of a hundred thousand files leaves the best part of a
+        // megabyte of block tops and cell positions behind, and `view_mode` going back to `Details`
+        // just below means nothing would ask `Layout::ensure` to replace it.
+        self.grid = crate::ui::grid::Layout::default();
         self.selected.clear();
         self.selected_count = 0;
         self.selected_size = 0;
@@ -624,6 +715,11 @@ impl Tab {
         self.anchor = None;
         self.filter.clear();
         self.filter_at = None;
+        // And neither do the tiles, for the same reason as the two above: a folder of photographs is
+        // worth looking at as pictures and the folder you open out of it is a different question. So
+        // every folder opens in the details view — see [`ViewMode`], which is also why there is no
+        // setting for this.
+        self.view_mode = ViewMode::Details;
         // **A flatten does not come along to the next folder**, for the same reason the
         // filter does not: both are a question asked of the folder you were looking at,
         // and the answer to a question about somewhere else is not the same answer. It
@@ -693,6 +789,7 @@ impl Tab {
         self.awaiting = None;
         self.asked_at = None;
         self.order.clear();
+        self.order_gen = next_order_gen();
         self.tree.clear();
         self.widths_measured = false;
         // The top, because row 200 of a folder's own children is not row 200 of its
@@ -1097,6 +1194,8 @@ impl Tab {
         // Whatever was owed is paid by this: every path into here builds the order from the
         // filter as it stands, so a deadline left behind would only buy a second identical pass.
         self.filter_at = None;
+        // A new order, whatever comes of it — including the empty one below. See [`Tab::order_gen`].
+        self.order_gen = next_order_gen();
         let Some(dir) = self.dir.clone() else {
             self.order.clear();
             self.tree.clear();
@@ -1298,12 +1397,43 @@ impl Tab {
     /// rubber band feel like a rubber band instead of a paintbrush.
     pub fn apply_band(&mut self) {
         let Some(band) = &self.band else { return };
+        // Worked out before the reset, because both halves of this need `&mut self`. A `Range` rather
+        // than a collection, so nothing is allocated: a band over a folder of 300,000 is two numbers.
         let covered = band.rows(self.order.len());
-        let base = &band.base;
-        // The listing, taken out once: the loops below hold a borrow of `selected` and `order`, and
-        // an `Arc` clone is a counter rather than a copy of the folder.
-        let dir = self.dir.clone();
+        self.apply_band_over(covered);
+    }
 
+    /// Apply a coverage the caller has worked out — which is what the **grid** hands over.
+    ///
+    /// A tile is a rectangle in two axes, so "which rows does the band's `y` cross" is not the question
+    /// there: it is which cells the band's rectangle overlaps, and that depends on the column count and,
+    /// in a tree, on which block each cell is in. Only [`crate::ui::grid`] knows where a tile went, so
+    /// it answers and this applies — rather than the coverage rule being written twice in two languages.
+    ///
+    /// Generic over what comes in so both views reach it unchanged: the details view's `Range<usize>`
+    /// and the grid's slice of positions.
+    pub fn apply_band_over<I: IntoIterator<Item = usize>>(&mut self, covered: I) {
+        if self.band.is_none() {
+            return;
+        }
+        let dir = self.dir.clone();
+        self.reset_to_band_base();
+        for position in covered {
+            self.band_select(dir.as_ref(), position);
+        }
+    }
+
+    /// Put the selection back to what the band started from.
+    ///
+    /// The first half of a band pass, and the reason a band feels like a band rather than a
+    /// paintbrush: the coverage is applied to *this* on every frame of the drag rather than
+    /// accumulated, so shrinking the band deselects again.
+    fn reset_to_band_base(&mut self) {
+        let Some(band) = &self.band else { return };
+        let base = &band.base;
+        // The listing, taken out once: the loop below holds a borrow of `selected`, and an `Arc`
+        // clone is a counter rather than a copy of the folder.
+        let dir = self.dir.clone();
         self.selected_count = 0;
         self.selected_size = 0;
         for (entry, selected) in self.selected.iter_mut().enumerate() {
@@ -1313,16 +1443,18 @@ impl Tab {
                 self.selected_size += Self::size_at(dir.as_ref(), entry);
             }
         }
-        for position in covered {
-            let Some(&entry) = self.order.get(position) else {
-                continue;
-            };
-            let entry = entry as usize;
-            if !self.selected[entry] {
-                self.selected[entry] = true;
-                self.selected_count += 1;
-                self.selected_size += Self::size_at(dir.as_ref(), entry);
-            }
+    }
+
+    /// And the second half: one position the band covers.
+    fn band_select(&mut self, dir: Option<&Arc<Dir>>, position: usize) {
+        let Some(&entry) = self.order.get(position) else {
+            return;
+        };
+        let entry = entry as usize;
+        if !self.selected[entry] {
+            self.selected[entry] = true;
+            self.selected_count += 1;
+            self.selected_size += Self::size_at(dir, entry);
         }
     }
 
@@ -2067,6 +2199,41 @@ mod tests {
         tab.apply(listing(&folder, &["a.txt", "b.txt", made]));
         assert!(tab.renaming.is_none(), "nothing was created and a rename opened");
         assert!(tab.name_the_new.is_none());
+    }
+
+    /// **The tiles do not follow you into the next folder**, and neither does the switch remember
+    /// anything: every folder opens in the details view.
+    ///
+    /// The rule [`ViewMode`] argues for, pinned here because it is one line in [`Tab::go_to`] that
+    /// nothing else would notice going missing. The three navigations are tested separately because
+    /// they arrive by different routes and only `go_to` is common to them.
+    ///
+    /// The other half is what must *not* reset: a **refresh** is the same folder read again — every
+    /// file operation ends in one, and a paste that dropped you back into rows would be the view
+    /// undoing itself under your hands — and a **flatten** is another question about the folder you are
+    /// already looking at.
+    #[test]
+    fn going_anywhere_puts_the_details_view_back() {
+        let mut tab = Tab::new(r"C:\a");
+        assert_eq!(tab.view_mode, ViewMode::Details, "and it starts there");
+
+        tab.view_mode = ViewMode::Icons;
+        tab.navigate(r"C:\a\b");
+        assert_eq!(tab.view_mode, ViewMode::Details, "going down");
+
+        tab.view_mode = ViewMode::Icons;
+        tab.go_back();
+        assert_eq!(tab.view_mode, ViewMode::Details, "going back");
+
+        tab.view_mode = ViewMode::Icons;
+        tab.go_up();
+        assert_eq!(tab.view_mode, ViewMode::Details, "going up");
+
+        tab.view_mode = ViewMode::Icons;
+        tab.refresh();
+        assert_eq!(tab.view_mode, ViewMode::Icons, "a refresh is the same folder");
+        tab.toggle_flat(FlatMode::List, true);
+        assert_eq!(tab.view_mode, ViewMode::Icons, "so is a flatten");
     }
 
     /// A snapshot means nothing once the tab is looking at something else.
