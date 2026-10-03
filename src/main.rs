@@ -199,6 +199,7 @@ fn main() -> eframe::Result {
     let mut flat = false;
     let mut sizes = false;
     let mut console: Option<Vec<String>> = None;
+    let mut copy: Vec<std::path::PathBuf> = Vec::new();
 
     // `--open=<path>`, repeatable: one pane per path, so `--open=A --open=B` comes up
     // side by side. `--reveal=<name>` selects and scrolls to an entry once the listing
@@ -278,6 +279,11 @@ fn main() -> eframe::Result {
         } else if let Some(text) = arg.strip_prefix("--find=") {
             preview = true;
             find = Some(text.to_owned());
+        } else if let Some(path) = arg.strip_prefix("--copy=") {
+            // `--copy=<path>`, repeatable: copy each into the first pane's folder with the fast
+            // engine, one job apiece, so a capture can show the transfer panel — and several of
+            // them stacked. Either slash, as `--open=` takes it.
+            copy.push(fs::from_outside(path));
         } else if arg == "--stack" {
             stack = true;
         } else if arg == "--trace" {
@@ -432,6 +438,7 @@ fn main() -> eframe::Result {
                 against,
                 preview,
                 console,
+                copy,
                 find,
                 deps,
                 compare,
@@ -601,6 +608,10 @@ struct Window {
     /// `App::console_busy` — because a screenshot of a log that has not printed yet says nothing
     /// about the log.
     console: Option<Vec<String>>,
+    /// `--copy=<path>`, repeatable: copy each into the first pane's folder with the fast engine, one
+    /// job apiece, so a capture can show the transfer panel — which is only up while a copy is. See
+    /// `App::copy_here`.
+    copy: Vec<std::path::PathBuf>,
     /// `--find=<text>`: and then open the find bar on that text, for a capture of the text viewer
     /// with something found in it.
     find: Option<String>,
@@ -724,6 +735,14 @@ impl eframe::App for Window {
             let commands = self.console.take().unwrap_or_default();
             self.app.open_console_here(&commands);
         }
+        // Once the listing has landed, for the same reason: the copy goes into the folder the pane
+        // is showing, and that is only known once the scan is back.
+        if !self.copy.is_empty() && self.frames >= 8 && self.app.has_rows() {
+            let ctx = ui.ctx().clone();
+            for from in std::mem::take(&mut self.copy) {
+                self.app.copy_here(from, &ctx);
+            }
+        }
         // **Once the walk has landed**, which is not a frame number: the graph is read on a worker
         // thread, so a pick made before it is here finds no row. Tried every frame until it takes, and
         // *not* consumed on the first attempt — opening the panel does not itself start the read, so at
@@ -758,6 +777,9 @@ impl eframe::App for Window {
             || self.app.thumbs_pending()
             || self.app.cloud_pending()
             || self.app.diff_pending()
+            // The copy, until its panel is on screen to be photographed.
+            || !self.copy.is_empty()
+            || self.app.copy_pending()
             // The pick above, once it has had the frames to be attempted in. Waiting on it any earlier
             // would be waiting on the capture counter that opens the panel, and that counter only
             // advances when a capture is attempted — a deadlock that complained below about a name
@@ -866,6 +888,9 @@ impl Window {
             Ok(()) => println!("wrote {} ({w}x{h})", path.display()),
             Err(e) => eprintln!("could not write {}: {e}", path.display()),
         }
+        // A `--copy` still running holds the window open and asks; a capture run's own copy is
+        // nobody's to keep, so it is stopped first and the window closes once it has.
+        self.app.cancel_copies();
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 }

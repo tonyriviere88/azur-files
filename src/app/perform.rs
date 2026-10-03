@@ -983,6 +983,23 @@ impl App {
                     Err(why) => self.report(why),
                 }
             }
+            // From the next copy on: one already running stays with the engine it started on.
+            Action::SetFastCopy(on) => {
+                self.ops.set_fast(on);
+                self.config_dirty = true;
+            }
+            Action::Steer { transfer, steer } => self.ops.steer(transfer, steer),
+            Action::Leave(leave) => {
+                use crate::ui::transfers::Leave;
+                self.closing = match leave {
+                    Leave::Stay => Closing::No,
+                    Leave::WhenDone => Closing::WhenDone,
+                    Leave::StopAndClose => {
+                        self.ops.cancel_copies();
+                        Closing::WhenDone
+                    }
+                };
+            }
 
             Action::Window(what) => {
                 use egui::ViewportCommand as Cmd;

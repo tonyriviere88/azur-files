@@ -52,6 +52,29 @@ impl App {
         }
     }
 
+    /// Hold the window open while a fast copy is running, and close it once it may.
+    ///
+    /// **A close during a copy kills the copy mid-file**: the process goes, and every file the pool
+    /// had in flight is left half-written under its real name, which looks like a file. The shell's
+    /// copy runs the same risk, but it has a dialog of its own on screen saying a copy is going on;
+    /// this one's panel is inside the window being closed. So a close request — the window's own
+    /// button, `Alt+F4`, the taskbar — is cancelled and asked about on the panel instead, and the
+    /// window closes itself once the answer allows. A cancelled copy removes its half-written file
+    /// on the way out, which is why "Stop and close" waits for that rather than closing at once.
+    pub(super) fn mind_the_close(&mut self, ctx: &egui::Context) {
+        let copying = self.ops.copying();
+        if copying && ctx.input(|i| i.viewport().close_requested()) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.closing = Closing::Asking;
+        }
+        // Whatever the answer was, or with none given yet: the window was asked to close, and the
+        // only reason it did not is no longer there.
+        if !copying && self.closing != Closing::No {
+            self.closing = Closing::No;
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    }
+
     pub fn frame(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
         if !self.installed {
@@ -188,6 +211,7 @@ impl App {
         self.loader.sweep();
         self.clipboard_has_files = crate::shell::clipboard::has_files();
         self.collect_operations(now);
+        self.mind_the_close(&ctx);
         // Registered on the window rather than at startup, because the handle does not
         // exist until the platform has made one.
         self.drops.attach(self.owner, &ctx);
@@ -294,6 +318,7 @@ impl App {
             self.maximized,
             self.sidebar_shown,
             self.win_key.ours(),
+            self.ops.fast(),
             &self.drag,
             &mut self.icons,
             &mut self.actions,
@@ -316,6 +341,15 @@ impl App {
             chrome::resolve_drag(ui, &theme, &self.panes, &slots, &mut drag, &mut self.actions);
             self.drag = drag;
             self.tab_slots = slots;
+        }
+
+        // A fast copy's panels, over the panes and under any menu. Booked like an extraction's
+        // figures, and for the same reason: the work is on other threads and nothing else would
+        // ask for the frame that shows it moving.
+        let transfers = self.ops.transfers();
+        let closing = self.closing == Closing::Asking;
+        if crate::ui::transfers::show(&ctx, &theme, &transfers, closing, &mut self.actions) {
+            ctx.request_repaint_after(EXTRACTION_STEP);
         }
 
         // Over everything, and in the root `Ui` so its coordinates are the screen's.

@@ -1417,3 +1417,151 @@ fn copy_cut_paste_and_delete_end_to_end() {
     clipboard::clear();
     crate::sandbox::remove(&root);
 }
+
+/// **A fast copy's conflict is answered from its panel**, by a click, and the copy goes on.
+///
+/// The one thing about the panel a reading of it cannot settle: whether its buttons are reachable
+/// in a frame that also has the panes under them. Real files, inside `target/sandbox`, and a real
+/// job through `Operations` — the engine is `CopyFile2`, so nothing here asks the shell for
+/// anything unless the engine declines, which `the_shell_keeps_what_is_its_own` covers.
+#[cfg(windows)]
+#[test]
+fn a_fast_copy_asks_on_its_panel_and_takes_the_answer_clicked() {
+    let root = crate::sandbox::fresh("fast-copy-panel");
+    let file = root.join("src").join("one.txt");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "incoming").unwrap();
+    let dest = root.join("dest");
+    std::fs::create_dir_all(&dest).unwrap();
+    std::fs::write(dest.join("one.txt"), "existing").unwrap();
+
+    let _for_real = crate::shell::ops::for_real();
+    let mut h = Harness::new();
+    h.app.ops.set_fast(true);
+    let ctx = h.ctx.clone();
+    h.app.ops.start(
+        crate::shell::ops::Job::Copy {
+            items: vec![file],
+            into: dest.clone(),
+        },
+        crate::shell::Owner::default(),
+        &ctx,
+    );
+
+    let find = |h: &Harness, want: &str| {
+        h.texts()
+            .into_iter()
+            .find(|(_, t)| t == want)
+            .map(|(pos, _)| pos)
+    };
+    let mut keep = None;
+    for _ in 0..200 {
+        h.frame(Vec::new());
+        keep = find(&h, "Keep both");
+        if keep.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    let keep = keep.expect("the panel never asked about one.txt");
+    assert!(
+        find(&h, "one.txt is already in dest").is_some(),
+        "the question does not name the file"
+    );
+    h.click_at(keep + vec2(4.0, 4.0));
+
+    let kept = dest.join("one (2).txt");
+    for _ in 0..200 {
+        h.frame(Vec::new());
+        if kept.exists() && h.app.ops.transfers().is_empty() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert_eq!(std::fs::read_to_string(&kept).unwrap(), "incoming");
+    assert_eq!(std::fs::read_to_string(dest.join("one.txt")).unwrap(), "existing");
+    assert!(
+        h.app.ops.transfers().is_empty(),
+        "a copy that did everything is still on its panel"
+    );
+}
+
+/// **Closing the window during a fast copy asks first**, rather than killing the copy mid-file.
+///
+/// The close is held off with `CancelClose`, the question goes up on the panel, and *Stop and close*
+/// cancels the copy and closes the window only once the copy has stopped. The copy is held on a
+/// conflict question, which is what keeps it running for as long as the test needs it to be.
+#[cfg(windows)]
+#[test]
+fn closing_during_a_fast_copy_asks_and_closes_once_it_has_stopped() {
+    let root = crate::sandbox::fresh("fast-copy-close");
+    let file = root.join("src").join("one.txt");
+    std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+    std::fs::write(&file, "incoming").unwrap();
+    let dest = root.join("dest");
+    std::fs::create_dir_all(&dest).unwrap();
+    std::fs::write(dest.join("one.txt"), "existing").unwrap();
+
+    let _for_real = crate::shell::ops::for_real();
+    let mut h = Harness::new();
+    h.app.ops.set_fast(true);
+    let ctx = h.ctx.clone();
+    h.app.ops.start(
+        crate::shell::ops::Job::Copy {
+            items: vec![file],
+            into: dest.clone(),
+        },
+        crate::shell::Owner::default(),
+        &ctx,
+    );
+    let find = |h: &Harness, want: &str| {
+        h.texts()
+            .into_iter()
+            .find(|(_, t)| t == want)
+            .map(|(pos, _)| pos)
+    };
+    for _ in 0..200 {
+        h.frame(Vec::new());
+        if find(&h, "Keep both").is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(h.app.ops.copying(), "the copy is not running");
+
+    let closes = |h: &Harness| {
+        h.commands
+            .iter()
+            .filter(|c| **c == egui::ViewportCommand::Close)
+            .count()
+    };
+    h.commands.clear();
+    h.window_events.push(egui::ViewportEvent::Close);
+    h.frame(Vec::new());
+    assert!(
+        h.commands.contains(&egui::ViewportCommand::CancelClose),
+        "the close went ahead with the copy still running"
+    );
+    h.frame(Vec::new());
+    let stop = find(&h, "Stop and close").expect("the panel does not ask about closing");
+    // Where it was a frame ago. A panel that moves between frames is one whose buttons cannot be
+    // pressed: the release lands somewhere else than the press did.
+    h.frame(Vec::new());
+    assert_eq!(find(&h, "Stop and close"), Some(stop), "the panel is moving");
+    assert_eq!(closes(&h), 0);
+
+    let pressed = h.click_at(stop + vec2(4.0, 4.0));
+    assert!(pressed.contains(&"Leave"), "the button did not answer: {pressed:?}");
+    for _ in 0..200 {
+        h.frame(Vec::new());
+        if closes(&h) > 0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(!h.app.ops.copying(), "the copy was not stopped");
+    assert_eq!(closes(&h), 1, "the window did not close once the copy had stopped");
+    // Stopped at the question, so nothing was written over.
+    assert_eq!(std::fs::read_to_string(dest.join("one.txt")).unwrap(), "existing");
+    assert!(!dest.join("one (2).txt").exists());
+}

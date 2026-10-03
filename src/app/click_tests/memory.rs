@@ -453,6 +453,7 @@ fn startup_phases() {
             cursor: egui::CursorIcon::Default,
             commands: Vec::new(),
             shapes: Vec::new(),
+            window_events: Vec::new(),
         };
 
         let at = std::time::Instant::now();

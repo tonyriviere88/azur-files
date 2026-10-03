@@ -147,6 +147,18 @@ enum Then {
     Land(Box<crate::shell::dnd::Dropped>),
 }
 
+/// Where a request to close the window stands while a fast copy is running. See
+/// [`App::mind_the_close`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Closing {
+    No,
+    /// Asked, and waiting for an answer on the transfer panel.
+    Asking,
+    /// Answered: close as soon as no copy is running — after they finish, or after they have
+    /// cleaned up from being cancelled.
+    WhenDone,
+}
+
 pub struct App {
     theme: Theme,
     /// Set once per theme change; installing a style every frame would throw away
@@ -290,6 +302,9 @@ pub struct App {
     connecting: connect::Connecting,
     /// Shell file operations in flight.
     ops: crate::shell::ops::Operations,
+    /// Whether the window was asked to close while a fast copy was running. See
+    /// [`App::mind_the_close`].
+    closing: Closing,
     /// The ones that have finished, so Ctrl+Z can take them back.
     ///
     /// Lives for the session and is not written to the settings file — see
@@ -622,7 +637,12 @@ impl App {
             previews: crate::preview::Previews::new(ctx),
             owner: crate::shell::Owner::default(),
             connecting: connect::Connecting::default(),
-            ops: crate::shell::ops::Operations::new(),
+            ops: {
+                let mut ops = crate::shell::ops::Operations::new();
+                ops.set_fast(config.fast_copy);
+                ops
+            },
+            closing: Closing::No,
             history: crate::shell::ops::history::History::default(),
             cut: Vec::new(),
             notice: None,
@@ -752,6 +772,7 @@ impl App {
             regroup: self.regroup,
             show_hidden: self.show_hidden,
             forward_slashes: self.forward_slashes,
+            fast_copy: self.ops.fast(),
             auto_tiles: self.auto_tiles,
             menu_moves: self.menu_moves.clone(),
             sections: self.sections,

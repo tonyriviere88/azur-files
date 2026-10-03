@@ -304,6 +304,8 @@ pub fn title_bar(
     // Whether `Win+E` opens this build, for the tick beside it in that same menu. A copy of what
     // the registry said — see `crate::shell::winkey`, which is where the answer lives.
     win_key: bool,
+    // Whether copies and moves go through this program's own engine, for the tick beside it.
+    fast_copy: bool,
     drag: &Option<TabDrag>,
     icons_cache: &mut crate::shell::icons::Icons,
     out: &mut Vec<Action>,
@@ -355,7 +357,7 @@ pub fn title_bar(
         ui.painter(),
         Rect::from_center_size(mark.center(), vec2(16.0, 16.0)),
     );
-    app_menu(ui, &mark_response, t.palette, sidebar, win_key, out);
+    app_menu(ui, &mark_response, t.palette, sidebar, win_key, fast_copy, out);
     x = mark.right() + space::S2;
 
     // ---- Window buttons, from the right ---------------------------------
@@ -812,6 +814,7 @@ fn app_menu(
     palette: crate::theme::Palette,
     sidebar: bool,
     win_key: bool,
+    fast_copy: bool,
     out: &mut Vec<Action>,
 ) {
     use azur_egui_theme::components::{Menu, MenuItem};
@@ -904,6 +907,20 @@ fn app_menu(
         // for something set once.
         if let Some(wants) = azur_egui_theme::palettes::submenu(ui, palette) {
             out.push(Action::SetTheme(wants));
+        }
+        // This program's own engine instead of the shell's, for copies, moves and permanent
+        // deletes — never a delete to the Recycle Bin. Off until
+        // somebody ticks it — see [`crate::config::Config::fast_copy`] — and what it hands back to
+        // the shell even when on is in [`crate::shell::ops::fast`].
+        if ui
+            .add(
+                MenuItem::new("Fast copy")
+                    .selected(fast_copy)
+                    .icon(&icons::copy),
+            )
+            .clicked()
+        {
+            out.push(Action::SetFastCopy(!fast_copy));
         }
         // Windows' own folder key, and **the one entry in this window that changes something outside
         // it**. It is last but for `Close window`, and that is the reasoning: everything above acts

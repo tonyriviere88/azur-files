@@ -268,6 +268,17 @@ pub enum Action {
     /// argues that at length, and which is also the only thing in this program that changes
     /// anything outside the window.
     SetWinKey(bool),
+    /// Copy and move with this program's own engine, or with the shell's. In the application menu,
+    /// and written to the settings file. See [`crate::shell::ops::fast`].
+    SetFastCopy(bool),
+    /// A button on a copy's progress panel: pause, cancel, an answer to a conflict, or close.
+    Steer {
+        transfer: u64,
+        steer: crate::shell::ops::fast::Steer,
+    },
+    /// The answer to "a copy is still running", asked when the window is closed during one. See
+    /// [`crate::app::App::mind_the_close`].
+    Leave(crate::ui::transfers::Leave),
     Window(WindowAction),
 }
 
@@ -357,6 +368,9 @@ impl Action {
             Self::RemoveBookmarkGroup(_) => "RemoveBookmarkGroup",
             Self::SetTheme { .. } => "SetTheme",
             Self::SetWinKey(_) => "SetWinKey",
+            Self::SetFastCopy(_) => "SetFastCopy",
+            Self::Steer { .. } => "Steer",
+            Self::Leave(_) => "Leave",
             Self::Window(_) => "Window",
         }
     }

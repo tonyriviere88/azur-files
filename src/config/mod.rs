@@ -160,6 +160,14 @@ pub struct Config {
     /// program for somewhere else is the case the setting was added for, and a copied path is that
     /// case more literally than the field is.
     pub forward_slashes: bool,
+    /// Whether copies, moves and permanent deletes go through this program's own engine before the
+    /// shell's. A delete to the Recycle Bin never does.
+    ///
+    /// **Off**, and read as "only `1`": the shell's `IFileOperation` is the copy every other program
+    /// on the machine makes, and a first run that swapped it for one of this program's would be this
+    /// program being clever with somebody's files. Ticked in the application menu. See
+    /// [`crate::shell::ops::fast`] for what it does and what it hands back to the shell.
+    pub fast_copy: bool,
     /// When a folder opens as tiles rather than as rows without the switch being pressed.
     ///
     /// The one setting here that touches [`crate::pane::ViewMode`], and it is a *rule* rather than a
@@ -249,6 +257,7 @@ impl Default for Config {
             regroup: true,
             show_hidden: false,
             forward_slashes: false,
+            fast_copy: false,
             auto_tiles: crate::pane::AutoTiles::default(),
             menu_moves: crate::shell::menu::Moves::default(),
             sections: Sections::default(),
@@ -381,6 +390,7 @@ impl Config {
                 // missing line and a `0` mean the same thing and both have to leave them alone.
                 "show_hidden" => config.show_hidden = value == "1",
                 "forward_slashes" => config.forward_slashes = value == "1",
+                "fast_copy" => config.fast_copy = value == "1",
                 // The same again: opening a folder as tiles on its own is off until somebody asks
                 // for it. See [`crate::pane::AutoTiles`].
                 // Read as "anything but 0", like `regroup` above and `diff` below: its default is
@@ -578,6 +588,7 @@ impl Config {
             "forward_slashes={}\n",
             flag(self.forward_slashes)
         ));
+        text.push_str(&format!("fast_copy={}\n", flag(self.fast_copy)));
         text.push_str(&format!("auto_tiles={}\n", flag(self.auto_tiles.on)));
         // Whole percent: it is what the slider produces — see `ui::filelist::tiles_menu`, whose step
         // is 5 — and a `59.9999` in a file people are meant to be able to edit would be this program

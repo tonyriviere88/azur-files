@@ -56,6 +56,7 @@ fn the_window_comes_back_the_way_it_was_left() {
         regroup: false,
         show_hidden: true,
         forward_slashes: true,
+        fast_copy: true,
         // Both away from their defaults again: the rule is *on* by default and the threshold is
         // `TILES_THRESHOLD`, so a round trip that used either would prove nothing. There is no third
         // key — whether the count asks this machine about `.pdf` and `.3dr` is not a setting, it is
@@ -177,6 +178,11 @@ fn the_window_comes_back_the_way_it_was_left() {
     // that the field opens the same way every time.
     assert!(back.forward_slashes);
     assert!(!older.forward_slashes, "off by default");
+    // Which engine copies and moves. Off by default too, and for a stronger reason than the two
+    // above: a settings file that predates the key must keep getting the shell's copy, which is the
+    // one every other program on the machine makes. See `crate::shell::ops::fast`.
+    assert!(back.fast_copy);
+    assert!(!older.fast_copy, "off by default");
     // And the console's two, which are the same kind of thing again. The shell is written as the
     // word the dropdown shows, so a settings file stays something you can read and edit.
     assert!((back.console_share - 0.28).abs() < 1e-3);

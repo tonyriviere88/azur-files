@@ -20,6 +20,7 @@ pub mod grid;
 pub mod menu;
 pub mod preview;
 pub mod sidebar;
+pub mod transfers;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;

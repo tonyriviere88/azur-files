@@ -781,3 +781,30 @@ fn the_bare_title_bar_moves_and_maximises_the_window() {
         "double-clicking the bar has to maximise, got {done:?}"
     );
 }
+
+/// **Fast copy** is in the application menu, ticked from the setting, and a click turns it over —
+/// on the engine that decides, which is what the settings file is written from.
+#[test]
+fn the_application_menu_turns_fast_copy_on_and_off() {
+    let mut h = Harness::new();
+    assert!(!h.app.ops.fast(), "fast copy is on by default");
+    let mark = (0..64)
+        .step_by(2)
+        .map(|x| pos2(x as f32, crate::ui::chrome::HEIGHT * 0.5))
+        .find(|at| h.hovers(Id::new("app-menu"), *at))
+        .expect("the application mark is not reachable");
+    for want in [true, false] {
+        h.click_at(mark);
+        h.frame(Vec::new());
+        let entry = h
+            .texts()
+            .into_iter()
+            .find(|(_, t)| t == "Fast copy")
+            .map(|(pos, _)| pos)
+            .expect("the application menu has no Fast copy entry");
+        h.click_at(entry + vec2(8.0, 6.0));
+        h.settle();
+        assert_eq!(h.app.ops.fast(), want, "the click did not turn fast copy over");
+        assert_eq!(h.app.settings().fast_copy, want, "the settings would not say so");
+    }
+}

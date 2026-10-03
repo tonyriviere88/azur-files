@@ -42,9 +42,18 @@
 //! initialises COM as its own apartment and pumps the dialog there. The window stays
 //! live, the dialog is parented to it, and the affected folders are re-read when the
 //! thread reports back.
+//!
+//! # Fast copy
+//!
+//! With **Fast copy** ticked in the application menu, a copy, a move or a permanent delete is offered
+//! to [`fast`] on that same thread first, and only comes here when [`fast`] declines it. Everything
+//! else — a delete to the Recycle Bin, rename, new folder, and every undo — is the shell's either
+//! way. See [`fast`] for which jobs it takes, and what it has to do itself that the shell would have
+//! done.
 
 use std::path::{Path, PathBuf};
 
+pub mod fast;
 pub mod history;
 
 #[cfg(windows)]
@@ -551,6 +560,14 @@ pub struct Operations {
     rx: Receiver<Done>,
     /// What is running, oldest first, for the status line.
     running: Vec<String>,
+    /// Whether a copy or a move goes to [`fast`] before the shell. The setting, held here because
+    /// this is the one place that decides; see [`crate::config::Config::fast_copy`].
+    fast: bool,
+    /// The copies and moves [`fast`] is doing, for the panel that shows them — and the ones that
+    /// finished with something left undone, until that panel is closed.
+    transfers: Vec<std::sync::Arc<fast::Transfer>>,
+    /// What the next one is called, so the panel's buttons can say which they are about.
+    next_transfer: u64,
 }
 
 impl Operations {
@@ -560,6 +577,71 @@ impl Operations {
             tx,
             rx,
             running: Vec::new(),
+            fast: false,
+            transfers: Vec::new(),
+            next_transfer: 0,
+        }
+    }
+
+    /// Whether copies and moves go to [`fast`] first.
+    pub fn fast(&self) -> bool {
+        self.fast
+    }
+
+    /// From the next job on. One already running stays with the engine it started on.
+    pub fn set_fast(&mut self, on: bool) {
+        self.fast = on;
+    }
+
+    /// What every copy and move [`fast`] has is doing, for [`crate::ui::transfers`].
+    pub fn transfers(&self) -> Vec<fast::Snapshot> {
+        self.transfers.iter().map(|t| t.snapshot()).collect()
+    }
+
+    /// Whether a copy or move of [`fast`]'s is still going, which closing the window would cut
+    /// short. See [`crate::app::App::mind_the_close`].
+    pub fn copying(&self) -> bool {
+        self.transfers
+            .iter()
+            .any(|t| matches!(t.phase(), fast::Phase::Starting | fast::Phase::Running))
+    }
+
+    /// The permanent delete waiting on its yes or no, if one is — for Enter and Escape. The oldest,
+    /// if more than one is, which is the one whose question was asked first.
+    pub fn confirming(&self) -> Option<u64> {
+        self.transfers
+            .iter()
+            .find(|t| t.confirming())
+            .map(|t| t.id)
+    }
+
+    /// Stop every one of them. Each removes its own half-written file on the way out.
+    pub fn cancel_copies(&self) {
+        for transfer in &self.transfers {
+            transfer.cancel();
+        }
+    }
+
+    /// Pass a button press on the transfer panel to the job it is about.
+    pub fn steer(&mut self, id: u64, steer: fast::Steer) {
+        let Some(at) = self.transfers.iter().position(|t| t.id == id) else {
+            return;
+        };
+        let transfer = &self.transfers[at];
+        match steer {
+            fast::Steer::Pause(paused) => transfer.pause(paused),
+            fast::Steer::Cancel => transfer.cancel(),
+            fast::Steer::Answer { choice, every } => transfer.answer(choice, every),
+            fast::Steer::Room(room) => transfer.make_room(room),
+            fast::Steer::Mend { mend, every } => transfer.mend(mend, every),
+            fast::Steer::Confirm(yes) => transfer.confirm(yes),
+            // Only once it is over: a panel closed on a job still running would leave it with no
+            // way to be stopped or asked anything.
+            fast::Steer::Dismiss => {
+                if transfer.phase() == fast::Phase::Finished {
+                    self.transfers.remove(at);
+                }
+            }
         }
     }
 
@@ -633,11 +715,34 @@ impl Operations {
         let scratch = claimed(&job).map(Scratch::at);
         // Kept back from the closure below, because the failure path needs it. See there.
         let unstarted = after.clone();
+        // Offered to [`fast`] first, when the setting is on and the job is one it might take. Made
+        // here rather than on the thread so the panel has it from this frame.
+        // A permanent delete as well; a delete to the Recycle Bin never — see [`fast`] on why.
+        let takes = matches!(
+            job,
+            Job::Copy { .. } | Job::Move { .. } | Job::Delete { to_bin: false, .. }
+        );
+        let transfer = (self.fast && takes).then(|| {
+            self.next_transfer += 1;
+            let transfer = std::sync::Arc::new(fast::Transfer::new(
+                self.next_transfer,
+                &job,
+                Some(ctx.clone()),
+            ));
+            self.transfers.push(transfer.clone());
+            transfer
+        });
         let spawned = std::thread::Builder::new()
             .name("file-operation".to_owned())
             .spawn(move || {
                 let mut scratch = scratch;
-                let ran = run(&job, owner);
+                let ran = match &transfer {
+                    Some(transfer) => fast::run(&job, transfer).unwrap_or_else(|| {
+                        transfer.set_phase(fast::Phase::Shell);
+                        run(&job, owner)
+                    }),
+                    None => run(&job, owner),
+                };
                 // **The staging directory goes only if the job that consumed it worked.** It holds
                 // the *only* copy of whatever the drop claimed — the claim is a rename, so the
                 // source no longer has it — and removing it after a copy that failed or was
@@ -681,6 +786,14 @@ impl Operations {
 
     /// Anything that has finished since the last frame.
     pub fn drain(&mut self) -> Vec<Done> {
+        // A transfer the shell took has nothing to show, and one that did everything has nothing
+        // left to say. One that failed somewhere stays until its panel is closed, because the status
+        // line can only name the first thing that went wrong.
+        self.transfers.retain(|t| match t.phase() {
+            fast::Phase::Starting | fast::Phase::Running => true,
+            fast::Phase::Shell => false,
+            fast::Phase::Finished => t.snapshot().failed > 0,
+        });
         let finished: Vec<Done> = self.rx.try_iter().collect();
         for _ in 0..finished.len() {
             if !self.running.is_empty() {

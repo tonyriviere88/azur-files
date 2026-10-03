@@ -1,7 +1,7 @@
 //! What the developer flags drive, and the instruments that watch them.
 //!
 //! `--shot`, `--walk`, `--scroll`, `--trace`, `--rename`, `--path`, `--tiles`, `--preview`,
-//! `--find`, `--compare`, `--console`, `--reveal`, `--filter`, `--lens` and `--flat`. None of it
+//! `--find`, `--compare`, `--console`, `--reveal`, `--filter`, `--lens`, `--flat` and `--copy`. None of it
 //! is reachable by a person using the program; all of it is how the screenshots in `docs/` are
 //! taken and how "does browsing let go of what it read?" is answered by a number.
 //!
@@ -364,6 +364,53 @@ impl App {
             tab.select_only(at);
             tab.begin_rename();
         }
+    }
+
+    /// Copy `from` into the focused pane's folder with the fast engine, whatever the setting says.
+    ///
+    /// For `--copy`, which is how a capture run gets the transfer panel on screen: it is only ever
+    /// up while a copy is, and a capture has no clipboard gesture to start one with. The setting is
+    /// put back straight after, so the run leaves the user's choice as it found it. Copy onto a name
+    /// that is already there, and the panel holds still on its question for as long as the capture
+    /// needs it.
+    pub fn copy_here(&mut self, from: PathBuf, ctx: &egui::Context) {
+        let Some(into) = self.pane_mut(self.focused).map(|p| p.tab().path.clone()) else {
+            return;
+        };
+        let was = self.ops.fast();
+        self.ops.set_fast(true);
+        let owner = self.owner;
+        self.ops.start(
+            crate::shell::ops::Job::Copy {
+                items: vec![from],
+                into,
+            },
+            owner,
+            ctx,
+        );
+        self.ops.set_fast(was);
+    }
+
+    /// Whether a copy started by [`Self::copy_here`] has yet to put its panel on screen: still
+    /// deciding, or running but not yet long enough to be shown and with nothing to ask.
+    pub fn copy_pending(&self) -> bool {
+        use crate::shell::ops::fast::Phase;
+        self.ops.transfers().iter().any(|s| match s.phase {
+            Phase::Starting => true,
+            Phase::Running => {
+                s.running_for < crate::ui::transfers::DELAY
+                    && s.question.is_none()
+                    && s.short.is_none()
+                    && s.snag.is_none()
+            }
+            Phase::Shell | Phase::Finished => false,
+        })
+    }
+
+    /// Stop every fast copy, for a capture run on its way out: the window will not close on one
+    /// that is still running — see [`App::mind_the_close`].
+    pub fn cancel_copies(&self) {
+        self.ops.cancel_copies();
     }
 
     /// Open the focused pane's console, and queue some commands into it.

@@ -192,6 +192,28 @@ impl App {
             return;
         }
 
+        // **A permanent delete waiting on its yes or no owns the keyboard**, as the shell's dialog
+        // does: Enter is Delete and Escape is Cancel, and nothing else reaches the listing until it
+        // is answered. The keys matter more than they look — Enter is what a habit of the shell's
+        // dialog presses next, and let through to the listing it would *open* the file about to be
+        // deleted. See [`crate::shell::ops::fast`].
+        if let Some(transfer) = self.ops.confirming() {
+            use crate::shell::ops::fast::Steer;
+            let none = egui::Modifiers::NONE;
+            if ctx.input_mut(|i| i.consume_key(none, K::Enter)) {
+                self.actions.push(Action::Steer {
+                    transfer,
+                    steer: Steer::Confirm(true),
+                });
+            } else if ctx.input_mut(|i| i.consume_key(none, K::Escape)) {
+                self.actions.push(Action::Steer {
+                    transfer,
+                    steer: Steer::Confirm(false),
+                });
+            }
+            return;
+        }
+
         // **The window's own three, above the fields and the menus** — and below the fullscreen
         // return above, deliberately: resizing the window under a video that is filling the screen is
         // not something either gesture means. See [`App::window_keys`].

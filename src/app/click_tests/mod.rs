@@ -76,6 +76,9 @@ struct Harness {
     /// a colour is not a click target, and reading the source only proves the source says
     /// what it says.
     shapes: Vec<egui::Shape>,
+    /// What the platform says happened to the window on the next frame — `Close`, for a test of
+    /// what a close request does. Taken by that frame.
+    window_events: Vec<egui::ViewportEvent>,
 }
 
 impl Harness {
@@ -111,6 +114,7 @@ impl Harness {
             cursor: egui::CursorIcon::Default,
             commands: Vec::new(),
             shapes: Vec::new(),
+            window_events: Vec::new(),
         };
         // The listing arrives by channel, so rects that depend on it do not exist
         // until a few frames have gone by.
@@ -158,7 +162,7 @@ impl Harness {
         let mut events = events;
         events.extend(self.app.take_injected());
         self.time += 1.0 / 60.0;
-        let input = RawInput {
+        let mut input = RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, self.size)),
             time: Some(self.time),
             modifiers: self.modifiers,
@@ -166,6 +170,12 @@ impl Harness {
             events,
             ..Default::default()
         };
+        input
+            .viewports
+            .entry(egui::ViewportId::ROOT)
+            .or_default()
+            .events
+            .append(&mut self.window_events);
         let app = &mut self.app;
         let out = self.ctx.run_ui(input, |ui| app.frame(ui));
         // Taken from the frame's own output rather than read back off the context
