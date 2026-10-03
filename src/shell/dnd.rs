@@ -328,7 +328,7 @@ pub fn default_effect(source: Option<&std::path::Path>, target: &std::path::Path
 pub fn under_temp(path: &std::path::Path) -> bool {
     use std::path::{Path, PathBuf};
 
-    let temp = std::env::temp_dir();
+    let temp = temp_root();
     if temp.as_os_str().is_empty() {
         return false;
     }
@@ -345,6 +345,44 @@ pub fn under_temp(path: &std::path::Path) -> bool {
         (Ok(path), Ok(temp)) => fold(&path).starts_with(fold(&temp)),
         _ => false,
     }
+}
+
+/// `%TEMP%`, or wherever a test has pointed it.
+///
+/// Every part of a claim is decided against this directory: whether a drop's items are a source's
+/// materialisation ([`under_temp`]), where the staging directory is made ([`staging`]), and what
+/// [`is_staging`] will authorise a `remove_dir_all` of. A test that could not move it would have to
+/// build its fixture in the real `%TEMP%` to reach any of that, and the containment rule in
+/// [`crate::sandbox`] does not allow it — which is why the claim went untested through two rounds
+/// of the same bug.
+fn temp_root() -> PathBuf {
+    #[cfg(test)]
+    if let Some(root) = TEMP_OVERRIDE.with(|cell| cell.borrow().clone()) {
+        return root;
+    }
+    std::env::temp_dir()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// See [`temp_root`]. Thread-local rather than an environment variable, so that two tests
+    /// running at once cannot move each other's `%TEMP%` — and neither can move the real one.
+    static TEMP_OVERRIDE: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Treat `root` as `%TEMP%` for as long as the returned guard is alive.
+#[cfg(test)]
+fn temp_here(root: &std::path::Path) -> impl Drop {
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            TEMP_OVERRIDE.with(|cell| *cell.borrow_mut() = None);
+        }
+    }
+    let root = root.to_path_buf();
+    TEMP_OVERRIDE.with(|cell| *cell.borrow_mut() = Some(root));
+    Guard
 }
 
 /// What marks a staging directory as this program's own. See [`claim`].
@@ -364,7 +402,8 @@ const STAGING: &str = "yafe-drop-";
 /// alongside them is on the same volume, and moving them into it is a directory-entry rename:
 /// microseconds, whatever the archive weighs. The source is then welcome to delete a folder
 /// that is empty, and the copy to the real destination runs on the ops thread like every other
-/// one, with the window live and every tab usable.
+/// one, with the window live and every tab usable. When the rename is refused — which is a
+/// case, not a theory, and is [`take`] — there is more to it than that.
 ///
 /// It also makes the right-button menu safe, which it could not otherwise be: `Copy here` is
 /// answered whenever the user gets round to it, long after any source has cleaned up.
@@ -379,11 +418,20 @@ pub(crate) fn claim(items: Vec<PathBuf>) -> Vec<PathBuf> {
     let Some(staging) = staging() else {
         return items;
     };
-    items
+    let claimed: Vec<PathBuf> = items
         .into_iter()
         .enumerate()
         .map(|(index, item)| claim_one(&staging, index, item))
-        .collect()
+        .collect();
+    // A claim that got nothing leaves an empty directory in `%TEMP%` that nothing will ever come
+    // back for: the job only takes one with it when its items are *in* it — see
+    // `crate::shell::ops::claimed` — and [`sweep`] leaves alone anything belonging to a process
+    // that is still running. Which is how the failure that prompted all this was found in the
+    // first place, sitting next to the archiver's own leftovers.
+    if !claimed.iter().any(|item| item.starts_with(&staging)) {
+        let _ = std::fs::remove_dir(&staging);
+    }
+    claimed
 }
 
 /// One item into the staging directory, under its own name.
@@ -404,11 +452,96 @@ fn claim_one(staging: &std::path::Path, index: usize, item: PathBuf) -> PathBuf 
         }
         to = nested.join(name);
     }
-    match std::fs::rename(&item, &to) {
-        Ok(()) => to,
+    if take(&item, &to) {
+        to
+    } else {
         // Nothing moved, so the original is still the right answer — and still a race.
-        Err(_) => item,
+        item
     }
+}
+
+/// Get whatever is at `from` over to `to`, by whatever means the filesystem will allow.
+///
+/// **A directory cannot be renamed while a single file anywhere beneath it is open.** Windows
+/// answers `ERROR_ACCESS_DENIED` — 5, not the sharing violation the situation sounds like — and it
+/// does so however that handle was opened: `FILE_SHARE_DELETE` and all, a plain reader is enough.
+/// Renaming that same open file on its own succeeds. It is only the directory above it that
+/// becomes unmovable.
+///
+/// That is the whole of why this bug came back after [`under_temp`] and [`claim`] had between them
+/// already fixed it. Dragging *files* out of an archive claims them one rename at a time, so a held
+/// file costs that file; dragging a *folder* out staked the entire tree on one rename, and anything
+/// that had so much as looked at a freshly extracted file — a virus scanner is enough, and takes as
+/// long as it likes over a folder full of them — refused it. The claim then gave up and returned
+/// the archiver's own paths, the copy ran out of the archiver's temporary directory, and the
+/// archiver deleted it part way through. Which is the original bug exactly: half the files arrive.
+///
+/// So a refusal is not the end of it. In order:
+///
+/// | | |
+/// | --- | --- |
+/// | rename | the whole item in one directory entry, and what nearly every claim still is |
+/// | recurse, for a directory | the tree recreated and each child claimed in turn, so one held file costs one file |
+/// | hard link | a second name for the same data: the source deleting *its* name leaves ours, and this is allowed where a rename is refused |
+/// | copy | the bytes, when nothing cheaper is permitted — reading is the one thing a scanner's handle still allows |
+///
+/// Returns whether `to` is now where the item is to be found.
+fn take(from: &std::path::Path, to: &std::path::Path) -> bool {
+    // The fast path, and the one this is nearly always on: one directory entry rewritten,
+    // microseconds, whatever the item weighs.
+    if std::fs::rename(from, to).is_ok() {
+        return true;
+    }
+    let Ok(what) = std::fs::symlink_metadata(from) else {
+        return false;
+    };
+    // A junction or a symlink, whose rename has just been refused. A copy would follow it and
+    // duplicate what it points at — which for a link to somewhere outside the extraction would be
+    // copying the user's own files into a scratch folder. Left where it is instead.
+    if what.file_type().is_symlink() {
+        return false;
+    }
+    if what.is_dir() {
+        return take_dir(from, to);
+    }
+    // A file whose rename was refused: a hard link is a second name for the same data, so the
+    // source deleting its own name leaves the data reachable under ours. Failing that, the bytes.
+    std::fs::hard_link(from, to).is_ok() || std::fs::copy(from, to).is_ok()
+}
+
+/// A directory whose rename was refused, one child at a time.
+///
+/// The children are what is claimed; the directories themselves are recreated. That loses the
+/// timestamps the archive carried for the folder — the files keep theirs, since they are moved and
+/// not remade — which is a real if small difference from what the copy would otherwise have
+/// arrived with, and worth strictly less than the files this exists to save. Setting them would
+/// mean a directory handle opened with `FILE_FLAG_BACKUP_SEMANTICS`, so it belongs in
+/// `crate::windows` and not here, on a path taken only when the rename has already failed.
+fn take_dir(from: &std::path::Path, to: &std::path::Path) -> bool {
+    if std::fs::create_dir_all(to).is_err() {
+        return false;
+    }
+    let Ok(entries) = std::fs::read_dir(from) else {
+        return false;
+    };
+    let (mut taken, mut left) = (0usize, 0usize);
+    for entry in entries.flatten() {
+        if take(&entry.path(), &to.join(entry.file_name())) {
+            taken += 1;
+        } else {
+            left += 1;
+        }
+    }
+    // Nothing came across at all and there was something to come: the source is still the better
+    // answer of the two, and the empty shell made here is not one. An empty directory that was
+    // *already* empty is a different thing, and is claimed — `taken` and `left` both zero.
+    if taken == 0 && left > 0 {
+        let _ = std::fs::remove_dir(to);
+        return false;
+    }
+    // Anything at all having moved settles it: reporting `from` now would send the copy to a
+    // directory this had just emptied, which is a worse version of the bug being fixed.
+    true
 }
 
 /// A directory of this program's own, directly inside `%TEMP%` — so on the same volume as
@@ -417,7 +550,7 @@ fn staging() -> Option<PathBuf> {
     use std::sync::atomic::{AtomicU32, Ordering};
 
     static NEXT: AtomicU32 = AtomicU32::new(0);
-    let temp = std::env::temp_dir();
+    let temp = temp_root();
     // Bounded rather than `loop`: if something is answering `AlreadyExists` to every name this
     // can produce, the answer is to give up and let the drop go on unclaimed.
     for _ in 0..64 {
@@ -439,7 +572,7 @@ fn staging() -> Option<PathBuf> {
 /// the name, and that the thing is sitting directly in the temporary directory. Neither on its
 /// own would be enough to be trusted with `remove_dir_all`.
 pub(crate) fn is_staging(dir: &std::path::Path) -> bool {
-    if dir.parent() != Some(std::env::temp_dir().as_path()) {
+    if dir.parent() != Some(temp_root().as_path()) {
         return false;
     }
     let Some(name) = dir.file_name().and_then(|name| name.to_str()) else {
@@ -462,7 +595,7 @@ pub(crate) fn is_staging(dir: &std::path::Path) -> bool {
 /// still running is left alone, which is the safe way round: another window may be copying out
 /// of it, and that is the exact bug all of this exists to fix.
 pub fn sweep() {
-    let temp = std::env::temp_dir();
+    let temp = temp_root();
     let Ok(entries) = std::fs::read_dir(&temp) else {
         return;
     };
@@ -573,6 +706,174 @@ mod tests {
         // A drag from somewhere with no volume — a virtual folder, a browser — cannot be
         // a move, and guessing otherwise would be the destructive guess.
         assert_eq!(default_effect(None, Path::new(r"C:\b")), Effect::Copy);
+    }
+
+    /// A sandbox directory standing in for `%TEMP%`, and the guard that makes it one.
+    ///
+    /// Everything a claim reads comes from [`temp_root`], so this is all it takes to hold the whole
+    /// mechanism inside `target/sandbox` — the reason it can be tested at all now, where before
+    /// checking any of it would have meant building fixtures in the real `%TEMP%`.
+    fn sandboxed_temp(name: &str) -> (PathBuf, impl Drop) {
+        let temp = crate::sandbox::fresh(name).join("temp");
+        std::fs::create_dir_all(&temp).unwrap();
+        let guard = temp_here(&temp);
+        (temp, guard)
+    }
+
+    /// **A folder dragged out of an archive while a file inside it is open.**
+    ///
+    /// The gesture that has now lost half a decompression twice, and the second time is not a
+    /// regression in this file: [`under_temp`] still calls the drop a copy, and [`claim`] still
+    /// stages it. What failed is narrower and is in [`take`] — **Windows refuses to rename a
+    /// directory that has any open file beneath it**, with `ERROR_ACCESS_DENIED`, whatever sharing
+    /// that handle was opened with. A drag of *files* never noticed, because each one is claimed by
+    /// a rename of its own; a drag of a *folder* staked the entire tree on one rename, and one
+    /// handle anywhere under it — a scanner reading a freshly extracted file is enough — sent the
+    /// copy back to reading out of the archiver's directory, which the archiver then deleted part
+    /// way through.
+    ///
+    /// So the assertion is not "the claim succeeded". It is that the files are somewhere the
+    /// archiver is not about to delete, under the name they have to keep.
+    #[test]
+    fn a_folder_is_claimed_even_when_a_file_inside_it_is_open() {
+        let (temp, _temp) = sandboxed_temp("claim-a-held-folder");
+
+        // What an archiver leaves for a folder drag: a directory of its own in `%TEMP%` with the
+        // dragged folder inside it, and a tree under that.
+        let master = temp.join("7zE436F3BDA").join("master");
+        std::fs::create_dir_all(master.join("qml").join("QtQuick")).unwrap();
+        std::fs::write(master.join("qml").join("QtQuick").join("one.qml"), b"one").unwrap();
+        std::fs::write(master.join("two.txt"), b"two").unwrap();
+
+        // The handle that does it. Nothing about it is exotic — a reader, sharing everything it is
+        // able to share, which is what a scanner or a thumbnailer holds.
+        let held = std::fs::File::open(master.join("qml").join("QtQuick").join("one.qml")).unwrap();
+        // Stated rather than assumed: the test is worth nothing if the platform has stopped
+        // refusing this, because the refusal is the thing being survived.
+        assert!(
+            std::fs::rename(&master, temp.join("moved")).is_err(),
+            "the directory rename was allowed, so this is no longer a test of what it was written for"
+        );
+
+        let claimed = claim(vec![master.clone()]);
+        drop(held);
+
+        assert_eq!(claimed.len(), 1);
+        let landed = &claimed[0];
+        assert!(
+            landed
+                .parent()
+                .is_some_and(|parent| is_staging(parent) || parent.parent().is_some_and(is_staging)),
+            "the folder was left with the archiver, at {}",
+            landed.display()
+        );
+        assert_eq!(
+            landed.file_name(),
+            master.file_name(),
+            "the name has to survive, or the copy arrives at the destination under another one"
+        );
+        // The whole tree, the file that was open included.
+        assert_eq!(
+            std::fs::read_to_string(landed.join("qml").join("QtQuick").join("one.qml")).unwrap(),
+            "one",
+            "the file that was open did not come across"
+        );
+        assert_eq!(
+            std::fs::read_to_string(landed.join("two.txt")).unwrap(),
+            "two"
+        );
+        assert!(
+            !master.join("two.txt").exists(),
+            "a file was left where the archiver is about to delete it"
+        );
+    }
+
+    /// The fast path, which is the one nearly every claim is still on: one rename, and the
+    /// archiver no longer has it.
+    #[test]
+    fn a_file_is_claimed_by_moving_it_rather_than_copying_it() {
+        let (temp, _temp) = sandboxed_temp("claim-a-file");
+
+        let extracted = temp.join("7zE00E731CF");
+        std::fs::create_dir_all(&extracted).unwrap();
+        let one = extracted.join("one.txt");
+        std::fs::write(&one, b"one").unwrap();
+
+        let claimed = claim(vec![one.clone()]);
+        assert_eq!(claimed.len(), 1);
+        assert!(claimed[0].parent().is_some_and(is_staging));
+        assert_eq!(std::fs::read_to_string(&claimed[0]).unwrap(), "one");
+        assert!(
+            !one.exists(),
+            "the claim left a copy behind, so it cost the archive's weight rather than a rename"
+        );
+    }
+
+    /// A file open with less sharing than that: its *own* rename is refused too, and the hard link
+    /// is what gets it across. Which is the rung below the recursion and the reason there is one —
+    /// a second name for the same data, so the archiver deleting its name leaves the data under
+    /// ours, which is the half of it the second assertion is about.
+    #[cfg(windows)]
+    #[test]
+    fn a_file_that_cannot_be_renamed_is_claimed_by_a_second_name_for_it() {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 0x1;
+
+        let (temp, _temp) = sandboxed_temp("claim-an-unmovable-file");
+        let master = temp.join("7zE8C57170C").join("master");
+        std::fs::create_dir_all(&master).unwrap();
+        let scanned = master.join("scanned.dll");
+        std::fs::write(&scanned, b"bytes").unwrap();
+
+        let held = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(&scanned)
+            .unwrap();
+        assert!(
+            std::fs::rename(&scanned, temp.join("moved")).is_err(),
+            "the file's own rename was allowed, so this never reaches the hard link"
+        );
+
+        let claimed = claim(vec![master.clone()]);
+        assert_eq!(claimed.len(), 1);
+        let landed = &claimed[0];
+        assert_eq!(
+            std::fs::read_to_string(landed.join("scanned.dll")).unwrap(),
+            "bytes",
+            "the file nothing would move did not come across"
+        );
+
+        drop(held);
+        crate::sandbox::remove_file(&scanned);
+        assert_eq!(
+            std::fs::read_to_string(landed.join("scanned.dll")).unwrap(),
+            "bytes",
+            "the archiver's own delete took the data with it"
+        );
+    }
+
+    /// The narrow test that keeps a drag from Explorer out of all of this: a claim applied to the
+    /// user's own files would move them into a scratch folder. And with nothing claimed there is
+    /// nothing to stage, which is the litter this leaves in `%TEMP%` otherwise.
+    #[test]
+    fn files_that_are_not_a_source_s_temporary_are_left_where_they_are() {
+        let (temp, _temp) = sandboxed_temp("claim-leaves-real-files");
+        let theirs = temp.with_file_name("documents");
+        std::fs::create_dir_all(&theirs).unwrap();
+
+        let one = theirs.join("one.txt");
+        std::fs::write(&one, b"one").unwrap();
+        assert_eq!(claim(vec![one.clone()]), vec![one.clone()]);
+        assert!(
+            one.exists(),
+            "a file that was not a materialisation was moved into a scratch folder anyway"
+        );
+        assert_eq!(
+            std::fs::read_dir(&temp).unwrap().count(),
+            0,
+            "a staging directory was made for a drop that had nothing to claim"
+        );
     }
 
     #[test]
