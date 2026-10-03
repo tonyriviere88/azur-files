@@ -139,6 +139,230 @@ fn a_folder_row_is_followed_by_its_own_files_and_then_by_its_folders() {
     }
 }
 
+/// The tree the two navigation tests are written against.
+///
+/// Three files in the listed folder and three in `a`, so both of those grids have a full line and a
+/// short one at two columns — which is what makes `Down` inside a grid a different answer from
+/// `Down` off the bottom of one. `a\b` is a second level, `z` a second branch, and `zz` **an empty
+/// folder at the end**: that last one is what makes the end of the pane a folder's row rather than a
+/// tile, which a fixture of files could not check.
+fn a_tree() -> (Tab, Arc<crate::fs::Dir>) {
+    let mut builder = DirBuilder::new(r"C:\x");
+    for name in ["top-a.txt", "top-b.txt", "top-c.txt"] {
+        builder.push(name, 1, 0, 0);
+    }
+    builder.push("a", 0, 0, FLAG_DIR);
+    for name in ["f1.txt", "f2.txt", "f3.txt"] {
+        builder.push(&format!(r"a\{name}"), 1, 0, 0);
+    }
+    builder.push(r"a\b", 0, 0, FLAG_DIR);
+    builder.push(r"a\b\deep.txt", 1, 0, 0);
+    builder.push("z", 0, 0, FLAG_DIR);
+    builder.push(r"z\last.txt", 1, 0, 0);
+    builder.push("zz", 0, 0, FLAG_DIR);
+    let dir = Arc::new(builder.finish(0));
+
+    let mut tab = Tab::new(r"C:\x");
+    tab.flat = true;
+    tab.flat_mode = FlatMode::Tree;
+    // Off, or `a\b` would be merged into `a`'s row and the pane would be a level shallower than
+    // what these are about.
+    tab.regroup = false;
+    tab.apply(dir.clone());
+    (tab, dir)
+}
+
+/// **Where the arrow keys go in a tree, all of it, as one table.**
+///
+/// The claim is that the four keys walk *what is on the pane* and not the display order, which in a
+/// tree are two different arrangements of the same rows — a folder's own files are drawn between its
+/// row and its subfolders, and the listed folder's files are drawn above everything. So the reading
+/// order below is nothing like `0, 1, 2, …`, and every position in it is named rather than numbered:
+/// a test written against display positions would pass against the very bug this is for.
+///
+/// Two columns, at a width picked for it, because the vertical pair is the only part of this that
+/// depends on the geometry: `Down` is a line of tiles inside a grid and the block below it at the
+/// bottom of one, and a test at one column could not tell those apart.
+#[test]
+fn the_arrows_walk_the_pane_and_not_the_display_order() {
+    let (tab, dir) = a_tree();
+
+    // Two columns at the top level and two one level in, which is what the assertions below are
+    // written against — asked of the arithmetic rather than restated, so a change to `CELL_W` or to
+    // the indent makes this fail here instead of somewhere in the middle of the table.
+    let width = space::S3 * 2.0 + filelist::INDENT + CELL_W * 2.0 + 1.0;
+    assert_eq!(columns_in(width, 0), 2, "at {width} wide");
+    assert_eq!(columns_in(width, 1), 2);
+    let mut layout = Layout::default();
+    layout.ensure(&tab, width);
+
+    let name = |position: usize| -> String {
+        tab.entry_at(position)
+            .map(|entry| dir.name(entry).to_owned())
+            .unwrap_or_else(|| format!("nothing at {position}"))
+    };
+    let named = |position: Option<usize>| position.map_or_else(|| "-".to_owned(), &name);
+    let step = |from: &str, step: Step| -> String {
+        let at = (0..tab.order.len())
+            .find(|&at| name(at) == from)
+            .unwrap_or_else(|| panic!("no `{from}` in the listing"));
+        named(layout.walk(at, step, 1))
+    };
+
+    // ---- The reading order, walked from one end and then the other ------
+    //
+    // `Right` from the first place to the last is the pane, in order. Note what it is: the listed
+    // folder's three files, *then* `a` — whose display positions are 9, 10, 11 and 0.
+    let mut order = vec![named(layout.first())];
+    while let Some(&last) = order.last().as_ref() {
+        let at = (0..tab.order.len())
+            .find(|&at| name(at) == *last)
+            .expect("a place on the pane is a row in the listing");
+        match layout.walk(at, Step::Next, 1) {
+            Some(next) => order.push(name(next)),
+            None => break,
+        }
+    }
+    assert_eq!(
+        order,
+        vec![
+            "top-a.txt",
+            "top-b.txt",
+            "top-c.txt",
+            "a",
+            r"a\f1.txt",
+            r"a\f2.txt",
+            r"a\f3.txt",
+            r"a\b",
+            r"a\b\deep.txt",
+            "z",
+            r"z\last.txt",
+            "zz",
+        ],
+        "`Right` does not walk the pane in reading order"
+    );
+    assert_eq!(named(layout.first()), "top-a.txt", "the first place is a file");
+    assert_eq!(named(layout.last()), "zz", "and the last one is a folder");
+
+    // And `Left` from the last place is the same thing backwards, which is the property that makes
+    // the pair reversible — a cursor that cannot be put back where it was is worse than a slow one.
+    let mut back = vec![named(layout.last())];
+    while let Some(&last) = back.last().as_ref() {
+        let at = (0..tab.order.len())
+            .find(|&at| name(at) == *last)
+            .expect("a place on the pane is a row in the listing");
+        match layout.walk(at, Step::Prev, 1) {
+            Some(prev) => back.push(name(prev)),
+            None => break,
+        }
+    }
+    back.reverse();
+    assert_eq!(back, order, "`Left` is not `Right` the other way round");
+
+    // ---- Left and Right at the edges of a grid --------------------------
+    //
+    // The two the user meets first: out of the front of a folder's files is that folder, and off
+    // the end of them is whatever row comes next.
+    assert_eq!(step(r"a\f1.txt", Step::Prev), "a", "left off the first file");
+    assert_eq!(step(r"a\f3.txt", Step::Next), r"a\b", "right off the last one");
+
+    // ---- Up and Down, which is where the columns come in ----------------
+    for (from, up, down) in [
+        // The listed folder's grid: two on the first line, one on the second. Down from either of
+        // the first two lands on the third, since a short last line is still a line below.
+        ("top-a.txt", "-", "top-c.txt"),
+        ("top-b.txt", "-", "top-c.txt"),
+        ("top-c.txt", "top-a.txt", "a"),
+        // A folder's row: down is what is inside it, up is what is drawn above it.
+        ("a", "top-c.txt", r"a\f1.txt"),
+        // And its files, the same shape one level in.
+        (r"a\f1.txt", "a", r"a\f3.txt"),
+        (r"a\f2.txt", "a", r"a\f3.txt"),
+        (r"a\f3.txt", r"a\f1.txt", r"a\b"),
+        // Down off the last file of a branch is the next folder up the tree, not the next row.
+        (r"a\b", r"a\f3.txt", r"a\b\deep.txt"),
+        (r"a\b\deep.txt", r"a\b", "z"),
+        ("z", r"a\b\deep.txt", r"z\last.txt"),
+        (r"z\last.txt", "z", "zz"),
+        // The end of the pane, which is where both keys have to stand still.
+        ("zz", r"z\last.txt", "-"),
+    ] {
+        assert_eq!(step(from, Step::Up), up, "up from `{from}`");
+        assert_eq!(step(from, Step::Down), down, "down from `{from}`");
+    }
+
+    // ---- And a page, which is the same step over and over ---------------
+    //
+    // Past the end rather than to it, so what is pinned is that it stops at the last place instead
+    // of stopping moving.
+    let first = layout.first().expect("a pane with something on it");
+    assert_eq!(named(layout.walk(first, Step::Down, 100)), "zz");
+    let last = layout.last().expect("a pane with something on it");
+    assert_eq!(named(layout.walk(last, Step::Up, 100)), "top-a.txt");
+    // A page of two, from the top: `top-c.txt` and then `a`.
+    assert_eq!(named(layout.walk(first, Step::Down, 2)), "a");
+}
+
+/// **The page keys are the folders, and `Ctrl` is the pair that never goes deeper.**
+///
+/// A screenful is not a useful page of a tree — the rows a screen holds belong to several different
+/// branches — so `PageDown` is the next folder's row and `PageUp` the one before it, wherever in the
+/// hierarchy that is. `Ctrl` with either takes only folders no deeper than what the cursor is in, so
+/// it crosses the top of the tree instead of descending into every branch on the way past.
+///
+/// The distinction is the whole test, and it needs a level to skip: from `a`, the next folder at any
+/// depth is `a\b` *inside* it, and the next one no deeper is `z`. Both are asserted from a file as
+/// well as from a row, because a file's level is the folder it is in rather than the depth its own
+/// tile is drawn at — `f2.txt` is one level in and belongs to a folder at the top.
+#[test]
+fn the_page_keys_walk_the_folders_and_ctrl_never_goes_deeper() {
+    let (tab, dir) = a_tree();
+    let mut layout = Layout::default();
+    layout.ensure(&tab, space::S3 * 2.0 + filelist::INDENT + CELL_W * 2.0 + 1.0);
+
+    let name = |position: usize| -> String {
+        tab.entry_at(position)
+            .map(|entry| dir.name(entry).to_owned())
+            .unwrap_or_else(|| format!("nothing at {position}"))
+    };
+    let page = |from: &str, down: bool, shallower: bool| -> String {
+        let at = (0..tab.order.len())
+            .find(|&at| name(at) == from)
+            .unwrap_or_else(|| panic!("no `{from}` in the listing"));
+        layout
+            .next_folder(at, down, shallower)
+            .map_or_else(|| "-".to_owned(), &name)
+    };
+
+    // (from, PageDown, PageUp, Ctrl+PageDown, Ctrl+PageUp)
+    for (from, down, up, across_down, across_up) in [
+        // From the listed folder's own files, whose level is the folder being listed: every top-level
+        // folder is fair game and there is nothing above them to go back to.
+        ("top-a.txt", "a", "-", "a", "-"),
+        ("top-c.txt", "a", "-", "a", "-"),
+        // **From `a`, the two keys differ**: `a\b` is inside it, `z` is the next one at its level.
+        ("a", r"a\b", "-", "z", "-"),
+        // From a file in `a`: the same answers, because its level is `a`'s and not its own indent —
+        // and back up is `a` itself, which is the folder the file is in.
+        (r"a\f2.txt", r"a\b", "a", "z", "a"),
+        (r"a\f3.txt", r"a\b", "a", "z", "a"),
+        // One level in. Up is `a` either way — it is shallower, so `Ctrl` does not exclude it.
+        (r"a\b", "z", "a", "z", "a"),
+        (r"a\b\deep.txt", "z", r"a\b", "z", r"a\b"),
+        // The second branch, and the empty folder after it. Back across from `z` is `a` and not
+        // `a\b`, which is the one place `Ctrl+PageUp` has a whole branch to step over.
+        ("z", "zz", r"a\b", "zz", "a"),
+        (r"z\last.txt", "zz", "z", "zz", "z"),
+        // The end of the tree: nothing below, and back up is the branch it came from.
+        ("zz", "-", "z", "-", "z"),
+    ] {
+        assert_eq!(page(from, true, false), down, "PageDown from `{from}`");
+        assert_eq!(page(from, false, false), up, "PageUp from `{from}`");
+        assert_eq!(page(from, true, true), across_down, "Ctrl+PageDown from `{from}`");
+        assert_eq!(page(from, false, true), across_up, "Ctrl+PageUp from `{from}`");
+    }
+}
+
 /// The visible range is the blocks the viewport crosses, and never fewer.
 ///
 /// A binary search over the blocks' tops, which is the one piece of arithmetic here that fails

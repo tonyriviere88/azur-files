@@ -60,6 +60,283 @@ fn in_the_grid_the_arrows_move_by_a_line_of_tiles() {
     assert_eq!(h.tab(0).cursor, Some(1), "a row is one step in the details view");
 }
 
+/// **The arrows in a flattened tree of tiles, driven through the real keyboard.**
+///
+/// [`crate::ui::grid::tests::the_arrows_walk_the_pane_and_not_the_display_order`] is where the whole
+/// table of where each key goes is pinned, against a layout at a chosen width. This is the wiring:
+/// the keys arrive, the pane the keyboard is in is the one that moves, and `Ctrl` with `Home` or
+/// `End` gets through to the listing rather than being eaten on the way.
+///
+/// **Every claim here is written to be free of the column count**, which is the harness's pane width
+/// divided by a tile and is nobody's business but the layout's — so each folder in the fixture holds
+/// exactly one file, and the answers are the same whether one tile fits across or six.
+///
+/// The fixture is where the point is. Flattened as a tree, the display order is `one`, `one\p.txt`,
+/// `two`, `top.txt` — and the pane is the other way about: `top.txt` is drawn *first*, above every
+/// folder row, because the listed folder's own files are. So `Ctrl+Home` landing on the first row of
+/// the order is landing three quarters of the way down the pane, which is the bug this is for.
+#[test]
+fn the_arrows_in_a_tree_of_tiles_walk_what_is_on_the_pane() {
+    use crate::pane::{FlatMode, ViewMode};
+
+    let root = crate::sandbox::fresh("tree-tiles-arrows");
+    std::fs::create_dir_all(root.join("one")).expect("the sandbox is writable");
+    // Empty, and last: what `End` has to land on, and a folder rather than a file.
+    std::fs::create_dir_all(root.join("two")).expect("the sandbox is writable");
+    std::fs::write(root.join("top.txt"), b"x").expect("writable");
+    std::fs::write(root.join(r"one\p.txt"), b"x").expect("writable");
+
+    let mut h = Harness::new();
+    let pane = h.app.panes[0].id;
+    let ctx = h.ctx.clone();
+    h.app.perform(&ctx, Action::Navigate { pane, path: root.clone() });
+    h.settle();
+    h.app.perform(&ctx, Action::ToggleFlat(pane));
+    h.app.perform(&ctx, Action::SetFlatMode(FlatMode::Tree));
+    h.app.perform(&ctx, Action::SetView { pane, mode: ViewMode::Icons });
+    h.settle();
+    assert!(h.tab(0).is_tree(), "the listing is not a tree");
+    assert_eq!(h.tab(0).view_mode, ViewMode::Icons, "and it is not tiles");
+    assert_eq!(
+        shown_names(&h, 0),
+        vec!["one", r"one\p.txt", "two", "top.txt"],
+        "the fixture is not the display order this test is about"
+    );
+
+    // Where the cursor is, by name — because a position means nothing here: the whole point is that
+    // the pane's order and the display order are not each other.
+    let under_the_cursor = |h: &Harness| -> String {
+        let tab = h.tab(0);
+        tab.cursor
+            .and_then(|at| tab.entry_at(at))
+            .and_then(|entry| tab.dir.as_ref().map(|dir| dir.name(entry).to_owned()))
+            .unwrap_or_else(|| "nothing".to_owned())
+    };
+    // A key with `Ctrl` held, which has to be held on the input state as well as carried on the
+    // event — `App::keyboard` reads the modifiers off the frame.
+    let with_ctrl = |h: &mut Harness, key: egui::Key| {
+        h.modifiers = Modifiers::COMMAND;
+        h.frame(vec![Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::COMMAND,
+        }]);
+        h.modifiers = Modifiers::NONE;
+    };
+
+    // ---- Ctrl+Home and Ctrl+End, the two ends of the pane ---------------
+    with_ctrl(&mut h, egui::Key::Home);
+    assert_eq!(
+        under_the_cursor(&h),
+        "top.txt",
+        "Ctrl+Home is the first thing drawn, which here is a file three rows down the order"
+    );
+    with_ctrl(&mut h, egui::Key::End);
+    assert_eq!(
+        under_the_cursor(&h),
+        "two",
+        "Ctrl+End is the last thing drawn, which here is an empty folder's row"
+    );
+
+    // ---- And the four arrows, from the top down -------------------------
+    with_ctrl(&mut h, egui::Key::Home);
+    // Down off the listed folder's only file leaves its grid for the first folder row.
+    h.frame(tap(egui::Key::ArrowDown));
+    assert_eq!(under_the_cursor(&h), "one", "down off the top grid");
+    // **Down on a folder is what is inside it**, and not the next folder along.
+    h.frame(tap(egui::Key::ArrowDown));
+    assert_eq!(under_the_cursor(&h), r"one\p.txt", "down on a folder");
+    // Down on the last file of a branch is the next folder up the tree.
+    h.frame(tap(egui::Key::ArrowDown));
+    assert_eq!(under_the_cursor(&h), "two", "down off the last file");
+    // And nothing below it: the cursor stands still rather than jumping back into the order.
+    h.frame(tap(egui::Key::ArrowDown));
+    assert_eq!(under_the_cursor(&h), "two", "down off the end of the pane");
+
+    // Up is the same steps backwards.
+    for expected in [r"one\p.txt", "one", "top.txt", "top.txt"] {
+        h.frame(tap(egui::Key::ArrowUp));
+        assert_eq!(under_the_cursor(&h), expected, "walking back up");
+    }
+
+    // ---- Left and Right: the tile beside it, and then the branch ---------
+    //
+    // On a folder's row the pair is the tree's *first*, and moves only when the branch has nothing to
+    // answer with — which is what makes one press open a folder and the next go into it.
+    h.frame(tap(egui::Key::ArrowRight));
+    assert_eq!(under_the_cursor(&h), "one", "right off the top grid");
+    // **`one` is already open, so Right goes to what is inside it.**
+    h.frame(tap(egui::Key::ArrowRight));
+    assert_eq!(under_the_cursor(&h), r"one\p.txt", "right on an open folder");
+    // Off the end of that folder's files, which is the next row along.
+    h.frame(tap(egui::Key::ArrowRight));
+    assert_eq!(under_the_cursor(&h), "two", "right off the last file");
+    // **And on a folder with nothing in it, Right is the next folder** — except there is none after
+    // `two`, so the cursor stands still rather than wrapping or falling into the order.
+    h.frame(tap(egui::Key::ArrowRight));
+    assert_eq!(under_the_cursor(&h), "two", "right off the end of the pane");
+
+    // **Left on an empty folder backs out on the first press**, because there is nothing to shut —
+    // and what is before it on the pane is the last file of the folder above, which is open.
+    h.frame(tap(egui::Key::ArrowLeft));
+    assert_eq!(under_the_cursor(&h), r"one\p.txt", "left off an empty folder");
+    assert_eq!(
+        shown_names(&h, 0),
+        vec!["one", r"one\p.txt", "two", "top.txt"],
+        "Left on the empty folder shut something"
+    );
+    // Left on the first file of a folder is that folder.
+    h.frame(tap(egui::Key::ArrowLeft));
+    assert_eq!(under_the_cursor(&h), "one", "left off the first file");
+    // On the open folder it shuts the branch and stays put, which is the tree answering.
+    h.frame(tap(egui::Key::ArrowLeft));
+    assert_eq!(under_the_cursor(&h), "one", "Left on an open folder moved the cursor");
+    assert_eq!(
+        shown_names(&h, 0),
+        vec!["one", "two", "top.txt"],
+        "Left on the folder's row did not shut it"
+    );
+    // **And now that it is shut, Left backs out of it** — to the place before it on the pane, which
+    // here is the listed folder's own file.
+    h.frame(tap(egui::Key::ArrowLeft));
+    assert_eq!(under_the_cursor(&h), "top.txt", "left off a shut folder");
+    // Right from there is the folder's row again, and the branch opens from it.
+    h.frame(tap(egui::Key::ArrowRight));
+    assert_eq!(under_the_cursor(&h), "one");
+    h.frame(tap(egui::Key::ArrowRight));
+    assert_eq!(
+        shown_names(&h, 0),
+        vec!["one", r"one\p.txt", "two", "top.txt"],
+        "Right did not open it again"
+    );
+    assert_eq!(
+        under_the_cursor(&h),
+        "one",
+        "the press that opened the branch also moved the cursor"
+    );
+
+    crate::sandbox::remove(&root);
+}
+
+/// **The page keys walk the folders, and `Ctrl` with them never goes deeper.**
+///
+/// [`crate::ui::grid::tests::the_page_keys_walk_the_folders_and_ctrl_never_goes_deeper`] pins the
+/// whole table; this is the wiring, and in particular that `Ctrl` reaches the listing on these two
+/// keys — nothing else in the window binds them, and a modifier eaten on the way would leave both
+/// pairs doing the same thing.
+///
+/// Its own fixture, deeper than the one above, because the difference between the two pairs needs a
+/// level to step over: from `a`, the next folder at any depth is `sub` *inside* it and the next one
+/// no deeper is `z`. Nothing here depends on the column count — every answer is a folder's row.
+#[test]
+fn the_page_keys_in_a_tree_of_tiles_walk_the_folders() {
+    use crate::pane::{FlatMode, ViewMode};
+
+    let root = crate::sandbox::fresh("tree-tiles-pages");
+    std::fs::create_dir_all(root.join(r"a\sub")).expect("the sandbox is writable");
+    std::fs::create_dir_all(root.join("z")).expect("the sandbox is writable");
+    std::fs::write(root.join("top.txt"), b"x").expect("writable");
+    std::fs::write(root.join(r"a\a1.txt"), b"x").expect("writable");
+    std::fs::write(root.join(r"a\sub\deep.txt"), b"x").expect("writable");
+    std::fs::write(root.join(r"z\z1.txt"), b"x").expect("writable");
+
+    let mut h = Harness::new();
+    let pane = h.app.panes[0].id;
+    let ctx = h.ctx.clone();
+    h.app.perform(&ctx, Action::Navigate { pane, path: root.clone() });
+    h.settle();
+    h.app.perform(&ctx, Action::ToggleFlat(pane));
+    h.app.perform(&ctx, Action::SetFlatMode(FlatMode::Tree));
+    h.app.perform(&ctx, Action::SetView { pane, mode: ViewMode::Icons });
+    h.settle();
+    assert_eq!(
+        shown_names(&h, 0),
+        vec![
+            "a",
+            r"a\sub",
+            r"a\sub\deep.txt",
+            r"a\a1.txt",
+            "z",
+            r"z\z1.txt",
+            "top.txt"
+        ],
+        "the fixture is not the tree this test is about"
+    );
+
+    let under_the_cursor = |h: &Harness| -> String {
+        let tab = h.tab(0);
+        tab.cursor
+            .and_then(|at| tab.entry_at(at))
+            .and_then(|entry| tab.dir.as_ref().map(|dir| dir.name(entry).to_owned()))
+            .unwrap_or_else(|| "nothing".to_owned())
+    };
+    let with_ctrl = |h: &mut Harness, key: egui::Key| {
+        h.modifiers = Modifiers::COMMAND;
+        h.frame(vec![Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::COMMAND,
+        }]);
+        h.modifiers = Modifiers::NONE;
+    };
+
+    // ---- Plain: every folder, whatever its depth ------------------------
+    with_ctrl(&mut h, egui::Key::Home);
+    assert_eq!(under_the_cursor(&h), "top.txt", "the first place on the pane");
+    for expected in ["a", r"a\sub", "z", "z"] {
+        h.frame(tap(egui::Key::PageDown));
+        assert_eq!(under_the_cursor(&h), expected, "PageDown through the folders");
+    }
+
+    // ---- With Ctrl: only what is no deeper than here ---------------------
+    //
+    // Back across from `z`, which steps over the whole of `a`'s branch — `a\sub` is deeper, so it is
+    // not a place this pair stops at.
+    with_ctrl(&mut h, egui::Key::PageUp);
+    assert_eq!(under_the_cursor(&h), "a", "Ctrl+PageUp went into the branch");
+
+    // From a *file* the level is the folder it is in, not the depth its own tile is drawn at. So
+    // from `a\a1.txt` the plain key finds `a\sub` and the Ctrl one steps over it.
+    h.frame(tap(egui::Key::ArrowRight));
+    assert_eq!(under_the_cursor(&h), r"a\a1.txt", "right on an open folder");
+    with_ctrl(&mut h, egui::Key::PageDown);
+    assert_eq!(under_the_cursor(&h), "z", "Ctrl+PageDown from a file went deeper");
+    with_ctrl(&mut h, egui::Key::PageUp);
+    assert_eq!(under_the_cursor(&h), "a");
+    h.frame(tap(egui::Key::ArrowRight));
+    h.frame(tap(egui::Key::PageDown));
+    assert_eq!(
+        under_the_cursor(&h),
+        r"a\sub",
+        "the plain key should go into the branch the Ctrl one steps over"
+    );
+
+    // ---- And Left out of a shut folder, with a branch above it -----------
+    //
+    // The case the fixture above is too flat for: shut `z`, and what is before it on the pane is the
+    // last file of `a\sub`, which is open.
+    h.frame(tap(egui::Key::PageDown));
+    assert_eq!(under_the_cursor(&h), "z");
+    h.frame(tap(egui::Key::ArrowLeft));
+    assert_eq!(under_the_cursor(&h), "z", "Left on an open folder moved the cursor");
+    assert!(
+        !shown_names(&h, 0).contains(&r"z\z1.txt".to_owned()),
+        "Left did not shut `z`"
+    );
+    h.frame(tap(egui::Key::ArrowLeft));
+    assert_eq!(
+        under_the_cursor(&h),
+        r"a\sub\deep.txt",
+        "left off a shut folder is the last child of the folder above it"
+    );
+
+    crate::sandbox::remove(&root);
+}
+
 /// **The rule as a fresh profile has it, and the menu that turns it off and on again** — ticked,
 /// dragged, and obeyed.
 ///

@@ -219,6 +219,147 @@ impl Tab {
         self.scroll_to_cursor = true;
     }
 
+    /// Whether the cursor walks **the order the tiles are in** rather than the display order.
+    ///
+    /// The two are the same listing arranged two ways, and in the tiles view of a tree they are
+    /// nothing like each other: the order is pre-order, and the view puts a folder's own files
+    /// between its row and its subfolders. So the keys go through the layout that drew the pane —
+    /// but only while it still describes the order on screen, which is
+    /// [`crate::ui::grid::Layout::describes`].
+    fn walks_the_tiles(&self) -> bool {
+        self.view_mode.is_icons() && self.grid.describes(self)
+    }
+
+    /// Move the cursor one way, `times` over, through whichever order the view has.
+    ///
+    /// `by` is what the same key means in a listing of *rows* — the display-order delta — and it is
+    /// what happens in the details view and in the one frame of a tiles view that has not been drawn
+    /// yet. See [`crate::ui::grid::Layout::walk`] for the other half.
+    pub fn walk(&mut self, step: crate::ui::grid::Step, times: usize, by: isize, extend: bool) {
+        if self.walks_the_tiles() {
+            let to = match self.cursor {
+                Some(at) => self.grid.walk(at, step, times),
+                // Nothing to step from, so the first press of any of the four arrows lands on the
+                // first tile rather than on whatever the arithmetic made of a cursor that is not
+                // there.
+                None => self.grid.first(),
+            };
+            // A step off the end of the pane stays where it is. Deliberately not a fall-through to
+            // the arithmetic: it would move the cursor by a number about a different arrangement of
+            // the same rows, which is the whole bug this walk is for.
+            if let Some(to) = to {
+                self.move_cursor_to(to, extend);
+            }
+            return;
+        }
+        self.move_cursor(by, extend);
+    }
+
+    /// **The page keys**: `PageDown` and `PageUp`, and the same pair with `Ctrl`.
+    ///
+    /// **In a tree they are the folders**, which is the step worth having there — a screenful of a
+    /// tree is a screenful of rows belonging to several different branches, so "down one screen"
+    /// lands in the middle of something with no relation to where it started, while "the next
+    /// folder" is the step somebody reading a tree is actually taking. Without `Ctrl` that is the
+    /// next folder at any depth; `across` is `Ctrl`'s half, which takes only folders no deeper than
+    /// the one the cursor is in, so it crosses the top of the tree instead of descending into every
+    /// branch on the way.
+    ///
+    /// In every other listing there are no folders to walk and both are a screenful, which is
+    /// `screenful` steps of the view's own order — see [`Tab::walk`].
+    pub fn page(&mut self, down: bool, across: bool, screenful: usize, by: isize, extend: bool) {
+        // A tree, and somewhere to count from.
+        if let (true, Some(at)) = (self.is_tree(), self.cursor) {
+            // The two views arrange the same folders in the same order and put the *files* in
+            // different places, so which order this is asked of matters as much as it does for the
+            // arrows: the cursor may be on a file whose display position is nowhere near where the
+            // pane draws it.
+            let to = if self.walks_the_tiles() {
+                self.grid.next_folder(at, down, across)
+            } else {
+                self.next_folder_row(at, down, across)
+            };
+            if let Some(to) = to {
+                self.move_cursor_to(to, extend);
+            }
+            // Nothing that way leaves the cursor where it is. Falling back to a screenful from the
+            // last folder in the tree would jump somewhere with nothing to do with the key.
+            return;
+        }
+        let step = if down {
+            crate::ui::grid::Step::Down
+        } else {
+            crate::ui::grid::Step::Up
+        };
+        self.walk(step, screenful, by, extend);
+    }
+
+    /// The next folder's row either way through the **display order**, which is the order a tree
+    /// drawn as rows is in: the row above a row is the one before it.
+    ///
+    /// [`crate::ui::grid::Layout::next_folder`] is the same question asked of the pane the tiles laid
+    /// out, and the answers differ — see [`Tab::page`].
+    fn next_folder_row(&self, from: usize, down: bool, across: bool) -> Option<usize> {
+        // How deep the cursor is: a folder's own depth, and for a file the depth of the folder it is
+        // in, which is one level out from where the row itself is drawn.
+        let depth = self.row_depth(from);
+        let level = if self.is_dir_at(from) {
+            depth
+        } else {
+            depth.saturating_sub(1)
+        };
+        let mut at = from;
+        loop {
+            at = if down {
+                let next = at + 1;
+                (next < self.order.len()).then_some(next)?
+            } else {
+                at.checked_sub(1)?
+            };
+            if self.is_dir_at(at) && (!across || self.row_depth(at) <= level) {
+                return Some(at);
+            }
+        }
+    }
+
+    /// `Left` on a folder that is **already shut**: the way out of a branch.
+    ///
+    /// In the tiles view that is the place before it on the pane — the last file of the folder above
+    /// if that one is open, and otherwise the folder above itself, which is what reading backwards
+    /// gives and is [`crate::ui::grid::Step::Prev`].
+    ///
+    /// In a listing of rows it is the folder this one is *in*. Left means that in every tree control
+    /// on the platform, and there it is the only way out of a branch — the tiles have `Left` and
+    /// `Right` as an axis of their own, and a listing of rows does not.
+    pub fn step_out(&mut self) {
+        if self.walks_the_tiles() {
+            self.walk(crate::ui::grid::Step::Prev, 1, -1, false);
+            return;
+        }
+        self.move_cursor_to_parent();
+    }
+
+    /// The first place in the view, or the last: `Home` and `End`, with or without `Ctrl`.
+    ///
+    /// **Which is not row 0 and the last row once the tiles are drawing a tree.** The listed
+    /// folder's own files are the first thing on the pane — see [`crate::ui::grid`] — so the first
+    /// place is one of them and the last is whatever is deepest in the last branch, either of which
+    /// may be a file or a folder. In the display order both of those are somewhere in the middle.
+    pub fn move_cursor_to_edge(&mut self, last: bool, extend: bool) {
+        if self.walks_the_tiles() {
+            let edge = if last {
+                self.grid.last()
+            } else {
+                self.grid.first()
+            };
+            if let Some(at) = edge {
+                self.move_cursor_to(at, extend);
+                return;
+            }
+        }
+        self.move_cursor_to(if last { usize::MAX } else { 0 }, extend);
+    }
+
     /// Open or shut the folder the cursor is on, for the `Left` and `Right` keys.
     ///
     /// Answers whether the tree changed, which is what tells `Left` apart from "shut already":
@@ -228,9 +369,16 @@ impl Tab {
         let Some(at) = self.cursor else {
             return false;
         };
-        // Whether it *is* already what is being asked for, taken first: `set_collapsed` answers
-        // `false` for both "not a folder" and "already shut", and `Left` on a shut folder should
-        // step out rather than sit there.
+        // **A folder with nothing on show has nothing to shut**, and answering `true` for one is a
+        // keystroke that appears to do nothing: the mark takes no rows out of the order, and no
+        // twisty is drawn for it to change the state of. So `Left` on an empty folder backs out on
+        // the first press rather than the second. [`Tab::has_children_below`] is also `false` for a
+        // folder that is *already* shut, which is the same answer wanted for the same reason.
+        if shut && !self.has_children_below(at) {
+            return false;
+        }
+        // Otherwise whether it *is* already what is being asked for, which `set_collapsed` answers:
+        // `false` for both "not a folder" and "already open", and either way the key moves instead.
         self.set_collapsed(at, shut)
     }
 

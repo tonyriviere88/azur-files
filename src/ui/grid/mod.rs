@@ -161,9 +161,12 @@ pub struct Layout {
     built: bool,
 
     /// How many tiles fit across, where that is one number — which is every listing that is not a
-    /// tree. `1` in a tree, where each grid has its own count and the keyboard follows the rows.
+    /// tree. `1` in a tree, where each grid has its own count and the blocks are what the keyboard
+    /// walks.
     ///
-    /// Read by `App`'s keyboard: it is what `Up` and `Down` move by.
+    /// Read by `App`'s keyboard, as the display-order step to fall back on where this layout does
+    /// not describe the order on screen — see [`Layout::describes`] and [`Layout::walk`], which are
+    /// what the keys go through when it does.
     pub columns: usize,
 }
 
@@ -383,23 +386,59 @@ impl Layout {
     /// Where the line holding `position` sits: its top in content space, and how tall it is.
     ///
     /// For scrolling the cursor into view, which is the one question that goes the other way — every
-    /// other lookup here starts from a `y`. Walked rather than indexed: a tree's blocks are a couple
-    /// per folder, so this is thousands of comparisons on a keystroke where an index would be a
-    /// parallel array over every row for the life of the tab.
+    /// other lookup here starts from a `y`.
     pub fn locate(&self, position: usize) -> Option<(f32, f32)> {
+        let (at, index) = self.find(position)?;
+        match self.blocks[at] {
+            Block::Row { .. } => Some((self.tops[at], ROW_HEIGHT)),
+            Block::Grid { columns, .. } => {
+                let line = index / (columns as usize).max(1);
+                Some((self.tops[at] + line as f32 * CELL_H, CELL_H))
+            }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Where the arrow keys go
+    // -----------------------------------------------------------------------
+    //
+    // **The order the tiles are in is not the display order**, and in a tree it is not even close to
+    // it. The order is pre-order — a folder, then everything under it — while the view puts a
+    // folder's own files *between* its row and its subfolders, so display position `n + 1` can be
+    // most of a screen away from position `n` in either direction. Stepping the cursor by ±1 through
+    // the order was therefore a cursor that jumped about the pane: `Down` on a folder went to its
+    // first subfolder rather than to the first tile under it, and `End` went to the listed folder's
+    // last file, which is drawn at the *top*.
+    //
+    // So the keys walk the blocks, which are what is on screen: a folder's row is one place, a grid
+    // is `count` of them, and the whole pane is those runs end to end. That is a reading order, and
+    // every one of the four keys is a move in it — see [`Layout::walk`].
+
+    /// Whether this describes `tab` as it stands, and so whether the cursor may be moved by it.
+    ///
+    /// The same three questions [`Layout::ensure`] rebuilds on, minus the width — a layout built for
+    /// a narrower pane still holds every position exactly once, which is all the keys need. What
+    /// matters is that it is not a cache over an order that has gone: the caller falls back to the
+    /// display order rather than moving the cursor by an answer about a listing nobody is looking at.
+    pub fn describes(&self, tab: &Tab) -> bool {
+        self.built && self.gen == tab.order_gen && self.tree == tab.is_tree()
+    }
+
+    /// Which block holds a display position, and how far into it.
+    ///
+    /// Walked rather than indexed: a tree's blocks are a couple per folder, so this is thousands of
+    /// comparisons on a keystroke where an index would be a parallel array over every row for the
+    /// life of the tab. Every position is in exactly one block — a folder is a row and everything
+    /// else is a cell — so a `None` here means the layout does not describe the order it was asked
+    /// about, which is what [`Layout::describes`] is for.
+    fn find(&self, position: usize) -> Option<(usize, usize)> {
         for (at, block) in self.blocks.iter().enumerate() {
             match *block {
                 Block::Row { position: row, .. } if row as usize == position => {
-                    return Some((self.tops[at], ROW_HEIGHT));
+                    return Some((at, 0));
                 }
                 Block::Row { .. } => {}
-                Block::Grid {
-                    from,
-                    count,
-                    columns,
-                    ..
-                } => {
-                    let columns = (columns as usize).max(1);
+                Block::Grid { from, count, .. } => {
                     // Without a `cells` vector it is arithmetic; a tree's cells have to be searched,
                     // and the group is one folder's files.
                     let index = if !self.tree {
@@ -411,14 +450,176 @@ impl Layout {
                         group.iter().position(|&cell| cell as usize == position)
                     };
                     if let Some(index) = index {
-                        let row = index / columns;
-                        return Some((self.tops[at] + row as f32 * CELL_H, CELL_H));
+                        return Some((at, index));
                     }
                 }
             }
         }
         None
     }
+
+    /// How many places a block holds: one for a folder's row, a cell each for a grid's files.
+    fn block_len(&self, at: usize) -> usize {
+        match self.blocks.get(at) {
+            Some(Block::Row { .. }) => 1,
+            Some(&Block::Grid { count, .. }) => count as usize,
+            None => 0,
+        }
+    }
+
+    /// The display position at one place of one block.
+    fn place(&self, at: usize, index: usize) -> Option<usize> {
+        match *self.blocks.get(at)? {
+            Block::Row { position, .. } => (index == 0).then_some(position as usize),
+            Block::Grid { from, count, .. } if index < count as usize => self.cell_at(from, index),
+            Block::Grid { .. } => None,
+        }
+    }
+
+    /// The first place on the pane, and the last: what `Home` and `End` land on.
+    ///
+    /// Neither is row 0 or the last row once a tree is being drawn. The first place is the listed
+    /// folder's first *file* — its grid is at the top, above every folder row — and the last is
+    /// whatever is deepest in the last branch, which is as likely to be a folder as a file.
+    pub fn first(&self) -> Option<usize> {
+        (0..self.blocks.len()).find_map(|at| self.place(at, 0))
+    }
+
+    pub fn last(&self) -> Option<usize> {
+        (0..self.blocks.len())
+            .rev()
+            .find_map(|at| self.place(at, self.block_len(at).checked_sub(1)?))
+    }
+
+    /// `times` steps of the cursor through the order the tiles are drawn in, or `None` if it cannot
+    /// move at all. A page is this with `times` set to a screenful of lines.
+    ///
+    /// One [`Layout::find`] however many steps are asked for, which is what keeps a held `PageDown`
+    /// cheap in a tree of twenty thousand folders.
+    pub fn walk(&self, from: usize, step: Step, times: usize) -> Option<usize> {
+        let (mut at, mut index) = self.find(from)?;
+        let mut moved = false;
+        for _ in 0..times.max(1) {
+            let Some(next) = self.stepped(at, index, step) else {
+                break;
+            };
+            (at, index) = next;
+            moved = true;
+        }
+        moved.then(|| self.place(at, index)).flatten()
+    }
+
+    /// **The next folder's row either way through the pane**, which is what the page keys are in a
+    /// tree. `None` if there is not one that way.
+    ///
+    /// A page of a tree is not worth having as a screenful: the rows a screen holds belong to
+    /// several different branches, so "down one screen" lands in the middle of something with no
+    /// relation to where it started. The next folder is the step somebody reading a tree is actually
+    /// taking.
+    ///
+    /// `shallower` is `Ctrl`'s half of the pair: only rows no deeper than what the cursor is on, so
+    /// the walk crosses the tree at one level rather than descending into every branch it passes. The
+    /// level of a *file* is the folder it is in — a page across from a file inside `a` goes to
+    /// whatever follows `a`, not into `a`'s own subfolders.
+    pub fn next_folder(&self, from: usize, down: bool, shallower: bool) -> Option<usize> {
+        let (at, _) = self.find(from)?;
+        let level = self.level_of(at);
+        let mut block = at;
+        loop {
+            block = if down {
+                let next = block + 1;
+                (next < self.blocks.len()).then_some(next)?
+            } else {
+                block.checked_sub(1)?
+            };
+            if let Block::Row { position, depth } = self.blocks[block] {
+                if !shallower || depth as usize <= level {
+                    return Some(position as usize);
+                }
+            }
+        }
+    }
+
+    /// How deep in the tree a block is: a row's own depth, and for a grid the depth of the folder
+    /// whose files it holds — one level out from where the tiles are drawn.
+    ///
+    /// Saturating, for the listed folder's own grid: it is drawn at depth zero and has no row above
+    /// it, so the folder it belongs to is the one being listed and its level is zero as well.
+    fn level_of(&self, at: usize) -> usize {
+        match self.blocks.get(at) {
+            Some(&Block::Row { depth, .. }) => depth as usize,
+            Some(&Block::Grid { depth, .. }) => (depth as usize).saturating_sub(1),
+            None => 0,
+        }
+    }
+
+    /// One step, in blocks and places rather than in display positions.
+    ///
+    /// `Prev` and `Next` are one place either way, across into the block next door at each end —
+    /// which is what makes `Left` on the first file of a folder go to that folder's own row, and
+    /// `Right` on its last file go to whatever row comes after the grid.
+    ///
+    /// `Up` and `Down` are a line of tiles inside a grid and the same thing as `Prev` and `Next`
+    /// everywhere else: a folder's row is a line of its own, and the top and bottom lines of a grid
+    /// have the blocks either side of it above and below them.
+    fn stepped(&self, at: usize, index: usize, step: Step) -> Option<(usize, usize)> {
+        // The columns and the cell count of a grid, and nothing for a folder's row — which is what
+        // makes the two vertical keys fall through to the horizontal pair's answer on one.
+        let grid = match self.blocks.get(at) {
+            Some(&Block::Grid { count, columns, .. }) if count > 0 => {
+                Some(((columns as usize).max(1), count as usize))
+            }
+            _ => None,
+        };
+        match (step, grid) {
+            (Step::Prev, _) => self.back(at, index),
+            (Step::Next, _) => self.on(at, index),
+            (Step::Up, Some((columns, _))) if index >= columns => Some((at, index - columns)),
+            // A short last line is still a line below, so the column is clamped to what is on it
+            // rather than the step going over the whole grid — Explorer's tiles do the same.
+            (Step::Down, Some((columns, count))) if index / columns < (count - 1) / columns => {
+                Some((at, (index + columns).min(count - 1)))
+            }
+            // Off the top line of a grid, or off its bottom one: out of the block, to whatever is
+            // drawn either side of it.
+            (Step::Up, _) => self.back(at, 0),
+            (Step::Down, _) => self.on(at, self.block_len(at).saturating_sub(1)),
+        }
+    }
+
+    /// The place after this one, crossing into the next block if this is the last of its own.
+    fn on(&self, at: usize, index: usize) -> Option<(usize, usize)> {
+        if index + 1 < self.block_len(at) {
+            return Some((at, index + 1));
+        }
+        (at + 1..self.blocks.len())
+            .find(|&next| self.block_len(next) > 0)
+            .map(|next| (next, 0))
+    }
+
+    /// And the place before it.
+    fn back(&self, at: usize, index: usize) -> Option<(usize, usize)> {
+        if let Some(before) = index.checked_sub(1) {
+            return Some((at, before));
+        }
+        (0..at)
+            .rev()
+            .find(|&prev| self.block_len(prev) > 0)
+            .map(|prev| (prev, self.block_len(prev) - 1))
+    }
+}
+
+/// Which way the cursor is going. See [`Layout::walk`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Step {
+    /// One place back in reading order: `Left`.
+    Prev,
+    /// One place on: `Right`.
+    Next,
+    /// The line above: `Up` and `PageUp`.
+    Up,
+    /// The line below: `Down` and `PageDown`.
+    Down,
 }
 
 /// How many tiles fit across a pane of `width`, at a tree indent of `depth`.

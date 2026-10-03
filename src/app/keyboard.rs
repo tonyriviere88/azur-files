@@ -230,18 +230,18 @@ impl App {
         let Some(index) = self.panes.iter().position(|p| p.id == pane) else {
             return;
         };
-        // **How far one step of the cursor goes, and it is not always one.**
+        // **How far one step of the cursor goes, and through which order.**
         //
-        // In the grid, `Down` means "the tile below this one", which is a whole line of tiles along
-        // the display order — so the step is the column count the view last laid out, and `Left` and
-        // `Right` become the ±1 that `Down` is in a listing of rows.
+        // In the tiles view the cursor walks the order the *tiles* are in, which is the blocks the
+        // view laid out rather than the display order — see [`crate::ui::grid::Layout::walk`]. That
+        // is the whole of what makes `Down` on a folder go to the first tile inside it and `End` go
+        // to the last thing on the pane, neither of which is a step along the display order at all.
         //
-        // Except in a **tree**, where the step stays one and the two horizontal keys stay the tree's:
-        // `Right` opens a folder and `Left` shuts it or steps out, which is what those keys mean in
-        // every tree control on the platform and is worth more than moving one cell. A tree's grid
-        // columns are per folder anyway — see [`crate::ui::grid::Layout::columns`], which answers 1
-        // there for exactly this reason.
-        let (step, page) = self
+        // The two numbers here are what the same keys mean in a listing of *rows*, and they are the
+        // fallback: one row for `Down`, a screenful for `PageDown`, and in the tiles view a whole
+        // line of tiles for the first of them — the column count the view last laid out. `lines` is
+        // how many steps a page is, which is the same question in both views.
+        let (step, page, lines) = self
             .panes
             .iter()
             .find(|p| p.id == pane)
@@ -250,13 +250,14 @@ impl App {
                 let height = (p.rect.height() - 80.0).max(1.0);
                 if tab.view_mode.is_icons() {
                     let columns = tab.grid.columns.max(1) as isize;
-                    let lines = (height / crate::ui::grid::CELL_H).max(1.0) as isize;
-                    (columns, lines * columns)
+                    let lines = (height / crate::ui::grid::CELL_H).max(1.0) as usize;
+                    (columns, lines as isize * columns, lines)
                 } else {
-                    (1, (height / crate::pane::ROW_HEIGHT).max(1.0) as isize)
+                    let lines = (height / crate::pane::ROW_HEIGHT).max(1.0) as usize;
+                    (1, lines as isize, lines)
                 }
             })
-            .unwrap_or((1, 20));
+            .unwrap_or((1, 20, 20));
 
         let mut open: Option<(bool, PathBuf)> = None;
         let mut typed: Vec<char> = Vec::new();
@@ -264,24 +265,35 @@ impl App {
         {
             let tab = self.panes[index].tab_mut();
             ctx.input(|i| {
+                use crate::ui::grid::Step;
+
                 let extend = i.modifiers.shift;
                 if i.key_pressed(K::ArrowDown) {
-                    tab.move_cursor(step, extend);
+                    tab.walk(Step::Down, 1, step, extend);
                 }
                 if i.key_pressed(K::ArrowUp) {
-                    tab.move_cursor(-step, extend);
+                    tab.walk(Step::Up, 1, -step, extend);
                 }
+                // **The page keys are the folders in a tree** and a screenful everywhere else, and
+                // `Ctrl` is the difference between the next folder at any depth and the next one no
+                // deeper than this — see [`Tab::page`], which is where both halves are decided.
                 if i.key_pressed(K::PageDown) {
-                    tab.move_cursor(page, extend);
+                    tab.page(true, i.modifiers.command, lines, page, extend);
                 }
                 if i.key_pressed(K::PageUp) {
-                    tab.move_cursor(-page, extend);
+                    tab.page(false, i.modifiers.command, lines, -page, extend);
                 }
+                // **`Ctrl` with either of these is the same gesture**, and on purpose: `Home` and
+                // `End` are Explorer's two keys for the ends of a listing, `Ctrl+Home` and
+                // `Ctrl+End` are what anybody who has used an editor or a tree reaches for, and
+                // there is nothing else in this window for the pair with a modifier to mean. So
+                // neither modifier is tested for, and `Shift` still extends as it does on every
+                // other key here.
                 if i.key_pressed(K::Home) {
-                    tab.move_cursor_to(0, extend);
+                    tab.move_cursor_to_edge(false, extend);
                 }
                 if i.key_pressed(K::End) {
-                    tab.move_cursor_to(usize::MAX, extend);
+                    tab.move_cursor_to_edge(true, extend);
                 }
                 // **Left and Right work a tree**, which is what those two keys mean in every tree
                 // control on the platform: Right opens the folder under the cursor, Left shuts it,
@@ -295,23 +307,39 @@ impl App {
                 // No `extend`: opening a branch is not a selection gesture, and `Shift+Left` in a
                 // tree that grew four hundred rows would select whatever the arithmetic landed on.
                 //
-                // In a **grid** that is not a tree they are the neighbouring tile instead, which is
-                // the same statement from the other end: the two keys go to whichever axis the view
-                // has, and a grid of tiles is the one listing here with two.
-                let sideways = tab.view_mode.is_icons() && !tab.is_tree();
+                // In a **grid** they are the tile beside this one instead, which is the same
+                // statement from the other end: the two keys go to whichever axis the view has, and
+                // a grid of tiles is the one listing here with two. **Except on a folder's row in a
+                // tree**, where they stay the tree's — a row is a line to itself, so there is
+                // nothing beside it to go to, and opening the branch is worth more than either key
+                // could otherwise do. So in the tiles view of a tree the pair means one thing on the
+                // rows and another on the tiles, which is what each of the two is drawn as.
+                let on_a_row = tab.is_tree() && tab.cursor.is_some_and(|at| tab.is_dir_at(at));
+                let sideways = tab.view_mode.is_icons() && !on_a_row;
                 if sideways {
                     if i.key_pressed(K::ArrowRight) {
-                        tab.move_cursor(1, extend);
+                        tab.walk(Step::Next, 1, 1, extend);
                     }
                     if i.key_pressed(K::ArrowLeft) {
-                        tab.move_cursor(-1, extend);
+                        tab.walk(Step::Prev, 1, -1, extend);
                     }
                 } else {
-                    if !extend && i.key_pressed(K::ArrowRight) {
-                        tab.set_collapsed_at_cursor(false);
+                    // **Both keys do a second thing when the branch cannot answer them**, which is
+                    // what makes the pair a way through the tree rather than two switches: a folder
+                    // that is already open has nothing to open, and one that is already shut has
+                    // nothing to shut, so the key moves instead. `set_collapsed_at_cursor` answering
+                    // `false` is exactly that condition — and it covers a folder with nothing in it
+                    // too, where neither direction has anything to do.
+                    //
+                    // `Right` goes to what is inside: the first thing under the folder, or the next
+                    // folder along where there is nothing under it. `Left` goes back out — see
+                    // [`Tab::step_out`], which is the half the two views answer differently.
+                    if !extend && i.key_pressed(K::ArrowRight) && !tab.set_collapsed_at_cursor(false)
+                    {
+                        tab.walk(Step::Next, 1, 1, false);
                     }
                     if !extend && i.key_pressed(K::ArrowLeft) && !tab.set_collapsed_at_cursor(true) {
-                        tab.move_cursor_to_parent();
+                        tab.step_out();
                     }
                 }
                 if i.key_pressed(K::Escape) {
