@@ -1501,6 +1501,17 @@ carrying a hotspot where an icon carries its colour planes, which `image`'s ICO 
 happily — but `cur` is in neither of `image`'s tables, not by extension and not by magic, so a preview
 of one used to be a complaint about the extension instead of a picture of a pointer.
 
+**A photograph is shown the way up it was taken.** A camera writes the sensor's own landscape frame
+and records which way it was being held as an EXIF `Orientation` tag, so a portrait photograph is
+stored on its side and every reader is expected to turn it back. `image` hands over the pixels as
+stored and leaves that to its caller, which is a defensible library decision and a bug in a file
+manager: the tiles in the grid come from the shell's own codec, that one honours the tag, and a
+portrait photograph was upright on its tile and lying on its side in the panel two inches away. Two
+decoders behind one window have to agree about the same file. The size on the bar is turned with it —
+a tall photograph reporting 4032 × 3024 would be the bar contradicting the canvas, and the zoom
+percentage divides by that number. A tagged `.tif` is still shown as stored: `image` reads the tag for
+JPEG, PNG and WebP only, and JPEG is the format cameras actually write it into.
+
 **Alpha shows as alpha**, on a checkerboard. Which two greys the board uses was picked by
 measurement rather than by eye: `background-canvas` against `background-control` is 11.5 ΔL* apart
 in the dark theme and **3.6** in the light one, where the board all but disappeared and with it the

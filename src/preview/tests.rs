@@ -390,6 +390,103 @@ fn a_picture_keeps_its_alpha_and_is_bounded() {
     }
 }
 
+/// **A photograph is shown the way up it was taken**, which is a tag rather than the pixels.
+///
+/// A camera writes the sensor's own landscape frame and records the rotation as EXIF `Orientation`, so
+/// a portrait photograph is stored on its side and every reader is expected to turn it back. `image`
+/// does not do that on its own, and the shell's codec behind
+/// [`crate::shell::thumbs`] does — which is exactly how this was found: the tiles in the grid were
+/// upright and the panel showing the same file was not.
+///
+/// The fixture is a landscape frame split red | blue with `Orientation` = 6, "rotate 90° clockwise",
+/// spliced in by hand. Hand-built because `image` has no EXIF *encoder*, and split down the middle
+/// rather than marked in a corner because JPEG is lossy and a half of the frame survives it in a way a
+/// single pixel does not. 90° clockwise takes the left half to the top, so red on top is the assertion
+/// and it cannot be satisfied by an accident of the aspect ratio alone.
+#[test]
+fn a_photograph_is_turned_the_way_the_camera_was_held() {
+    /// An `APP1` segment holding the smallest EXIF that can say "rotate 90° clockwise".
+    ///
+    /// A camera puts this immediately after the `SOI`, ahead of any JFIF `APP0`, which is where it is
+    /// spliced below. Every field is fixed, so it is written out as bytes rather than assembled.
+    const TURNED: [u8; 36] = [
+        0xFF, 0xE1, // APP1
+        0x00, 0x22, // 34 bytes, a length that counts its own two
+        b'E', b'x', b'i', b'f', 0x00, 0x00, // what makes an APP1 an EXIF one
+        0x49, 0x49, 0x2A, 0x00, // `II*\0`: a TIFF header, little-endian
+        0x08, 0x00, 0x00, 0x00, // IFD0 is eight bytes in — directly after this header
+        0x01, 0x00, // holding one entry
+        0x12, 0x01, // tag 0x0112, `Orientation`
+        0x03, 0x00, // of type 3, SHORT
+        0x01, 0x00, 0x00, 0x00, // one of them
+        0x06, 0x00, 0x00, 0x00, // 6, "rotate 90° clockwise", in the first two of four value bytes
+        0x00, 0x00, 0x00, 0x00, // and no IFD1 after it
+    ];
+
+    // Twice as wide as it is tall, so the shape alone says whether it was turned.
+    let mut frame = std::io::Cursor::new(Vec::new());
+    image::RgbImage::from_fn(64, 32, |x, _| {
+        if x < 32 {
+            image::Rgb([255, 0, 0])
+        } else {
+            image::Rgb([0, 0, 255])
+        }
+    })
+    .write_to(&mut frame, image::ImageFormat::Jpeg)
+    .expect("`image` can encode a JPEG");
+    let frame = frame.into_inner();
+
+    /// Which of red and blue won at a point, as a decoded picture is sampled.
+    fn hue_at(picture: &Picture, x: usize, y: usize) -> egui::Color32 {
+        picture.pixels.pixels[y * picture.pixels.size[0] + x]
+    }
+
+    // The control first: the same bytes with nothing spliced into them are shown as stored, so a
+    // failure below is about the tag rather than about the fixture or the encoder.
+    let flat = scratch("as-stored.jpg");
+    std::fs::write(&flat, &frame).expect("a JPEG in the temp folder");
+    let Payload::Picture(picture) = read(&Ask::One(flat.clone(), Kind::Picture)) else {
+        panic!("a JPEG did not come back as a picture");
+    };
+    assert_eq!(picture.pixels.size, [64, 32], "an untagged JPEG was turned anyway");
+    assert_eq!(picture.natural, [64, 32]);
+    let (left, right) = (hue_at(&picture, 16, 16), hue_at(&picture, 48, 16));
+    assert!(left.r() > left.b(), "the left half of the control is not red: {left:?}");
+    assert!(right.b() > right.r(), "the right half of the control is not blue: {right:?}");
+
+    // And the same frame, tagged.
+    let turned = scratch("turned.jpg");
+    let mut tagged = frame[..2].to_vec();
+    tagged.extend_from_slice(&TURNED);
+    tagged.extend_from_slice(&frame[2..]);
+    std::fs::write(&turned, &tagged).expect("a JPEG in the temp folder");
+    let Payload::Picture(picture) = read(&Ask::One(turned.clone(), Kind::Picture)) else {
+        panic!("a JPEG carrying an EXIF orientation did not come back as a picture at all");
+    };
+    assert_eq!(
+        picture.pixels.size, [32, 64],
+        "the tag was ignored: a portrait photograph is still lying on its side in the panel"
+    );
+    // The bar reports this, and the zoom percentage divides by it — the stored 64 × 32 under a canvas
+    // that is plainly taller than it is wide would be the two contradicting each other.
+    assert_eq!(
+        picture.natural, [32, 64],
+        "the size on the bar is the stored one rather than the one on the canvas"
+    );
+    assert!(!picture.scaled && !picture.vector);
+    // Clockwise and not anticlockwise: the left of the frame is the top of the picture.
+    let (top, bottom) = (hue_at(&picture, 16, 16), hue_at(&picture, 16, 48));
+    assert!(
+        top.r() > top.b(),
+        "the frame's left half did not land on top — it was turned the wrong way: {top:?}"
+    );
+    assert!(bottom.b() > bottom.r(), "the frame's right half is not at the bottom: {bottom:?}");
+
+    for path in [flat, turned] {
+        crate::sandbox::remove_file(&path);
+    }
+}
+
 /// **A `.cur` decodes, and its name is the whole reason it can.**
 ///
 /// A cursor is an icon whose directory entries carry a hotspot where an icon's carry the colour planes

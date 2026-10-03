@@ -7,6 +7,11 @@ use super::*;
 pub struct Picture {
     pub pixels: egui::ColorImage,
     /// What it is on disk, which is what the panel reports — `pixels` may be smaller.
+    ///
+    /// **Upright, not as stored.** A camera records a portrait photograph as a landscape frame plus
+    /// an EXIF tag; [`raster_from`] honours the tag, so the edges here are swapped to match what the
+    /// panel is actually showing. Reporting the stored 4032 × 3024 under a picture that is plainly
+    /// taller than it is wide would be the bar contradicting the canvas above it.
     pub natural: [u32; 2],
     /// It was larger than [`CAP`] and has been scaled down.
     pub scaled: bool,
@@ -134,10 +139,19 @@ fn named(path: &Path) -> Option<image::ImageFormat> {
 /// `cap` is the long edge anything larger is scaled down to. [`CAP`] for the panel and
 /// [`crate::shell::thumbs::CELL`] for a tile; [`DECODE_MAX`] is not a parameter, because how much this
 /// is allowed to *decode* on the way is the same question whoever asked.
+///
+/// **EXIF orientation is applied here**, which is the reason the second `open` goes through
+/// `into_decoder` rather than `decode` — see the comment on it. Every caller wants that: a photograph
+/// is upright in the panel, in a diff, in a git blob and on a tile, or it is upright in none of them.
 fn raster_from<R: std::io::BufRead + std::io::Seek>(
     open: impl Fn() -> Result<image::ImageReader<R>, String>,
     cap: u32,
 ) -> Result<Picture, String> {
+    // The trait behind `orientation`, `total_bytes` and `set_limits`, none of which are inherent
+    // methods on a decoder — and the enum, which is matched on rather than merely passed along.
+    use image::metadata::Orientation;
+    use image::ImageDecoder;
+
     // **How big it is, before deciding to decode it.** Only the header is read for this, and it
     // is the one bound that has to come first: `image` has no streaming resize, so a decode is
     // the full size in memory however small the answer is going to be. A 40-megapixel image is
@@ -153,10 +167,60 @@ fn raster_from<R: std::io::BufRead + std::io::Seek>(
         ));
     }
 
-    let decoded = open()?
-        .decode()
-        .map_err(|why| short(&why.to_string()))?
-        .into_rgba8();
+    // **The rotation a camera recorded rather than applied.** A phone writes the sensor's own
+    // landscape readout plus an EXIF `Orientation` tag saying which way up it was being held, and
+    // `image` hands back the pixels exactly as stored. Without this line a portrait photograph
+    // previews on its side while the *tile* for the same file, two inches away, is upright — a tile
+    // comes from `IShellItemImageFactory` and the shell's codec honours the tag. Two decoders behind
+    // one panel, and this is what keeps them agreeing about the same photograph.
+    //
+    // Which is why the second `open` produces a decoder rather than going straight to `decode`:
+    // `ImageReader::decode` builds one, consumes it and throws it away, and the tag is only
+    // reachable through it. In `image` 0.25 that means JPEG, PNG and WebP; a tagged `.tif` is still
+    // shown as stored, which is a gap in the library rather than one here — and JPEG is the format
+    // every camera on earth writes this tag into.
+    let mut decoder = open()?
+        .into_decoder()
+        .map_err(|why| short(&why.to_string()))?;
+    // The one thing `ImageReader::decode` did on the way past that `into_decoder` leaves to its
+    // caller: the allocation ceiling, checked against the size before the buffer is asked for.
+    // `Limits::default()` is exactly what the reader was carrying, because nothing here sets any.
+    let mut limits = image::Limits::default();
+    limits
+        .reserve(decoder.total_bytes())
+        .map_err(|why| short(&why.to_string()))?;
+    decoder
+        .set_limits(limits)
+        .map_err(|why| short(&why.to_string()))?;
+    // Absent, malformed, and "this decoder cannot read EXIF at all" are one answer here. There is
+    // nothing to do differently about a picture that never said which way up it goes, and failing a
+    // preview over a metadata tag would be a worse bug than the one this fixes.
+    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+    let mut decoded = image::DynamicImage::from_decoder(decoder)
+        .map_err(|why| short(&why.to_string()))?;
+    // Turned before `into_rgba8`, so a JPEG moves the three bytes a pixel it actually has rather
+    // than four.
+    decoded.apply_orientation(orientation);
+    let decoded = decoded.into_rgba8();
+
+    // **What the bar reports, now that the picture has been turned.** `into_dimensions` above read
+    // the header, and a header describes the file as stored: a portrait photograph is 4032 × 3024
+    // there and 3024 × 4032 on the screen. The bar has to say the second — and so does the zoom
+    // percentage, which divides the decoded width by `natural[0]` and would otherwise read 75% at
+    // 1:1 for every photograph a camera turned.
+    //
+    // The two bounds above are left measuring the stored size on purpose: one is a product and the
+    // other a `max`, and neither cares which way round the edges are.
+    let natural = match orientation {
+        Orientation::Rotate90
+        | Orientation::Rotate270
+        | Orientation::Rotate90FlipH
+        | Orientation::Rotate270FlipH => (natural.1, natural.0),
+        Orientation::NoTransforms
+        | Orientation::Rotate180
+        | Orientation::FlipHorizontal
+        | Orientation::FlipVertical => natural,
+    };
 
     let (width, height) = (decoded.width(), decoded.height());
     let scaled = width > cap || height > cap;
