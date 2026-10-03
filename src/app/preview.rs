@@ -178,14 +178,32 @@ impl App {
         self.preview_rect(pane, scale)
     }
 
-    /// The Bookmarks group, when a drag is over it.
+    /// What the drop highlight should cover in the Bookmarks section, when a drag is over it.
     ///
-    /// The whole group and not a row within it: pinning appends, so there is no position to
-    /// promise — which is also why the pointer is answered `LINK` rather than copy or move.
+    /// **The group under the pointer when there is one, and the whole section otherwise** —
+    /// which mirrors where the drop will actually go, since a group is published as a zone of its
+    /// own and wins over the section it sits in. The same rule, and the same reason, as
+    /// [`Self::preview_rect`] in a listing: a section-wide highlight over a group would promise
+    /// the wrong destination.
+    ///
+    /// A group means its name *and* the bookmarks under it, which is what makes the highlight a
+    /// picture of the thing being joined rather than of the row it was aimed at.
+    ///
+    /// Between two bookmarks there is nothing to promise — pinning appends — which is also why
+    /// the pointer is answered `LINK` rather than copy or move.
     pub(super) fn bookmarks_preview(&self, scale: f32) -> Option<Rect> {
         let (x, y) = self.drop_hover?;
         let rect = self.bookmarks_rect?;
         let at = egui::pos2(x as f32 / scale.max(0.01), y as f32 / scale.max(0.01));
-        rect.contains(at).then_some(rect)
+        if !rect.contains(at) {
+            return None;
+        }
+        Some(
+            self.bookmark_rows
+                .iter()
+                .find(|(row, _)| row.contains(at))
+                .map(|(row, _)| row.intersect(rect))
+                .unwrap_or(rect),
+        )
     }
 }

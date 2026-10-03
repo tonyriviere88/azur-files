@@ -599,33 +599,64 @@ impl App {
                     .join("\r\n");
                 ctx.copy_text(text);
             }
-            Action::AddBookmark(path) => {
-                if !path.as_os_str().is_empty() && !self.bookmarks.contains(&path) {
-                    self.bookmarks.push(path);
-                    self.config_dirty = true;
-                }
+            // Every one of these says whether it changed anything, and that is what marks the
+            // settings dirty: a drag that ended where it started, a folder already pinned, a
+            // group index from a stale menu — all of them are no-ops, and none of them is
+            // worth writing the file for.
+            Action::AddBookmark(path) => self.config_dirty |= self.bookmarks.add(path),
+            Action::AddBookmarkIn { group, path } => {
+                self.config_dirty |= self.bookmarks.add_in(group, path);
             }
-            Action::RemoveBookmark(path) => {
-                self.bookmarks.retain(|p| *p != path);
-                self.config_dirty = true;
-            }
+            Action::RemoveBookmark(path) => self.config_dirty |= self.bookmarks.remove(&path),
             Action::MoveBookmark { from, to } => {
-                // `to` is an insertion point in the list *before* the move, so removing
-                // first shifts every later position down by one.
-                if from < self.bookmarks.len() && to <= self.bookmarks.len() {
-                    let moved = self.bookmarks.remove(from);
-                    let at = if to > from { to - 1 } else { to };
-                    self.bookmarks.insert(at.min(self.bookmarks.len()), moved);
-                    self.config_dirty = true;
-                }
+                self.config_dirty |= self.bookmarks.move_to(from, to);
             }
             Action::ToggleBookmark(path) => {
-                if self.is_bookmarked(&path) {
-                    self.bookmarks.retain(|p| *p != path);
-                } else if !path.as_os_str().is_empty() {
-                    self.bookmarks.push(path);
-                }
+                self.config_dirty |= if self.is_bookmarked(&path) {
+                    self.bookmarks.remove(&path)
+                } else {
+                    self.bookmarks.add(path)
+                };
+            }
+            Action::AddBookmarkGroup => {
+                // Made and named in one gesture: the `+` is pressed, the group appears at the
+                // end of the list with its name in a field, and typing over `New group` is the
+                // rest of it. A dialog for one word would be a dialog too many, and a group
+                // called `New group` because nobody was asked is a group nobody can find.
+                self.sections.bookmarks = true;
+                let group = self
+                    .bookmarks
+                    .add_group(crate::ui::sidebar::bookmarks::NEW_GROUP, true);
+                self.bookmark_edit.rename = Some(crate::ui::sidebar::Rename::new(
+                    group,
+                    crate::ui::sidebar::bookmarks::NEW_GROUP.to_owned(),
+                ));
                 self.config_dirty = true;
+            }
+            Action::ToggleBookmarkGroup(group) => {
+                self.config_dirty |= self.bookmarks.toggle_group(group);
+            }
+            Action::BeginRenameBookmarkGroup(group) => {
+                if let Some(existing) = self.bookmarks.group(group) {
+                    self.bookmark_edit.rename =
+                        Some(crate::ui::sidebar::Rename::new(group, existing.name.clone()));
+                }
+            }
+            Action::CommitRenameBookmarkGroup { group, name } => {
+                self.bookmark_edit.rename = None;
+                self.config_dirty |= self.bookmarks.rename_group(group, &name);
+            }
+            Action::CancelRenameBookmarkGroup => self.bookmark_edit.rename = None,
+            Action::UngroupBookmarks(group) => {
+                self.bookmark_edit.rename = None;
+                self.config_dirty |= self.bookmarks.ungroup(group);
+            }
+            Action::RemoveBookmarkGroup(group) => {
+                // The field goes with the row it was over. Without this, renaming a group and
+                // removing it in the same breath leaves a field editing a group that is not
+                // there — and, worse, one whose index now names its neighbour.
+                self.bookmark_edit.rename = None;
+                self.config_dirty |= self.bookmarks.remove_group(group);
             }
             Action::SetTheme { dark } => {
                 if dark == self.theme.dark {

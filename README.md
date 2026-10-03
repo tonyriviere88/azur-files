@@ -577,6 +577,76 @@ Bookmarks are a list you arrange:
   pointer as a *link*, which is the truthful answer — nothing is copied and nothing moved —
   and is what Explorer does when you drag a folder onto Quick Access.
 - **Drag a bookmark up or down** to reorder, with a caret showing where it will land.
+- **`+` beside the heading makes a group**, and the list can be arranged into those too.
+
+### Groups of bookmarks
+
+The `+` on the Bookmarks heading is the only control in this panel, and it is there because a
+group is the only thing here that has to be *made* before it can be used — every other row
+already exists. The group appears at the end of the list with its name in a field and the text
+selected, so making one and naming one are a single gesture: press, type, Enter. A dialog for
+one word would be a dialog too many, and a group called `New group` because nobody was asked
+is a group nobody can find.
+
+**It is a hover control**: it appears while the pointer is anywhere in the Bookmarks section and
+is not there otherwise. A permanent button on a heading is permanent furniture in a panel whose
+whole job is to be a list of names — the same argument that took the star off the path bar — and
+making a group is a rare thing to do. It also stands down while anything is being dragged: a
+folder on its way to being pinned would otherwise arrive at a button under the pointer, sitting
+in the middle of a highlight that says something else is about to happen.
+
+A group is **not a place**, so clicking it folds it rather than going anywhere — and that is
+why it is the one folder in this program drawn as an *outline*. The convention everywhere else
+is that a filled glyph is somewhere you can be; a hollow one is a thing that is there. It also
+has to be told apart from the rows underneath it, which are real folders wearing Windows' own
+bitmap, gradient and all: a group drawn as a folder would be a folder that does not open, in a
+list of ones that do. So it gets a hollow folder with a star in it, in the amber the bookmarks'
+own stars wear — flat, hollow and in a colour the shell never produces. A folded group shows
+how many are inside, right-aligned, so a long name gives way to the count rather than running
+under it.
+
+**One level, and no more.** A group holds folders; it does not hold groups. A 200-point panel
+has room for one indent, and a tree of bookmarks is somewhere to lose bookmarks. The rule is
+kept in `Bookmarks::move_to`, which refuses a group dropped into a group rather than
+flattening it — the one place a nested group could ever come from.
+
+Filling one:
+
+- **Drag a bookmark onto a group's row** and it goes in. The group lights up as a drop target
+  rather than showing a caret beside itself, which is also the only way to fill a group that is
+  folded shut — the rows to aim between are not on screen.
+- **Drag a folder in from a listing onto a group** and it is pinned into that group rather than at
+  the end of the list. A group is published as a drop zone of its own and wins over the section it
+  sits in, exactly as a folder row wins over the listing it is in — dropping *on* something means
+  into that something — and the highlight follows the group so it says which. Anywhere else in the
+  section still means the end of the list.
+
+**A group is one thing while anything is being dragged**, and both marks it can wear say so:
+
+- The highlight for a drop *into* a group covers **the group and the rows under it**. A box round
+  the name alone left the bookmarks it was about to join outside the box, which is a picture of the
+  wrong thing.
+- The caret for a drop *after* a group is drawn **below everything in it**. Under the name is
+  inside the group, where a line reads as landing between two of its bookmarks — and it is not
+  what the drop would do.
+- And a group being dragged sees another group as one block: the rows inside one are not places a
+  group can go, so aiming anywhere in the top half of a block lands before it and the bottom half
+  after it. The rows inside an open group still take a caret of their own — indented with them,
+  which is what tells "at the end of this group" from "after this group" when the two lines land
+  on the same pixel.
+- **Drag it out** to anywhere in the list, and below the last row means the end of the top
+  level whatever the last row belongs to. Without that rule, a list ending in an open group
+  would have no reachable "put it at the bottom".
+- Or say it in words: a bookmark's menu has **Move to group** and, inside one, **Take out of
+  the group**. Dragging is how this list is arranged, but a menu is how anybody finds out that
+  groups take bookmarks at all.
+
+Getting rid of one asks which you meant, because there is no undo here: **Ungroup** leaves the
+bookmarks where the group was, and **Remove group** takes them with it — and says so, by
+counting them into its own label.
+
+`Ctrl+D` and the shell's `Pin to Quick access` search the groups too, so a folder pinned inside
+one is a folder that is bookmarked.
 
 ## Sorting
 
@@ -2889,6 +2959,12 @@ work — OLE refuses a target that answers with an effect the source never allow
 copy and move on offer the drop was rejected and dragging a folder onto Bookmarks did nothing at
 all.
 
+A **group** is a zone of its own inside that one, published after it so it wins, and a drop there
+pins into the group — the same arrangement as a folder row inside its listing, decided the same way
+and highlighted the same way. Both answer `LINK`, because both pin. The zone is the group's row
+*and* the rows under it, because that is what the highlight covers: a mark that promises the group
+and a zone that only accepts its name would disagree about the rows in between.
+
 `Ctrl` copies, `Shift` moves, and with neither, the same volume moves and a different one copies —
 unless what is being dragged is a temporary, for which see below.
 
@@ -4498,6 +4574,24 @@ the tree that arranged them. Anything unparseable is skipped rather than fatal.
 
 The window size is remembered, so **1024×600 is what a first launch gets**; delete the
 `window=` line to go back to it.
+
+The bookmarks are three keys read **in file order**, so the order in the file is the order on
+screen: `bookmark=` is a folder at the top level, `bookmark_group=1,Work` opens a group — the
+fold state first, so a name is free to have a comma in it — and `bookmark_in=` is a folder
+inside the group most recently opened.
+
+```ini
+bookmark=C:\src
+bookmark_group=1,Work
+bookmark_in=C:\work\api
+bookmark_in=C:\work\web
+bookmark=D:\photos
+```
+
+A file written before groups existed is nothing but `bookmark=` lines, which is a flat list and
+reads back as exactly that. A `bookmark_in=` with no group above it means somebody edited the
+file by hand; the folder is worth more than the line it was written on, so it lands at the top
+level rather than nowhere.
 
 `diff=1` shows what changed in a previewed file — the bands on a text file, the three views on a
 picture — and `diff_collapse=0` leaves the unchanged stretches in. Both are toggles in the preview's

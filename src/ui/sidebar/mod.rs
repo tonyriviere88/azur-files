@@ -15,21 +15,59 @@
 //! in from a listing pins it. The second is an OLE drop rather than a gesture of ours — the
 //! group publishes itself as a drop zone, and [`crate::app::App`] turns a drop there into
 //! a bookmark instead of a file operation.
+//!
+//! They can also be arranged *into* groups, which is a list of its own and lives in
+//! [`bookmarks`] — the model, the rows, and the arithmetic of dropping one row between two
+//! others. The `+` beside the Bookmarks heading is what makes a group; everything else about
+//! the section is drawn from here through the same [`row`] every other line in the panel uses.
 
 use azur_egui_theme::components::{ContextMenu, MenuItem};
 use azur_egui_theme::icons as azur_icons;
 use azur_egui_theme::tokens::{radius, space, typography};
 use egui::{pos2, vec2, CornerRadius, Id, Rect, Sense, Ui};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::app::Action;
 use crate::fs::drives::Drive;
+use crate::fs::fmt;
 use crate::fs::places::Place;
-use crate::fs::{display_name, fmt};
 use crate::icons;
 use crate::pane::{PaneId, Side};
 use crate::theme::Theme;
 use crate::ui::{icon_rect, row_fill, section_label, text_left, truncated};
+
+pub mod bookmarks;
+
+pub use bookmarks::{Bookmarks, Editing, Entry, Rename, Spot};
+
+/// The Bookmarks section's own state, which is more than the list.
+///
+/// One struct rather than four more arguments to [`show`], and they belong together: all four
+/// are about the one section, and three of them exist only because a *drag* is a thing that
+/// spans frames.
+pub struct Marks<'a> {
+    pub list: &'a Bookmarks,
+    /// A row being dragged, and a group being named.
+    pub editing: &'a mut Editing,
+    /// Where each group was drawn, refilled every frame, as `(the whole of it, its position in
+    /// the list)`.
+    ///
+    /// So that a folder dragged in from a listing can land in the group it is dropped on rather
+    /// than at the end of the list — [`crate::app::App`] publishes these as drop zones of their
+    /// own, the way a listing publishes its folder rows. Written here because this is the only
+    /// place that knows which rows a folded group did not draw.
+    ///
+    /// **The group's own row *and* the rows under it**, because a group is one thing: the
+    /// highlight a drag is shown covers the block, so the block is what has to accept the drop.
+    /// See [`bookmarks::Line::span`].
+    pub rows: &'a mut Vec<(Rect, usize)>,
+    /// Whether a drag from outside is over the window.
+    ///
+    /// Which takes the `+` away: it is a hover control, and during a drop it would be a button
+    /// under the pointer that the pointer cannot press, sitting in the middle of a highlight
+    /// that says something else is about to happen.
+    pub dragging: bool,
+}
 
 /// A row: one body line and a point of air either side.
 ///
@@ -58,6 +96,13 @@ const INDENT: f32 = space::S3;
 /// occupies, and the glyph. Known without a rect, which is what lets a drive row decide
 /// how tall it is before it is allocated.
 const TEXT_INSET: f32 = INDENT + 12.0 + space::S2 + GLYPH + space::S3;
+/// How far a bookmark inside a group is set in from one that is not.
+///
+/// A chevron's width, which is what the group's own chevron occupies on the row above — so a
+/// child's glyph starts where its group's name does, and the nesting is legible without a
+/// guide line. One indent is all there is: a group holds folders and not groups, so no row is
+/// ever further in than this. See [`bookmarks`].
+const CHILD: f32 = 12.0;
 
 /// Which groups are open. Persisted, because collapsing one is a decision about
 /// how you work rather than about this session.
@@ -93,13 +138,12 @@ pub fn show(
     ui: &mut Ui,
     t: &Theme,
     drives: &[Drive],
-    bookmarks: &[PathBuf],
+    marks: &mut Marks<'_>,
     places: &[Place],
     current: &Path,
     focused: PaneId,
     sections: &mut Sections,
     icons_cache: &mut crate::shell::icons::Icons,
-    reorder: &mut Option<usize>,
     scratch: &mut String,
     out: &mut Vec<Action>,
 ) -> Option<Rect> {
@@ -118,7 +162,7 @@ pub fn show(
             ui.add_space(space::S1);
 
             // ---- Drives ---------------------------------------------------
-            if group_header(ui, t, width, "Drives", &mut sections.drives) {
+            if group_header(ui, t, width, "Drives", &mut sections.drives, 0.0).1 {
                 for drive in drives {
                     let shell = shell_icon(ui, icons_cache, &drive.path);
                     drive_row(
@@ -131,63 +175,34 @@ pub fn show(
             // ---- Bookmarks ------------------------------------------------
             ui.add_space(space::S2);
             let header = ui.cursor().min;
-            if group_header(ui, t, width, "Bookmarks", &mut sections.bookmarks) {
-                if bookmarks.is_empty() {
-                    hint(
-                        ui,
-                        t,
-                        width,
-                        "Ctrl+D, or drag a folder here",
-                    );
-                }
-                // Row rects as they are drawn, so the caret between them can be worked out
-                // afterwards without laying anything out twice.
-                let mut rows: Vec<Rect> = Vec::with_capacity(bookmarks.len());
-                for (index, path) in bookmarks.iter().enumerate() {
-                    let shell = shell_icon(ui, icons_cache, path);
-                    let dragging = *reorder == Some(index);
-                    let response = row(
-                        ui,
-                        t,
-                        width,
-                        ROW,
-                        &icons::star_filled,
-                        t.status.warning,
-                        shell,
-                        &mut queue,
-                        &display_name(path),
-                        path == current,
-                        Id::new(("bookmark", path)),
-                        // Only bookmarks can be dragged, and only to reorder themselves.
-                        Sense::click_and_drag(),
-                        dragging,
-                    );
-                    rows.push(response.rect);
-                    if response.drag_started() {
-                        *reorder = Some(index);
-                    }
-                    navigate_on(&response, focused, path, out);
-                    ContextMenu::new(&response).show(ui.ctx(), |ui| {
-                        menu_targets(ui, focused, path, out);
-                        azur_egui_theme::components::menu_divider(ui);
-                        if ui
-                            .add(MenuItem::new("Remove bookmark").danger(true))
-                            .clicked()
-                        {
-                            out.push(Action::RemoveBookmark(path.clone()));
-                        }
-                    });
-                }
-                reordering(ui, t, reorder, &rows, out);
-                bookmarks_rect = Some(Rect::from_min_max(
-                    pos2(header.x, header.y),
-                    pos2(header.x + width, ui.cursor().min.y),
-                ));
+            let (heading, open) =
+                group_header(ui, t, width, "Bookmarks", &mut sections.bookmarks, ADD);
+            marks.rows.clear();
+            if open {
+                bookmarks::section(
+                    ui, t, width, marks, icons_cache, &mut queue, current, focused, out,
+                );
             }
+            // The section as a whole, which is both what a drag from a listing may be dropped on
+            // and the area the `+` answers to the pointer within. Known only now, after the rows
+            // — the alternative is last frame's rect, and a control that appears a frame late is
+            // a control that flickers as the pointer crosses into the section.
+            let area = Rect::from_min_max(
+                pos2(header.x, header.y),
+                pos2(header.x + width, ui.cursor().min.y),
+            );
+            if open {
+                bookmarks_rect = Some(area);
+            }
+            // The one control in this panel, and it is on the heading rather than in a menu
+            // because a group is the only thing here that has to be *made* before it can be
+            // used — every other row in the sidebar already exists. Drawn whether the section
+            // is folded or not: making a group is how somebody would open it again.
+            new_group_button(ui, t, heading, area, marks, out);
 
             // ---- Places ---------------------------------------------------
             ui.add_space(space::S2);
-            if group_header(ui, t, width, "Places", &mut sections.places) {
+            if group_header(ui, t, width, "Places", &mut sections.places, 0.0).1 {
                 for place in places {
                     let glyph = icons::for_place(place.icon);
                     let color = match crate::fs::places::kind_of(place.icon) {
@@ -199,6 +214,7 @@ pub fn show(
                         ui,
                         t,
                         width,
+                        0.0,
                         ROW,
                         glyph,
                         color,
@@ -239,68 +255,85 @@ pub fn show(
     bookmarks_rect
 }
 
-/// A bookmark being dragged to a new position: the caret while it is held, and the move
-/// when it is let go.
+/// The square the `+` on the Bookmarks heading takes, and what the label gives up for it.
 ///
-/// The list is short and always fully drawn, so the insertion point is simply the first row
-/// whose middle the pointer is above — no hit-testing and no scrolling to account for.
-fn reordering(
+/// 18 in a 20-point heading, which is as much of a target as the row has to give and still
+/// leaves a point of air above and below the button's own fill.
+const ADD: f32 = 18.0;
+
+/// `+` at the right of the Bookmarks heading: a new group.
+///
+/// **Only while the pointer is in the section**, `area`. A permanent button on a heading is a
+/// permanent piece of furniture in a panel whose whole job is to be a list of names — the same
+/// argument that took the star off the path bar — and making a group is a rare thing to do. It
+/// appears where the hand already is, and the panel is otherwise exactly as quiet as it was.
+///
+/// And **not while anything is being dragged**: a drag from a listing is on its way to being
+/// pinned, so a button under the pointer in the middle of a drop highlight would be advertising
+/// a press that cannot happen. A bookmark being dragged within the list is the same thing.
+///
+/// Interacted *after* the heading it sits on, which is what puts it on top — egui hands a
+/// click to the last widget that claimed the pointer's position. [`group_header`] is told how
+/// much of its right edge this takes, both so the label stops short of it and so a click that
+/// lands here cannot also fold the section away.
+fn new_group_button(
     ui: &mut Ui,
     t: &Theme,
-    reorder: &mut Option<usize>,
-    rows: &[Rect],
+    heading: Rect,
+    area: Rect,
+    marks: &Marks<'_>,
     out: &mut Vec<Action>,
 ) {
-    let Some(from) = *reorder else { return };
-    if from >= rows.len() {
-        *reorder = None;
+    if marks.dragging || marks.editing.drag.is_some() {
         return;
     }
-
-    let Some(pointer) = ui.ctx().pointer_interact_pos() else {
-        *reorder = None;
-        return;
-    };
-    let mut to = rows.len();
-    for (index, rect) in rows.iter().enumerate() {
-        if pointer.y < rect.center().y {
-            to = index;
-            break;
-        }
-    }
-
-    if ui.input(|i| i.pointer.any_down()) {
-        // The caret goes between rows: at the top of the row it would push down, or under
-        // the last one when it is going to the end.
-        let y = rows
-            .get(to)
-            .map(|rect| rect.top())
-            .unwrap_or_else(|| rows[rows.len() - 1].bottom());
-        let band = rows[0];
-        ui.painter().rect_filled(
-            Rect::from_min_max(
-                pos2(band.left() + INDENT, y - 1.0),
-                pos2(band.right() - space::S3, y + 1.0),
-            ),
-            CornerRadius::same(radius::CIRCULAR),
-            t.accent.default,
-        );
-        ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+    let pointer = ui.ctx().pointer_interact_pos();
+    if !pointer.is_some_and(|at| area.contains(at)) {
         return;
     }
-
-    // Dropping a row on itself, or immediately below itself, means nothing.
-    if to != from && to != from + 1 {
-        out.push(Action::MoveBookmark { from, to });
+    let rect = Rect::from_center_size(
+        pos2(heading.right() - space::S2 - ADD * 0.5, heading.center().y),
+        vec2(ADD, ADD),
+    );
+    let response = crate::ui::tool_button(
+        ui,
+        t,
+        rect,
+        Id::new("bookmark-group-add"),
+        &icons::plus,
+        "New group of bookmarks",
+        true,
+        false,
+        t.bg.layer_alt,
+    );
+    if response.clicked() {
+        out.push(Action::AddBookmarkGroup);
     }
-    *reorder = None;
 }
 
-/// A group heading that folds its rows away. Returns whether they should be drawn.
-fn group_header(ui: &mut Ui, t: &Theme, width: f32, label: &str, open: &mut bool) -> bool {
+/// A group heading that folds its rows away.
+///
+/// Returns the row it took and whether its rows should be drawn. `reserve` is how much of the
+/// right edge belongs to something else — a control drawn on the heading afterwards, which is
+/// the `+` on Bookmarks and nothing anywhere else: the label stops short of it, and a click
+/// that lands in it does not fold the section.
+fn group_header(
+    ui: &mut Ui,
+    t: &Theme,
+    width: f32,
+    label: &str,
+    open: &mut bool,
+    reserve: f32,
+) -> (Rect, bool) {
     let (rect, _) = ui.allocate_exact_size(vec2(width, HEADER), Sense::hover());
     let response = ui.interact(rect, Id::new(("sidebar-group", label)), Sense::click());
-    if response.clicked() {
+    // Where the click landed, and not merely that one did: a control on the heading is on top
+    // of it, so egui gives it the click — but this is the belt to that braces, because a
+    // heading that folds itself away under a button is a fault nothing else would catch.
+    let on_reserve = response
+        .interact_pointer_pos()
+        .is_some_and(|at| at.x > rect.right() - reserve);
+    if response.clicked() && !on_reserve {
         *open = !*open;
     }
 
@@ -324,15 +357,19 @@ fn group_header(ui: &mut Ui, t: &Theme, width: f32, label: &str, open: &mut bool
         t,
         label,
     );
-    *open
+    (rect, *open)
 }
 
 /// One row. Returns its response so the caller can wire clicks and a menu.
+///
+/// `indent` is how far in from the panel's edge the row's contents start — [`CHILD`] for a
+/// bookmark inside a group, and nothing for everything else.
 #[allow(clippy::too_many_arguments)]
 fn row(
     ui: &mut Ui,
     t: &Theme,
     width: f32,
+    indent: f32,
     height: f32,
     glyph: azur_icons::Icon<'_>,
     glyph_color: egui::Color32,
@@ -361,7 +398,7 @@ fn row(
         ui.painter().rect_filled(rect, CornerRadius::ZERO, t.bg.control_active);
     }
 
-    let glyph_rect = icon_rect(rect, rect.left() + INDENT + 12.0 + space::S2, GLYPH);
+    let glyph_rect = icon_rect(rect, rect.left() + indent + INDENT + 12.0 + space::S2, GLYPH);
     draw_icon(ui, glyph_rect, glyph, glyph_color, shell, queue);
 
     let text_left_x = glyph_rect.right() + space::S3;
@@ -611,11 +648,12 @@ fn menu_targets(ui: &mut Ui, focused: PaneId, path: &Path, out: &mut Vec<Action>
     }
 }
 
-/// A one-line note where a group has nothing in it.
-fn hint(ui: &mut Ui, t: &Theme, width: f32, text: &str) {
+/// A one-line note where a group has nothing in it. Returns the row it took, which an empty
+/// group's hint needs — see [`bookmarks::section`], where it is also a place to drop one.
+fn hint(ui: &mut Ui, t: &Theme, width: f32, indent: f32, text: &str) -> Rect {
     let (rect, _) = ui.allocate_exact_size(vec2(width, ROW), Sense::hover());
     let inner = Rect::from_min_max(
-        pos2(rect.left() + INDENT + 12.0 + space::S2, rect.top()),
+        pos2(rect.left() + indent + INDENT + 12.0 + space::S2, rect.top()),
         pos2(rect.right() - space::S3, rect.bottom()),
     );
     let galley = truncated(
@@ -626,12 +664,14 @@ fn hint(ui: &mut Ui, t: &Theme, width: f32, text: &str) {
         inner.width(),
     );
     text_left(ui.painter(), inner, galley);
+    rect
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::fs::drives::DriveKind;
+    use std::path::PathBuf;
 
     fn drive(total: u64, free: u64) -> Drive {
         Drive {

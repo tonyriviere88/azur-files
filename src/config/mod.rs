@@ -46,7 +46,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::ui::sidebar::Sections;
+use crate::ui::sidebar::{Bookmarks, Entry, Sections};
 
 /// One pane's worth of tabs, as it was left.
 #[derive(Clone, Debug, Default)]
@@ -59,8 +59,24 @@ pub struct PaneTabs {
 
 #[derive(Clone, Debug)]
 pub struct Config {
-    /// Folders pinned in the sidebar.
-    pub bookmarks: Vec<PathBuf>,
+    /// Folders pinned in the sidebar, and the groups they are arranged into.
+    ///
+    /// Three keys rather than one, and they are read in file order so that the order on screen
+    /// is the order in the file: `bookmark=` is a folder at the top level, `bookmark_group=`
+    /// opens a group — its fold state, then its name — and `bookmark_in=` is a folder inside
+    /// the group most recently opened.
+    ///
+    /// ```text
+    /// bookmark=C:\src
+    /// bookmark_group=1,Work
+    /// bookmark_in=C:\work\api
+    /// bookmark_in=C:\work\web
+    /// bookmark=D:\photos
+    /// ```
+    ///
+    /// A file from the version before groups is nothing but `bookmark=` lines, which is a flat
+    /// list and reads back as exactly that.
+    pub bookmarks: Bookmarks,
     /// Every tab that was open, grouped by the pane it was in — so the window reopens
     /// divided the way it was left and not merely pointing at the same folders.
     pub panes: Vec<PaneTabs>,
@@ -170,7 +186,7 @@ pub const WINDOW_SIZE: [f32; 2] = [1024.0, 600.0];
 impl Default for Config {
     fn default() -> Self {
         Self {
-            bookmarks: Vec::new(),
+            bookmarks: Bookmarks::default(),
             panes: Vec::new(),
             layout: None,
             focus: 0,
@@ -224,7 +240,19 @@ impl Config {
             };
             let value = value.trim();
             match key.trim() {
-                "bookmark" => config.bookmarks.push(PathBuf::from(value)),
+                "bookmark" => {
+                    config.bookmarks.add(PathBuf::from(value));
+                }
+                // The fold state and the name, in that order — a name is allowed a comma in it
+                // and a flag is not, so the flag goes first and the split is the first one.
+                "bookmark_group" => {
+                    let (open, name) = value.split_once(',').unwrap_or(("1", value));
+                    config.bookmarks.add_group(name.trim(), open.trim() != "0");
+                }
+                // Inside the group most recently opened. See [`Config::bookmarks`].
+                "bookmark_in" => {
+                    config.bookmarks.add_in_last(PathBuf::from(value));
+                }
                 // Opens a pane, and everything down to the next one belongs to it. The
                 // value is which of its tabs was in front.
                 "pane" => {
@@ -435,8 +463,22 @@ impl Config {
         } else {
             "theme=light\n"
         });
-        for bookmark in &self.bookmarks {
-            text.push_str(&format!("bookmark={}\n", bookmark.display()));
+        // The bookmarks, in the order the sidebar shows them — a group's own line, then the
+        // folders in it, so the file reads the way the panel looks. See [`Self::bookmarks`].
+        for entry in self.bookmarks.entries() {
+            match entry {
+                Entry::Mark(path) => text.push_str(&format!("bookmark={}\n", path.display())),
+                Entry::Group(group) => {
+                    text.push_str(&format!(
+                        "bookmark_group={},{}\n",
+                        flag(group.open),
+                        group.name
+                    ));
+                    for path in &group.marks {
+                        text.push_str(&format!("bookmark_in={}\n", path.display()));
+                    }
+                }
+            }
         }
         // The layout, then the panes it is written over, in the order it numbers them.
         if let Some(layout) = &self.layout {

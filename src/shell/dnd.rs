@@ -60,6 +60,12 @@ pub enum Onto {
     /// reports itself to the pointer as a link — the same answer Explorer gives when you
     /// drag a folder onto Quick Access.
     Bookmarks,
+    /// Pin them into the group at this position in the bookmark list.
+    ///
+    /// A zone of its own over the group's row, published after [`Self::Bookmarks`] so that it
+    /// wins — exactly the arrangement a listing's folder rows have over the listing they are in,
+    /// and for the same reason: dropping *on* something has to mean into that something.
+    BookmarkGroup(usize),
 }
 
 /// What a completed drop asks for.
@@ -156,6 +162,21 @@ impl Zone {
     pub fn publish(&self, targets: Targets) {
         if let Ok(mut shared) = self.shared.lock() {
             shared.targets = targets;
+        }
+    }
+
+    /// Put a drag over the window, or take it away, as `DragOver` and `DragLeave` do.
+    ///
+    /// For tests, and the only way to have one from here: what writes this runs on OLE's stack
+    /// from inside the message pump, and nothing a test can do starts a drag from another
+    /// program. Written into the shared block rather than into
+    /// [`crate::app::App::drop_hover`], because that field is refreshed from here at the top of
+    /// every frame — so a test that set it directly would have it cleared before the frame it
+    /// was set for drew anything.
+    #[cfg(test)]
+    pub fn hover(&self, at: Option<(i32, i32)>) {
+        if let Ok(mut shared) = self.shared.lock() {
+            shared.hovering = at;
         }
     }
 

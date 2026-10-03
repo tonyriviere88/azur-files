@@ -189,8 +189,14 @@ pub struct App {
     /// Where the sidebar's Bookmarks group was drawn, so a drag can be dropped on it.
     /// Read a frame later than it is written, which is a frame the sidebar has not moved in.
     bookmarks_rect: Option<Rect>,
-    /// A bookmark being dragged to a new position in the list.
-    bookmark_drag: Option<usize>,
+    /// Where each bookmark group's row was drawn, and which group it is, so a folder dragged in
+    /// can land in the group it is dropped on rather than at the end of the list.
+    ///
+    /// The same arrangement a listing's folder rows have — see [`crate::pane::Pane::drop_rows`]:
+    /// a zone of its own, published after the section it sits in so that it wins.
+    bookmark_rows: Vec<(Rect, usize)>,
+    /// The bookmark list mid-gesture: a row being dragged, and a group being named.
+    bookmark_edit: crate::ui::sidebar::Editing,
     /// The OLE drag in flight, if there is one, and the pane the files were picked up in so
     /// a move can re-read the folder they left. One at a time: the pointer is only holding
     /// one thing, and a second drag would be following the same button as the first.
@@ -198,7 +204,7 @@ pub struct App {
 
     volumes: Volumes,
     places: Vec<Place>,
-    bookmarks: Vec<PathBuf>,
+    bookmarks: crate::ui::sidebar::Bookmarks,
     sections: Sections,
     sidebar_width: f32,
 
@@ -398,7 +404,8 @@ impl App {
             asking: None,
             menu_builder: crate::shell::menu::Builder::new(ctx),
             bookmarks_rect: None,
-            bookmark_drag: None,
+            bookmark_rows: Vec::new(),
+            bookmark_edit: crate::ui::sidebar::Editing::default(),
             file_drag: None,
             volumes,
             places,
@@ -643,8 +650,9 @@ impl App {
         self.config_dirty = true;
     }
 
-    /// Whether a path is bookmarked, for the sidebar's star.
+    /// Whether a path is bookmarked, wherever in the list it sits — a group is somewhere a
+    /// bookmark can be, so `Ctrl+D` on a folder pinned inside one has to find it there.
     pub fn is_bookmarked(&self, path: &Path) -> bool {
-        self.bookmarks.iter().any(|p| p == path)
+        self.bookmarks.contains(path)
     }
 }

@@ -172,10 +172,32 @@ pub enum Action {
     OpenTerminal(PathBuf),
     CopyPaths(Vec<PathBuf>),
     AddBookmark(PathBuf),
-    /// Reorder the bookmarks: take the one at `from` and put it before `to`.
-    MoveBookmark { from: usize, to: usize },
+    /// Pin a folder into a group, rather than at the end of the list.
+    AddBookmarkIn { group: usize, path: PathBuf },
+    /// Rearrange the bookmarks: take the row at `from` and put it at `to`, which is an
+    /// insertion point in the list as it stands. Either end can be inside a group — that is
+    /// how a bookmark goes in and comes out — and the whole of the arithmetic is
+    /// [`crate::ui::sidebar::Bookmarks::move_to`].
+    MoveBookmark {
+        from: crate::ui::sidebar::Spot,
+        to: crate::ui::sidebar::Spot,
+    },
     RemoveBookmark(PathBuf),
     ToggleBookmark(PathBuf),
+    /// A new group, at the end of the list, with its name open for typing.
+    AddBookmarkGroup,
+    /// Fold a group away, or open it again. `usize` is a position in the bookmark list.
+    ToggleBookmarkGroup(usize),
+    /// Put a group's name in a field. The three of these are the same trio a file rename uses,
+    /// for the same reason: the field lives for as long as the gesture and belongs to neither
+    /// the settings nor the row.
+    BeginRenameBookmarkGroup(usize),
+    CommitRenameBookmarkGroup { group: usize, name: String },
+    CancelRenameBookmarkGroup,
+    /// Take a group apart, leaving the bookmarks that were in it where it was.
+    UngroupBookmarks(usize),
+    /// Remove a group, and the bookmarks in it with it.
+    RemoveBookmarkGroup(usize),
     SetTheme { dark: bool },
     Window(WindowAction),
 }
@@ -240,9 +262,17 @@ impl Action {
             Self::OpenTerminal(_) => "OpenTerminal",
             Self::CopyPaths(_) => "CopyPaths",
             Self::AddBookmark(_) => "AddBookmark",
+            Self::AddBookmarkIn { .. } => "AddBookmarkIn",
             Self::MoveBookmark { .. } => "MoveBookmark",
             Self::RemoveBookmark(_) => "RemoveBookmark",
             Self::ToggleBookmark(_) => "ToggleBookmark",
+            Self::AddBookmarkGroup => "AddBookmarkGroup",
+            Self::ToggleBookmarkGroup(_) => "ToggleBookmarkGroup",
+            Self::BeginRenameBookmarkGroup(_) => "BeginRenameBookmarkGroup",
+            Self::CommitRenameBookmarkGroup { .. } => "CommitRenameBookmarkGroup",
+            Self::CancelRenameBookmarkGroup => "CancelRenameBookmarkGroup",
+            Self::UngroupBookmarks(_) => "UngroupBookmarks",
+            Self::RemoveBookmarkGroup(_) => "RemoveBookmarkGroup",
             Self::SetTheme { .. } => "SetTheme",
             Self::Window(_) => "Window",
         }

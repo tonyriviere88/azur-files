@@ -310,7 +310,9 @@ impl Target_Impl {
             // Pinning moves nothing, so it answers `LINK` whatever is held down. It is
             // also the only honest answer: a copy cursor over the sidebar would be
             // promising a copy that is not going to happen.
-            Some(Onto::Bookmarks) => return permitted(DROPEFFECT_LINK, allowed),
+            Some(Onto::Bookmarks | Onto::BookmarkGroup(_)) => {
+                return permitted(DROPEFFECT_LINK, allowed)
+            }
             None => return DROPEFFECT_NONE,
         };
 
@@ -454,7 +456,7 @@ impl IDropTarget_Impl for Target_Impl {
         // for a pin, which copies nothing and would otherwise bookmark a scratch folder.
         let items = match onto {
             Onto::Folder(_) => super::claim(items),
-            Onto::Bookmarks => items,
+            Onto::Bookmarks | Onto::BookmarkGroup(_) => items,
         };
         if let Ok(mut shared) = self.shared.lock() {
             shared.dropped.push(Dropped {

@@ -502,6 +502,88 @@ pub fn star_filled(p: &Painter, rect: Rect, color: Color32) {
     star_shape(p, rect, color, true);
 }
 
+/// A group of bookmarks: a folder outline with a star in it.
+///
+/// **Outlined, where every other folder in this program is filled**, and that is the one thing
+/// about it that is not decoration. The convention this set keeps — see the module header — is
+/// that a filled glyph is somewhere you can *be*; a group of bookmarks is not. Clicking one
+/// folds it away, because there is nowhere to go, and the outline is what says so before the
+/// click is tried.
+///
+/// It is also what keeps it clear of the rows underneath it. Those are real folders, and
+/// Windows draws them itself — the shell's own bitmap, gradient and all — so a group drawn as a
+/// folder would be a folder that does not open, in a list of ones that do. This is flat, hollow
+/// and in the amber the bookmarks' own stars wear, none of which the shell produces.
+///
+/// The star is 5.4 units in a body 9 tall, which leaves 1.8 units — a pixel and a half at the
+/// 14 the sidebar draws it at — between its points and the outline around them. That number is
+/// the whole legibility argument at this size: [`flatten`], [`fit`] and [`columns`] all have
+/// the same note, arrived at the same way, and half of it would read as a blot rather than as a
+/// star in a box.
+pub fn bookmark_group(p: &Painter, rect: Rect, color: Color32) {
+    let g = Grid::new(rect);
+    let stroke = g.stroke(color);
+    // The tab, then the body, as one outline each — a single closed path round both would put a
+    // seam where they meet, and at this weight a seam is a notch.
+    path(
+        p,
+        vec![g.at(1.5, 5.0), g.at(1.5, 3.0), g.at(6.8, 3.0), g.at(7.8, 5.0)],
+        stroke,
+    );
+    p.rect_stroke(
+        g.rect(1.5, 4.6, 14.5, 13.4),
+        g.radius(1.2),
+        stroke,
+        StrokeKind::Middle,
+    );
+    // 5.4 units of ink: `star_shape` fills four fifths of the box it is handed.
+    star_shape(
+        p,
+        Rect::from_center_size(g.at(8.0, 8.8), Vec2::splat(6.75 * g.scale)),
+        color,
+        true,
+    );
+}
+
+/// A plus. New group, new anything.
+///
+/// Two strokes 4.5 units either side of the middle. Shorter than the 2..14 most of this set
+/// uses, because it is drawn inside a button rather than beside a row of text, and a plus that
+/// reaches the button's edge reads as a crosshair.
+///
+/// **And a device pixel longer at the right and at the bottom, which is the whole of the
+/// arithmetic here.** A bar drawn on a pixel boundary does not come out centred on it: at this
+/// weight the rasteriser lands it half a pixel further down and right than it was put, so the
+/// two arms of a mathematically symmetric plus render three pixels one side of the bar and two
+/// the other — and a plus that is one pixel heavy up and left is the kind of fault that is
+/// invisible in the source and the first thing you see on the button. Extending the far ends by
+/// the same half-pixel-and-a-bit the bars moved puts the ink back either side of them.
+///
+/// In *device* pixels rather than grid units, because that is the unit the error is in: one
+/// grid unit is 0.875 of a pixel at the 14 this is drawn at and two at 200% scaling, so a
+/// correction written in units would over-shoot every screen but this one.
+pub fn plus(p: &Painter, rect: Rect, color: Color32) {
+    let g = Grid::new(rect);
+    let stroke = g.stroke(color);
+    let pixel = 1.0 / p.pixels_per_point().max(0.5);
+    let center = g.at(8.0, 8.0);
+    let arm = 4.5 * g.scale;
+    p.line_segment(
+        [
+            pos2(center.x, center.y - arm),
+            pos2(center.x, center.y + arm + pixel),
+        ],
+        stroke,
+    );
+    p.line_segment(
+        [
+            pos2(center.x - arm, center.y),
+            pos2(center.x + arm + pixel, center.y),
+        ],
+        stroke,
+    );
+}
+
 /// A fixed disk: the drive body and its activity light.
 pub fn drive(p: &Painter, rect: Rect, color: Color32) {
     let g = Grid::new(rect);

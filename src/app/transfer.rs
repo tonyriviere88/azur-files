@@ -185,6 +185,17 @@ impl App {
         // if a future layout let them, dropping onto a listing should mean the listing.
         if let Some(rect) = self.bookmarks_rect {
             zones.push((physical(rect), Onto::Bookmarks));
+            // Then each group — its own row and the rows under it, since a group is one thing —
+            // so a group wins over the section it is in. The same arrangement, and the same
+            // reason, as a folder row winning over its listing below: dropping a folder on a
+            // group means *into that group*, and anywhere else in the section still means the
+            // end of the list.
+            for (row, group) in &self.bookmark_rows {
+                let row = row.intersect(rect);
+                if usable(row) {
+                    zones.push((physical(row), Onto::BookmarkGroup(*group)));
+                }
+            }
         }
         for pane in &self.panes {
             let folder = pane.tab().path.clone();
@@ -255,6 +266,17 @@ impl App {
                     for item in dropped.items {
                         if item.is_dir() {
                             self.perform(ctx, Action::AddBookmark(item));
+                        }
+                    }
+                    continue;
+                }
+                // Onto a group's row: into that group. Which group was decided when the pointer
+                // was over it, like everything else about where a drop landed — and the list
+                // cannot have changed since, because a drag holds the pointer.
+                crate::shell::dnd::Onto::BookmarkGroup(group) => {
+                    for item in dropped.items {
+                        if item.is_dir() {
+                            self.perform(ctx, Action::AddBookmarkIn { group, path: item });
                         }
                     }
                     continue;

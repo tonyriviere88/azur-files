@@ -316,17 +316,25 @@ impl App {
                 .find(|p| p.id == self.focused)
                 .map(|p| p.tab().path.clone())
                 .unwrap_or_default();
+            let mut marks = sidebar::Marks {
+                list: &self.bookmarks,
+                editing: &mut self.bookmark_edit,
+                rows: &mut self.bookmark_rows,
+                // A drag from outside is over the window, so the `+` stands down — see
+                // [`sidebar::Marks::dragging`]. Read from the hover the OLE callbacks
+                // publish, which is the only thing that knows a drag is in flight at all.
+                dragging: self.drop_hover.is_some(),
+            };
             self.bookmarks_rect = sidebar::show(
                 &mut child,
                 t,
                 self.volumes.all(),
-                &self.bookmarks,
+                &mut marks,
                 &self.places,
                 &current,
                 self.focused,
                 &mut self.sections,
                 &mut self.icons,
-                &mut self.bookmark_drag,
                 &mut self.scratch,
                 &mut self.actions,
             );

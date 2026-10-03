@@ -136,6 +136,52 @@ fn the_window_comes_back_the_way_it_was_left() {
     assert_eq!(back.panes[1].paths, saved.panes[1].paths);
 }
 
+/// The bookmarks come back arranged the way they were left: the order, the groups, what is in
+/// each of them, and which of them were folded shut.
+///
+/// Round-tripped for the same reason the window's shape is, and with one thing more to prove:
+/// the *order* here is the order on screen, and it is spread across three keys that are read as
+/// the file goes by — a `bookmark_in=` belongs to whichever `bookmark_group=` came last. A
+/// reader that gathered the groups first and the marks afterwards would pass every assertion
+/// about membership and still shuffle the list.
+#[test]
+fn bookmarks_and_their_groups_survive_a_write_and_a_read() {
+    let mut marks = crate::ui::sidebar::Bookmarks::default();
+    marks.add(PathBuf::from(r"C:\src"));
+    let work = marks.add_group("Work, and more", true);
+    marks.add_in(work, PathBuf::from(r"C:\work\api"));
+    marks.add_in(work, PathBuf::from(r"C:\work\web"));
+    // Folded shut, and after a mark that follows a group — which is what pins the order down.
+    marks.add(PathBuf::from(r"D:\photos"));
+    let shut = marks.add_group("Archive", false);
+    marks.add_in(shut, PathBuf::from(r"E:\2019"));
+
+    let saved = Config {
+        bookmarks: marks.clone(),
+        ..Config::default()
+    };
+    let back = Config::parse(&saved.to_text()).bookmarks;
+    assert_eq!(back, marks, "in {}", saved.to_text());
+    // And the name kept its comma, which is why the fold flag is written first and the split is
+    // the first one rather than the last.
+    assert_eq!(back.group(1).expect("a group").name, "Work, and more");
+    // Entry 3, not 5: what is *in* a group is not a line of the list it sits in.
+    assert_eq!(shut, 3);
+    assert!(!back.group(shut).expect("a group").open);
+
+    // A file from the build before groups is nothing but `bookmark=` lines, and that is a flat
+    // list — the keys are new, so nothing has to be migrated, but a reader that needed a group
+    // line before it would take a bookmark would come back empty.
+    let older = Config::parse("theme=dark\nbookmark=C:\\a\nbookmark=C:\\b\n").bookmarks;
+    assert_eq!(older.paths().count(), 2);
+    assert_eq!(older.len_of(None), 2, "and none of them in a group");
+
+    // A `bookmark_in=` with no group above it is a hand-edited file. The folder is worth more
+    // than the line it was written on, so it lands at the top level rather than nowhere.
+    let orphan = Config::parse("bookmark_in=C:\\a\n").bookmarks;
+    assert_eq!(orphan.len_of(None), 1);
+}
+
 /// A settings file from the version that remembered tabs but not panes.
 ///
 /// Its `path` lines have no `pane` line above them, and what they meant was one pane
