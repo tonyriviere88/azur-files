@@ -125,8 +125,11 @@ fn a_test_cannot_hand_a_job_to_the_shell_by_accident() {
 /// Only the operations that cannot raise a dialog: a copy into an empty folder, a
 /// rename to a free name and a new folder all complete without asking anything, so
 /// the test finishes on its own. Delete is deliberately not exercised here — a
-/// permanent delete prompts, and a recycle would leave litter in the user's own
-/// Recycle Bin, which a test has no business doing.
+/// permanent delete prompts, and a recycle puts something in the user's own Recycle
+/// Bin, which a test should only do if it takes it back out again.
+///
+/// Which is what [`a_recycled_file_comes_back_from_the_bin`] does, because the whole point of it
+/// is the taking back out. It says exactly what it leaves in the bin and when.
 #[test]
 #[cfg(windows)]
 fn the_shell_engine_copies_renames_and_creates() {
@@ -142,19 +145,6 @@ fn the_shell_engine_copies_renames_and_creates() {
     std::fs::create_dir_all(&into).expect("temp dir");
     let one = from.join("one.txt");
     std::fs::write(&one, b"one").expect("write");
-
-    /// Run a job to completion, on a thread of its own.
-    ///
-    /// On a thread of its own because that is where production runs it, and because
-    /// `run` initialises an apartment and *uninitialises* it on the way out — doing
-    /// that on the test thread would tear down the apartment every other shell test
-    /// on this thread is relying on, and the failure would surface somewhere else
-    /// entirely.
-    fn run_now(job: Job) -> Option<String> {
-        std::thread::spawn(move || super::run(&job, Owner::default()).0)
-            .join()
-            .expect("the operation thread panicked")
-    }
 
     // ---- Copy ----
     assert_eq!(
@@ -198,6 +188,433 @@ fn the_shell_engine_copies_renames_and_creates() {
     assert!(into.join("made").is_dir(), "the folder should have been made");
 
     crate::sandbox::remove(&root);
+}
+
+/// **What the sink is told, and how much of it can be relied on.**
+///
+/// The whole of undo rests on this: [`Outcome`] is filled from `IFileOperationProgressSink`, and
+/// two things about that were assumptions until this test measured them on a real operation.
+///
+/// 1. **Does one sink registered with `Advise` hear about every item**, or does `NewItem` only
+///    report to the sink passed in its own last argument? The old code passed a per-item sink to
+///    `NewItem` and nothing else, so the question had never come up.
+/// 2. **Is `psiNewlyCreated` actually there?** It is documented as optional on all five `Post…`
+///    callbacks, and it is the only exact answer to "what did this produce".
+///
+/// Measured here, in `target/sandbox`, on operations that raise no dialog:
+///
+/// | operation | reported by the `Advise` sink | `psiNewlyCreated` | `psznewname` |
+/// | --- | --- | --- | --- |
+/// | copy into an empty folder | `created`, one path | `…\into\one.txt` | `one.txt` |
+/// | copy into the folder it is already in | `created`, one path | `…\from\one - Copie.txt` | `one - Copie.txt` |
+/// | move between folders | `moved`, both ends | `…\from\two.txt` | `two.txt` |
+/// | rename | `moved`, both ends | present | — |
+/// | new folder, twice | `created`, one path each | `…\into\made`, then `…\into\made (2)` | `made`, `made (2)` |
+///
+/// So `Advise` alone is enough — the per-item sink `NewItem` used to be passed is gone — and
+/// `psiNewlyCreated` was present every time.
+///
+/// The last column is the surprise, and it is the reason the fallback in `win::landed` is not as
+/// alarming as it looks: `psznewname` turns out to be the name the shell *settled on*, not the
+/// one it was asked for. `one - Copie.txt` and `made (2)` are both in it. That is not in any
+/// contract, though, so the item is still what is used.
+///
+/// Assertions and not a print-out, because every row is load-bearing. If `psiNewlyCreated` stops
+/// arriving, undo starts working off composed paths — and this is where that is noticed rather
+/// than in somebody's folder.
+#[test]
+#[cfg(windows)]
+fn the_sink_reports_what_the_shell_actually_did() {
+    let _serialised = crate::shell::serialised();
+    crate::shell::init();
+
+    let root = sandbox("sink");
+    let from = root.join("from");
+    let into = root.join("into");
+    std::fs::create_dir_all(&from).expect("sandbox");
+    std::fs::create_dir_all(&into).expect("sandbox");
+    let one = from.join("one.txt");
+    std::fs::write(&one, b"one").expect("write");
+
+    // ---- A copy says where the copy landed ----
+    let outcome = outcome_of(Job::Copy {
+        items: vec![one.clone()],
+        into: into.clone(),
+    });
+    assert_eq!(
+        outcome.created,
+        [into.join("one.txt")],
+        "the sink did not report the copy it made"
+    );
+    assert!(outcome.moved.is_empty() && outcome.recycled.is_empty());
+
+    // ---- And into the folder it is already in, where the name is the shell's ----
+    //
+    // The row of the table that a guess gets wrong, and the reason the sink exists at all: what
+    // arrives is `one - Copy.txt` under whatever name this Windows is in, and nothing on this
+    // side could have worked it out.
+    let outcome = outcome_of(Job::Copy {
+        items: vec![one.clone()],
+        into: from.clone(),
+    });
+    let [made] = &outcome.created[..] else {
+        panic!("expected exactly one copy, got {:?}", outcome.created)
+    };
+    assert_ne!(*made, one, "the copy was reported as the original");
+    assert_eq!(made.parent(), Some(from.as_path()));
+    assert!(
+        made.exists(),
+        "the sink reported {}, which is not there — undo would recycle nothing",
+        made.display()
+    );
+    crate::sandbox::remove_file(made);
+
+    // ---- A rename says both ends ----
+    let outcome = outcome_of(Job::Rename {
+        item: into.join("one.txt"),
+        name: "two.txt".to_owned(),
+    });
+    assert_eq!(
+        outcome.moved,
+        [(into.join("one.txt"), into.join("two.txt"))],
+        "a rename has to report the name it came from as well as the one it went to, or there \
+         is nothing to put back"
+    );
+
+    // ---- A move says both ends, across folders ----
+    let outcome = outcome_of(Job::Move {
+        items: vec![into.join("two.txt")],
+        into: from.clone(),
+    });
+    assert_eq!(outcome.moved, [(into.join("two.txt"), from.join("two.txt"))]);
+
+    // ---- A new folder says the name the shell settled on ----
+    //
+    // Twice, because the second is where the name stops being the one that was asked for — which
+    // is the property `After::NameIt` has depended on since before there was a history.
+    for expected in ["made", "made (2)"] {
+        let outcome = outcome_of(Job::NewFolder {
+            parent: into.clone(),
+            name: "made".to_owned(),
+        });
+        assert_eq!(
+            outcome.created,
+            [into.join(expected)],
+            "`Advise` alone did not hear about the new folder"
+        );
+        assert_eq!(outcome.created_name().as_deref(), Some(expected));
+        // `NewItem` returns before the directory entry is necessarily visible, and the second
+        // pass round this loop depends on the first folder being there to collide with.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while !into.join(expected).is_dir() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(into.join(expected).is_dir(), "the folder was never made");
+    }
+
+    crate::sandbox::remove(&root);
+}
+
+/// **Undo of a move and of a rename, through the real shell.**
+///
+/// [`Job::PutBack`] is what Ctrl+Z issues for both, and the pair inside one folder takes the
+/// `RenameItem` path rather than the move engine — see `win::perform`. Both are exercised here,
+/// from separate folders in one job, which is the shape a paste of a multi-folder cut leaves
+/// behind and the reason `PutBack` carries a destination per item.
+#[test]
+#[cfg(windows)]
+fn a_move_and_a_rename_can_be_put_back() {
+    let _serialised = crate::shell::serialised();
+    crate::shell::init();
+
+    let root = sandbox("put-back");
+    let a = root.join("a");
+    let b = root.join("b");
+    let dest = root.join("dest");
+    for dir in [&a, &b, &dest] {
+        std::fs::create_dir_all(dir).expect("sandbox");
+    }
+    std::fs::write(a.join("one.txt"), b"one").expect("write");
+    std::fs::write(b.join("two.txt"), b"two").expect("write");
+    // The rename half: it stays in `dest` and only its name changes.
+    std::fs::write(dest.join("three.txt"), b"three").expect("write");
+
+    let outcome = outcome_of(Job::Move {
+        items: vec![a.join("one.txt"), b.join("two.txt")],
+        into: dest.clone(),
+    });
+    assert_eq!(outcome.moved.len(), 2, "{:?}", outcome.moved);
+    assert_eq!(
+        outcome_of(Job::Rename {
+            item: dest.join("three.txt"),
+            name: "renamed.txt".to_owned(),
+        })
+        .moved
+        .len(),
+        1
+    );
+
+    // Everything back at once, which is two folders and a rename in one job.
+    let back = Job::PutBack {
+        items: vec![
+            (dest.join("one.txt"), a.join("one.txt")),
+            (dest.join("two.txt"), b.join("two.txt")),
+            (dest.join("renamed.txt"), dest.join("three.txt")),
+        ],
+    };
+    assert_eq!(run_now(back), None, "the put-back was refused");
+
+    assert!(a.join("one.txt").exists(), "one.txt did not go back to a/");
+    assert!(b.join("two.txt").exists(), "two.txt did not go back to b/");
+    assert!(
+        dest.join("three.txt").exists(),
+        "the rename was not taken back"
+    );
+    assert!(
+        !dest.join("one.txt").exists() && !dest.join("renamed.txt").exists(),
+        "the put-back copied instead of moving: {:?}",
+        std::fs::read_dir(&dest)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.file_name())
+            .collect::<Vec<_>>()
+    );
+
+    crate::sandbox::remove(&root);
+}
+
+/// **Delete to the Recycle Bin, then Ctrl+Z: the whole round trip, through the real bin.**
+///
+/// The one test here that touches something outside `target/sandbox`, and it is worth being exact
+/// about what: it recycles two files **from** the sandbox, which puts them in the user's own
+/// Recycle Bin for a moment, and then restores them — which is the operation under test, and which
+/// is what takes them back out again. Nothing else in the bin is read, matched or touched.
+///
+/// It is written to leave nothing behind on the way through. If the restore fails the test fails
+/// loudly *and* says what to look for, because the residue is then real: two files named
+/// `recycled.txt` and `searched.txt`, originally under `target\sandbox\recycle`, sitting in the bin
+/// where the user can put them back or empty them.
+///
+/// Both routes into [`crate::shell::ops::bin`] are covered, because they fail differently:
+///
+/// | | |
+/// | --- | --- |
+/// | `recycled.txt` | restored from the ID list `PostDeleteItem` handed over |
+/// | `searched.txt` | its ID list thrown away first, so the bin has to be searched by original path |
+#[test]
+#[cfg(windows)]
+fn a_recycled_file_comes_back_from_the_bin() {
+    let _serialised = crate::shell::serialised();
+    crate::shell::init();
+
+    let root = sandbox("recycle");
+    let exact = root.join("recycled.txt");
+    let searched = root.join("searched.txt");
+    std::fs::write(&exact, b"from the id list").expect("write");
+    std::fs::write(&searched, b"from a search").expect("write");
+
+    let outcome = outcome_of(Job::Delete {
+        items: vec![exact.clone(), searched.clone()],
+        to_bin: true,
+    });
+    assert!(
+        !exact.exists() && !searched.exists(),
+        "the files were not recycled, so there is nothing to restore"
+    );
+    assert_eq!(
+        outcome.recycled.len(),
+        2,
+        "the sink did not report what went to the bin: {outcome:?}"
+    );
+    for item in &outcome.recycled {
+        assert!(
+            item.from == exact || item.from == searched,
+            "the bin item is not one of the two deleted: {item:?}"
+        );
+    }
+
+    // The second route: the same items, with what the shell said about the bin thrown away, so
+    // `bin::find` has to identify them by where they came from. Restored in one job with the
+    // first, which is also what proves a mixed batch works.
+    let items: Vec<crate::shell::ops::Recycled> = outcome
+        .recycled
+        .iter()
+        .map(|item| crate::shell::ops::Recycled {
+            from: item.from.clone(),
+            bin: if item.from == searched {
+                None
+            } else {
+                item.bin.clone()
+            },
+        })
+        .collect();
+
+    let refused = run_now(Job::Restore { items });
+    assert_eq!(
+        refused, None,
+        "the restore was refused — `recycled.txt` and `searched.txt` are now in the Recycle \
+         Bin, under {}",
+        root.display()
+    );
+
+    // `undelete` is the shell's own Restore and it returns before the file is necessarily back,
+    // exactly as `NewItem` does — so this waits rather than asserting on a race.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !(exact.exists() && searched.exists()) && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(
+        exact.exists(),
+        "the file the shell named was not put back — `recycled.txt` is still in the Recycle Bin, \
+         originally from {}",
+        root.display()
+    );
+    assert!(
+        searched.exists(),
+        "the file found by searching the bin was not put back — `searched.txt` is still in the \
+         Recycle Bin, originally from {}",
+        root.display()
+    );
+    assert_eq!(
+        std::fs::read(&exact).expect("read it back"),
+        b"from the id list",
+        "it came back as a different file"
+    );
+    assert_eq!(
+        std::fs::read(&searched).expect("read it back"),
+        b"from a search"
+    );
+
+    crate::sandbox::remove(&root);
+}
+
+/// **The whole loop: a move, Ctrl+Z, Ctrl+Y — through `Operations`, on real files.**
+///
+/// Everything above this tests one link. This tests the chain, and it goes through the same
+/// [`Operations::start_then`] the window uses rather than calling [`super::run`] directly, so the
+/// `FOR_REAL` gate and the sandbox guard are both in the path — as is the thread, the channel and
+/// [`Done`] arriving a frame later, which is where a history keyed on anything but what travelled
+/// with the job would come apart.
+///
+/// A **move** and not a copy, deliberately: undoing a copy recycles it, and a test that leaves
+/// something in the user's Recycle Bin has to be the test whose subject *is* the Recycle Bin. This
+/// one covers the loop; [`a_recycled_file_comes_back_from_the_bin`] covers that.
+#[test]
+#[cfg(windows)]
+fn a_move_can_be_undone_and_redone_through_the_history() {
+    use crate::shell::ops::history::History;
+
+    let _serialised = crate::shell::serialised();
+    crate::shell::init();
+    let _for_real = for_real();
+
+    let ctx = egui::Context::default();
+    let root = sandbox("history");
+    let from = root.join("from");
+    let dest = root.join("dest");
+    std::fs::create_dir_all(&from).expect("sandbox");
+    std::fs::create_dir_all(&dest).expect("sandbox");
+    let one = from.join("one.txt");
+    std::fs::write(&one, b"one").expect("write");
+
+    let mut ops = Operations::new();
+    let mut history = History::default();
+
+    /// Wait for whatever is running, then hand every answer to the history exactly as
+    /// `App::collect_operations` does.
+    ///
+    /// Cloned because the history takes ownership and this test also wants to look at what
+    /// arrived, which the window has no reason to do.
+    fn settle(ops: &mut Operations, history: &mut History) -> Vec<Done> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut arrived = Vec::new();
+        while std::time::Instant::now() < deadline {
+            for done in ops.drain() {
+                history.record(done.clone());
+                arrived.push(done);
+            }
+            if ops.in_progress().is_none() {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        arrived
+    }
+
+    // ---- The move ----
+    ops.start(
+        Job::Move {
+            items: vec![one.clone()],
+            into: dest.clone(),
+        },
+        Owner::default(),
+        &ctx,
+    );
+    let arrived = settle(&mut ops, &mut history);
+    assert_eq!(arrived.len(), 1, "the move never reported back");
+    assert_eq!(arrived[0].error, None);
+    assert!(dest.join("one.txt").exists(), "the move did not happen");
+    assert!(
+        history.can_undo(),
+        "a move that worked was not put on the undo stack: {:?}",
+        arrived[0].outcome
+    );
+    assert!(!history.can_redo());
+
+    // ---- Ctrl+Z ----
+    let back = history.undo().expect("an undo job");
+    ops.start_then(back, After::Settle, Owner::default(), &ctx);
+    let arrived = settle(&mut ops, &mut history);
+    assert_eq!(arrived.len(), 1, "the undo never reported back");
+    assert_eq!(arrived[0].error, None, "the undo was refused");
+    assert!(one.exists(), "Ctrl+Z did not put the file back in from/");
+    assert!(
+        !dest.join("one.txt").exists(),
+        "Ctrl+Z left a copy behind in dest/"
+    );
+    // The entry has crossed over, and only because the reversal reported that it worked.
+    assert!(history.can_redo(), "the undone move is not redoable");
+    assert!(!history.can_undo(), "the undo was itself put on the stack");
+
+    // ---- Ctrl+Y ----
+    let again = history.redo().expect("a redo job");
+    ops.start_then(again, After::Settle, Owner::default(), &ctx);
+    let arrived = settle(&mut ops, &mut history);
+    assert_eq!(arrived.len(), 1, "the redo never reported back");
+    assert_eq!(arrived[0].error, None, "the redo was refused");
+    assert!(dest.join("one.txt").exists(), "Ctrl+Y did not move it again");
+    assert!(!one.exists(), "Ctrl+Y left the original where it was");
+    assert!(history.can_undo() && !history.can_redo());
+
+    crate::sandbox::remove(&root);
+}
+
+/// Run a job to completion, on a thread of its own.
+///
+/// On a thread of its own because that is where production runs it, and because [`super::run`]
+/// initialises an apartment and *uninitialises* it on the way out — doing that on the test thread
+/// would tear down the apartment every other shell test on this thread is relying on, and the
+/// failure would surface somewhere else entirely.
+#[cfg(all(test, windows))]
+fn run_now(job: Job) -> Option<String> {
+    finish(job).0
+}
+
+/// The same, handing back what the shell said it did and asserting that it worked.
+#[cfg(all(test, windows))]
+fn outcome_of(job: Job) -> Outcome {
+    let described = job.describe();
+    let (error, outcome) = finish(job);
+    assert_eq!(error, None, "{described} was refused");
+    outcome
+}
+
+#[cfg(all(test, windows))]
+fn finish(job: Job) -> (Option<String>, Outcome) {
+    std::thread::spawn(move || super::run(&job, Owner::default()))
+        .join()
+        .expect("the operation thread panicked")
 }
 
 /// What the shell actually puts on screen, and for which operation.
@@ -524,5 +941,69 @@ fn descriptions_count_and_name_the_operation() {
         }
         .describe(),
         "Copying 2 items…"
+    );
+    // Both undo jobs say the same thing, which is what they are from where the user is standing:
+    // they pressed Ctrl+Z. Whether the shell is being asked to move a file or to empty one out of
+    // the Recycle Bin is not something the status line should be explaining.
+    assert_eq!(
+        Job::PutBack {
+            items: vec![(PathBuf::from("x"), PathBuf::from("y"))]
+        }
+        .describe(),
+        "Putting 1 item back…"
+    );
+    assert_eq!(
+        Job::Restore {
+            items: vec![
+                crate::shell::ops::Recycled {
+                    from: PathBuf::from("x"),
+                    bin: None
+                },
+                crate::shell::ops::Recycled {
+                    from: PathBuf::from("y"),
+                    bin: None
+                },
+            ]
+        }
+        .describe(),
+        "Putting 2 items back…"
+    );
+}
+
+/// The two undo jobs name the folders a pane has to re-read, at both ends.
+///
+/// A `PutBack` takes an item out of one folder and puts it in another, and a pane showing either
+/// is a pane with a stale listing. Missing the source is the half that looks fine until you have
+/// two panes open, which is what this program is for.
+#[test]
+fn the_undo_jobs_touch_both_ends() {
+    let touched = Job::PutBack {
+        items: vec![
+            (PathBuf::from(r"C:\dest\one.txt"), PathBuf::from(r"C:\a\one.txt")),
+            (PathBuf::from(r"C:\dest\two.txt"), PathBuf::from(r"C:\b\two.txt")),
+        ],
+    }
+    .touches();
+    assert_eq!(
+        touched,
+        [
+            PathBuf::from(r"C:\a"),
+            PathBuf::from(r"C:\b"),
+            PathBuf::from(r"C:\dest"),
+        ],
+        "both ends of every pair, each folder once"
+    );
+
+    // A restore has only a destination: the Recycle Bin is not somewhere this program shows, so
+    // there is nothing to re-read on the way out of it.
+    assert_eq!(
+        Job::Restore {
+            items: vec![crate::shell::ops::Recycled {
+                from: PathBuf::from(r"C:\a\one.txt"),
+                bin: None,
+            }],
+        }
+        .touches(),
+        [PathBuf::from(r"C:\a")]
     );
 }

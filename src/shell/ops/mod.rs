@@ -3,8 +3,9 @@
 //! This is the shell's own engine, which is not a detail. Going through it means this
 //! program gets, for free and *correctly*:
 //!
-//! - the **Recycle Bin**, and with it undo — a delete that cannot be undone is a
-//!   different feature from the one users expect Delete to be;
+//! - the **Recycle Bin** — a delete that cannot be undone is a different feature from
+//!   the one users expect Delete to be. Ctrl+Z is in [`history`], and it is worth reading
+//!   why the shell can perform every reversal without being able to *remember* any of them;
 //! - the **progress dialog**, with its estimate, its pause and its cancel;
 //! - the **conflict prompts** — "there is already a file with this name", with the
 //!   comparison of both and the keep-both option;
@@ -44,9 +45,17 @@
 
 use std::path::{Path, PathBuf};
 
+pub mod history;
+
 #[cfg(windows)]
 #[path = "../../windows/ops.rs"]
 mod win;
+/// Taking something back out of the Recycle Bin, which is the one operation here that
+/// `IFileOperation` has no call for. Declared beside [`win`] rather than inside it because it is
+/// the other half of the same story and neither reads without the other.
+#[cfg(windows)]
+#[path = "../../windows/bin.rs"]
+mod bin;
 #[cfg(windows)]
 pub(crate) use win::run;
 // Reached by the tests next door and in [`super::clipboard`], which check what the shell
@@ -60,6 +69,11 @@ use super::Owner;
 /// What an operation did, once it has finished.
 #[derive(Clone, Debug)]
 pub struct Done {
+    /// The job as it was asked for, so [`history`] can offer it again as Redo.
+    ///
+    /// `None` only when the operation's thread could not be started, which is the one path here
+    /// that reports back without anything having been asked of the shell.
+    pub job: Option<Job>,
     /// The folders whose contents may have changed, so they can be re-read.
     pub touched: Vec<PathBuf>,
     /// Empty when it worked — including when the user cancelled, which is an answer
@@ -67,13 +81,75 @@ pub struct Done {
     pub error: Option<String>,
     /// What still has to happen now that it has.
     pub after: After,
-    /// The name the shell gave a newly created folder.
+    /// What the shell says it actually did, item by item. See [`Outcome`].
+    pub outcome: Outcome,
+}
+
+/// What an operation actually did, item by item, as the shell reported it.
+///
+/// **Asked for rather than assumed, and that is the whole reason undo can be trusted.** What a
+/// job says it wants and what the shell does are not the same thing, and every difference
+/// between them is a difference an undo built on the request would get wrong:
+///
+/// | asked for | what happens | what a guess would undo |
+/// | --- | --- | --- |
+/// | copy `one.txt` into a folder that has one | `one - Copy.txt` appears | `one.txt`, the file that was already there |
+/// | copy ten items, cancelled after four | four exist | ten, six of which are not ours |
+/// | copy onto an existing name, answered Skip | nothing appears | a file this program never made |
+/// | move onto an existing name, answered Keep both | it lands as `two (2).txt` | a path with nothing at it |
+///
+/// So nothing here is inferred from [`Job`]. `IFileOperation` reports each item's fate to an
+/// `IFileOperationProgressSink` — `PostCopyItem`, `PostMoveItem`, `PostRenameItem`,
+/// `PostNewItem`, `PostDeleteItem`, each with the item it made and the `HRESULT` for that one
+/// item — and this is those callbacks collected. An item the shell skipped, failed or was
+/// never reached is simply absent, which is exactly the property undo needs.
+#[derive(Clone, Debug, Default)]
+pub struct Outcome {
+    /// Items that exist now and did not before: a copy's destinations, a new folder.
+    /// Undone by recycling them.
+    pub created: Vec<PathBuf>,
+    /// Items that changed place or name: where each was, and where it is now. A move and a
+    /// rename are the same shape here, because putting either back is the same operation.
+    /// Undone by [`Job::PutBack`].
+    pub moved: Vec<(PathBuf, PathBuf)>,
+    /// Items that went to the Recycle Bin, and what to say to get each one back.
+    /// Undone by [`Job::Restore`].
+    pub recycled: Vec<Recycled>,
+}
+
+impl Outcome {
+    /// The name the shell gave the item it made, when it made one.
     ///
     /// Asked for rather than guessed. `NewItem` is given the name to *start* from and the shell
-    /// picks the first free one, so what actually appears may be `New folder (3)` — and
-    /// nothing on this side can know which without being told. `IFileOperationProgressSink`
-    /// is how it is told.
-    pub created: Option<String>,
+    /// picks the first free one, so what actually appears may be `New folder (3)` — and nothing
+    /// on this side can know which without being told.
+    pub fn created_name(&self) -> Option<String> {
+        self.created
+            .first()?
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+    }
+}
+
+/// One item that went to the Recycle Bin, and both ways of finding it there again.
+///
+/// The bin is a namespace rather than a folder — what is in it cannot be restored by moving a
+/// path, only by invoking its own `undelete` verb, and to invoke that the *item* has to be found.
+/// See [`bin`], which is where both of these are used and where the measurements behind them are.
+#[derive(Clone, Debug)]
+pub struct Recycled {
+    /// Where it was before it was deleted, which is where restoring puts it back.
+    ///
+    /// Kept whether or not [`Self::bin`] is: it is what the folder re-read needs, what the search
+    /// falls back to, and what names the file to the user.
+    pub from: PathBuf,
+    /// The file the bin actually holds it as — `…\$Recycle.Bin\<SID>\$RKOFDIE.txt`.
+    ///
+    /// The exact answer, and it identifies one item and no other: a file deleted, remade and
+    /// deleted again leaves two items in the bin claiming the same [`Self::from`], and this
+    /// distinguishes them where nothing else can. `None` when the shell did not say —
+    /// `psiNewlyCreated` is documented as optional on `PostDeleteItem`.
+    pub bin: Option<PathBuf>,
 }
 
 /// What is left to do once an operation finishes, beyond re-reading the folders.
@@ -88,8 +164,15 @@ pub enum After {
     /// changed is left alone.
     FinishCut(u32),
     /// A folder was created: select it in this pane and open its name for editing, once the
-    /// re-read brings it in. Which name that is comes back on [`Done::created`].
+    /// re-read brings it in. Which name that is comes back on [`Outcome::created_name`].
     NameIt(crate::pane::PaneId),
+    /// This *was* an undo or a redo. [`history::History`] is holding the entry it came off, and
+    /// needs telling whether the shell managed it before the entry can move to the other stack.
+    ///
+    /// Carried on the job rather than remembered beside the history for the reason
+    /// [`Self::FinishCut`] is: the answer arrives on a channel a frame or a minute later, and the
+    /// only thing certain to still be true then is what travelled with it.
+    Settle,
 }
 
 /// The work to do.
@@ -102,28 +185,45 @@ pub enum Job {
     Delete { items: Vec<PathBuf>, to_bin: bool },
     Rename { item: PathBuf, name: String },
     NewFolder { parent: PathBuf, name: String },
+
+    // ---- The two that only undo asks for -------------------------------------
+    //
+    /// Put each item back where it was: `(where it is now, where it should go)`.
+    ///
+    /// The inverse of a move and of a rename both, which is why it is one job and not two. A
+    /// pair whose two parents are the same folder is a rename and is performed as one — see
+    /// [`crate::windows::ops`] — so undoing an F2 does not go through the move engine.
+    ///
+    /// Per item rather than one destination for all of them, unlike [`Self::Move`]: a paste can
+    /// gather a selection out of several folders, and putting *that* back means as many
+    /// destinations as there were sources.
+    PutBack { items: Vec<(PathBuf, PathBuf)> },
+    /// Take each of these out of the Recycle Bin and put it back where it came from.
+    ///
+    /// The inverse of a delete, and the one job here that is not `IFileOperation` at all — the
+    /// bin is a namespace rather than a folder, and `undelete` is the only thing that empties an
+    /// item out of it correctly. See [`bin`].
+    Restore { items: Vec<Recycled> },
 }
 
 impl Job {
     /// A present-tense description, for the status line while it runs.
     pub fn describe(&self) -> String {
-        let count = |items: &Vec<PathBuf>| {
-            if items.len() == 1 {
-                "1 item".to_owned()
-            } else {
-                format!("{} items", items.len())
-            }
-        };
         match self {
-            Self::Copy { items, .. } => format!("Copying {}…", count(items)),
-            Self::Move { items, .. } => format!("Moving {}…", count(items)),
+            Self::Copy { items, .. } => format!("Copying {}…", plural(items.len())),
+            Self::Move { items, .. } => format!("Moving {}…", plural(items.len())),
             Self::Delete {
                 items,
                 to_bin: true,
-            } => format!("Recycling {}…", count(items)),
-            Self::Delete { items, .. } => format!("Deleting {}…", count(items)),
+            } => format!("Recycling {}…", plural(items.len())),
+            Self::Delete { items, .. } => format!("Deleting {}…", plural(items.len())),
             Self::Rename { .. } => "Renaming…".to_owned(),
             Self::NewFolder { .. } => "Creating a folder…".to_owned(),
+            // Both undo jobs say "Putting back", which is what they are from where the user is
+            // standing: they pressed Ctrl+Z, and whether the shell is being asked to move a file
+            // or to empty one out of the Recycle Bin is not their problem.
+            Self::PutBack { items } => format!("Putting {} back…", plural(items.len())),
+            Self::Restore { items } => format!("Putting {} back…", plural(items.len())),
         }
     }
 
@@ -144,10 +244,58 @@ impl Job {
             Self::Delete { items, .. } => parents(items),
             Self::Rename { item, .. } => item.parent().map(Path::to_path_buf).into_iter().collect(),
             Self::NewFolder { parent, .. } => vec![parent.clone()],
+            // Both ends of every pair: an item leaves one folder and arrives in another, and a
+            // pane showing either has to be told.
+            Self::PutBack { items } => items
+                .iter()
+                .flat_map(|(from, to)| [from.parent(), to.parent()])
+                .flatten()
+                .map(Path::to_path_buf)
+                .collect(),
+            // Where each one is going. Nothing has to be re-read on the way out, because the
+            // Recycle Bin is not somewhere this program shows.
+            Self::Restore { items } => items
+                .iter()
+                .filter_map(|item| item.from.parent().map(Path::to_path_buf))
+                .collect(),
         };
         touched.sort();
         touched.dedup();
         touched
+    }
+
+    /// Every path this job could write to, for the sandbox guard in [`Operations::start_then`].
+    ///
+    /// The folders from [`Self::touches`] are not enough: a delete names the items, and it is
+    /// the items that go. Kept here beside them so a job added later has one obvious place to
+    /// say what it would touch, rather than a `match` in the middle of a guard nobody reads
+    /// until it is too late.
+    #[cfg(test)]
+    pub(crate) fn every_path(&self) -> Vec<PathBuf> {
+        let mut paths = self.touches();
+        match self {
+            Self::Copy { items, into } | Self::Move { items, into } => {
+                paths.extend(items.iter().cloned());
+                paths.push(into.clone());
+            }
+            Self::Delete { items, .. } => paths.extend(items.iter().cloned()),
+            Self::Rename { item, .. } => paths.push(item.clone()),
+            Self::NewFolder { parent, .. } => paths.push(parent.clone()),
+            Self::PutBack { items } => {
+                paths.extend(items.iter().flat_map(|(from, to)| [from.clone(), to.clone()]))
+            }
+            Self::Restore { items } => paths.extend(items.iter().map(|item| item.from.clone())),
+        }
+        paths
+    }
+}
+
+/// `1 item` or `n items`, which three of the descriptions above want.
+fn plural(count: usize) -> String {
+    if count == 1 {
+        "1 item".to_owned()
+    } else {
+        format!("{count} items")
     }
 }
 
@@ -221,10 +369,11 @@ impl Operations {
         #[cfg(test)]
         if !FOR_REAL.load(std::sync::atomic::Ordering::SeqCst) {
             let _ = tx.send(Done {
+                job: Some(job),
                 touched,
                 error: None,
                 after,
-                created: None,
+                outcome: Outcome::default(),
             });
             return;
         }
@@ -234,19 +383,10 @@ impl Operations {
         // the part that cost this repository its working tree. Every path the job names, not just
         // the folders it will re-read: a delete names the items, and it is the items that go.
         #[cfg(test)]
-        {
-            let mut paths = job.touches();
-            match &job {
-                Job::Copy { items, into } | Job::Move { items, into } => {
-                    paths.extend(items.iter().cloned());
-                    paths.push(into.clone());
-                }
-                Job::Delete { items, .. } => paths.extend(items.iter().cloned()),
-                Job::Rename { item, .. } => paths.push(item.clone()),
-                Job::NewFolder { parent, .. } => paths.push(parent.clone()),
-            }
-            crate::sandbox::guard(&format!("the shell job {:?}", job.describe()), &paths);
-        }
+        crate::sandbox::guard(
+            &format!("the shell job {:?}", job.describe()),
+            &job.every_path(),
+        );
 
         // Taken here and dropped on the job's own thread, so that a directory a drop claimed
         // into goes when the job that consumes it is done — and goes there rather than on the
@@ -257,22 +397,26 @@ impl Operations {
             .name("file-operation".to_owned())
             .spawn(move || {
                 let _scratch = scratch;
-                let (error, created) = run(&job, owner);
+                let (error, outcome) = run(&job, owner);
                 let _ = tx.send(Done {
+                    job: Some(job),
                     touched,
                     error,
                     after,
-                    created,
+                    outcome,
                 });
                 ctx.request_repaint();
             });
         if spawned.is_err() {
             self.running.pop();
             let _ = self.tx.send(Done {
+                // No job: it was moved into a closure that will never run, and there is nothing
+                // for the history to offer back anyway. See [`Done::job`].
+                job: None,
                 touched: Vec::new(),
                 error: Some("Could not start the operation".to_owned()),
                 after: After::Nothing,
-                created: None,
+                outcome: Outcome::default(),
             });
         }
     }
@@ -338,10 +482,10 @@ impl Drop for Scratch {
 // ---------------------------------------------------------------------------
 
 #[cfg(not(windows))]
-fn run(_job: &Job, _owner: Owner) -> (Option<String>, Option<String>) {
+fn run(_job: &Job, _owner: Owner) -> (Option<String>, Outcome) {
     (
         Some("File operations are implemented against the Windows shell only".to_owned()),
-        None,
+        Outcome::default(),
     )
 }
 

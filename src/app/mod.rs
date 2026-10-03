@@ -214,6 +214,12 @@ pub struct App {
     owner: crate::shell::Owner,
     /// Shell file operations in flight.
     ops: crate::shell::ops::Operations,
+    /// The ones that have finished, so Ctrl+Z can take them back.
+    ///
+    /// Lives for the session and is not written to the settings file — see
+    /// [`crate::shell::ops::history`], which sets out both what is undoable and why none of it
+    /// outlives the window.
+    history: crate::shell::ops::history::History,
     /// Items cut but not yet pasted, shown ghosted the way Explorer shows them.
     cut: Vec<PathBuf>,
     /// The last thing that went wrong, for the status line.
@@ -449,6 +455,7 @@ impl App {
             previews: crate::preview::Previews::new(ctx),
             owner: crate::shell::Owner::default(),
             ops: crate::shell::ops::Operations::new(),
+            history: crate::shell::ops::history::History::default(),
             cut: Vec::new(),
             notice: None,
             drop_hover: None,

@@ -191,6 +191,25 @@ impl App {
             if i.key_pressed(K::F2) {
                 push(Action::BeginRename(pane));
             }
+            // **Undo and redo, of file operations** — the copy, move, rename, delete and new
+            // folder this window has performed, not of anything typed. See
+            // [`crate::shell::ops::history`].
+            //
+            // `Ctrl+Y` and `Ctrl+Shift+Z` both redo. Explorer's is `Ctrl+Y` and that is what
+            // Windows users reach for; `Ctrl+Shift+Z` is what everybody who has used anything
+            // else reaches for, it collides with nothing here, and a redo that answers only one
+            // of the two is a redo half its users conclude is missing.
+            //
+            // `Shift` is tested on the undo half rather than left out, for the same reason
+            // `Ctrl+Shift+T` is up at the top of this function: without it `Ctrl+Shift+Z` fires
+            // both, and undo-then-redo in one keystroke is a keystroke that appears to do
+            // nothing at all.
+            if m.command && i.key_pressed(K::Z) {
+                push(Action::Undo { redo: m.shift });
+            }
+            if m.command && i.key_pressed(K::Y) {
+                push(Action::Undo { redo: true });
+            }
             if m.command && m.shift && i.key_pressed(K::N) {
                 push(Action::NewFolder(pane));
             }

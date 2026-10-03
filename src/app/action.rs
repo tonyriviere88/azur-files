@@ -136,6 +136,12 @@ pub enum Action {
     PasteIntoFolder(PathBuf),
     /// `permanent` is Shift+Delete; otherwise it goes to the Recycle Bin.
     Delete { pane: PaneId, permanent: bool },
+    /// Take back the last file operation this window performed, or do the last undone one again.
+    ///
+    /// One action with a direction rather than two, because everything either of them does is the
+    /// same: ask [`crate::shell::ops::history::History`] for a job, and start it. See that module
+    /// for what is undoable and what is not.
+    Undo { redo: bool },
     /// Start renaming the row under the cursor.
     BeginRename(PaneId),
     /// Finish a rename, or do nothing if the name is unchanged or empty.
@@ -249,6 +255,10 @@ impl Action {
             Self::CopyItems(_) => "CopyItems",
             Self::PasteIntoFolder(_) => "PasteIntoFolder",
             Self::Delete { .. } => "Delete",
+            // Named apart, because a test that drives Ctrl+Z and Ctrl+Y wants to see which
+            // arrived and the journal is the only place it can.
+            Self::Undo { redo: false } => "Undo",
+            Self::Undo { redo: true } => "Redo",
             Self::BeginRename(_) => "BeginRename",
             Self::CommitRename { .. } => "CommitRename",
             Self::CancelRename(_) => "CancelRename",

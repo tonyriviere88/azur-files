@@ -308,8 +308,11 @@ impl App {
     pub(super) fn collect_operations(&mut self) {
         for done in self.ops.drain() {
             let worked = done.error.is_none();
-            if let Some(why) = done.error.filter(|why| !why.is_empty()) {
-                self.notice = Some(why);
+            // Borrowed rather than taken, because the history is handed the whole `Done` at the
+            // end of this body — deciding what Ctrl+Z does next needs both what the operation did
+            // and whether it worked.
+            if let Some(why) = done.error.as_deref().filter(|why| !why.is_empty()) {
+                self.notice = Some(why.to_owned());
             }
             // The documented end of a cut, and only when the move actually happened.
             if let crate::shell::ops::After::FinishCut(was) = done.after {
@@ -322,7 +325,7 @@ impl App {
             // soon as the re-read brings it in. `New folder` on its own is only half the
             // gesture; nobody wants a folder called `New folder`.
             if let crate::shell::ops::After::NameIt(pane) = done.after {
-                if let (true, Some(name)) = (worked, done.created.clone()) {
+                if let (true, Some(name)) = (worked, done.outcome.created_name()) {
                     if let Some(p) = self.pane_mut(pane) {
                         let tab = p.tab_mut();
                         tab.reveal = Some(name);
@@ -342,6 +345,13 @@ impl App {
                     }
                 }
             }
+            // What Ctrl+Z will take back, or — when this *was* a Ctrl+Z — which stack its entry
+            // belongs on now. Both are one call, because both are answered by the same two things
+            // the operation reported: what it did, and whether it worked.
+            //
+            // Last, and it takes the `Done` with it: an entry is the job and the outcome, and
+            // handing them over beats copying them. See [`History::record`].
+            self.history.record(done);
         }
         // A cut whose sources have gone is a cut that has been honoured.
         self.cut.retain(|path| path.exists());

@@ -478,6 +478,31 @@ impl App {
                     ctx,
                 );
             }
+            // Ctrl+Z and Ctrl+Y. The history decides what the job is; this only starts it, and
+            // tells the user when there was nothing to start.
+            //
+            // `After::Settle` is what closes the loop: the job runs on its own thread like every
+            // other, and the entry it came from does not move to the other stack until the shell
+            // reports back — see [`crate::shell::ops::history::History::record`].
+            Action::Undo { redo } => {
+                let job = if redo {
+                    self.history.redo()
+                } else {
+                    self.history.undo()
+                };
+                match job {
+                    Some(job) => {
+                        self.notice = None;
+                        self.ops.start_then(
+                            job,
+                            crate::shell::ops::After::Settle,
+                            self.owner,
+                            ctx,
+                        );
+                    }
+                    None => self.notice = Some(self.history.why_not(redo).to_owned()),
+                }
+            }
             Action::BeginRename(pane) => {
                 if let Some(p) = self.pane_mut(pane) {
                     p.tab_mut().begin_rename();

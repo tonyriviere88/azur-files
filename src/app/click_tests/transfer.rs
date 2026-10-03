@@ -352,6 +352,71 @@ fn the_clipboard_events_map_to_the_right_actions() {
     );
 }
 
+/// **Ctrl+Z, Ctrl+Y and Ctrl+Shift+Z reach the right action, and the third does not do both.**
+///
+/// Driven through real frames for the reason the test above it is: what breaks in a shortcut is
+/// the wiring, and wiring looks correct while doing nothing. Two things here could only be caught
+/// this way.
+///
+/// **`Ctrl+Shift+Z` must not fire undo as well as redo.** `m.command && key_pressed(Z)` is true
+/// with Shift down, so without the `redo: m.shift` on that arm the keystroke undoes and redoes in
+/// one frame — which cancels out and reads exactly like a shortcut nobody wired up. The same trap
+/// `Ctrl+Shift+T` has at the top of [`crate::app::App::keyboard`].
+///
+/// **Neither may be swallowed on the way in.** `egui-winit` turns Ctrl+C, Ctrl+X and Ctrl+V into
+/// `Event::Copy`, `Event::Cut` and `Event::Paste` in place of the key — which is why those three
+/// are read as events a few lines above — and a `Z` that arrived as something other than a key
+/// would be just as invisible.
+#[test]
+fn the_undo_shortcuts_reach_undo_and_redo() {
+    let mut h = Harness::new();
+    h.settle();
+
+    let fired = |h: &mut Harness, mods: Modifiers, key: egui::Key| -> Vec<&'static str> {
+        h.app.journal = Some(Vec::new());
+        h.modifiers = mods;
+        h.frame(vec![Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: mods,
+        }]);
+        h.modifiers = Modifiers::NONE;
+        h.app.journal.clone().unwrap_or_default()
+    };
+
+    let ctrl = Modifiers {
+        command: true,
+        ctrl: true,
+        ..Modifiers::NONE
+    };
+    let ctrl_shift = Modifiers {
+        shift: true,
+        ..ctrl
+    };
+
+    let undo = fired(&mut h, ctrl, egui::Key::Z);
+    assert!(undo.contains(&"Undo"), "Ctrl+Z produced {undo:?}");
+    assert!(!undo.contains(&"Redo"), "and only undo: {undo:?}");
+
+    let redo = fired(&mut h, ctrl, egui::Key::Y);
+    assert!(redo.contains(&"Redo"), "Ctrl+Y produced {redo:?}");
+
+    let both = fired(&mut h, ctrl_shift, egui::Key::Z);
+    assert!(both.contains(&"Redo"), "Ctrl+Shift+Z produced {both:?}");
+    assert!(
+        !both.contains(&"Undo"),
+        "Ctrl+Shift+Z undid and redid in one frame, which does nothing at all: {both:?}"
+    );
+
+    // And with nothing in the history, the keystroke says so rather than going quiet — a Ctrl+Z
+    // that does nothing and explains nothing is a Ctrl+Z people conclude is missing.
+    assert_eq!(h.app.notice.as_deref(), Some("Nothing to redo"));
+    fired(&mut h, ctrl, egui::Key::Z);
+    assert_eq!(h.app.notice.as_deref(), Some("Nothing to undo"));
+}
+
 /// A right drag — or a copy — can land in the folder the files are already in.
 ///
 /// A move there means "put this where it already is", which is nothing, and the pointer says so by
