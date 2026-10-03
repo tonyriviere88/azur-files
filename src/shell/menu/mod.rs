@@ -730,6 +730,18 @@ const SHORTCUT: &str = "link";
 /// The anchor the whole bottom of the menu hangs off; see [`properties_at`].
 const PROPERTIES: &str = "properties";
 
+/// The two names [`name_of`] has to invent, because the run it is naming has no owner to name it
+/// after.
+///
+/// Constants rather than literals at the one place they are written, because they are read
+/// somewhere else as well: [`is_generic_group`] tells a group named this apart from a group named
+/// `7-Zip`, and the drawing code sets those two rows one tier quieter. A label edited here and
+/// matched by hand there would silently stop being quiet.
+const MORE_APPS: &str = "More apps";
+/// See [`MORE_APPS`]. Numbered from the second — `More actions (2)` — so `starts_with` and not
+/// `==` is what recognises one.
+const MORE_ACTIONS: &str = "More actions";
+
 /// Windows' own menu, banded: the anchored verbs flat, the long runs collapsed into submenus of
 /// this program's making, and shell32's block as one row of tiles.
 ///
@@ -835,7 +847,7 @@ pub fn regroup(entries: Vec<Entry>, handlers: &Handlers, moved: &Moves) -> Vec<E
         }
         let collapse = run.len() >= COLLAPSE_FROM;
         let label = name_of(&run, handlers, default_run == Some(at), unowned);
-        if label.starts_with("More actions") {
+        if label.starts_with(MORE_ACTIONS) {
             unowned += 1;
         }
         let (grouped, flat): (Vec<Entry>, Vec<Entry>) = run
@@ -940,11 +952,11 @@ fn name_of(run: &[Entry], handlers: &Handlers, has_default: bool, unowned: usize
         }
     }
     if has_default {
-        return "More apps".to_owned();
+        return MORE_APPS.to_owned();
     }
     match unowned {
-        0 => "More actions".to_owned(),
-        n => format!("More actions ({})", n + 1),
+        0 => MORE_ACTIONS.to_owned(),
+        n => format!("{MORE_ACTIONS} ({})", n + 1),
     }
 }
 
@@ -981,6 +993,21 @@ pub fn is_anchored(entry: &Entry) -> bool {
     entry.default
         || BANDS.iter().any(|verb| entry.is(verb))
         || TILES.iter().any(|(verb, _)| entry.is(verb))
+}
+
+/// Whether this row is a group [`name_of`] could not name — `More apps`, `More actions` — rather
+/// than one it named after the product that registered it.
+///
+/// For the drawing code, which sets these two one tier quieter than the rest of the menu. The
+/// difference is worth showing: `7-Zip` is a name the row shares with something the user installed
+/// and recognises, while `More apps` is this program admitting it has nothing to call the pile. A
+/// label that names its contents and a label that stands in for them should not read as equally
+/// certain.
+///
+/// Only ours are asked about. A shell submenu that happens to be called this is Windows' own row
+/// and is drawn as Windows' rows are.
+pub fn is_generic_group(entry: &Entry) -> bool {
+    entry.kind.is_ours() && (entry.label == MORE_APPS || entry.label.starts_with(MORE_ACTIONS))
 }
 
 /// Which of this program's glyphs stands in for a tile, since Windows supplies none.

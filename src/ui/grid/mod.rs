@@ -862,13 +862,20 @@ pub fn show(
                     ui.painter().rect_filled(cell.hit, corners, fill);
                     under = fill;
                 }
-                if selected && cell.row {
+                // A tree's rows are the details view's band and wear what it wears — the bar
+                // only while the selection is the quiet one. See `filelist::rows`, where the
+                // measurement is. A tile never had one.
+                if selected && cell.row && !focused {
                     crate::ui::selection_bar(ui.painter(), cell.hit, t);
                 }
             }
             if focused && tab.cursor == Some(position) {
                 let ink = filelist::cursor_ink(t, selected);
-                filelist::cursor_ring(ui.painter(), cell.hit.shrink(1.0), ink);
+                // Clamped to the clip on the right, like the listing's — a tree's row is the full
+                // width of the pane here too, so the scrollbar's gutter cropped the dashes down its
+                // right edge. See [`filelist::ring_rect`].
+                let ring = filelist::ring_rect(cell.hit, ui.painter().clip_rect());
+                filelist::cursor_ring(ui.painter(), ring, ink);
             }
 
             let pending_cut = crate::ui::is_cut(cut, &dir.path, dir.name(entry_index));

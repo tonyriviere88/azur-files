@@ -534,7 +534,18 @@ pub fn show(ui: &mut Ui, t: &Theme, menu: &mut Open) -> Outcome {
             // asked for and is already reading.
             .fade_in(false)
             .show(&ctx, |ui| {
+                // Square corners, which is `menu_frame`'s decision rather than an invention here:
+                // the design system rounds a popover — something that floats near a control — and
+                // squares a *menu*, because the corner is the loudest signal of which era a menu
+                // belongs to and this one is a desktop menu hung off a right click.
+                //
+                // Only the corner is taken from it. `menu_frame`'s margins are horizontal 0 and
+                // vertical `space-1`, and `measure` below is written to `popover_frame`'s `space-2`
+                // either side — a menu measured against one frame and drawn in another is a menu
+                // placed a few points out, which is the failure the whole of `measure` exists to
+                // avoid.
                 popover_frame(t.azur())
+                    .corner_radius(egui::CornerRadius::ZERO)
                     .show(ui, |ui| {
                         // An explicit rect for the rows, rather than whatever the `Ui`
                         // says is available.
@@ -764,10 +775,15 @@ fn draw_level(
             );
         }
 
+        // A group this program had to invent a name for — `More apps`, `More actions` — is set one
+        // tier quieter than the rest of the menu, because its label is a stand-in and not a name.
+        // Only those two: a group `name_of` could call `7-Zip` names something the user installed
+        // and reads as confidently as any shell row.
         let mut item = MenuItem::new(entry.label.clone())
             .shortcut(entry.shortcut.clone())
             .submenu(is_submenu)
-            .selected(entry.checked);
+            .selected(entry.checked)
+            .secondary(crate::shell::menu::is_generic_group(entry));
         if texture.is_some() {
             item = item.icon(&paint_icon);
         }

@@ -1809,6 +1809,73 @@ fn a_second_unowned_group_is_not_called_the_same_as_the_first() {
     assert_eq!(names, vec!["More actions", "More actions (2)"]);
 }
 
+/// The two invented names are the ones the menu draws quieter, and a group named after the product
+/// that registered it is not one of them.
+///
+/// Asserted against a real [`regroup`] and not against hand-built rows, because the distinction is
+/// [`name_of`]'s and this predicate has to agree with it: a run that acquires an owner stops being
+/// generic the moment it is named, and nothing else in the menu should start being it.
+#[test]
+fn only_the_names_this_program_invented_are_generic() {
+    let mut entries = a_real_shaped_menu();
+    // A run of four that one product registered all of, so `name_of` has a name for it and this
+    // does not. Appended with a rule in front so it is a run of its own.
+    let powertoys = Handler {
+        module: PathBuf::from(r"C:\Program Files\PowerToys\PowerRenameExt.dll"),
+        name: Some("Microsoft PowerToys".to_owned()),
+    };
+    let mut handlers = Handlers::new();
+    let mut run = vec![Entry::separator()];
+    for i in 0..4 {
+        run.push(cmd(&format!("PowerToys thing {i}"), &format!("pt{i}")));
+        handlers.insert(format!("pt{i}"), powertoys.clone());
+    }
+    let at = entries.len() - 1;
+    entries.splice(at..at, run);
+
+    let out = regroup(entries, &handlers, &Moves::default());
+    let generic: Vec<&str> = out
+        .iter()
+        .filter(|entry| is_generic_group(entry))
+        .map(|entry| entry.label.as_str())
+        .collect();
+    assert_eq!(generic, vec!["More apps"], "in {:?}", shape(&out));
+    assert!(
+        out.iter().any(|entry| {
+            entry.label == "Microsoft PowerToys" && entry.kind.is_ours() && !is_generic_group(entry)
+        }),
+        "a group named after the product that registered it was quietened as a stand-in: {:?}",
+        shape(&out)
+    );
+    // And `Envoyer vers` — a submenu Windows owns, which happens to be a group row too. Never ours,
+    // whatever it is called.
+    assert!(
+        out.iter()
+            .any(|entry| entry.label == "Envoyer vers" && !is_generic_group(entry))
+    );
+}
+
+/// A second unnamed group is quietened as well as the first, numbering and all — the drawing code
+/// matches the name by its stem, so `More actions (2)` is not a row that reads louder than
+/// `More actions`.
+#[test]
+fn a_numbered_group_is_generic_too() {
+    let mut entries = vec![default_cmd("Ouvrir", "open"), Entry::separator()];
+    for run in 0..2 {
+        for i in 0..4 {
+            entries.push(cmd(&format!("R{run} thing {i}"), &format!("r{run}t{i}")));
+        }
+        entries.push(Entry::separator());
+    }
+    let out = regroup(entries, &Handlers::new(), &Moves::default());
+    let generic: Vec<&str> = out
+        .iter()
+        .filter(|entry| is_generic_group(entry))
+        .map(|entry| entry.label.as_str())
+        .collect();
+    assert_eq!(generic, vec!["More actions", "More actions (2)"]);
+}
+
 /// A menu with no `MFS_DEFAULT` on it still gets a top row rather than losing its first entry into a
 /// group.
 ///

@@ -17,16 +17,19 @@ pub(crate) const GLYPH: f32 = 16.0;
 /// Space either side of a cell's text.
 pub(crate) const CELL_PAD: f32 = space::S3;
 
-/// Two points off the top of every cell's text in a row.
+/// Two points off the top of a row's **name**.
 ///
 /// Text centred in a box is centred on its *line box*, which reserves room under the
 /// baseline for descenders — so a line of mostly-x-height text put beside a 16px icon
 /// centred on its own ink reads two points low. Which it did: a guide drawn through the
 /// icon's centre passed above the x-height of every name in the listing.
 ///
-/// Applied to all four cells rather than to the name alone, or the columns of one row would
-/// no longer sit on the same line as each other. The icon stays where it is — it is the
-/// thing the text is being brought level with.
+/// **The Name column only.** Size, Type and Modified are centred in the row itself, two points
+/// below the name — which is the one place this correction does not apply, because there is no
+/// icon beside them to be brought level with. It was applied to all four, on the argument that a
+/// row's columns should share one baseline; a caption lifted clear of a cell it is the only thing
+/// in reads high instead, which is what the eye actually picks up when it runs down the column.
+/// The icon stays where it is either way — it is the thing the name is being brought level with.
 pub const CELL_LIFT: f32 = 2.0;
 
 /// The twisty's box: the chevron that opens and shuts a folder in a
@@ -176,6 +179,29 @@ pub(crate) fn cursor_ring(painter: &egui::Painter, rect: Rect, color: Color32) {
     ));
 }
 
+/// The dashed ring's rect: one pixel inside the row, and inside the **clip** on the right.
+///
+/// A row is as wide as the pane, and when the listing is long enough to scroll, the last ten points
+/// of that are the gutter egui reserves for the scrollbar — outside the scroll area's clip. So the
+/// dashes down the row's right edge were being cropped away and the ring came out open on that
+/// side, which reads as a drawing bug rather than as a cursor.
+///
+/// **The row itself cannot narrow with the gutter.** The columns are measured against the pane's
+/// width and the header strip is drawn outside the scroll area, so a row that shrank when a
+/// scrollbar appeared would take Size, Type and Modified out of line with the headers above them —
+/// and put them back on the next scroll. It is the ring that stops at what can be seen.
+///
+/// **The right edge only.** Vertically the clip is the *scroll*: a row half off the bottom of the
+/// viewport is meant to have its bottom edge cut off, and closing the ring at the clip instead would
+/// draw a dashed line across the middle of the viewport's edge.
+pub(crate) fn ring_rect(row: Rect, clip: Rect) -> Rect {
+    let ring = row.shrink(1.0);
+    Rect::from_min_max(
+        ring.min,
+        pos2(ring.right().min(clip.right() - 1.0), ring.bottom()),
+    )
+}
+
 /// The ink for [`cursor_ring`], which is about the row it lands on rather than about the cursor.
 ///
 /// **Off a selection**, a dashed grey: the accent is what this window says "selected" with — the
@@ -184,13 +210,22 @@ pub(crate) fn cursor_ring(painter: &egui::Painter, rect: Rect, color: Color32) {
 /// has marked the focused-not-selected row with since long before any of them had a theme, and it
 /// cannot be mistaken for a selection at a glance.
 ///
-/// **On one**, the row's own text colour, because `stroke.strong` is a neutral chosen against the
-/// listing's surface and a selected row is not wearing it: over `accent.active` the grey ring went
-/// muddy at one pixel and two points of dash. `text.primary` is the ink already proven against that
-/// fill — it is what the row's name is drawn in — so the ring is as legible as the name beside it.
+/// **On one**, `accent.mark` — the accent as *ink* rather than as a surface, which is the same ink
+/// as the 2px bar down the left edge of the row it is ringing. So the two marks a selected row
+/// wears speak with one voice, and the ring reads as part of the selection rather than as a second
+/// white line beside the name. It cannot be `stroke.strong`: that grey is chosen against the
+/// listing's surface, and over `accent.active` it went muddy at one pixel and two points of dash.
+///
+/// **What this costs, measured.** `accent.mark` on the resting selected fill is 3.14:1 dark and
+/// 3.43:1 light — over the 3:1 a shape wants, and guaranteed by
+/// `azur::desktop`'s own `a_selected_row_is_told_apart_from_a_hovered_one`, since the selection bar
+/// is held to exactly this pairing. On a selected row that is *also hovered* the fill lifts a rung
+/// and it falls to 2.38:1 dark, under that floor. `text.primary` was 7.96:1 and never fell: the
+/// ring is quieter than it was, deliberately, and it is a hint on a row whose fill and bar have
+/// already said "selected" — not the only thing carrying the meaning.
 pub(crate) fn cursor_ink(t: &Theme, selected: bool) -> Color32 {
     if selected {
-        t.text.primary
+        t.accent.mark
     } else {
         t.stroke.strong
     }
@@ -202,11 +237,17 @@ pub(crate) fn cursor_ink(t: &Theme, selected: bool) -> Color32 {
 /// row — because it is the same kind of thing said the same way, and one window should not have two
 /// visual languages for "this much of that".
 ///
-/// The room comes out of the two points every cell's text is lifted by, plus the slack a
-/// 16-point caption line leaves in a 24-point row: the text's line box ends 6 points off the
-/// bottom, and its descenders a point and a half above that. So the bar sits under the number
-/// rather than behind it, and nothing has to be moved to make space.
-const SHARE_DROP: f32 = 2.0;
+/// The room is the slack a 16-point caption line leaves in a 24-point row: centred, the number's
+/// line box ends 4 points off the bottom and its descender ink about a point and a half above
+/// that. So the bar sits under the number rather than behind it, and nothing has to be moved to
+/// make space.
+///
+/// **One point, not two.** Two is what it was while the number was lifted by [`CELL_LIFT`] as
+/// well, which left 7 and a half points to put a 3-point bar in. The number is centred in the row
+/// now, and at two the bar's top edge and the descenders below `1,25 Mo` would have half a point
+/// between them — so the bar goes a point nearer the row's own edge and keeps the point and a half
+/// of air that makes it read as underneath the figure.
+const SHARE_DROP: f32 = 1.0;
 
 /// The least a Size cell can be and still carry a bar worth reading.
 ///
@@ -456,9 +497,14 @@ pub(crate) fn rows(
                 ),
                 vec2(visible.width(), ROW_HEIGHT),
             );
-            // Every cell's text is centred in this instead of in the row — see [`CELL_LIFT`].
-            // Fills, the selection bar, the cursor ring and the drag ink all stay on `row`.
+            // The name is centred in this instead of in the row — see [`CELL_LIFT`]. Fills, the
+            // selection bar, the cursor ring and the drag ink all stay on `row`.
             let text_row = row.translate(vec2(0.0, -CELL_LIFT));
+            // And Size, Type and Modified in the row itself, two points below it. Named rather
+            // than written as `row` at the three cells, so the three of them cannot come to
+            // different answers about which line they are on — that is the whole failure this
+            // pair of rects is about.
+            let meta_row = row;
 
             let selected = tab.selected.get(entry_index).copied().unwrap_or(false);
             let is_hovered = hovered_row == Some(position);
@@ -485,14 +531,31 @@ pub(crate) fn rows(
                     ui.painter().rect_filled(row, CornerRadius::ZERO, fill);
                     under = fill;
                 }
-                if selected {
+                // The 2px accent bar, and **only while this pane does not have the keyboard.**
+                //
+                // On the pane being worked in it said nothing the row was not already saying: the
+                // fill is 24.7 ΔL* off the panel, and the row the cursor is on carries a dashed
+                // ring in the same `accent.mark` the bar was drawn in — two blue marks down one
+                // row's left edge, for one fact.
+                //
+                // A quiet selection is the opposite case and it is why this is a condition rather
+                // than a deletion. [`crate::ui::row_fill_quiet`] is 1.15 ΔL* off the panel in the
+                // dark theme — 1.02:1, which is to say invisible on its own — so with the bar gone
+                // as well, a selection in the pane you are not typing in would be a selection
+                // nothing on screen mentions. The bar is what has been carrying that state all
+                // along; here it is the only thing carrying it.
+                if selected && !focused {
                     selection_bar(ui.painter(), row, t);
                 }
             }
             // The keyboard cursor. Two inks, one for a selected row and one for the rest — see
             // [`cursor_ink`], which is also where the ring's whole argument is written down.
             if focused && tab.cursor == Some(position) {
-                cursor_ring(ui.painter(), row.shrink(1.0), cursor_ink(t, selected));
+                cursor_ring(
+                    ui.painter(),
+                    ring_rect(row, ui.painter().clip_rect()),
+                    cursor_ink(t, selected),
+                );
             }
 
             // A hidden or system entry is dimmed rather than hidden-when-shown:
@@ -773,12 +836,12 @@ pub(crate) fn rows(
             if widths[1] > 0.0 {
                 if let Some(bytes) = tab.size_shown(entry_index) {
                     let cell = Rect::from_min_max(
-                        pos2(edges[1] + CELL_PAD, text_row.top()),
-                        pos2(edges[2] - CELL_PAD, text_row.bottom()),
+                        pos2(edges[1] + CELL_PAD, meta_row.top()),
+                        pos2(edges[2] - CELL_PAD, meta_row.bottom()),
                     );
-                    // Under the text rather than behind it, and on `row` rather than `text_row`:
-                    // the bar belongs to the row's own bottom edge, where the two points every
-                    // cell's text is lifted by are exactly the room it needs. See [`share_bar`].
+                    // Under the text rather than behind it, and on `row` rather than the cell: the
+                    // bar belongs to the row's own bottom edge, in the slack a caption line leaves
+                    // below itself. See [`SHARE_DROP`], which is that measurement.
                     if let Some(share) = tab.sizes.share(bytes) {
                         share_bar(
                             ui.painter(),
@@ -816,8 +879,8 @@ pub(crate) fn rows(
                 scratch.clear();
                 fmt::type_label(dir.ext(entry_index), entry.is_dir(), scratch);
                 let cell = Rect::from_min_max(
-                    pos2(edges[2] + CELL_PAD, text_row.top()),
-                    pos2(edges[3] - CELL_PAD, text_row.bottom()),
+                    pos2(edges[2] + CELL_PAD, meta_row.top()),
+                    pos2(edges[3] - CELL_PAD, meta_row.bottom()),
                 );
                 let galley = truncated(
                     ui.painter(),
@@ -827,8 +890,8 @@ pub(crate) fn rows(
                     cell.width(),
                 );
                 if inked {
-                    // The ink is what a drag is measured against, so it stays on the row
-                    // rather than following the text's two-point lift.
+                    // The ink is what a drag is measured against, so it is the whole row's height
+                    // whatever line the text in it sits on.
                     ink.push(Rect::from_min_max(
                         pos2(cell.left(), row.top()),
                         pos2((cell.left() + galley.size().x).min(cell.right()), row.bottom()),
@@ -842,8 +905,8 @@ pub(crate) fn rows(
                 scratch.clear();
                 fmt::modified(entry.modified, zone, scratch);
                 let cell = Rect::from_min_max(
-                    pos2(edges[3] + CELL_PAD, text_row.top()),
-                    pos2(edges[4] - CELL_PAD, text_row.bottom()),
+                    pos2(edges[3] + CELL_PAD, meta_row.top()),
+                    pos2(edges[4] - CELL_PAD, meta_row.bottom()),
                 );
                 let galley = truncated(
                     ui.painter(),
