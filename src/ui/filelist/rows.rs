@@ -139,7 +139,13 @@ pub(crate) const GROUP_GAP: f32 = space::S6;
 /// of a whole number of them.
 pub const TAIL: f32 = ROW_HEIGHT * 1.5;
 
-/// The dashed rectangle that marks the row the keyboard is on but has not selected.
+/// The dashed rectangle that marks the row the keyboard is on.
+///
+/// **Drawn on a selected row as well**, in [`cursor_ink`]'s other colour. It was drawn only on
+/// rows that were *not* selected, on the argument that a selection is already a mark — which held
+/// only while the cursor could not be anywhere else: `Ctrl` with the arrows moves it through a
+/// selection without changing it, and a listing that drew nothing for that is a listing where the
+/// keys appear to do nothing at all.
 ///
 /// Square corners, because it is drawn one pixel inside a row whose fill has none — a rounded
 /// ring inside a square edge reads as a mistake at this size.
@@ -168,6 +174,26 @@ pub(crate) fn cursor_ring(painter: &egui::Painter, rect: Rect, color: Color32) {
         DASH,
         GAP,
     ));
+}
+
+/// The ink for [`cursor_ring`], which is about the row it lands on rather than about the cursor.
+///
+/// **Off a selection**, a dashed grey: the accent is what this window says "selected" with — the
+/// fill, and the bar down the left edge of a selected row — and spending it on a row that is not
+/// selected said the opposite of what it meant. Grey and dashed is what every list on the platform
+/// has marked the focused-not-selected row with since long before any of them had a theme, and it
+/// cannot be mistaken for a selection at a glance.
+///
+/// **On one**, the row's own text colour, because `stroke.strong` is a neutral chosen against the
+/// listing's surface and a selected row is not wearing it: over `accent.active` the grey ring went
+/// muddy at one pixel and two points of dash. `text.primary` is the ink already proven against that
+/// fill — it is what the row's name is drawn in — so the ring is as legible as the name beside it.
+pub(crate) fn cursor_ink(t: &Theme, selected: bool) -> Color32 {
+    if selected {
+        t.text.primary
+    } else {
+        t.stroke.strong
+    }
 }
 
 /// How far off the bottom of the row the bar in a Size cell sits.
@@ -463,16 +489,10 @@ pub(crate) fn rows(
                     selection_bar(ui.painter(), row, t);
                 }
             }
-            // The keyboard cursor, when it is not simply the selection.
-            //
-            // Dashed and grey rather than a solid accent outline. The accent is what this
-            // window says "selected" with — the fill and the bar down the left edge of a
-            // selected row — and spending it on a row that is *not* selected said the opposite
-            // of what it meant. A dashed grey rectangle is what every list on the platform has
-            // marked the focused-not-selected row with since long before any of them had a
-            // theme, and it cannot be confused with a selection at a glance.
-            if focused && tab.cursor == Some(position) && !selected {
-                cursor_ring(ui.painter(), row.shrink(1.0), t.stroke.strong);
+            // The keyboard cursor. Two inks, one for a selected row and one for the rest — see
+            // [`cursor_ink`], which is also where the ring's whole argument is written down.
+            if focused && tab.cursor == Some(position) {
+                cursor_ring(ui.painter(), row.shrink(1.0), cursor_ink(t, selected));
             }
 
             // A hidden or system entry is dimmed rather than hidden-when-shown:

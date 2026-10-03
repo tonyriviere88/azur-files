@@ -363,6 +363,26 @@ impl Band {
     }
 }
 
+/// What a cursor key takes with it, which is what its modifier decides.
+///
+/// The three are the whole of what `Down` can mean in a listing, and one argument rather than the
+/// pair of `bool`s it replaced: a pair has four states and this has three, so the fourth was a
+/// combination every caller had to be trusted not to ask for.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Carry {
+    /// The selection follows the cursor: one row, alone. A bare arrow, and what every key here
+    /// did before there was anything else.
+    Select,
+    /// The selection grows from the anchor out to where the cursor lands. `Shift`.
+    Extend,
+    /// Nothing. The cursor moves and the selection stays exactly as it is — `Ctrl`, and the
+    /// gesture that lets a keyboard pick rows out of a folder one at a time: walk to a row without
+    /// disturbing what is already picked, then `Ctrl+Space` to add it. See
+    /// [`Tab::toggle_at_cursor`], which is the other half and without which this mode is a cursor
+    /// with nothing to do.
+    Focus,
+}
+
 /// One place being looked at.
 pub struct Tab {
     /// The folder. Empty means "This PC".

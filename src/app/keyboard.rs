@@ -4,6 +4,7 @@
 //! same key does not do two things at once.
 
 use super::*;
+use crate::pane::Carry;
 
 /// Whether a Windows key is held.
 ///
@@ -478,20 +479,43 @@ impl App {
                 use crate::ui::grid::Step;
 
                 let extend = i.modifiers.shift;
+                // **What a cursor key does to the selection**, which is the whole of what the two
+                // modifiers decide — see [`Carry`]. `Shift` grows the selection to where the cursor
+                // lands, `Ctrl` moves the cursor and leaves the selection alone, and a bare key takes
+                // the selection with it.
+                //
+                // **`Shift` wins the pair.** `Ctrl+Shift+Down` is an extend reached for on a machine
+                // where `Ctrl` is already held down from picking rows out one at a time, and a
+                // focus-only move that also refused to extend would be the one chord here that does
+                // nothing at all.
+                //
+                // `shifted` is the same question **without** the third mode, for the keys where `Ctrl`
+                // already means something: it is the difference between the next folder at any depth
+                // and the next one no deeper than this on the page keys, and on `Home` and `End` it is
+                // deliberately not read at all — see below. So `Carry::Focus` is offered by the keys
+                // that had nothing else for the modifier to mean.
+                let shifted = if extend { Carry::Extend } else { Carry::Select };
+                let carry = if extend {
+                    Carry::Extend
+                } else if i.modifiers.command {
+                    Carry::Focus
+                } else {
+                    Carry::Select
+                };
                 if i.key_pressed(K::ArrowDown) {
-                    tab.walk(Step::Down, 1, step, extend);
+                    tab.walk(Step::Down, 1, step, carry);
                 }
                 if i.key_pressed(K::ArrowUp) {
-                    tab.walk(Step::Up, 1, -step, extend);
+                    tab.walk(Step::Up, 1, -step, carry);
                 }
                 // **The page keys are the folders in a tree** and a screenful everywhere else, and
                 // `Ctrl` is the difference between the next folder at any depth and the next one no
                 // deeper than this — see [`Tab::page`], which is where both halves are decided.
                 if i.key_pressed(K::PageDown) {
-                    tab.page(true, i.modifiers.command, lines, page, extend);
+                    tab.page(true, i.modifiers.command, lines, page, shifted);
                 }
                 if i.key_pressed(K::PageUp) {
-                    tab.page(false, i.modifiers.command, lines, -page, extend);
+                    tab.page(false, i.modifiers.command, lines, -page, shifted);
                 }
                 // **`Ctrl` with either of these is the same gesture**, and on purpose: `Home` and
                 // `End` are Explorer's two keys for the ends of a listing, `Ctrl+Home` and
@@ -500,10 +524,10 @@ impl App {
                 // neither modifier is tested for, and `Shift` still extends as it does on every
                 // other key here.
                 if i.key_pressed(K::Home) {
-                    tab.move_cursor_to_edge(false, extend);
+                    tab.move_cursor_to_edge(false, shifted);
                 }
                 if i.key_pressed(K::End) {
-                    tab.move_cursor_to_edge(true, extend);
+                    tab.move_cursor_to_edge(true, shifted);
                 }
                 // **Left and Right work a tree**, which is what those two keys mean in every tree
                 // control on the platform: Right opens the folder under the cursor, Left shuts it,
@@ -527,11 +551,14 @@ impl App {
                 let on_a_row = tab.is_tree() && tab.cursor.is_some_and(|at| tab.is_dir_at(at));
                 let sideways = tab.view_mode.is_icons() && !on_a_row;
                 if sideways {
+                    // `carry` and not `shifted`: in the tiles view these two are `Down` and `Up` on
+                    // the other axis, and a `Ctrl` that moved the cursor on one axis while resetting
+                    // the selection on the other would be a gesture you cannot use to cross a grid.
                     if i.key_pressed(K::ArrowRight) {
-                        tab.walk(Step::Next, 1, 1, extend);
+                        tab.walk(Step::Next, 1, 1, carry);
                     }
                     if i.key_pressed(K::ArrowLeft) {
-                        tab.walk(Step::Prev, 1, -1, extend);
+                        tab.walk(Step::Prev, 1, -1, carry);
                     }
                 } else {
                     // **Both keys do a second thing when the branch cannot answer them**, which is
@@ -546,7 +573,7 @@ impl App {
                     // [`Tab::step_out`], which is the half the two views answer differently.
                     if !extend && i.key_pressed(K::ArrowRight) && !tab.set_collapsed_at_cursor(false)
                     {
-                        tab.walk(Step::Next, 1, 1, false);
+                        tab.walk(Step::Next, 1, 1, Carry::Select);
                     }
                     if !extend && i.key_pressed(K::ArrowLeft) && !tab.set_collapsed_at_cursor(true) {
                         tab.step_out();
@@ -554,6 +581,34 @@ impl App {
                 }
                 if i.key_pressed(K::Escape) {
                     tab.clear_selection();
+                }
+                // **`Ctrl+Space` flips the row under the cursor**, and is why `Ctrl` with the arrows
+                // is worth having: a cursor that moves without the selection is only useful if
+                // something can then pick out the row it stopped on. It is the keyboard's
+                // `Ctrl`-click, and Explorer's key for the same thing.
+                //
+                // **The press, and not the repeat**, read off the events for exactly the reason the
+                // bare space below is: `key_pressed` counts key-*repeat* events among its presses, so
+                // a thumb resting on the bar would flip the row on and off at the machine's repeat
+                // rate. `repeat: false` is the only thing that tells the two apart.
+                //
+                // No `Space` reaches the type-ahead with `Ctrl` held — the characters below are read
+                // only when it is not — so this is the whole of what the chord does.
+                if i.modifiers.command
+                    && !i.modifiers.alt
+                    && i.events.iter().any(|event| {
+                        matches!(
+                            event,
+                            egui::Event::Key {
+                                key: K::Space,
+                                pressed: true,
+                                repeat: false,
+                                ..
+                            }
+                        )
+                    })
+                {
+                    tab.toggle_at_cursor();
                 }
                 if i.key_pressed(K::Enter) {
                     if let Some(at) = tab.cursor {

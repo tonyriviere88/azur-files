@@ -196,33 +196,55 @@ impl Tab {
             .collect()
     }
 
-    /// Move the cursor, taking the selection with it unless `extend` is set.
-    pub fn move_cursor(&mut self, delta: isize, extend: bool) {
+    /// Move the cursor `delta` places, and do to the selection whatever `carry` says.
+    pub fn move_cursor(&mut self, delta: isize, carry: Carry) {
         if self.order.is_empty() {
             return;
         }
         let last = self.order.len() as isize - 1;
         let from = self.cursor.map(|c| c as isize).unwrap_or(-1);
         let to = (from + delta).clamp(0, last) as usize;
-        if extend {
-            self.select_range_to(to);
-        } else {
-            self.select_only(to);
-        }
-        self.scroll_to_cursor = true;
+        self.land_on(to, carry);
     }
 
-    pub fn move_cursor_to(&mut self, position: usize, extend: bool) {
+    pub fn move_cursor_to(&mut self, position: usize, carry: Carry) {
         if self.order.is_empty() {
             return;
         }
         let position = position.min(self.order.len() - 1);
-        if extend {
-            self.select_range_to(position);
-        } else {
-            self.select_only(position);
+        self.land_on(position, carry);
+    }
+
+    /// The cursor arriving somewhere: the one place the three [`Carry`] modes are told apart, so
+    /// that every key reaching it means the same thing by its modifier.
+    ///
+    /// **All three scroll.** A cursor that walked off the bottom of the pane is a cursor nobody can
+    /// see, and it is [`Carry::Focus`] that most needs the scroll rather than least: it is the only
+    /// one of the three that leaves nothing else on screen changed.
+    fn land_on(&mut self, position: usize, carry: Carry) {
+        match carry {
+            Carry::Select => self.select_only(position),
+            Carry::Extend => self.select_range_to(position),
+            // **The anchor stays where it was**, and that is what makes the two modifiers compose:
+            // nothing about the selection changed, so a later `Shift` still grows the range out of
+            // wherever the selection was last made rather than out of wherever the cursor has since
+            // wandered to. Which is also what the platform's own listings do.
+            Carry::Focus => self.cursor = Some(position),
         }
         self.scroll_to_cursor = true;
+    }
+
+    /// Flip the selection on the row under the cursor, and move nothing: `Ctrl+Space`.
+    ///
+    /// The keyboard's `Ctrl`-click, and the key [`Carry::Focus`] exists for. [`Tab::toggle`] puts
+    /// the cursor and the anchor on the row it flipped, which here is the row both are already on
+    /// for the cursor and is the point for the anchor: the row you just picked is where a `Shift`
+    /// walk out of it should start.
+    pub fn toggle_at_cursor(&mut self) {
+        if let Some(at) = self.cursor {
+            self.toggle(at);
+            self.scroll_to_cursor = true;
+        }
     }
 
     /// Whether the cursor walks **the order the tiles are in** rather than the display order.
@@ -241,7 +263,7 @@ impl Tab {
     /// `by` is what the same key means in a listing of *rows* — the display-order delta — and it is
     /// what happens in the details view and in the one frame of a tiles view that has not been drawn
     /// yet. See [`crate::ui::grid::Layout::walk`] for the other half.
-    pub fn walk(&mut self, step: crate::ui::grid::Step, times: usize, by: isize, extend: bool) {
+    pub fn walk(&mut self, step: crate::ui::grid::Step, times: usize, by: isize, carry: Carry) {
         if self.walks_the_tiles() {
             let to = match self.cursor {
                 Some(at) => self.grid.walk(at, step, times),
@@ -254,11 +276,11 @@ impl Tab {
             // the arithmetic: it would move the cursor by a number about a different arrangement of
             // the same rows, which is the whole bug this walk is for.
             if let Some(to) = to {
-                self.move_cursor_to(to, extend);
+                self.move_cursor_to(to, carry);
             }
             return;
         }
-        self.move_cursor(by, extend);
+        self.move_cursor(by, carry);
     }
 
     /// **The page keys**: `PageDown` and `PageUp`, and the same pair with `Ctrl`.
@@ -273,7 +295,7 @@ impl Tab {
     ///
     /// In every other listing there are no folders to walk and both are a screenful, which is
     /// `screenful` steps of the view's own order — see [`Tab::walk`].
-    pub fn page(&mut self, down: bool, across: bool, screenful: usize, by: isize, extend: bool) {
+    pub fn page(&mut self, down: bool, across: bool, screenful: usize, by: isize, carry: Carry) {
         // A tree, and somewhere to count from.
         if let (true, Some(at)) = (self.is_tree(), self.cursor) {
             // The two views arrange the same folders in the same order and put the *files* in
@@ -286,7 +308,7 @@ impl Tab {
                 self.next_folder_row(at, down, across)
             };
             if let Some(to) = to {
-                self.move_cursor_to(to, extend);
+                self.move_cursor_to(to, carry);
             }
             // Nothing that way leaves the cursor where it is. Falling back to a screenful from the
             // last folder in the tree would jump somewhere with nothing to do with the key.
@@ -297,7 +319,7 @@ impl Tab {
         } else {
             crate::ui::grid::Step::Up
         };
-        self.walk(step, screenful, by, extend);
+        self.walk(step, screenful, by, carry);
     }
 
     /// The next folder's row either way through the **display order**, which is the order a tree
@@ -339,7 +361,7 @@ impl Tab {
     /// `Right` as an axis of their own, and a listing of rows does not.
     pub fn step_out(&mut self) {
         if self.walks_the_tiles() {
-            self.walk(crate::ui::grid::Step::Prev, 1, -1, false);
+            self.walk(crate::ui::grid::Step::Prev, 1, -1, Carry::Select);
             return;
         }
         self.move_cursor_to_parent();
@@ -351,7 +373,7 @@ impl Tab {
     /// folder's own files are the first thing on the pane — see [`crate::ui::grid`] — so the first
     /// place is one of them and the last is whatever is deepest in the last branch, either of which
     /// may be a file or a folder. In the display order both of those are somewhere in the middle.
-    pub fn move_cursor_to_edge(&mut self, last: bool, extend: bool) {
+    pub fn move_cursor_to_edge(&mut self, last: bool, carry: Carry) {
         if self.walks_the_tiles() {
             let edge = if last {
                 self.grid.last()
@@ -359,11 +381,11 @@ impl Tab {
                 self.grid.first()
             };
             if let Some(at) = edge {
-                self.move_cursor_to(at, extend);
+                self.move_cursor_to(at, carry);
                 return;
             }
         }
-        self.move_cursor_to(if last { usize::MAX } else { 0 }, extend);
+        self.move_cursor_to(if last { usize::MAX } else { 0 }, carry);
     }
 
     /// Open or shut the folder the cursor is on, for the `Left` and `Right` keys.
@@ -416,7 +438,7 @@ impl Tab {
         let Some(parent) = (0..at).rev().find(|&above| self.row_depth(above) < depth) else {
             return false;
         };
-        self.move_cursor_to(parent, false);
+        self.move_cursor_to(parent, Carry::Select);
         true
     }
 

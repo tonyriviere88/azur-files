@@ -519,6 +519,29 @@ impl Harness {
         self.click_with(at, PointerButton::Primary, Modifiers::NONE)
     }
 
+    /// A keystroke with modifiers held: press, release, and back to nothing held.
+    ///
+    /// The modifiers go on the frame as well as on the event, because that is where the shortcuts
+    /// read them from — an event carrying `COMMAND` into a frame that says nothing is held is a
+    /// keystroke half the window disagrees about.
+    ///
+    /// **The release is not politeness.** `InputState` rewrites a press of a key it already has down
+    /// into a *repeat* — that is where `Event::Key::repeat` comes from, the platform never sets it —
+    /// so a helper that only ever pressed would deliver the second `Ctrl+Space` of a test as a held
+    /// thumb, and the shortcuts that (rightly) ignore repeats would ignore it.
+    fn chord(&mut self, key: egui::Key, modifiers: Modifiers) {
+        self.modifiers = modifiers;
+        self.frame(held(key, modifiers));
+        self.frame(vec![Event::Key {
+            key,
+            physical_key: None,
+            pressed: false,
+            repeat: false,
+            modifiers,
+        }]);
+        self.modifiers = Modifiers::NONE;
+    }
+
     fn click_with(
         &mut self,
         at: Pos2,
@@ -840,11 +863,18 @@ fn pane_body(h: &Harness) -> Rect {
 
 /// One key, with nothing held.
 fn tap(key: egui::Key) -> Vec<Event> {
+    held(key, Modifiers::NONE)
+}
+
+/// One key with modifiers held — which have to be carried on the event *and* held on the frame:
+/// `App::keyboard` reads them off `InputState::modifiers`, not off the key event. See
+/// [`Harness::chord`], which is the pair of them and what a test should reach for.
+fn held(key: egui::Key, modifiers: Modifiers) -> Vec<Event> {
     vec![Event::Key {
         key,
         physical_key: None,
         pressed: true,
         repeat: false,
-        modifiers: Modifiers::NONE,
+        modifiers,
     }]
 }

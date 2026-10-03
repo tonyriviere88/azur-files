@@ -78,6 +78,125 @@ fn shift_click_selects_a_range() {
     assert_eq!(h.tab(0).selected_count, 4);
 }
 
+/// A pane on a folder of six files that **nothing else writes to**, for the keyboard tests below.
+///
+/// Not the repository root the harness opens by default, and the difference is not tidiness: a
+/// re-read of a folder puts the cursor and the selection back to nothing — [`Tab::set_dir`] — and
+/// the folder this suite runs in is one `cargo` is writing `target/` into the whole time. A watch
+/// event landing between two keystrokes made the *next* arrow start from an empty cursor, which is a
+/// test that fails once a run and never in the same place twice.
+fn on_a_quiet_folder() -> Harness {
+    let root = crate::sandbox::fresh("keyboard-cursor");
+    for name in ["a.txt", "b.txt", "c.txt", "d.txt", "e.txt", "f.txt"] {
+        std::fs::write(root.join(name), b"x").expect("a file in the sandbox");
+    }
+    Harness::opening(vec![root])
+}
+
+/// **`Ctrl` with the arrows moves the cursor and nothing else, and `Ctrl+Space` picks the row it
+/// stopped on.** The keyboard's half of building a selection out of rows that are not neighbours.
+///
+/// Driven through the real keyboard rather than through `Tab`, because the claim is as much about
+/// the modifier reaching the listing as about what the listing does with it: `Ctrl+Up` and
+/// `Ctrl+Down` are two thirds of the window shortcuts that carry the Windows key, and `Ctrl+Space`
+/// arrives in the middle of the type-ahead's characters.
+#[test]
+fn ctrl_moves_the_cursor_without_the_selection_and_space_picks_a_row() {
+    let mut h = on_a_quiet_folder();
+    h.click_at(h.row_center(0, 0));
+    assert_eq!((h.tab(0).cursor, h.tab(0).selected_count), (Some(0), 1));
+
+    // ---- Ctrl+Down: the cursor moves, the selection does not ------------
+    for expected in [1, 2] {
+        h.chord(egui::Key::ArrowDown, Modifiers::COMMAND);
+        assert_eq!(h.tab(0).cursor, Some(expected), "Ctrl+Down moves the cursor");
+        assert_eq!(
+            h.tab(0).selected_count, 1,
+            "and leaves the selection where it was"
+        );
+        assert!(h.tab(0).is_selected(0), "which is still the first row");
+    }
+    h.chord(egui::Key::ArrowUp, Modifiers::COMMAND);
+    assert_eq!(h.tab(0).cursor, Some(1), "and Ctrl+Up is the same going back");
+    assert_eq!(h.tab(0).selected_count, 1);
+
+    // ---- Ctrl+Space: flip the row under the cursor ----------------------
+    h.chord(egui::Key::Space, Modifiers::COMMAND);
+    assert_eq!(h.tab(0).selected_count, 2, "Ctrl+Space adds the focused row");
+    assert!(h.tab(0).is_selected(1) && h.tab(0).is_selected(0), "both of them");
+    assert_eq!(h.tab(0).cursor, Some(1), "and the cursor has not moved");
+    // And again takes it back off, which is what makes it a toggle rather than an add.
+    h.chord(egui::Key::Space, Modifiers::COMMAND);
+    assert_eq!(h.tab(0).selected_count, 1, "Ctrl+Space again unpicks it");
+    assert!(!h.tab(0).is_selected(1));
+
+    // ---- A bare arrow still takes the selection with it -----------------
+    h.frame(tap(egui::Key::ArrowDown));
+    assert_eq!(h.tab(0).cursor, Some(2));
+    assert_eq!(h.tab(0).selected_count, 1, "a bare Down is one row, alone");
+    assert!(h.tab(0).is_selected(2), "the one it landed on");
+
+    // ---- And Shift still extends, with Ctrl held or not -----------------
+    //
+    // `Ctrl+Shift+Down` is an extend reached for with `Ctrl` already down from picking rows out one
+    // at a time, so Shift wins the pair rather than the two cancelling out.
+    h.chord(egui::Key::ArrowDown, Modifiers::COMMAND | Modifiers::SHIFT);
+    assert_eq!(h.tab(0).cursor, Some(3));
+    assert_eq!(h.tab(0).selected_count, 2, "Ctrl+Shift+Down still extends");
+}
+
+/// **The dashed cursor ring is drawn on a selected row too**, which is the only thing on screen
+/// that says where `Ctrl` with the arrows has left the cursor once it is inside the selection.
+///
+/// Asked of the pixels rather than of `Tab::cursor`, because the bug this is for is a listing whose
+/// state is right and whose rows all look the same: the ring used to be suppressed on anything
+/// selected, so `Ctrl+Down` through a selection drew nothing at all.
+///
+/// **Counted by ink rather than by where it landed.** A ring is a run of dashes, each a line segment
+/// of its own, and which row they are in is a question about the scroll offset and the group headers
+/// as much as about the ring — while the *colour* is the claim: [`filelist::cursor_ink`] gives the
+/// ring on a selected row the row's own text colour, and every other row in the listing the grey.
+#[test]
+fn the_cursor_ring_shows_on_a_selected_row() {
+    use crate::ui::filelist::cursor_ink;
+
+    let mut h = on_a_quiet_folder();
+    // Rows 0 and 1 selected, cursor on 1 — so the cursor is on a row that is selected.
+    h.click_at(h.row_center(0, 0));
+    h.click_with(h.row_center(0, 1), PointerButton::Primary, Modifiers::SHIFT);
+    assert_eq!((h.tab(0).cursor, h.tab(0).selected_count), (Some(1), 2));
+
+    let dashes = |h: &Harness, ink: egui::Color32| -> usize {
+        h.segments().into_iter().filter(|&(_, colour)| colour == ink).count()
+    };
+    let (on_selected, off) = (
+        cursor_ink(&h.app.theme, true),
+        cursor_ink(&h.app.theme, false),
+    );
+    assert!(
+        dashes(&h, on_selected) > 4,
+        "the row under the cursor has to be ringed even though it is selected"
+    );
+
+    // And off the selection it is the grey one instead, which is the other half of the same rule:
+    // `Ctrl+Down` onto an unselected row moves only the cursor, so the ring is all there is to see.
+    let grey_before = dashes(&h, off);
+    h.chord(egui::Key::ArrowDown, Modifiers::COMMAND);
+    assert_eq!(
+        (h.tab(0).cursor, h.tab(0).selected_count),
+        (Some(2), 2),
+        "Ctrl+Down has to leave the selection behind for this to be about an unselected row"
+    );
+    assert_eq!(
+        dashes(&h, on_selected), 0,
+        "and take the selected row's ring with it — one cursor, one ring"
+    );
+    assert!(
+        dashes(&h, off) > grey_before + 4,
+        "the unselected row it landed on wears the grey ring"
+    );
+}
+
 #[test]
 fn a_column_header_sorts() {
     let mut h = Harness::new();

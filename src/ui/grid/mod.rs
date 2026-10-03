@@ -866,8 +866,9 @@ pub fn show(
                     crate::ui::selection_bar(ui.painter(), cell.hit, t);
                 }
             }
-            if focused && tab.cursor == Some(position) && !selected {
-                filelist::cursor_ring(ui.painter(), cell.hit.shrink(1.0), t.stroke.strong);
+            if focused && tab.cursor == Some(position) {
+                let ink = filelist::cursor_ink(t, selected);
+                filelist::cursor_ring(ui.painter(), cell.hit.shrink(1.0), ink);
             }
 
             let pending_cut = crate::ui::is_cut(cut, &dir.path, dir.name(entry_index));
