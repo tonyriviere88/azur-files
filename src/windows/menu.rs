@@ -74,6 +74,10 @@ fn pidl_of(path: &Path) -> Option<Pidl> {
 /// to Explorer's own view rather than to the shell folder — Explorer synthesises them
 /// around this menu — so they are this program's to provide, and it does, on their
 /// shortcuts.
+///
+/// And what it carries but will not *run* is Properties, which belongs to that same view and
+/// answers `S_OK` without showing anything when it is asked from anywhere else. That one is
+/// invoked against the folder-as-an-item menu above instead — see [`as_an_item`].
 unsafe fn context_of(parent: &Path, items: &[PathBuf]) -> Option<IContextMenu> {
     if items.is_empty() {
         let pidl = pidl_of(parent)?;
@@ -592,6 +596,44 @@ pub(super) fn probe(parent: &Path, items: &[PathBuf]) {
     }
 }
 
+/// Invoke `properties` against one of a folder's two menus, and say whether the shell claims to
+/// have run it.
+///
+/// The instrument behind the table on [`as_an_item`], and the only way left to re-measure it:
+/// [`invoke`] deliberately never asks a background menu for its Properties any more, so nothing
+/// in the program reaches the case this reproduces. `true` means `InvokeCommand` returned
+/// success, which on the background menu it does *without showing anything* — the whole point.
+///
+/// The menu is built and thrown away exactly as [`invoke`] builds it, because a verb has to be
+/// invoked against a menu the shell has actually populated.
+#[cfg(test)]
+pub(super) fn probe_properties(parent: &Path, items: &[PathBuf]) -> bool {
+    // SAFETY: the menu is destroyed before returning and the interfaces are reference counted.
+    unsafe {
+        let Some(context) = context_of(parent, items) else {
+            return false;
+        };
+        let Ok(hmenu) = CreatePopupMenu() else {
+            return false;
+        };
+        let _ = context.QueryContextMenu(hmenu, 0, FIRST, LAST, flags(Depth::Full));
+        let at = std::time::Instant::now();
+        let ran = run(
+            &context,
+            parent,
+            Named::Verb("properties"),
+            crate::shell::Owner::default(),
+        );
+        eprintln!(
+            "  InvokeCommand(properties) against {} -> {ran} in {:.1} ms",
+            if items.is_empty() { "the background" } else { "the item" },
+            at.elapsed().as_secs_f32() * 1e3
+        );
+        let _ = DestroyMenu(hmenu);
+        ran
+    }
+}
+
 /// Which entries survive into the menu `invoke` resolves against.
 ///
 /// The instrument behind the table on [`super::invoke`]: it builds the menu twice, once as
@@ -712,6 +754,12 @@ const CMIC_MASK_FLAG_LOG_USAGE: u32 = windows::Win32::UI::Shell::SEE_MASK_FLAG_L
 ///
 /// The walk is not done for a verb, only as the fallback: it costs an extension's populate
 /// per level — 3 ms for New, up to 116 ms for Open With — and a verb has no use for it.
+///
+/// # And why one command is invoked against a different menu entirely
+///
+/// `properties` on a folder's **background** menu answers `S_OK` and does nothing at all, so it
+/// is run against the folder as an item instead. That is [`as_an_item`], and the measurements
+/// are there.
 pub fn invoke(
     parent: &Path,
     items: &[PathBuf],
@@ -722,6 +770,11 @@ pub fn invoke(
     let super::Command::Shell { verb, id, path, label } = command else {
         return;
     };
+    // The one entry a background menu cannot run itself; see `as_an_item`. Everything below is
+    // then an ordinary invoke against an ordinary selection — including the id fallback, which
+    // `resolve` recovers by label if it is ever reached.
+    let stand_in = as_an_item(parent, items, verb.as_deref());
+    let items = stand_in.as_deref().unwrap_or(items);
     // SAFETY: the menu is destroyed before returning, and every string outlives the
     // call that reads it.
     unsafe {
@@ -779,6 +832,51 @@ pub fn invoke(
         }
         let _ = DestroyMenu(hmenu);
     }
+}
+
+/// The folder itself as a one-item selection, for the one command its **background** menu
+/// will not run.
+///
+/// `properties` is in that menu — the shell puts it there, and this program draws it — and
+/// invoking it does nothing whatsoever. Measured by
+/// `properties_on_a_background_menu_goes_through_the_folder_as_an_item`, on a folder in the
+/// sandbox, with the same verb against each of the two menus a folder has:
+///
+/// | the menu it is invoked against | `InvokeCommand("properties")` | what appeared |
+/// | --- | --- | --- |
+/// | `CreateViewObject` — the background | `S_OK`, in 0.3 ms | nothing, in four seconds of waiting |
+/// | `GetUIObjectOf` — the folder as an item | `S_OK` | `Propriétés de : bg-props`, a second later |
+///
+/// **`S_OK` is the part that made it invisible.** The shell says it ran the command, so there is
+/// no failure for [`invoke`] to fall back from: the id path is never reached, nothing is logged
+/// even in a debug build, and the entry is simply inert. It is not the wrong verb, the wrong id
+/// or a menu read incorrectly — every one of those was checked first. The sheet is not the return
+/// value either; the shell puts it on a thread of its own and answers straight away, which is why
+/// the difference between these two rows can only be seen by waiting for a window.
+///
+/// What the background menu's Properties actually is, is Explorer's *view's* command: the
+/// handler shows the sheet through the site it expects to be hosted in, and a menu built here
+/// out of a shell folder has no site. Providing one means implementing enough of
+/// `IShellBrowser` and `IShellView` to satisfy somebody else's expectations, for one entry.
+///
+/// The swap is exact rather than approximate, which is what makes it the answer instead of a
+/// workaround: Explorer's own background Properties shows the *folder's* sheet, and the folder's
+/// sheet is what selecting that folder in its parent gives — the same one, from the same shell
+/// folder, with the same property pages from the same extensions. See [`context_of`] for the two
+/// menus a folder has.
+///
+/// Only `properties`, and only with nothing selected. Everything else in a background menu
+/// belongs to whoever registered it — `Open Git Bash here`, `Open with Code`, New — and those
+/// run perfectly well against the folder they were read from, which is where they belong.
+pub(super) fn as_an_item(
+    parent: &Path,
+    items: &[PathBuf],
+    verb: Option<&str>,
+) -> Option<Vec<PathBuf>> {
+    // By verb, never by label: `properties` is the shell's own name for it on every Windows,
+    // and `Propriétés` is one localisation of many. Same rule as `super::properties_at`.
+    let properties = verb.is_some_and(|verb| verb.eq_ignore_ascii_case("properties"));
+    (items.is_empty() && properties).then(|| vec![parent.to_path_buf()])
 }
 
 /// How a command is being named to `InvokeCommand`.

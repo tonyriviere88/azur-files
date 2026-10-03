@@ -790,6 +790,208 @@ fn probe_invoking() {
     // it open, and this is a probe somebody is watching rather than a test that has to tidy.
 }
 
+/// Which of a folder's two menus can actually run Properties, and the fix that follows.
+///
+/// The complaint was that Properties works on a selected item and does nothing on the folder
+/// itself, and the reason is not a verb this program read wrongly — the shell **answers `S_OK`**
+/// and shows nothing. There is no failure to fall back from and nothing to log, which is why the
+/// entry was inert rather than noisy. So [`win::as_an_item`] invokes it against the folder as an
+/// item, and this is the test of both halves of that claim.
+///
+/// A Properties sheet is a window rather than a return value, so what is asserted is the window.
+/// Real sheets open while this runs and are closed on the way out, which is why it is `#[ignore]`d
+/// — and why it is worth running by hand after touching any of `invoke`.
+#[test]
+#[ignore = "opens real Properties sheets; run explicitly, single-threaded"]
+#[cfg(windows)]
+fn properties_on_a_background_menu_goes_through_the_folder_as_an_item() {
+    let _serialised = crate::shell::serialised();
+    crate::shell::init();
+    let dir = crate::sandbox::dir("bg-props");
+    std::fs::write(dir.join("one.txt"), b"x").expect("write");
+    let name = dir
+        .file_name()
+        .expect("a named folder")
+        .to_string_lossy()
+        .to_string();
+
+    // Half one: the background menu's own Properties, invoked the way `invoke` used to. The
+    // shell says it ran it — that is the assertion — and no sheet ever appears.
+    assert!(
+        super::win::probe_properties(&dir, &[]),
+        "the background menu's `properties` was refused outright, which is not what was \
+         measured: it answers S_OK and does nothing. The note on `win::as_an_item` needs \
+         rewriting rather than trusting."
+    );
+    let none = wait_for_a_window(4);
+    assert!(
+        none.is_empty(),
+        "the background menu's Properties has started working on its own, so the swap in \
+         `win::as_an_item` is no longer needed: {none:?}"
+    );
+
+    // Half two: the same entry through `invoke`, which swaps the folder in as an item.
+    let (_live, entries) =
+        super::win::Live::open(&dir, &[], Depth::Full).expect("the background menu");
+    let properties = entries
+        .iter()
+        .find_map(|e| match &e.kind {
+            Kind::Command(command @ Command::Shell { verb: Some(verb), .. })
+                if verb.eq_ignore_ascii_case("properties") =>
+            {
+                Some(command.clone())
+            }
+            _ => None,
+        })
+        .expect("every folder's background menu has Properties on it");
+    invoke(&dir, &[], &properties, Depth::Full, crate::shell::Owner::default());
+
+    let shown = wait_for_a_window(10);
+    let closing: Vec<isize> = shown.iter().map(|(hwnd, _)| *hwnd).collect();
+    let titles: Vec<&str> = shown.iter().map(|(_, title)| title.as_str()).collect();
+    // Closed before the assertion, so a failure does not leave a sheet standing.
+    close_these(&closing);
+    assert!(
+        titles.iter().any(|title| title.contains(&name)),
+        "no Properties sheet for `{name}` turned up, so the folder's own Properties is doing \
+         nothing again. Windows this process had: {titles:?}"
+    );
+
+    crate::sandbox::remove(&dir);
+}
+
+/// Every visible top-level window this process owns, as `(HWND, title)`.
+#[cfg(windows)]
+fn windows_of_this_process() -> Vec<(isize, String)> {
+    use windows::core::BOOL;
+    use windows::Win32::Foundation::{HWND, LPARAM, TRUE};
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
+    };
+    type Found = Vec<(isize, String)>;
+    // SAFETY: called by `EnumWindows` for the duration of the call below, with `lparam`
+    // pointing at the `Found` on that frame's stack and nothing else touching it.
+    unsafe extern "system" fn each(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let out = &mut *(lparam.0 as *mut Found);
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid == std::process::id() && IsWindowVisible(hwnd).as_bool() {
+            let mut text = [0u16; 256];
+            let read = GetWindowTextW(hwnd, &mut text);
+            out.push((hwnd.0 as isize, String::from_utf16_lossy(&text[..read as usize])));
+        }
+        TRUE
+    }
+    let mut out: Found = Vec::new();
+    // SAFETY: the pointer is to `out`, which outlives the call.
+    unsafe {
+        let _ = EnumWindows(Some(each), LPARAM(&mut out as *mut Found as isize));
+    }
+    out
+}
+
+/// Wait for a window of this process to turn up, up to `secs`.
+///
+/// **Answering calls while waiting, not sleeping.** The shell puts a property sheet on a thread
+/// of its own, so `InvokeCommand` returns long before the sheet is on screen — measured, the call
+/// came back in under a millisecond and the sheet arrived about a second later — and getting there
+/// involves calls back into this apartment. A test that slept through them would be testing a
+/// deadlock.
+#[cfg(windows)]
+fn wait_for_a_window(secs: u64) -> Vec<(isize, String)> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    loop {
+        let found = windows_of_this_process();
+        if !found.is_empty() || std::time::Instant::now() >= deadline {
+            return found;
+        }
+        crate::shell::answering_calls(100);
+    }
+}
+
+/// Ask each of these windows to close, and give them a moment to.
+#[cfg(windows)]
+fn close_these(windows: &[isize]) {
+    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
+    for hwnd in windows {
+        // SAFETY: posting to a window of this process; a stale handle is answered with an error.
+        unsafe {
+            let _ = PostMessageW(
+                Some(HWND(*hwnd as *mut std::ffi::c_void)),
+                WM_CLOSE,
+                WPARAM(0),
+                LPARAM(0),
+            );
+        }
+    }
+    crate::shell::answering_calls(300);
+}
+
+/// The redirect has somewhere to go: the folder as an item still offers `properties`.
+///
+/// [`win::as_an_item`] sends a background menu's Properties to the folder-as-an-item menu, by
+/// verb. If the shell ever stopped putting `properties` on one of those two menus, nothing would
+/// fail — the entry would go back to doing nothing at all, silently, which is the bug this was.
+/// So both ends are pinned here, and cheaply: no command is invoked and no window opens.
+#[test]
+#[cfg(windows)]
+fn both_of_a_folder_s_menus_carry_the_properties_verb() {
+    let _serialised = crate::shell::serialised();
+    crate::shell::init();
+    let dir = crate::sandbox::dir("properties-verb");
+
+    for (what, items) in [
+        ("the folder's background", Vec::new()),
+        ("the folder as an item", vec![dir.clone()]),
+    ] {
+        let verbs = verbs_of(&dir, &items);
+        assert!(
+            verbs
+                .iter()
+                .any(|(verb, _)| verb.eq_ignore_ascii_case("properties")),
+            "no `properties` on {what}, so `win::as_an_item` redirects one nothing to another. \
+             What it did offer: {verbs:?}"
+        );
+    }
+
+    crate::sandbox::remove(&dir);
+}
+
+/// Only a *background* Properties is invoked against something else. Decided without the shell.
+#[test]
+#[cfg(windows)]
+fn nothing_but_a_background_properties_is_swapped_for_the_folder() {
+    use super::win::as_an_item;
+
+    let folder = PathBuf::from(r"D:\Sources");
+    let file = PathBuf::from(r"D:\Sources\one.txt");
+    let swapped = [folder.clone()];
+
+    assert_eq!(
+        as_an_item(&folder, &[], Some("properties")).as_deref(),
+        Some(swapped.as_slice()),
+        "the folder's own Properties is the one entry that needs the swap"
+    );
+    // The verb is the shell's string, read back as it wrote it, so the case is not ours to rely
+    // on — the same rule `super::properties_at` follows.
+    assert_eq!(
+        as_an_item(&folder, &[], Some("Properties")).as_deref(),
+        Some(swapped.as_slice())
+    );
+    // A selection's Properties already works, and is about the selection rather than the folder.
+    assert_eq!(
+        as_an_item(&folder, std::slice::from_ref(&file), Some("properties")),
+        None
+    );
+    // Everything else in a background menu runs against the folder it was read from.
+    for verb in ["NewFolder", "NewLink", ".txt", "git_shell", "OpenWithCode", "paste", "view"] {
+        assert_eq!(as_an_item(&folder, &[], Some(verb)), None, "`{verb}`");
+    }
+    // And an entry with no canonical verb is not guessed at.
+    assert_eq!(as_an_item(&folder, &[], None), None);
+}
+
 /// Invoking a shell command has to actually do it, and the result has to be usable.
 ///
 /// The menu's own Cut, Copy, Paste, Delete and Rename are the *shell's* entries, so they go
