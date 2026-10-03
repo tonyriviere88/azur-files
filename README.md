@@ -231,6 +231,17 @@ behaviour and not a promise.
 tab opens beside it. The same gesture works on all four edges, nests as deep as you
 like, and the drop preview shows exactly what you are about to get before you commit.
 
+**Pick the tab up and every place it can go appears in grey** — a compass of five equal
+squares in each pane, one for its middle and one towards each edge — so the gesture is on
+screen rather than something to be told about. **Each square is that pane in miniature, with
+the part the tab would take shaded inside it behind a dashed edge**: half of it for the four,
+all of it for the middle. The pane you are aiming at fills with the same blue behind a solid
+edge — dashed is *would*, solid is *will* — and the compass stays up while you aim.
+
+You do not have to land inside a square: the **nearest** one wins, so the whole pane stays
+live and throwing the tab at an edge still splits it there. The squares are only marks, and
+marks that never overlap — there is no point in a pane asking for two things at once.
+
 - **Onto a pane's edge** → split, with the tab on that side.
 - **Onto a pane's middle** → move the tab into that pane.
 - **Onto a tab strip** → reorder, or move between panes, with a caret showing where.

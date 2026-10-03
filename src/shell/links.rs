@@ -40,6 +40,48 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 
+/// What a shortcut leads to, as a row shows it.
+///
+/// The arguments are their own field rather than part of the path, because the two are read in
+/// different places for different reasons: the tooltip names them separately — a path and a
+/// command line are not one string — and only [`Target::line`] runs them together, for the one
+/// line of dimmed text the Name column has room for.
+///
+/// A reparse point never has any: a junction leads somewhere, it does not run anything.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Target {
+    /// The path the shortcut stores. Never empty — a shortcut with nothing to show is `None`
+    /// rather than a `Target` with an empty path.
+    pub path: String,
+    /// The command line the target is run with, empty when there is none.
+    pub arguments: String,
+}
+
+impl Target {
+    /// The one line a row's dimmed half shows: where it points, and what it runs it with.
+    ///
+    /// Borrowed for the ordinary case, which is a shortcut with no arguments — the allocation is
+    /// only for the ones that have something more to say.
+    pub fn line(&self) -> std::borrow::Cow<'_, str> {
+        if self.arguments.is_empty() {
+            std::borrow::Cow::Borrowed(&self.path)
+        } else {
+            std::borrow::Cow::Owned(format!("{} {}", self.path, self.arguments))
+        }
+    }
+}
+
+/// Everything a `.lnk` is read for at once, which is one COM object's worth of answers.
+///
+/// [`Target`] is the display half of it; `folder` is the half [`folder_target`] wants and the
+/// display never shows.
+pub(crate) struct Shortcut {
+    pub target: String,
+    pub arguments: String,
+    /// Whether the attributes the shortcut stores say its target is a directory.
+    pub folder: bool,
+}
+
 /// Which kind of shortcut a row is, which is what decides how its target is found.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
@@ -76,7 +118,7 @@ struct Ready {
     row: u32,
     /// `None` when there is nothing to show: an unreadable shortcut, one pointing at a shell
     /// folder with no path behind it, or a platform where this does not apply.
-    target: Option<String>,
+    target: Option<Target>,
 }
 
 /// The shortcut-target service. One per application.
@@ -139,7 +181,7 @@ impl Links {
     }
 
     /// Everything resolved since the last call, as `(view, row, target)`. Drained.
-    pub fn answers(&mut self) -> Vec<(u64, u32, Option<String>)> {
+    pub fn answers(&mut self) -> Vec<(u64, u32, Option<Target>)> {
         self.answers
             .try_iter()
             .map(|ready| (ready.view, ready.row, ready.target))
@@ -214,9 +256,12 @@ fn apartment() {
     }
 }
 
-/// The path stored inside a `.lnk`.
-fn shortcut_target(path: &Path) -> Option<String> {
-    read_shortcut(path).map(|(target, _)| target)
+/// What a `.lnk` points at and what it runs it with.
+fn shortcut_target(path: &Path) -> Option<Target> {
+    read_shortcut(path).map(|link| Target {
+        path: link.target,
+        arguments: link.arguments,
+    })
 }
 
 /// **The folder a shortcut leads to, if it leads to one.**
@@ -250,47 +295,54 @@ pub fn folder_target(path: &Path) -> Option<PathBuf> {
     {
         return None;
     }
-    let (target, folder) = read_shortcut(path)?;
-    folder.then(|| PathBuf::from(target))
+    let link = read_shortcut(path)?;
+    link.folder.then(|| PathBuf::from(link.target))
 }
 
 #[cfg(not(windows))]
-fn read_shortcut(_path: &Path) -> Option<(String, bool)> {
+fn read_shortcut(_path: &Path) -> Option<Shortcut> {
     None
 }
 
 /// Where a symlink or a junction leads.
-fn reparse_target(path: &Path) -> Option<String> {
+fn reparse_target(path: &Path) -> Option<Target> {
     let target = std::fs::read_link(path).ok()?;
     let text = target.to_string_lossy();
     // A junction stores `\\?\C:\…`. The prefix is there to get the path past the Win32 parser
     // and means nothing to a person reading a row.
-    Some(
-        text.strip_prefix(r"\\?\")
+    Some(Target {
+        path: text
+            .strip_prefix(r"\\?\")
             .unwrap_or(&text)
             .trim_end_matches('\\')
             .to_owned(),
-    )
+        // Nothing is run: a reparse point is a place, not a command.
+        arguments: String::new(),
+    })
 }
 
-/// Write a `.lnk` at `at` pointing at `target`. `false` if the shell refused.
+/// Write a `.lnk` at `at` pointing at `target`, with `arguments` as its command line — `""` for
+/// none. `false` if the shell refused.
 ///
 /// Test-only, and the only way to have a real shortcut to resolve: a fixture checked into the
 /// repository would be a binary blob nobody could read, and one from `C:\Users` is not the
 /// same on two machines. It uses the same two interfaces the reading does, from the other end.
 #[cfg(all(test, windows))]
-pub(crate) fn write_shortcut(at: &Path, target: &Path) -> bool {
+pub(crate) fn write_shortcut(at: &Path, target: &Path, arguments: &str) -> bool {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::{Interface, PCWSTR};
     use windows::Win32::System::Com::{CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER};
     use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
 
-    fn made(at: &[u16], target: &[u16]) -> Option<()> {
-        // SAFETY: both slices are NUL-terminated locals of the caller, alive for the calls.
+    fn made(at: &[u16], target: &[u16], arguments: &[u16]) -> Option<()> {
+        // SAFETY: every slice is a NUL-terminated local of the caller, alive for the calls.
         unsafe {
             let link: IShellLinkW =
                 CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
             link.SetPath(PCWSTR(target.as_ptr())).ok()?;
+            // Set unconditionally: an empty command line is what a shortcut without one has,
+            // and the call is the same either way.
+            link.SetArguments(PCWSTR(arguments.as_ptr())).ok()?;
             let file: IPersistFile = link.cast().ok()?;
             file.Save(PCWSTR(at.as_ptr()), true).ok()?;
         }
@@ -302,7 +354,8 @@ pub(crate) fn write_shortcut(at: &Path, target: &Path) -> bool {
     let wide = |path: &Path| -> Vec<u16> {
         path.as_os_str().encode_wide().chain(Some(0)).collect()
     };
-    made(&wide(at), &wide(target)).is_some()
+    let argv: Vec<u16> = arguments.encode_utf16().chain(Some(0)).collect();
+    made(&wide(at), &wide(target), &argv).is_some()
 }
 
 #[cfg(test)]
@@ -343,7 +396,7 @@ mod tests {
         let to_folder = root.join("folder.lnk");
         let to_file = root.join("file.lnk");
         assert!(
-            write_shortcut(&to_folder, &folder) && write_shortcut(&to_file, &file),
+            write_shortcut(&to_folder, &folder, "") && write_shortcut(&to_file, &file, "/x \"a b\""),
             "the shell would not write a shortcut here"
         );
 
@@ -357,11 +410,22 @@ mod tests {
             None,
             "a shortcut to a file is the shell's business, not a place to navigate to"
         );
-        // And the display half agrees about where both of them point.
+        // And the display half agrees about where both of them point — and says what the
+        // shortcut runs it with, which is the difference between two `.lnk`s to the same
+        // program that do different things.
+        let shown = shortcut_target(&to_file).expect("a shortcut to a file has a target");
+        assert_eq!(shown.path, file.to_string_lossy());
+        assert_eq!(shown.arguments, "/x \"a b\"");
         assert_eq!(
-            shortcut_target(&to_file).as_deref(),
-            Some(file.to_string_lossy().as_ref())
+            shown.line(),
+            format!("{} /x \"a b\"", file.to_string_lossy()),
+            "the Name column's dimmed half is the target and the command line, in that order"
         );
+        // The one with nothing to run says so with an empty string rather than with a space at
+        // the end of its line.
+        let plain = shortcut_target(&to_folder).expect("a shortcut to a folder has a target");
+        assert_eq!(plain.arguments, "");
+        assert_eq!(plain.line(), folder.to_string_lossy());
 
         // Nothing that is not a shortcut costs a COM object, which is what the extension test
         // in `folder_target` is for.
@@ -397,10 +461,11 @@ mod tests {
         }
         let got = reparse_target(&link).expect("a symlink has a target");
         assert_eq!(
-            got,
+            got.path,
             target.to_string_lossy(),
             "the target came back as something else"
         );
+        assert_eq!(got.arguments, "", "a place does not run anything");
         // And the enumeration agrees that the row is one, which is what asks the question.
         let dir = crate::fs::scan::scan(&root);
         let row = (0..dir.len())

@@ -47,6 +47,125 @@ fn dragging_a_tab_onto_a_pane_edge_splits_it() {
     assert_eq!(h.app.layout.count(), 2);
 }
 
+/// **While a tab is in the air, everywhere else it could land is on screen too.**
+///
+/// The reason the grey exists: the docking gesture used to be invisible until the pointer
+/// happened to be in the right place, which made it something you had to be told about. What is
+/// pinned here is the wiring and the two rules that keep the two colours meaning two things —
+/// the hints are at the rects `dock` calls the sense areas, they are the grey and not the
+/// accent, and the pane the pointer is actually over wears the accent alone.
+#[test]
+fn dragging_a_tab_shows_where_else_it_could_go() {
+    use crate::dock::{hint_rect, Zone};
+
+    let mut h = Harness::with_panes(2);
+    // A second tab in the pane the drag starts from, so that pane's own edges are somewhere the
+    // tab could go: splitting a pane's *only* tab away from itself would leave an empty pane
+    // behind, and that zone is a no-op with nothing to hint at.
+    h.app.panes[0]
+        .tabs
+        .push(Tab::new(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")));
+    h.settle();
+
+    let source_id = h.app.panes[0].id;
+    let slot = h
+        .app
+        .tab_slots
+        .iter()
+        .find(|s| s.pane == source_id && s.tab == 1)
+        .map(|s| s.rect)
+        .expect("the second tab of the first pane is not on screen");
+    let source = h.pane_rect(0);
+    let over = h.pane_rect(1);
+
+    let done = h.drag_and_hold(slot.center(), over.center());
+    assert!(
+        done.contains(&"BeginTabDrag"),
+        "the drag never started, got {done:?}"
+    );
+
+    // The marks' own wash, asked for by name rather than recomputed: what this pins is that the
+    // marks are that grey and not the accent — the colour that means "release now and it lands
+    // here" — rather than what the figure behind the grey happens to be.
+    let wash = crate::ui::hint_wash(&h.app.theme);
+    let painted = h.rects();
+    let hinted = |rect: Rect| {
+        painted
+            .iter()
+            .filter(|(at, _, _)| at.min.distance(rect.min) < 0.5 && at.max.distance(rect.max) < 0.5)
+            .map(|(_, _, fill)| *fill)
+            .collect::<Vec<_>>()
+    };
+
+    for side in [Side::Left, Side::Right, Side::Top, Side::Bottom] {
+        let zone = Zone::Split(side);
+        assert!(
+            hinted(hint_rect(source, zone)).contains(&wash),
+            "nothing grey where the tab could split its own pane, {zone:?}"
+        );
+    }
+    // Not its middle, though: moving a tab into the strip it is already in does nothing, and a
+    // hint over a gesture that does nothing is worse than no hint.
+    assert!(
+        !hinted(hint_rect(source, Zone::Into)).contains(&wash),
+        "the pane the tab came from is offering to take it back"
+    );
+    // **And the pane being docked into keeps its hints too.** They are what a reader is aiming
+    // with: clearing them the moment a target is reached takes the other four places away
+    // exactly while the pointer is moving between them.
+    for zone in Zone::ALL {
+        assert!(
+            hinted(hint_rect(over, zone)).contains(&wash),
+            "the pane under the pointer lost its hints, {zone:?}"
+        );
+    }
+
+    // **Each mark draws what dropping on it does**: a dashed rectangle over the part of the pane
+    // the tab would take — the whole of it for the middle, a half for each of the four. Five
+    // identical squares cannot say that by themselves, and this is the only thing that does.
+    //
+    // Exactly half, and out to the mark's own edges. A diagram inset inside the square, or short of
+    // the middle by the width of a seam, reads as some other fraction and stops being a picture of
+    // "the right-hand side of this pane".
+    let ink = h.app.theme.accent.mark;
+    let segments = h.segments();
+    for zone in Zone::ALL {
+        let mark = hint_rect(over, zone);
+        let want = crate::ui::hint_part(mark, zone);
+        let drawn = segments
+            .iter()
+            .filter(|([a, b], colour)| *colour == ink && mark.contains(*a) && mark.contains(*b))
+            .fold(None, |union: Option<Rect>, ([a, b], _)| {
+                let dash = Rect::from_two_pos(*a, *b);
+                Some(union.map_or(dash, |all| all.union(dash)))
+            })
+            .unwrap_or_else(|| panic!("the {zone:?} mark has no diagram drawn in it"));
+        assert!(
+            drawn.min.distance(want.min) < 0.6 && drawn.max.distance(want.max) < 0.6,
+            "the {zone:?} mark draws {drawn:?}, which is not the {zone:?} of its pane at {want:?}"
+        );
+        // And it is filled, not just outlined: the mark is a miniature of the preview, so the part
+        // wears the accent inside the accent edge exactly as the full-size one does.
+        assert!(
+            hinted(want).contains(&crate::ui::hint_fill(&h.app.theme)),
+            "the {zone:?} mark's part is not filled with the accent"
+        );
+    }
+    // The accent goes over the top of them, so what says *this one* is still the only blue on
+    // screen: the whole pane, because the pointer is in its middle. `azur`'s own figure for the
+    // wash, the same way the grey above is `drop_hint`'s.
+    let accent = h.app.theme.accent.default;
+    let previewed = egui::Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 40);
+    assert!(
+        painted
+            .iter()
+            .any(|(at, _, fill)| *fill == previewed
+                && at.min.distance(over.min) < 0.5
+                && at.max.distance(over.max) < 0.5),
+        "the pane under the pointer is not previewed in the accent"
+    );
+}
+
 #[test]
 fn a_pane_stacked_below_another_gets_a_reachable_strip_of_its_own() {
     let mut h = Harness::new();

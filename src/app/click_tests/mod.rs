@@ -193,6 +193,31 @@ impl Harness {
         out
     }
 
+    /// Every straight line the last frame drew, as `(the two ends, its colour)`.
+    ///
+    /// [`Self::rects`] for the things painted as strokes rather than as shapes. A dashed outline
+    /// is a run of these — one segment per dash — which is why a test asks for the union of the
+    /// ones inside a rect rather than for a single line.
+    #[allow(dead_code)]
+    fn segments(&self) -> Vec<([Pos2; 2], egui::Color32)> {
+        fn walk(shape: &egui::Shape, into: &mut Vec<([Pos2; 2], egui::Color32)>) {
+            match shape {
+                egui::Shape::LineSegment { points, stroke } => into.push((*points, stroke.color)),
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        walk(shape, into);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for shape in &self.shapes {
+            walk(shape, &mut out);
+        }
+        out
+    }
+
     /// Where the last frame put each run of text, as `(top-left, the string)`.
     ///
     /// The counterpart to [`Self::rects`], and what lets a test assert that a word is in the

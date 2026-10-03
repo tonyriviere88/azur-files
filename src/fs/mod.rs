@@ -173,8 +173,12 @@ fn expand(text: &str) -> String {
 /// Split a path into the segments a breadcrumb shows, each with the path that
 /// reaching it navigates to.
 ///
-/// The first segment is always "This PC", so a breadcrumb is a route from the
-/// machine rather than from an arbitrary root.
+/// The first segment is always "This PC", so this is a route from the machine rather than from
+/// an arbitrary root — which is what makes it the walk [`crate::pane::Tab::go_to`] asks for the
+/// child to reveal on arrival, where a raw component walk has nothing above `C:`.
+///
+/// The bar itself does not *draw* that first segment unless it is the folder on show; see
+/// [`crate::ui::breadcrumb::segments`].
 pub fn breadcrumb_segments(path: &Path) -> Vec<(String, PathBuf)> {
     let mut out = vec![("This PC".to_owned(), PathBuf::new())];
     if path.as_os_str().is_empty() {

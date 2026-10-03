@@ -965,14 +965,35 @@ pub fn resolve_drag(
     // function runs, and a layer is ordered by rank rather than by when it was
     // added to.
     let painter = ctx.layer_painter(LayerId::new(Order::Foreground, Id::new("yafe-dock-hint")));
+
+    // ---- Where it could go -----------------------------------------------
+    //
+    // A compass of five in every pane that would take the tab, in grey. Without it the gesture is
+    // invisible until the pointer happens to be in the right place: a drag with nothing under it
+    // looked like a drag that was not going to work.
+    //
+    // **It stays up once a target is reached**, including the mark the accent is about to cover.
+    // Clearing the marks of the pane being dropped into meant the compass vanished exactly when
+    // it was being used, and a reader moving between the five places lost the other four. The
+    // accent goes on top, so what says "here" is still the only blue on screen.
+    for pane in panes {
+        for zone in Zone::ALL {
+            if !accepts(pane, panes, state, zone) {
+                continue;
+            }
+            crate::ui::drop_hint(&painter, dock::hint_rect(pane.rect, zone), zone, t);
+        }
+    }
+
+    // And where it *would* go if the button came up now, over the top of the grey.
     match target {
         Drop::Split { pane, side } => {
-            if let Some(rect) = panes.iter().find(|p| p.id == pane).map(|p| p.rect) {
+            if let Some(rect) = pane_rect(panes, pane) {
                 crate::ui::drop_preview(&painter, dock::preview_rect(rect, Zone::Split(side)), t);
             }
         }
         Drop::Into { pane } => {
-            if let Some(rect) = panes.iter().find(|p| p.id == pane).map(|p| p.rect) {
+            if let Some(rect) = pane_rect(panes, pane) {
                 crate::ui::drop_preview(&painter, rect, t);
             }
         }
@@ -1057,26 +1078,43 @@ fn drop_target(pointer: Pos2, slots: &[Slot], panes: &[Pane], state: &TabDrag) -
     // Over the panes: the edges split, the middle moves.
     for pane in panes {
         if pane.rect.contains(pointer) {
-            return match dock::zone_at(pane.rect, pointer) {
-                Zone::Split(side) => {
-                    // Splitting a single-tab pane away from itself would leave an
-                    // empty pane behind, so that gesture is a no-op.
-                    let only_tab = panes
-                        .iter()
-                        .find(|p| p.id == state.pane)
-                        .is_some_and(|p| p.tabs.len() == 1);
-                    if pane.id == state.pane && only_tab {
-                        Drop::Nowhere
-                    } else {
-                        Drop::Split { pane: pane.id, side }
-                    }
-                }
-                Zone::Into if pane.id == state.pane => Drop::Nowhere,
+            let zone = dock::zone_at(pane.rect, pointer);
+            if !accepts(pane, panes, state, zone) {
+                return Drop::Nowhere;
+            }
+            return match zone {
+                Zone::Split(side) => Drop::Split { pane: pane.id, side },
                 Zone::Into => Drop::Into { pane: pane.id },
             };
         }
     }
     Drop::Nowhere
+}
+
+/// Whether dropping the dragged tab in this zone of this pane would do anything.
+///
+/// Both no-ops are about the pane the tab came *from*: moving it into the strip it is already
+/// in, and splitting a pane off itself when that tab is all the pane holds — which would leave
+/// an empty pane behind.
+///
+/// Asked by [`drop_target`] of the one zone the pointer is in, and by the hints of all of them,
+/// so a grey rect is never drawn where a release would do nothing.
+fn accepts(pane: &Pane, panes: &[Pane], state: &TabDrag, zone: Zone) -> bool {
+    if pane.id != state.pane {
+        return true;
+    }
+    match zone {
+        Zone::Into => false,
+        Zone::Split(_) => panes
+            .iter()
+            .find(|p| p.id == state.pane)
+            .is_some_and(|p| p.tabs.len() > 1),
+    }
+}
+
+/// Where a pane is this frame, by id.
+fn pane_rect(panes: &[Pane], pane: PaneId) -> Option<Rect> {
+    panes.iter().find(|p| p.id == pane).map(|p| p.rect)
 }
 
 /// Where the insertion caret goes for a strip drop, and how tall to draw it.

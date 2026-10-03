@@ -339,6 +339,115 @@ fn a_row_says_what_it_is_when_the_pointer_rests_on_it() {
     );
 }
 
+/// **A shortcut says where it points and what it runs it with — in the row, and in the tooltip.**
+///
+/// Two facts and two places for them. The Name column has one line to work in, so it runs the
+/// target and the command line together after the name, dimmed; the tooltip has room to give each
+/// a labelled line of its own, and it is where the *whole* target lives — the dimmed half of a
+/// Name cell is the first thing that cell gives up when the column is narrow, and it is elided
+/// from the front, which is exactly the case where the rest of the path is what was wanted.
+///
+/// Skipped rather than failed where the shell will not write a `.lnk`, the same as the other tests
+/// that need a real one: no shortcut is not a broken tooltip.
+#[test]
+#[cfg(windows)]
+fn a_shortcut_row_says_where_it_points_and_what_it_runs() {
+    let root = crate::sandbox::dir("tip-lnk");
+    crate::sandbox::remove(&root);
+    std::fs::create_dir_all(&root).expect("sandbox");
+    let target = root.join("target.txt");
+    std::fs::write(&target, b"x").expect("a file to point at");
+    let link = root.join("shortcut.lnk");
+    let arguments = "/quiet \"two words\"";
+    if !crate::shell::links::write_shortcut(&link, &target, arguments) {
+        eprintln!("the shell would not write a shortcut here; skipping");
+        crate::sandbox::remove(&root);
+        return;
+    }
+
+    let mut h = Harness::new();
+    let pane = h.app.panes[0].id;
+    h.app.perform(
+        &h.ctx.clone(),
+        Action::Navigate {
+            pane,
+            path: root.clone(),
+        },
+    );
+    h.settle();
+
+    let row = (0..h.tab(0).order.len())
+        .find(|&at| {
+            let tab = h.tab(0);
+            tab.entry_at(at)
+                .zip(tab.dir.as_ref())
+                .is_some_and(|(entry, dir)| dir.leaf(entry) == "shortcut.lnk")
+        })
+        .expect("the shortcut is not in its own folder's listing");
+    let over = h.row_center(0, row);
+
+    // The target is read on a worker — a `.lnk` means COM, and one pointing at an unreachable
+    // share is the classic Explorer hang — so the row asks on the frame it is drawn and the
+    // answer lands a frame or two later. Frames are free here; the wait is for another thread.
+    for _ in 0..400 {
+        h.frame(vec![Event::PointerMoved(over)]);
+        if h.tab(0).links.values().any(|target| target.is_some()) {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    assert!(
+        h.tab(0).links.values().any(|target| target.is_some()),
+        "the shortcut was never resolved, so there is nothing for either half of this to show"
+    );
+
+    // The row's own dimmed half: the target *and* the command line, which is what makes two
+    // shortcuts to one program readable as two different things.
+    //
+    // The middle of it is not asserted, because the path is elided from the front to fit the
+    // column — which is the behaviour, and the reason the tooltip below carries the whole of it.
+    // What is asserted is the shape: the name, then the target, then what it is run with.
+    let shown: Vec<String> = h.texts().into_iter().map(|(_, text)| text).collect();
+    let tail = format!("tip-lnk\\target.txt {arguments}");
+    assert!(
+        shown
+            .iter()
+            .any(|text| text.starts_with("shortcut.lnk > ") && text.ends_with(&tail)),
+        "the Name cell does not read `shortcut.lnk > …{tail}`: {shown:?}"
+    );
+
+    // And the tooltip, which egui holds back until the pointer has come to rest.
+    for _ in 0..40 {
+        h.frame(Vec::new());
+    }
+    let frame = h.tooltip_rect().expect("the tooltip is up over the shortcut");
+    let painted: Vec<(Pos2, String)> = h
+        .texts()
+        .into_iter()
+        .filter(|(at, _)| frame.contains(*at))
+        .collect();
+    let lines: Vec<String> = painted.iter().map(|(_, text)| text.clone()).collect();
+    let value_of = |key: &str| -> Option<String> {
+        let (at, _) = painted.iter().find(|(_, text)| text == key)?;
+        painted
+            .iter()
+            .filter(|(pos, _)| (pos.y - at.y).abs() < 1.0 && pos.x > at.x)
+            .min_by(|(a, _), (b, _)| a.x.total_cmp(&b.x))
+            .map(|(_, text)| text.clone())
+    };
+    assert_eq!(
+        value_of("Target").as_deref(),
+        Some(target.to_string_lossy().as_ref()),
+        "the tooltip has no `Target` line, or it is the wrong path: {lines:?}"
+    );
+    assert_eq!(
+        value_of("Arguments").as_deref(),
+        Some(arguments),
+        "the command line is its own line, not the tail of the path: {lines:?}"
+    );
+    crate::sandbox::remove(&root);
+}
+
 /// The listing keeps three rows of nothing under it, in a folder of any size.
 ///
 /// The folder's own menu — the one with `New` on it — is what you get by right-clicking a

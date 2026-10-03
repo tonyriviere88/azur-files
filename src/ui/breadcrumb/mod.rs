@@ -5,7 +5,10 @@
 //! - Every **segment** is a button that goes there.
 //! - Every **chevron** between segments opens that folder's subfolders, so you can
 //!   step sideways into a sibling without going up first.
-//! - The **leading chevron** lists the drives.
+//! - The **leading chevron** lists the drives. It is This PC's chevron, and it is all of This PC
+//!   that the bar draws: a segment saying so in front of every path on the machine says nothing a
+//!   drive letter does not, and clicking it did nothing this chevron does not. It appears as a
+//!   segment only when it is the folder on show, because the bar always names that one.
 //! - When the path is too long to fit, the leading segments collapse into a `…`
 //!   that opens them as a menu — the current folder is never the part that
 //!   disappears.

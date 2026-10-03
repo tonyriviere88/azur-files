@@ -619,7 +619,7 @@ fn the_shell_s_open_cut_copy_and_paste_act_in_this_explorer() {
     {
         let link = dir.join("to-inner.lnk");
         assert!(
-            crate::shell::links::write_shortcut(&link, &sub),
+            crate::shell::links::write_shortcut(&link, &sub, ""),
             "could not write the shortcut this case is about"
         );
         match ours(vec![link.clone()], "open").as_slice() {

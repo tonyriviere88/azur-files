@@ -56,6 +56,18 @@ pub enum Zone {
     Split(Side),
 }
 
+impl Zone {
+    /// Every zone a pane has, which is what a drag draws its hints for. The centre first,
+    /// because it is the one that means "leave the layout alone".
+    pub const ALL: [Zone; 5] = [
+        Zone::Into,
+        Zone::Split(Side::Left),
+        Zone::Split(Side::Right),
+        Zone::Split(Side::Top),
+        Zone::Split(Side::Bottom),
+    ];
+}
+
 impl Node {
     /// Divide `rect` up, collecting where each pane goes and where each divider is.
     pub fn layout(&self, rect: Rect, panes: &mut Vec<(PaneId, Rect)>, splitters: &mut Vec<Splitter>) {
@@ -341,39 +353,96 @@ impl Node {
 pub const RATIO_MIN: f32 = 0.12;
 pub const RATIO_MAX: f32 = 0.88;
 
+/// The air between the middle mark and the four around it, as a share of one mark's side.
+///
+/// **This is what sizes "into this pane", not just what keeps the marks apart.** [`zone_at`] takes
+/// the nearest mark, so the region that reaches the middle one is its own square plus half of this
+/// in every direction — the boundary sits midway across the air. At the six flat points this used
+/// to be, moving a tab into another pane meant aiming at a square with three points of margin
+/// round it, in a pane four hundred wide, with a split either side of that. Half a mark of air
+/// makes the middle a target rather than a bullseye.
+///
+/// A share of the mark rather than a figure of its own, so one number governs the whole compass
+/// and a pane too small for the full size loses its air in the same proportion as its marks. It
+/// also puts the four outer marks nearer the edges they stand for, which is where a reader looks
+/// for them.
+const COMPASS_AIR: f32 = 0.5;
+
+/// The compass's two measures in a pane of any shape: the side of one mark, and the air around the
+/// middle one.
+///
+/// **All five marks are this one square.** They are read together — five marks arranged in a plus,
+/// saying "here are the five places" — and five rectangles of five different proportions is a
+/// diagram of nothing. It was one, until the four outer marks ran out to the pane's edges: that
+/// made each of them as long as the pane happened to be in that direction, so a wide pane drew two
+/// long slabs either side of two stubs.
+///
+/// Off the *smaller* extent, because the whole figure is `3 × side + 2 × air` in both directions
+/// and has to fit inside the pane either way. Clamped: a quarter of a 2000-point pane is a
+/// 500-point square, which is a wall rather than a mark, and a quarter of a 90-point one is too
+/// small to aim at. The last term is the fit, and it is what a pane too small for even the floor
+/// gives way by — never to nothing, because the air is a share of what is left.
+fn compass(pane: Rect) -> (f32, f32) {
+    let extent = pane.width().min(pane.height());
+    let side = (extent * 0.26)
+        .clamp(24.0, 88.0)
+        .min(extent / (3.0 + 2.0 * COMPASS_AIR));
+    (side, side * COMPASS_AIR)
+}
+
+/// **The mark a zone is drawn as, and the seed [`zone_at`] measures against.**
+///
+/// Five equal squares in a plus, centred in the pane: the middle one for dropping *into* it, and
+/// one out towards each edge for splitting. Drawn exactly as returned — what you see is what you
+/// aim at.
+///
+/// It is not what you *get*, and the difference is the point. [`preview_rect`] is the result —
+/// half the pane for a split — and marks the size of a result could not be the marks: two halves
+/// of one pane overlap across the whole middle of it, so every point would be asking for two
+/// things at once, and a hint whose area overlaps its neighbour's is a hint that cannot say which
+/// one it is.
+///
+/// The marks are also smaller than the region that *reaches* each of them — see [`zone_at`], which
+/// takes the nearest. That is the forgiving direction to be wrong in: a square you have to land
+/// inside would be a square you miss, and it would take "throw the tab at the pane's right-hand
+/// edge" away, which is the gesture people arrive with.
+pub fn hint_rect(pane: Rect, zone: Zone) -> Rect {
+    let (side, air) = compass(pane);
+    let step = side + air;
+    let middle = Rect::from_center_size(pane.center(), vec2(side, side));
+    let along = |dx: f32, dy: f32| middle.translate(vec2(dx * step, dy * step));
+    match zone {
+        Zone::Into => middle,
+        Zone::Split(Side::Left) => along(-1.0, 0.0),
+        Zone::Split(Side::Right) => along(1.0, 0.0),
+        Zone::Split(Side::Top) => along(0.0, -1.0),
+        Zone::Split(Side::Bottom) => along(0.0, 1.0),
+    }
+}
+
 /// Which part of a pane the pointer is over, for a tab being dragged.
 ///
-/// The edge bands are a fraction of the pane rather than a fixed size, so the
-/// gesture feels the same in a narrow pane as in a wide one — but clamped, because
-/// a 30% band on a 2000-pixel pane would mean the centre is unreachable, and a 30%
-/// band on a 200-pixel one would be too small to hit.
+/// **The nearest mark wins**, measured to [`hint_rect`] and zero once inside it. So the marks are
+/// what the pointer is aimed at while the whole pane stays live: the left-hand edge, and the
+/// corners either side of it, are all nearer the left mark than anything else, which is what keeps
+/// the throw-it-at-the-edge gesture working with a compass small enough to look like one.
+///
+/// The other side of that is what [`COMPASS_AIR`] is for: every boundary sits midway between two
+/// marks, so how much of the pane means "into it" is decided by how far the four are pushed off
+/// the middle one.
+///
+/// A partition, so nothing overlaps and nothing is dead. Where two marks are exactly equidistant
+/// the earlier one in [`Zone::ALL`] takes it, which puts the centre — the answer that leaves the
+/// layout alone — ahead of a split, and settles the diagonals of a square pane on the left and
+/// right rather than on nothing.
 pub fn zone_at(pane: Rect, pointer: Pos2) -> Zone {
-    let band = |extent: f32| (extent * 0.30).clamp(28.0, 140.0);
-    let (bx, by) = (band(pane.width()), band(pane.height()));
-
-    let from_left = pointer.x - pane.left();
-    let from_right = pane.right() - pointer.x;
-    let from_top = pointer.y - pane.top();
-    let from_bottom = pane.bottom() - pointer.y;
-
-    // Nearest edge wins, so the corners resolve to whichever side the pointer is
-    // actually closer to instead of to whichever test ran first.
-    let mut best: Option<(f32, Side)> = None;
-    for (distance, limit, side) in [
-        (from_left, bx, Side::Left),
-        (from_right, bx, Side::Right),
-        (from_top, by, Side::Top),
-        (from_bottom, by, Side::Bottom),
-    ] {
-        if distance < limit && best.is_none_or(|(d, _)| distance < d) {
-            best = Some((distance, side));
-        }
-    }
-
-    match best {
-        Some((_, side)) => Zone::Split(side),
-        None => Zone::Into,
-    }
+    Zone::ALL
+        .into_iter()
+        .min_by(|&a, &b| {
+            let reach = |zone| hint_rect(pane, zone).distance_sq_to_pos(pointer);
+            reach(a).total_cmp(&reach(b))
+        })
+        .unwrap_or(Zone::Into)
 }
 
 /// The rect a drop preview should highlight.

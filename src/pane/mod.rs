@@ -407,17 +407,18 @@ pub struct Tab {
     /// four bytes per row in a `Vec` the tab owns: sized when the listing lands, dropped when
     /// the tab moves. Leave the folder and every byte of it goes with it.
     pub file_icons: Vec<i32>,
-    /// Where a shortcut row points, by entry index — see [`crate::shell::links`].
+    /// Where a shortcut row points, and what it runs it with, by entry index — see
+    /// [`crate::shell::links`].
     ///
     /// A map rather than a column, because unlike an icon this is only ever wanted for a
-    /// handful of rows: a `.lnk` or a reparse point. A `Vec` would be an `Option<String>` per
+    /// handful of rows: a `.lnk` or a reparse point. A `Vec` would be an `Option<Target>` per
     /// row, which on a flattened tree of 200,000 is megabytes to say "not a shortcut" 199,990
     /// times.
     ///
     /// **A key that is present means asked.** `None` is an answer as much as `Some` is — an
     /// unreadable shortcut, or one pointing at something with no path — and both stop the row
     /// asking again. Dropped with the folder, exactly like [`Tab::file_icons`].
-    pub links: std::collections::HashMap<u32, Option<String>>,
+    pub links: std::collections::HashMap<u32, Option<crate::shell::links::Target>>,
 
     /// What git says about this folder, once it has been asked.
     ///

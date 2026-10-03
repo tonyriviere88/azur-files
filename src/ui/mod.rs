@@ -494,6 +494,146 @@ pub fn drop_preview(painter: &Painter, rect: Rect, t: &Theme) {
     azur_egui_theme::desktop::drop_target(painter, rect, t)
 }
 
+/// The grey a drop mark is filled with, over the opaque base it is laid on.
+///
+/// `text-secondary`, translucent: a mid grey in *both* themes — light over the dark theme's
+/// surfaces, dark over the light theme's — so a mark reads the same way round either way, exactly
+/// as the accent wash does.
+///
+/// **On a surface rather than on the listing**, which is the correction. A translucent tint alone
+/// was faint enough that the rows underneath read straight through the mark and crossed the dashed
+/// diagram inside it with `File folder`, twice. A mark with a drawing in it has to be a surface, so
+/// [`drop_hint`] lays `background-layer-alt` — what a menu or a tooltip is made of, this window's
+/// answer to "a small thing floating over the content" — and puts this on top of it to lift it off
+/// the pane it is over.
+///
+/// Public so a test can name the colour it is looking for without knowing the figure.
+pub fn hint_wash(t: &Theme) -> Color32 {
+    let grey = t.text.secondary;
+    Color32::from_rgba_unmultiplied(grey.r(), grey.g(), grey.b(), 56)
+}
+
+/// The accent wash inside a drop mark: the part of it a drop would take, filled.
+///
+/// `accent-default` — the accent as a *surface*, which is what a filled region is — translucent
+/// over the mark's grey. Stronger than [`drop_preview`]'s wash, because it is laid on that grey
+/// rather than on a listing: the same figure that tints a whole pane went to almost nothing on a
+/// mid grey plate. Still a wash and not a solid, so the dashed edge over it stays an edge in the
+/// light theme, where the accent's ink and surface rungs are one value.
+///
+/// Public so a test can name the colour without knowing the figure.
+pub fn hint_fill(t: &Theme) -> Color32 {
+    let accent = t.accent.default;
+    Color32::from_rgba_unmultiplied(accent.r(), accent.g(), accent.b(), 110)
+}
+
+/// The part of a drop mark that dropping there would take: **the whole square, or exactly half of
+/// it.**
+///
+/// The mark is the pane in miniature, so the diagram inside it has to be the miniature of the
+/// result — and a half is a half. Anything short of the mark's own edges reads as some *other*
+/// fraction and stops being a diagram of "the right-hand side of this pane".
+///
+/// Which is why this is not [`crate::dock::preview_rect`] of the mark, tempting as the reuse was:
+/// that one takes the seam between two panes out of the middle, which is right at full size and a
+/// point of missing edge at this one.
+pub fn hint_part(mark: Rect, zone: crate::dock::Zone) -> Rect {
+    use crate::pane::Side;
+    let middle = mark.center();
+    match zone {
+        crate::dock::Zone::Into => mark,
+        crate::dock::Zone::Split(Side::Left) => {
+            Rect::from_min_max(mark.min, pos2(middle.x, mark.max.y))
+        }
+        crate::dock::Zone::Split(Side::Right) => {
+            Rect::from_min_max(pos2(middle.x, mark.min.y), mark.max)
+        }
+        crate::dock::Zone::Split(Side::Top) => {
+            Rect::from_min_max(mark.min, pos2(mark.max.x, middle.y))
+        }
+        crate::dock::Zone::Split(Side::Bottom) => {
+            Rect::from_min_max(pos2(mark.min.x, middle.y), mark.max)
+        }
+    }
+}
+
+/// **One place the dragged tab *could* go**: the quiet twin of [`drop_preview`].
+///
+/// Drawn once per zone of every pane that would take the tab — five equal squares in a plus, see
+/// `dock::hint_rect` — so the arrangement on offer is on screen instead of being something to find
+/// by sweeping the pointer around the window and watching for the blue. The docking gesture was
+/// the one thing in this program you had to be told about.
+///
+/// **Grey, because the blue already means something else.** [`drop_preview`]'s accent says
+/// "release now and it lands *here*" — one rect at a time, and the only one the pointer is in.
+/// If possibility wore the same colour there would be five of them and no way to tell which was
+/// the answer. Two colours, two facts.
+///
+/// The wash is [`hint_wash`]. One point of outline against the preview's two, because five of these
+/// are on screen per pane and this is the quieter mark of the pair — but `stroke-strong` rather than
+/// `stroke-control`, which is a rung that disappeared over a listing: the outline is what gives each
+/// square its edge.
+///
+/// Square, per `azur::desktop::structural_radius`, and for the same reason the preview is: it
+/// shows where a rectangle would go, and a rounded corner only blurs where the edge is.
+///
+/// **Inside it, what dropping there does**: a dashed rectangle over [`hint_part`] — the whole
+/// square for the middle mark, exactly half of it for each of the four around it. Five identical
+/// squares are five identical squares, and their arrangement is the only thing saying which is
+/// which; the diagram is what makes each one legible on its own, before the pointer has been
+/// anywhere near it. The mark is the pane, and the dashes are the half of it this tab would take.
+///
+/// **Filled and outlined, which makes each mark a miniature of [`drop_preview`]** — the same accent
+/// wash inside the same accent edge, so what a mark promises and what the pane it is in shows a
+/// moment later are visibly the same mark at two sizes. The dashes are the whole of the difference
+/// between them: dashed is *would*, solid is *will*.
+///
+/// The fill is translucent rather than solid, and that is what keeps the light theme working: there
+/// `accent-mark` and `accent-default` are one value — see `azur::theme::Accents::mark` — so a
+/// dashed edge over a solid fill of the accent would be a dashed line drawn in the colour it is
+/// drawn on. Over a wash it still reads as an edge in both themes.
+///
+/// The edge is `accent-mark` and not `accent-default`, because it is a line on a surface rather
+/// than a surface: the default rung is a fill dark enough to carry white text, which as a hairline
+/// on a dark listing is barely there. Two points of it, which is [`drop_preview`]'s width — the
+/// accent saying "this part of this pane" is one statement whether it is drawn across a whole pane
+/// or inside an eighty-point mark, so it is drawn at one weight. At a single point the dashes read
+/// as a dotted guide laid on the mark rather than as the thing the mark is about.
+pub fn drop_hint(painter: &Painter, mark: Rect, zone: crate::dock::Zone, t: &Theme) {
+    let radius = azur_egui_theme::desktop::structural_radius();
+    // Opaque first, then the grey on top of it: see [`hint_wash`] for why a mark with a drawing
+    // in it cannot be a tint on the listing.
+    painter.rect_filled(mark, radius, t.bg.layer_alt);
+    painter.rect_filled(mark, radius, hint_wash(t));
+    painter.rect_stroke(
+        mark,
+        radius,
+        Stroke::new(1.0, t.stroke.strong),
+        egui::StrokeKind::Inside,
+    );
+
+    let part = hint_part(mark, zone);
+    painter.rect_filled(part, radius, hint_fill(t));
+    // Long enough to read as a dash rather than as a dotted line, off the mark so it does not
+    // become a solid line on a small pane's smaller marks.
+    let dash = (mark.width().min(mark.height()) * 0.11).clamp(2.0, 7.0);
+    // Closed, and starting at each corner: `dashed_line` lays its first dash from the start of
+    // every run, so going round the four sides in turn puts ink in all four corners.
+    let outline = [
+        part.left_top(),
+        part.right_top(),
+        part.right_bottom(),
+        part.left_bottom(),
+        part.left_top(),
+    ];
+    painter.extend(egui::Shape::dashed_line(
+        &outline,
+        Stroke::new(2.0, t.accent.mark),
+        dash,
+        dash * 0.7,
+    ));
+}
+
 /// Centre a single line in a rect — for the empty and error states.
 pub fn text_center(painter: &Painter, rect: Rect, font: FontId, color: Color32, text: &str) {
     painter.text(rect.center(), Align2::CENTER_CENTER, text, font, color);

@@ -75,6 +75,21 @@ pub(crate) fn segments(
     let center = rect.center().y;
     let deepest = crumbs.len() - 1;
     let active = active_index(&crumbs, &tab.path);
+    // **Where the trail starts being drawn: past This PC, unless This PC is where we are.**
+    //
+    // Every path on this machine begins with it, so a segment saying so spends the front of the
+    // bar on the one fact that is true of every folder — and the chevron in front of the first
+    // segment already lists the volumes, which is the whole of what clicking This PC was for. A
+    // drive letter says which machine it is on by being a drive letter.
+    //
+    // Kept when it *is* the folder on show, because the bar always names that one: This PC with
+    // an empty trail would otherwise be a bar with nothing on it, and This PC reached by walking
+    // up a deeper trail still has to have somewhere to put the bold.
+    //
+    // Only the drawing changes. [`fs::breadcrumb_segments`] still starts at This PC, because
+    // [`crate::pane::Tab::go_to`] reads the same walk to decide which child to reveal on
+    // arrival — and arriving at This PC has to reveal the drive you came out of.
+    let start = usize::from(active > 0);
 
     // Whether this bar had a dropdown open when the frame began, which is the same question as
     // whether the pointer moving along it should carry that dropdown with it. Read once, before
@@ -117,8 +132,11 @@ pub(crate) fn segments(
     // a convenience and takes whatever room is left over, so a long tail can never push the
     // folder you are actually in off the front of the bar. Whatever does not fit at the
     // right-hand end is simply not drawn — the loop below stops when it runs out of room.
-    let cost: f32 = widths[..=active].iter().sum::<f32>() + (active + 1) as f32 * CHEVRON;
-    let mut first = 0;
+    //
+    // From `start`, so the segment that is not drawn is not paid for either.
+    let cost: f32 =
+        widths[start..=active].iter().sum::<f32>() + (active - start + 1) as f32 * CHEVRON;
+    let mut first = start;
     if cost > rect.width() {
         // Drop from the front until it fits, leaving room for the `…`.
         let mut used = cost + OVERFLOW;
@@ -135,7 +153,7 @@ pub(crate) fn segments(
         return;
     }
 
-    if first > 0 {
+    if first > start {
         let overflow = Rect::from_min_size(
             pos2(x.round(), (center - TOOL_SIZE * 0.5).round()),
             vec2(OVERFLOW, TOOL_SIZE),
@@ -172,7 +190,9 @@ pub(crate) fn segments(
         azur_egui_theme::components::Menu::new(&response)
             .open(&mut open)
             .show(ui.ctx(), |ui| {
-                for (label, path) in crumbs.iter().take(first) {
+                // `start` rather than nothing: what the `…` holds is the part of the *trail*
+                // that did not fit, and This PC is not on the bar to be collapsed into it.
+                for (label, path) in crumbs[start..first].iter() {
                     if ui.add(MenuItem::new(label.clone())).clicked() {
                         out.push(Action::Navigate {
                             pane,
@@ -187,8 +207,9 @@ pub(crate) fn segments(
         x += OVERFLOW;
     }
 
-    // A leading chevron for the very first visible segment, which for a full path
-    // is This PC and so lists the drives.
+    // A leading chevron for the very first visible segment. For a full path that is the drive,
+    // and the chevron in front of it belongs to This PC — so it lists the volumes, which is what
+    // the front of the bar is for now that the segment naming them is gone.
     let mut pending_chevron = Some(if first == 0 {
         PathBuf::new()
     } else {
@@ -196,8 +217,8 @@ pub(crate) fn segments(
     });
 
     // Where the segment before the chevron about to be drawn was, so the two can be filled as
-    // one shape. `None` for the leading chevron, whose segment is in the overflow or is This PC
-    // itself — it is highlighted alone, having nothing to be welded to.
+    // one shape. `None` for the leading chevron, whose segment is in the overflow, is This PC
+    // itself, or was never drawn — it is highlighted alone, having nothing to be welded to.
     let mut previous: Option<Rect> = None;
 
     for (index, (label, path)) in crumbs.iter().enumerate().skip(first) {

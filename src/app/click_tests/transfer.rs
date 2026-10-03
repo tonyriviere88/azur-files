@@ -17,7 +17,7 @@ fn opening_a_folder_shortcut_stays_in_this_window() {
     crate::sandbox::remove(&root);
     std::fs::create_dir_all(&folder).expect("a directory in the temp folder");
     let link = root.join("somewhere.lnk");
-    if !crate::shell::links::write_shortcut(&link, &folder) {
+    if !crate::shell::links::write_shortcut(&link, &folder, "") {
         println!("the shell would not write a shortcut here; skipping");
         crate::sandbox::remove(&root);
         return;

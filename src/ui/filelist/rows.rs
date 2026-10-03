@@ -490,6 +490,10 @@ pub(crate) fn rows(
             // parent is what a flattened listing shows, and it is the answer for every row in
             // one that is not a shortcut.
             //
+            // **With the command line, where there is one.** Two shortcuts to `cmd.exe` with
+            // different arguments are two different things, and a row showing only the target
+            // draws them identically — see [`links::Target::line`].
+            //
             // Asked once per row per view and answered on a worker thread: reading a `.lnk`
             // means COM, and one pointing at a share that is not currently reachable is the
             // classic Explorer hang. Until the answer lands the row draws its name alone, which
@@ -514,8 +518,8 @@ pub(crate) fn rows(
                         // shortcut row on screen is not a cost worth threading a lifetime for.
                         tab.links
                             .get(&row_index)
-                            .and_then(|target| target.clone())
-                            .map(std::borrow::Cow::Owned)
+                            .and_then(|target| target.as_ref())
+                            .map(|target| std::borrow::Cow::Owned(target.line().into_owned()))
                     }
                     None => None,
                 }
@@ -1098,12 +1102,14 @@ pub(crate) fn name_galley(
 /// What a row says about itself when the pointer rests on it, as **key and value**.
 ///
 /// ```text
-/// Name      LgsxItemBuilders.cpp
-/// In        Inspect\Model              ← only in a flattened listing
-/// Type      C++ source
-/// Size      9.38 KB (9,605 bytes)      ← only on a file
-/// Modified  07/08/2026 18:24
-/// Git       Changed on disk            ← only where git has something to say
+/// Name       LgsxItemBuilders.cpp
+/// In         Inspect\Model             ← only in a flattened listing
+/// Target     C:\Windows\System32\cmd.exe   ← only on a shortcut, once it has resolved
+/// Arguments  /k build.bat              ← only on a shortcut that runs something
+/// Type       C++ source
+/// Size       9.38 KB (9,605 bytes)     ← only on a file
+/// Modified   07/08/2026 18:24
+/// Git        Changed on disk           ← only where git has something to say
 /// ```
 ///
 /// **The name is the reason it exists.** The Name column is whatever the other three leave, and on a
@@ -1129,7 +1135,7 @@ pub(crate) fn row_tooltip(
     let dir = tab.dir.as_ref()?;
     let entry_index = tab.entry_at(position)?;
     let entry = dir.entries.get(entry_index)?;
-    let mut about: Vec<(&'static str, String)> = Vec::with_capacity(6);
+    let mut about: Vec<(&'static str, String)> = Vec::with_capacity(8);
 
     // The row's own name and where it is — which for a merged chain of folders is the whole chain and
     // the folder the chain starts in. `chain_split` is the one place that division is made, so the
@@ -1148,6 +1154,30 @@ pub(crate) fn row_tooltip(
     // name, and the first thing that column gives up when it runs out of room.
     if !within.is_empty() {
         about.push(("In", within.to_owned()));
+    }
+
+    // **What a shortcut points at, in full.** The Name column shows this too, but it is the half of
+    // that cell that gets elided from the front the moment the column is narrow — and a target
+    // reading `…\Lang\x.dll` is exactly the case where the whole path is the thing wanted. Here it
+    // wraps instead, in a tooltip that is `TIP_VALUE` wide.
+    //
+    // The command line is its own line rather than run together with the path, because they are two
+    // facts: `Arguments` is what the shortcut's own property sheet calls it, and a path with a
+    // switch on the end of it reads as a longer path. Only the Name column, with one line to work
+    // in, joins them.
+    //
+    // Whatever has already been resolved for the Name column — nothing is read here, so a tooltip
+    // never costs a `.lnk` read, and a row hovered before its answer landed simply has no `Target`
+    // line for the frame or two that takes. The grid never asks, so there it has none at all.
+    if let Some(target) = tab
+        .links
+        .get(&(entry_index as u32))
+        .and_then(|target| target.as_ref())
+    {
+        about.push(("Target", target.path.clone()));
+        if !target.arguments.is_empty() {
+            about.push(("Arguments", target.arguments.clone()));
+        }
     }
 
     scratch.clear();

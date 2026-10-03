@@ -4,9 +4,14 @@
 
 use super::*;
 
-/// The path a `.lnk` stores, and whether the attributes it stores with it say directory.
+/// What a `.lnk` stores: the target, the command line it runs it with, and whether the
+/// attributes stored alongside say directory.
+///
+/// The arguments come from the same COM object the path does, so they are free once it is open —
+/// and they are the difference between two shortcuts to `cmd.exe` that do entirely different
+/// things, which is exactly the case a row showing only the target cannot tell apart.
 #[cfg(windows)]
-pub(super) fn read_shortcut(path: &Path) -> Option<(String, bool)> {
+pub(super) fn read_shortcut(path: &Path) -> Option<Shortcut> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::{Interface, PCWSTR};
     use windows::Win32::Storage::FileSystem::{
@@ -21,25 +26,38 @@ pub(super) fn read_shortcut(path: &Path) -> Option<(String, bool)> {
     // A target longer than `MAX_PATH` is what `SLGP_RAWPATH` can hand back — it is the string
     // the file holds, not a path the API has parsed — so the buffer is not `MAX_PATH`.
     let mut buffer = [0u16; 1024];
+    // And the same again for the command line, which `INFOTIPSIZE` puts at 1024 characters.
+    let mut argv = [0u16; 1024];
     let mut find = WIN32_FIND_DATAW::default();
 
     // SAFETY: every pointer below is to a local that outlives the call, and each call's result
     // is checked before the next one uses what it produced.
-    unsafe {
+    let arguments = unsafe {
         let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
         let file: IPersistFile = link.cast().ok()?;
         file.Load(PCWSTR(wide.as_ptr()), STGM_READ).ok()?;
         link.GetPath(&mut buffer, &mut find, SLGP_RAWPATH.0 as u32).ok()?;
-    }
+        // **Not `?`.** A shortcut with no arguments is the ordinary case and this is the one
+        // call here whose failure is not the read failing: the target is what the row is about,
+        // and losing the whole answer over the command line would be the wrong trade.
+        link.GetArguments(&mut argv).is_ok()
+    };
 
-    let len = buffer.iter().position(|&unit| unit == 0).unwrap_or(0);
+    let text = |units: &[u16]| {
+        let len = units.iter().position(|&unit| unit == 0).unwrap_or(0);
+        String::from_utf16_lossy(&units[..len])
+    };
+    let target = text(&buffer);
     // Empty means the shortcut points at something with no path: the Recycle Bin, Control
     // Panel, a printer. There is nothing useful to show, so the row keeps its name alone.
-    if len == 0 {
+    if target.is_empty() {
         return None;
     }
-    // The attributes the shortcut *stores*, filled in when it was made. Nothing is asked of the
-    // target itself, which is what keeps a shortcut to an unreachable share cheap.
-    let folder = find.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0;
-    Some((String::from_utf16_lossy(&buffer[..len]), folder))
+    Some(Shortcut {
+        target,
+        arguments: if arguments { text(&argv) } else { String::new() },
+        // The attributes the shortcut *stores*, filled in when it was made. Nothing is asked of
+        // the target itself, which is what keeps a shortcut to an unreachable share cheap.
+        folder: find.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0,
+    })
 }

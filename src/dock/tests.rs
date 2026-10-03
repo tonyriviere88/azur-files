@@ -168,13 +168,161 @@ fn the_centre_of_a_pane_is_a_tab_drop() {
     assert_eq!(zone_at(pane, pos2(300.0, 397.0)), Zone::Split(Side::Bottom));
 }
 
+/// A corner is nearer one of the two splits that meet there than it is to the other, and that is
+/// the one it asks for — which is what keeps "throw the tab at that end of the pane" working with
+/// a compass small enough to look like one.
 #[test]
-fn a_corner_resolves_to_the_nearer_edge() {
+fn a_corner_goes_to_the_nearer_mark() {
+    // Wider than it is tall, so the left and right marks are the near ones at every corner.
     let pane = Rect::from_min_size(Pos2::ZERO, vec2(600.0, 400.0));
-    // Closer to the top than to the left.
-    assert_eq!(zone_at(pane, pos2(40.0, 6.0)), Zone::Split(Side::Top));
-    // And the other way round.
-    assert_eq!(zone_at(pane, pos2(6.0, 40.0)), Zone::Split(Side::Left));
+    assert_eq!(zone_at(pane, pos2(6.0, 6.0)), Zone::Split(Side::Left));
+    assert_eq!(zone_at(pane, pos2(6.0, 394.0)), Zone::Split(Side::Left));
+    assert_eq!(zone_at(pane, pos2(594.0, 6.0)), Zone::Split(Side::Right));
+    assert_eq!(zone_at(pane, pos2(594.0, 394.0)), Zone::Split(Side::Right));
+    // And the other way up, where the near ones are top and bottom.
+    let tall = Rect::from_min_size(Pos2::ZERO, vec2(400.0, 600.0));
+    assert_eq!(zone_at(tall, pos2(6.0, 6.0)), Zone::Split(Side::Top));
+    assert_eq!(zone_at(tall, pos2(394.0, 594.0)), Zone::Split(Side::Bottom));
+}
+
+/// **All five marks are the same square, and they sit in a plus around the pane's centre.**
+///
+/// Which is what makes them read as one compass rather than as five rectangles: equal, square,
+/// evenly spaced, symmetric about both axes. It held for the middle alone once and not for the
+/// four around it — they ran out to the pane's edges, so each was as long as the pane happened to
+/// be in that direction and a wide pane drew two slabs either side of two stubs.
+///
+/// The side comes off the pane's smaller extent, so this has to hold on a pane of any shape —
+/// including one more than twice as wide as it is tall, where a square cut from the width would
+/// not fit at all.
+#[test]
+fn the_compass_is_five_equal_squares_in_a_plus() {
+    for size in [
+        vec2(600.0, 400.0),
+        vec2(2000.0, 600.0),
+        vec2(180.0, 90.0),
+        vec2(300.0, 900.0),
+        vec2(400.0, 400.0),
+    ] {
+        let pane = Rect::from_min_size(pos2(40.0, 20.0), size);
+        let middle = hint_rect(pane, Zone::Into);
+        assert_eq!(middle.center(), pane.center(), "the middle is not in the middle");
+        let side = middle.width();
+        for zone in Zone::ALL {
+            let mark = hint_rect(pane, zone);
+            assert!(
+                (mark.width() - side).abs() < 0.01 && (mark.height() - side).abs() < 0.01,
+                "the {zone:?} mark of a {size:?} pane is {}x{}, not the square {side}",
+                mark.width(),
+                mark.height()
+            );
+            assert!(
+                pane.contains_rect(mark),
+                "the {zone:?} mark of a {size:?} pane hangs outside it: {mark:?}"
+            );
+        }
+        // Opposite marks are the same distance out, on the axis they belong to.
+        let (left, right) = (
+            hint_rect(pane, Zone::Split(Side::Left)),
+            hint_rect(pane, Zone::Split(Side::Right)),
+        );
+        let (top, bottom) = (
+            hint_rect(pane, Zone::Split(Side::Top)),
+            hint_rect(pane, Zone::Split(Side::Bottom)),
+        );
+        assert_eq!(left.center().y, middle.center().y);
+        assert_eq!(right.center().y, middle.center().y);
+        assert_eq!(top.center().x, middle.center().x);
+        assert_eq!(bottom.center().x, middle.center().x);
+        let step = right.center().x - middle.center().x;
+        assert!(
+            (middle.center().x - left.center().x - step).abs() < 0.01
+                && (bottom.center().y - middle.center().y - step).abs() < 0.01
+                && (middle.center().y - top.center().y - step).abs() < 0.01,
+            "the four are not evenly spaced around the middle of a {size:?} pane"
+        );
+        // And the air around the middle is a share of a mark, on every side of it: it is what
+        // decides how much of the pane means "into this pane", so it is worth pinning rather
+        // than leaving to whatever the spacing happens to work out as.
+        let air = side * COMPASS_AIR;
+        for (name, got) in [
+            ("left", middle.left() - left.right()),
+            ("right", right.left() - middle.right()),
+            ("top", middle.top() - top.bottom()),
+            ("bottom", bottom.top() - middle.bottom()),
+        ] {
+            assert!(
+                (got - air).abs() < 0.01,
+                "the air on the {name} of the middle of a {size:?} pane is {got}, not {air}"
+            );
+        }
+    }
+}
+
+/// **Moving a tab into another pane does not mean threading a needle.**
+///
+/// What the air around the middle mark buys, written as the gesture rather than as geometry: the
+/// pointer can be well outside the mark it is aiming at and still be asking to drop *into* the
+/// pane. The boundary is midway across the air, which is the rule [`COMPASS_AIR`] is chosen by —
+/// so this is where a smaller gap would show up as "it split when I wanted to move it".
+#[test]
+fn the_middle_reaches_out_across_half_the_air() {
+    let pane = Rect::from_min_size(Pos2::ZERO, vec2(600.0, 400.0));
+    let middle = hint_rect(pane, Zone::Into);
+    let air = middle.width() * COMPASS_AIR;
+    assert!(air > 8.0, "the air is {air}, which is no more room than a hairline");
+
+    let (cx, cy) = (pane.center().x, pane.center().y);
+    // Outside the mark, inside the middle's reach.
+    for at in [
+        pos2(middle.right() + air * 0.4, cy),
+        pos2(middle.left() - air * 0.4, cy),
+        pos2(cx, middle.top() - air * 0.4),
+        pos2(cx, middle.bottom() + air * 0.4),
+    ] {
+        assert_eq!(zone_at(pane, at), Zone::Into, "at {at:?}");
+    }
+    // And past the halfway line it is the split, so the reach is a boundary rather than a
+    // preference: the four are still there to be hit.
+    assert_eq!(
+        zone_at(pane, pos2(middle.right() + air * 0.6, cy)),
+        Zone::Split(Side::Right)
+    );
+    assert_eq!(
+        zone_at(pane, pos2(cx, middle.top() - air * 0.6)),
+        Zone::Split(Side::Top)
+    );
+}
+
+/// **The marks do not overlap, and each is inside what dropping there would give.**
+///
+/// The first half is what makes the compass honest: two marks overlapping would be a point asking
+/// for two things, and one of them would be lying about what a release does there. The second half
+/// is the smaller-than-the-result rule — the mark is where you aim, the preview is what you get.
+#[test]
+fn the_marks_are_disjoint_and_smaller_than_what_they_give() {
+    for size in [vec2(600.0, 400.0), vec2(2000.0, 1200.0), vec2(180.0, 90.0)] {
+        let pane = Rect::from_min_size(pos2(40.0, 20.0), size);
+        for (i, &zone) in Zone::ALL.iter().enumerate() {
+            let mine = hint_rect(pane, zone);
+            assert!(mine.width() > 0.0 && mine.height() > 0.0, "{zone:?} at {size:?}");
+            assert!(
+                preview_rect(pane, zone).contains_rect(mine),
+                "{zone:?} at {size:?} is marked outside what it gives"
+            );
+            for &other in &Zone::ALL[i + 1..] {
+                assert!(
+                    !mine.intersects(hint_rect(pane, other)),
+                    "{zone:?} and {other:?} overlap at {size:?}"
+                );
+            }
+        }
+        // And every zone is reachable at its own mark, which a compass clamped past the pane
+        // would break.
+        for &zone in &Zone::ALL {
+            assert_eq!(zone_at(pane, hint_rect(pane, zone).center()), zone, "{size:?}");
+        }
+    }
 }
 
 #[test]
