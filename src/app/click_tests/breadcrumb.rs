@@ -357,3 +357,85 @@ fn a_field_lights_up_over_all_of_itself() {
         "the field stayed lit with the pointer somewhere else"
     );
 }
+
+/// Where the dropdown of the chevron at `index` ended up, frame and all.
+///
+/// Off the `Area`'s own state rather than out of the shapes, for the reason
+/// [`Harness::tooltip_rect`] gives: the padding and the frame are exactly the part a test about
+/// how *tall* a menu is is asking after, and a shape only knows where its own row went.
+fn chevron_dropdown_rect(h: &Harness, pane: PaneId, index: usize) -> Rect {
+    let popup = Id::new(("crumb-chevron", pane, index)).with("popup");
+    egui::AreaState::load(&h.ctx, popup)
+        .map(|area| area.rect())
+        .unwrap_or_else(|| panic!("the chevron at {index} has no dropdown up"))
+}
+
+/// **A dropdown that opened while the folder was still being read grows to hold it.**
+///
+/// The same lock `path_field::a_dropdown_that_was_short_grows_back` is about, reached from the
+/// other side. An `Area` hands its content *last frame's size* as this frame's room, and a
+/// `ScrollArea` fits itself into whatever room it is given without asking for more — so whatever
+/// the popup measured on the frame it opened is the size it keeps. For the path field the short
+/// first list came from a keystroke; here it comes from the wait: the chevron's folder is read on a
+/// [`crate::loader`] worker, so the frame the popup opens on is `Reading…` and nothing else, and
+/// the six folders that land a frame later then shrink to fit the one row of room left over.
+///
+/// Which is why the loader is emptied of the parent first. With the folder already in its cache the
+/// rows are there on the opening frame, the popup measures the right size, and nothing is proved —
+/// that is exactly why this looked fine everywhere it was tried by hand.
+#[test]
+fn a_chevron_dropdown_that_opened_while_reading_grows_to_its_rows() {
+    const KIDS: usize = 6;
+    let root = crate::sandbox::fresh("chevron-grow");
+    for i in 1..=KIDS {
+        std::fs::create_dir_all(root.join(format!("folder-{i:02}")))
+            .expect("a directory in the sandbox");
+    }
+    let here = root.join("folder-01");
+
+    let mut h = Harness::opening(vec![here.clone()]);
+    let pane = h.app.panes[0].id;
+    let crumbs = crate::fs::breadcrumb_segments(&here);
+    let index = crumbs.len() - 1;
+    assert_eq!(
+        crumbs[index - 1].1, root,
+        "the chevron this presses does not point at the folder the subfolders are in"
+    );
+
+    let y = h.path_bar_y(0);
+    let at = (0..1200)
+        .step_by(2)
+        .map(|x| pos2(x as f32, y))
+        .find(|at| h.hovers(Id::new(("crumb-chevron", pane, index)), *at))
+        .expect("the chevron before the current folder is not reachable");
+
+    // Nothing of the parent left in the loader, so the popup can only open on `Reading…`.
+    h.app.loader.invalidate(&root);
+    h.wait();
+    h.click_at(at);
+    h.frame(Vec::new());
+    let (read, count) = settle_dropdown(&mut h);
+    assert_eq!(read, root, "the dropdown listed the wrong folder");
+    assert_eq!(count, KIDS, "the sandbox folder lost a subfolder");
+
+    // Frames to spare: the area is allowed to take one to catch up with its content, and this is
+    // about the size it settles at rather than about which frame it gets there on.
+    for _ in 0..8 {
+        h.frame(Vec::new());
+    }
+
+    let row = azur::components::menu_item_height();
+    let height = chevron_dropdown_rect(&h, pane, index).height();
+    assert!(
+        height >= KIDS as f32 * row,
+        "the dropdown is {height} tall, which is not room for the {KIDS} rows of {row} it is \
+         listing -- it is still wearing the size it had while the folder was being read"
+    );
+    // And no taller: a menu padded out past its rows is one claiming to hold something it does not.
+    assert!(
+        height < (KIDS + 1) as f32 * row,
+        "the dropdown is {height} tall, which is room for more than the {KIDS} rows it lists"
+    );
+
+    crate::sandbox::remove(&root);
+}
