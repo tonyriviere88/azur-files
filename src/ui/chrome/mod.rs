@@ -541,7 +541,10 @@ pub fn tab_strip(
             plus,
             Id::new(("new-tab", pane.id)),
             &azur_icons::plus,
-            "New tab in this folder",
+            // Its key as well as what it does, which is the one thing the menu under the mark said
+            // and this button did not — and the two are the same command, so they say it the same
+            // way. See `azur_egui_theme::components::shortcut_in` for the bracket going grey.
+            "New tab in this folder (Ctrl+T)",
             true,
             false,
             // The strip it sits in, whether that is the title bar or a band of its own.

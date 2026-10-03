@@ -304,6 +304,55 @@ impl Harness {
         out
     }
 
+    /// Every run of text the last frame painted, split where its **colour** changes, as
+    /// `(the galley's top-left, the run, its colour)`.
+    ///
+    /// [`Self::texts`] hands back a galley at a time, and a galley is not always one colour: a
+    /// two-colour sentence is deliberately *one* galley — it has to sit on one baseline and break
+    /// as one paragraph — so the two halves of `Refresh (F5)` come back from there as the single
+    /// string they were laid out from, with nothing said about the part that is dimmed. The colours
+    /// are in the job the galley was laid out from, one `LayoutSection` per run, which is what this
+    /// reads.
+    ///
+    /// The position is the galley's and not the run's: sections after the first start partway along
+    /// a row, and epaint does not record where. It is enough for what this is for, which is picking
+    /// the runs inside one popover out with `rect.contains` and then asking about their colour.
+    ///
+    /// `PLACEHOLDER` is resolved the way epaint resolves it — an overridden colour wins outright,
+    /// and a section left as the placeholder takes the shape's fallback — so what comes back is what
+    /// the screen got rather than what the job asked for.
+    fn coloured(&self) -> Vec<(Pos2, String, egui::Color32)> {
+        fn walk(shape: &egui::Shape, into: &mut Vec<(Pos2, String, egui::Color32)>) {
+            match shape {
+                egui::Shape::Text(text) => {
+                    let job = &text.galley.job;
+                    for section in &job.sections {
+                        let run = &job.text[section.byte_range.start.0..section.byte_range.end.0];
+                        let colour = match text.override_text_color {
+                            Some(over) => over,
+                            None if section.format.color == egui::Color32::PLACEHOLDER => {
+                                text.fallback_color
+                            }
+                            None => section.format.color,
+                        };
+                        into.push((text.pos, run.to_owned(), colour));
+                    }
+                }
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        walk(shape, into);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = Vec::new();
+        for shape in &self.shapes {
+            walk(shape, &mut out);
+        }
+        out
+    }
+
     /// The text of every run the last frame painted **that did not fit**, as the string it was
     /// asked to draw.
     ///

@@ -286,7 +286,15 @@ fn strip(
         } else {
             &crate::icons::play
         },
-        if playing { "Pause" } else { "Play" },
+        // **`Space` is on both of them**, because it is the same key doing the same toggle — see
+        // [`crate::app::App::video_keys`], where the player that has the keyboard is the one that was
+        // last clicked. A player being pointed at is a player that has been clicked, which is what
+        // makes the tooltip's claim true wherever it is read.
+        if playing {
+            "Pause (Space)"
+        } else {
+            "Play (Space)"
+        },
         true,
         false,
         surface,

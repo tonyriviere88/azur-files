@@ -53,17 +53,18 @@ fn measuring_fills_the_folders_size_cells_and_bars_them() {
 
     // ---- Where the button is -------------------------------------------
     //
-    // On the status line, in the pane's group of switches and **between** the two that were already
-    // there: the view switch changes how every row is drawn, this adds a figure to one column of
-    // them, and the console's opens a band under the pane. Asserted by geometry rather than by
-    // reading the source, because the order of three rects laid out from one running `x` is exactly
-    // the thing a source change can get wrong silently.
+    // On the status line, at the far end of the pane's group of switches: the console's first, then
+    // the view, then this. That order is the order `Ctrl+²`, `Ctrl+1` and `Ctrl+2` are printed in on
+    // the number row, so the run of buttons and the run of keys read the same way — and this one is
+    // last because `Ctrl+2` is the last of the three keys. Asserted by geometry rather than by reading
+    // the source, because the order of three rects laid out from one running `x` is exactly the thing
+    // a source change can get wrong silently.
     let button = rect_of(&h, Id::new(("sizes", pane)));
     let view = rect_of(&h, Id::new(("view-switch", pane)));
     let console = rect_of(&h, Id::new(("console-switch", pane)));
     assert!(
-        view.right() <= button.left() && button.right() <= console.left(),
-        "the measure button is not between the two switches: {view:?}, {button:?}, {console:?}"
+        console.right() <= view.left() && view.right() <= button.left(),
+        "the switches are not in their keys' order: {console:?}, {view:?}, {button:?}"
     );
     assert!(
         (button.center().y - view.center().y).abs() < 0.5

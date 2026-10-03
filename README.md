@@ -188,11 +188,12 @@ slack to dodge a 4-point band with — so its lowest point belongs to the window
 does not light up is what says so. It was two points until the whole line moved up one; halving it was
 not the reason for that and is what it bought. The rest has a test that finds the switch by sweeping
 the bar for something under the pointer, because a control that cannot be reached is a control that
-does not work, however right its rect looks. The **view switch** in front of it and `N changed` at the
-other end of the group are the second and third controls down there, and each has the same sweep for
-the same reason — the view switch's also checks that the two 18-point switches four points apart are
-still two targets and still in the order they were asked for, which is not something a rect can be read
-to prove. A maximised window skips the bands entirely, since there is nothing to resize.
+does not work, however right its rect looks. The **view switch** behind it, the **measure** button
+after that and `N changed` at the other end of the group are the rest of the controls down there, and
+each has the same sweep for the same reason — the view switch's also checks that two 18-point switches
+four points apart are still two targets and still in the order they were asked for, and the measure
+button's that the three of them are in their keys' order, which is not something a rect can be read to
+prove. A maximised window skips the bands entirely, since there is nothing to resize.
 
 **The weld is real, not just matching paint.** The title bar draws a `stroke-subtle` hairline
 along its bottom to say where it ends — which matters against the sidebar, whose fill is the same
@@ -1103,7 +1104,7 @@ same question again, and so does a duplicated tab, which is the same place as it
 
 A directory's own byte count is noise, so the Size column has always left a folder's cell blank —
 and the question a file manager gets asked more than any other is *what is taking the space in
-here.* The **measure** button, on the status line between the view switch and the console's:
+here.* The **measure** button, last of the three switches at the left of the status line — `Ctrl+2`:
 
 ```
 Name                 Size            Name                 Size
@@ -2318,10 +2319,11 @@ polyline rather than four dashed edges, so the dashes stay in step round the cor
 
 ## Rows or tiles
 
-The first switch on [the status line](#the-status-line) turns the pane into Explorer's **Large icons**:
-a grid of 96-point tiles with a thumbnail on anything that has one. One other thing turns it on, and it
-is the same request in one word: `Show images only` in [the funnel's menu](#the-funnel-is-a-button),
-which is a listing of nothing but pictures and so is this view's own case.
+The view switch on [the status line](#the-status-line) — `Ctrl+1`, or the second of the three at its
+left end — turns the pane into Explorer's **Large icons**: a grid of 96-point tiles with a thumbnail on
+anything that has one. One other thing turns it on, and it is the same request in one word:
+`Show images only` in [the funnel's menu](#the-funnel-is-a-button), which is a listing of nothing but
+pictures and so is this view's own case.
 
 ```
 ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐
@@ -2652,29 +2654,38 @@ It used to be the listing's to place, and that looked right for exactly as long 
 went along the bottom — where it lands above the line either way. Docked to the **right** it did not:
 the line stopped where the panel began and the panel ran on down to the pane's own edge.
 
-Two groups, one bar. On the left the pane's two **controls** and a fact about the repository; on the
+Two groups, one bar. On the left the pane's three **controls** and a fact about the repository; on the
 right arithmetic about the folder.
 
 ```
-[▦] [>_]  ⑂ master ↑2 ↓1  13 changed        0.3 ms  ·  1016 KB  ·  4 / 19 (3)
+[>_] [▦] [▤]  ⑂ master ↑2 ↓1  13 changed    0.3 ms  ·  1016 KB  ·  4 / 19 (3)
 ```
 
 | | |
 | --- | --- |
-| `▦` | rows or tiles — see [Rows or tiles](#rows-or-tiles). **Right-click it** for when to do that on its own: [Letting the folder answer](#letting-the-folder-answer) |
-| `>_` | show or hide this pane's console — the same thing `Ctrl+²` does |
+| `>_` | show or hide this pane's console — `Ctrl+²` |
+| `▦` | rows or tiles — `Ctrl+1`; see [Rows or tiles](#rows-or-tiles). **Right-click it** for when to do that on its own: [Letting the folder answer](#letting-the-folder-answer) |
+| `▤` | total up each folder and bar the shares — `Ctrl+2`; see [Measuring what is in each folder](#measuring-what-is-in-each-folder) |
 | ⑂ `master` `↑2` `↓1` `13 changed` | see [Git, by asking git](#git-by-asking-git) |
 | `13 changed` | and it is a **button**: press it for a listing of exactly those thirteen |
 | `0.3 ms` | how long this folder took to read |
 | `1016 KB` | the folder's size, or the selection's the moment there is one |
 | `4 / 19 (3)` | selected, on show, and not on show |
 
-**Both switches are at this end because the left group is the one that never gives way** — a switch
-nobody can see is a switch nobody can find — and they are in front of the figures because that is where
-a control belongs on a bar read left to right. The console's is here for a second reason of its own: it
-opens the band directly above this bar, and a panel whose only door is a keystroke is a panel most
-people never find. The **view switch goes first** of the two, because the order is the order of what
-they are about: one changes the listing filling the pane, the other opens a band at the bottom of it.
+**All three switches are at this end because the left group is the one that never gives way** — a
+switch nobody can see is a switch nobody can find — and they are in front of the figures because that is
+where a control belongs on a bar read left to right. The console's is here for a second reason of its
+own: it opens the band directly above this bar, and a panel whose only door is a keystroke is a panel
+most people never find.
+
+**They are in the order of the keys that work them**: `Ctrl+²`, `Ctrl+1`, `Ctrl+2` are the three
+leftmost keys of the number row in the order they are printed on it, so the run of three buttons and the
+run of three keys are one run read the same way. That is worth more than any argument from what each
+switch is about — three 18-point glyphs in a 22-point strip are told apart by *position*, and a position
+that is also the keystroke is a position you learn once. It is also what put the console's first: the
+key next to `1` is `²`, not something further along the row. Each names its key in its own tooltip, and
+the design system sets the bracket a shade back on its own — `Label (Keys)` is the shape it recognises,
+so a tooltip written that way says both halves in two colours without being asked.
 
 Each is subtle until the pointer is on it and latched while its thing is showing, which is what every
 other toggle in this window does. Four points apart rather than eight: they are one group, and the gap
@@ -3960,7 +3971,7 @@ A pipe is not a terminal and every program can tell:
 | --- | --- |
 | `Ctrl+T` / `Ctrl+W` | new tab / close tab |
 | `Ctrl+Shift+T` | reopen the last closed tab |
-| `Ctrl+Tab`, `Ctrl+1`…`9` | switch tab |
+| `Ctrl+Tab`, `Ctrl+Shift+Tab` | next tab / previous tab — every tab is on screen and named, so a particular one is a click, and `Ctrl+1`…`9` went to the pane's own switches |
 | `Ctrl+\` | split to the right |
 | `Alt+←` / `Alt+→` / `Alt+↑` | back / forward / up |
 | `Backspace` | up |
@@ -3984,7 +3995,9 @@ A pipe is not a terminal and every program can tell:
 | `Ctrl+G` | while renaming: type a fresh GUID over what is selected — so pressed straight after `F2` it replaces the name and leaves the extension |
 | `Ctrl+Shift+N` | new folder |
 | `Ctrl+Shift+C` | copy the selected paths as text, one per line — with whichever slash the path field writes, and also in the context menu as `Copy path(s)` |
-| `Ctrl+²` | show or hide this pane's console — also the switch at the left of [the status line](#the-status-line) |
+| `Ctrl+²` | show or hide this pane's console — also the first switch at the left of [the status line](#the-status-line) |
+| `Ctrl+1` | rows or tiles — the switch beside it, and the same toggle |
+| `Ctrl+2` | total up each folder and bar the shares — the switch after that; nothing to count on This PC, where both are refused |
 | `↑` `↓` `PgUp` `PgDn` `Home` `End` | move the cursor (`Shift` extends) |
 | `Enter` | open |
 | any letter | jump to the next name starting with it |

@@ -128,11 +128,11 @@ fn the_console_switch_is_reachable_and_toggles_the_console() {
 ///
 /// The switch sits in the status line, which the window's bottom resize band overlaps — and
 /// `chrome::resize_borders` is registered last, so it wins the pointer wherever the two meet. It is
-/// also the *first* thing on that bar now, with the console's switch four points to its right, so
-/// there are two 18-point targets to tell apart in a 22-point strip. So the bar is swept for
-/// something under the pointer before anything is asserted about a click, and the sweep runs
-/// **outwards from the left**, where a version of this that had drifted onto its neighbour would
-/// show up as the wrong id being hovered rather than as nothing at all.
+/// also the *middle* one of three 18-point targets four points apart in a 22-point strip, with the
+/// console's before it and the measurement's after. So the bar is swept for something under the
+/// pointer before anything is asserted about a click, and the sweep runs **outwards from the left**,
+/// where a version of this that had drifted onto its neighbour would show up as the wrong id being
+/// hovered rather than as nothing at all.
 ///
 /// Then the grid itself. A tile is not a widget — the whole view is one interaction with the cell
 /// derived from the pointer — so "the tiles are where the arithmetic says" is not something
@@ -151,19 +151,21 @@ fn the_view_switch_is_reachable_and_its_tiles_can_be_clicked() {
         .map(|dx| pos2(rect.left() + dx as f32, y))
         .find(|at| h.hovers(id, *at))
         .expect("the view switch is not reachable along its own bar");
-    // And it is in *front* of the console's, which is the position that was asked for. Checked
-    // from the far side of the pointer's own reach: the console switch has to be somewhere to the
-    // right of where this one answered.
+    // And it is *behind* the console's, which is the position that was asked for: the three switches
+    // are in the order the three keys that work them are printed on the number row — `Ctrl+²`,
+    // `Ctrl+1`, `Ctrl+2` — so the console's comes first. Checked from the far side of the pointer's
+    // own reach: the console switch has to be somewhere to the left of where this one answered, and
+    // both have to answer at all, which is the half that catches two rects laid on top of each other.
     let console = (0..120)
         .step_by(2)
         .map(|dx| pos2(rect.left() + dx as f32, y))
         .find(|probe| h.hovers(Id::new(("console-switch", pane)), *probe))
         .expect("the console switch went missing when the view switch moved in beside it");
     assert!(
-        console.x > at.x,
-        "the view switch is at {} and the console's at {}, which is the wrong way round",
-        at.x,
-        console.x
+        console.x < at.x,
+        "the console switch is at {} and the view switch at {}, which is the wrong way round",
+        console.x,
+        at.x
     );
 
     assert_eq!(
@@ -212,6 +214,209 @@ fn the_view_switch_is_reachable_and_its_tiles_can_be_clicked() {
     let done = h.click_at(back);
     assert!(done.contains(&"SetView"), "got {done:?}");
     assert_eq!(h.tab(0).view_mode, crate::pane::ViewMode::Details);
+}
+
+/// **`Ctrl+1` and `Ctrl+2` work the two switches beside the console's, and no longer pick a tab.**
+///
+/// Driven through real frames for the reason the undo shortcuts are — see
+/// [`super::transfer::the_undo_shortcuts_reach_undo_and_redo`]: what breaks in a shortcut is the
+/// wiring, and wiring looks correct while doing nothing.
+///
+/// Three claims, and the third is the one that needs a test rather than a reading. `Ctrl+1`…`9` used
+/// to activate a tab by number, and the two keys taken here were taken *from* that loop. A binding
+/// that fires both would switch the view **and** jump to the first tab, which on a window with one
+/// tab is indistinguishable from working correctly — so the tab is deliberately not the first one
+/// when the key is pressed.
+///
+/// Both switches **toggle**, exactly as their buttons do, so each key is pressed twice: the key that
+/// turned the tiles on has to be the key that turns them off, or the way back is a mouse.
+#[test]
+fn ctrl_1_and_ctrl_2_work_the_view_and_the_measurement_and_leave_the_tabs_alone() {
+    let mut h = Harness::new();
+    let pane = h.app.panes[0].id;
+    let ctrl = Modifiers {
+        command: true,
+        ctrl: true,
+        ..Modifiers::NONE
+    };
+    // A second tab, and it is the active one — see the doc above for why that matters.
+    h.app.perform(&h.ctx.clone(), Action::NewTab { pane });
+    h.settle();
+    assert_eq!(
+        h.app.panes[0].active, 1,
+        "the fixture needs the second tab to be the active one"
+    );
+
+    let fired = |h: &mut Harness, key: egui::Key| -> Vec<&'static str> {
+        h.app.journal = Some(Vec::new());
+        h.modifiers = ctrl;
+        h.frame(vec![Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: ctrl,
+        }]);
+        h.modifiers = Modifiers::NONE;
+        h.app.journal.clone().unwrap_or_default()
+    };
+
+    // ---- Ctrl+1: the view, both ways -----------------------------------
+    assert_eq!(
+        h.tab(0).view_mode,
+        crate::pane::ViewMode::Details,
+        "a fresh tab on this folder is a listing of rows"
+    );
+    let done = fired(&mut h, egui::Key::Num1);
+    assert!(done.contains(&"SetView"), "Ctrl+1 produced {done:?}");
+    assert!(
+        !done.contains(&"ActivateTab"),
+        "Ctrl+1 switched the view and jumped to a tab: {done:?}"
+    );
+    assert_eq!(h.tab(0).view_mode, crate::pane::ViewMode::Icons);
+    assert_eq!(h.app.panes[0].active, 1, "Ctrl+1 changed which tab is up");
+
+    let done = fired(&mut h, egui::Key::Num1);
+    assert!(done.contains(&"SetView"), "Ctrl+1 again produced {done:?}");
+    assert_eq!(
+        h.tab(0).view_mode,
+        crate::pane::ViewMode::Details,
+        "Ctrl+1 is a switch, so the second press has to come back"
+    );
+
+    // ---- Ctrl+2: the measurement, both ways ----------------------------
+    assert!(!h.tab(0).sizes.on, "nothing is being measured yet");
+    let done = fired(&mut h, egui::Key::Num2);
+    assert!(done.contains(&"ToggleSizes"), "Ctrl+2 produced {done:?}");
+    assert!(
+        !done.contains(&"ActivateTab"),
+        "Ctrl+2 started the measurement and jumped to a tab: {done:?}"
+    );
+    assert!(h.tab(0).sizes.on, "Ctrl+2 did not start the measurement");
+    assert_eq!(h.app.panes[0].active, 1, "Ctrl+2 changed which tab is up");
+
+    let done = fired(&mut h, egui::Key::Num2);
+    assert!(done.contains(&"ToggleSizes"), "Ctrl+2 again produced {done:?}");
+    assert!(
+        !h.tab(0).sizes.on,
+        "Ctrl+2 is a switch, so the second press has to turn the column off"
+    );
+
+    // ---- And the rest of the row is nobody's ---------------------------
+    //
+    // `Ctrl+3` was tab 3 and is now unbound. Asserted because the alternative to dropping the
+    // range was keeping `3`…`9`, and a half-range is the thing that was decided against — see
+    // [`crate::app::App::keyboard`].
+    let done = fired(&mut h, egui::Key::Num3);
+    assert!(
+        !done.contains(&"ActivateTab"),
+        "Ctrl+3 still picks a tab by number: {done:?}"
+    );
+}
+
+/// **Each of the three switches names its key, and the key is a shade back from the sentence.**
+///
+/// A switch at the bottom corner of a pane is found by pointing at it, so its tooltip is the only
+/// place the keystroke that saves the trip next time can be said — and `Ctrl+²`, `Ctrl+1` and
+/// `Ctrl+2` are the three leftmost keys of the number row in the order the buttons sit in.
+///
+/// # Why this is a test and not a reading of three string literals
+///
+/// The two colours are not written at any call site. A tooltip is one string; the design system
+/// *recognises* the `Label (Keys)` shape and dims the bracket — see
+/// `azur_egui_theme::components::shortcut_in`, which explains at length why that is recognised rather
+/// than passed in. The consequence is that a tooltip can be worded in a way the guard does not take,
+/// and nothing anywhere says so: the words are right, the shortcut is right, and it comes out one
+/// colour. That is exactly what `Ctrl+²` did — `²` is a Unicode `No` rather than an ASCII digit, so
+/// the one shortcut on this bar that could not be typed on a QWERTY board was also the one shortcut
+/// in the window wearing `text-primary`. Reading the literals proves nothing about it. This asks the
+/// frame.
+///
+/// Asserted on the **two runs of the painted galley**, because the halves are deliberately one galley
+/// — they have to sit on one baseline and break as one paragraph — so `Harness::texts` reports the
+/// whole sentence and says nothing about which part is dim. [`Harness::coloured`] is the accessor that
+/// splits a galley where its colour changes.
+///
+/// The pointer is parked off the window between switches: a tooltip is held up while *something* is
+/// hovered, and moving from one 18-point target to the next four points away is a move egui does not
+/// delay — so without a gap in between, the tooltip under test could be the previous switch's.
+#[test]
+fn each_switch_on_the_status_line_names_its_key_in_a_quieter_colour() {
+    let mut h = Harness::new();
+    let pane = h.app.panes[0].id;
+    let bar = h.app.panes[0].rect;
+    let y = bar.bottom() - crate::ui::filelist::STATUS_HEIGHT * 0.5;
+    // Read out as two colours rather than held as a borrow of the theme: everything below this
+    // needs `h` mutably, since a hover is a frame.
+    let (ink, aside) = (h.app.theme.text.primary, h.app.theme.text.secondary);
+
+    // In the order they are on the bar, which is the order of the keys. The sentence and the aside
+    // separately, because that is the split being asserted — and together they are the tooltip the
+    // switch was given, which is what makes this readable against the source.
+    let cases = [
+        ("console-switch", "Show the console", " (Ctrl+²)"),
+        (
+            "view-switch",
+            "Show large icons, with a thumbnail on anything that has one",
+            " (Ctrl+1)",
+        ),
+        (
+            "sizes",
+            "Measure each folder, and bar the share of what is on show",
+            " (Ctrl+2)",
+        ),
+    ];
+    for (which, label, keys) in cases {
+        let id = Id::new((which, pane));
+        // Swept rather than read off the response, for the reason the two tests above are: the
+        // window's bottom resize band overlaps this bar and is registered last, so a point that is
+        // inside the switch's rect is not necessarily a point the switch can be hovered at.
+        let at = (0..120)
+            .step_by(2)
+            .map(|dx| pos2(bar.left() + dx as f32, y))
+            .find(|at| h.hovers(id, *at))
+            .unwrap_or_else(|| panic!("`{which}` is not reachable along the status line"));
+        // egui holds a tooltip back for `interaction.tooltip_delay` and until the pointer has come
+        // to rest, so this moves once and then waits — `Harness::hovers` has already moved it here,
+        // and moving again on every frame would restart the delay for ever.
+        for _ in 0..40 {
+            h.frame(Vec::new());
+        }
+
+        let frame = h
+            .tooltip_rect()
+            .unwrap_or_else(|| panic!("nothing came up over `{which}`, hovered at {at:?}"));
+        let runs: Vec<(String, egui::Color32)> = h
+            .coloured()
+            .into_iter()
+            .filter(|(at, _, _)| frame.contains(*at))
+            .map(|(_, run, colour)| (run, colour))
+            .collect();
+        let colour_of = |want: &str| -> egui::Color32 {
+            runs.iter()
+                .find(|(run, _)| run == want)
+                .map(|(_, colour)| *colour)
+                .unwrap_or_else(|| {
+                    panic!("`{which}` did not paint {want:?}; it painted {runs:?}")
+                })
+        };
+        assert_eq!(
+            colour_of(label),
+            ink,
+            "`{which}` is not saying what it does in `text-primary`"
+        );
+        assert_eq!(
+            colour_of(keys),
+            aside,
+            "`{which}` is not saying its key in `text-secondary` — the guard in `shortcut_in` \
+             did not take {keys:?} for a chord, so the whole tooltip is one colour"
+        );
+
+        // Off the window, so the next switch's tooltip is its own. Two frames: one to take the
+        // pointer away and one for the tooltip to notice it has gone.
+        h.frame(vec![Event::PointerMoved(pos2(-100.0, -100.0))]);
+        h.frame(Vec::new());
+    }
 }
 
 /// The status line's `N changed` is a button, and pressing it shows what has changed.

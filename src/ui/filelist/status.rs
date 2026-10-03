@@ -91,16 +91,19 @@ pub(crate) fn status_geometry(painter: &egui::Painter, t: &Theme, rect: Rect) ->
     (band, line, baseline)
 }
 
-/// The pane's two switches and what git says, then — from the other end — how long the folder took,
+/// The pane's three switches and what git says, then — from the other end — how long the folder took,
 /// how much is in it, and how much of that is selected.
 ///
 /// # Two groups, and the left one wins
 ///
-/// The left is two *controls* and a fact about the repository; the right is arithmetic about the
+/// The left is three *controls* and a fact about the repository; the right is arithmetic about the
 /// folder. When the bar is too narrow for both, the right gives way — the scan's figure first, then
 /// the size, and the counts last, because the counts are the part of this line a listing cannot be
 /// read without. The left is never dropped: a switch nobody can see is a switch nobody can find,
 /// and the branch you are on is the one thing here that is said nowhere else in the window.
+///
+/// The three are `Ctrl+²`, `Ctrl+1` and `Ctrl+2` left to right, which is the order those keys are
+/// printed in on the number row — see the block that lays them out.
 ///
 /// # One baseline
 ///
@@ -151,79 +154,27 @@ pub(crate) fn status_line(
     // can see is a switch nobody can find — and they are **in front of** the figures because that is
     // where a control belongs on a bar that is otherwise read left to right.
     //
-    // **The view switch, then measure, then the console's.** The order is the order of what they are
-    // about, outwards from the listing: one changes how every row is drawn, one adds a figure and a
-    // bar to one column of them, and the last opens a band at the bottom of the pane. The measure
-    // toggle is in the middle because it belongs with the numbers on this line rather than with the
-    // buttons on the path bar — what it turns on is a *column*, and the figure it reports is on this
-    // bar beside the scan's own.
+    // **The console's, then the view switch, then measure — which is the order of the keys that work
+    // them.** `Ctrl+²`, `Ctrl+1`, `Ctrl+2` are the three leftmost keys of the number row in the order
+    // they are printed on it, so the run of three buttons and the run of three keys are one run read
+    // the same way. That is worth more here than any argument from what each one is about: three
+    // 18-point glyphs in a 22-point strip are told apart by *position*, and a position that is also
+    // the keystroke is a position you learn once. It is also why the console's went first — the key
+    // beside `1` on this keyboard is `²`, not something further along the row.
     //
     // **One glyph each, latched**, rather than a pair that swap places. That is the rule every other
     // toggle in this window follows — see [`crate::icons::flatten`] and [`crate::icons::eye`], which
     // say it at length: what a toggle draws is the thing it is *about*, and whether it is on is said
     // by the fill and the ink [`crate::ui::tool_button`] gives a latched button. A button whose art
     // changed under the pointer would have to be read rather than recognised.
-    let middle = (line.center().y - SWITCH * 0.5).round();
-    let tiles = tab.view_mode.is_icons();
-    let view = Rect::from_min_size(pos2(line.left() + space::S2, middle), vec2(SWITCH, SWITCH));
-    let switched = crate::ui::tool_button(
-        ui,
-        t,
-        view,
-        Id::new(("view-switch", pane)),
-        &icons::grid_view,
-        if tiles {
-            "Show details instead"
-        } else {
-            "Show large icons, with a thumbnail on anything that has one"
-        },
-        true,
-        tiles,
-        t.bg.layer_alt,
-    );
-    if switched.clicked() {
-        out.push(Action::SetView {
-            pane,
-            mode: tab.view_mode.toggled(),
-        });
-    }
-    // And its own menu, which is where "do this for me" lives. See [`tiles_menu`].
-    tiles_menu(ui, t, &switched, tab, auto, providers, out);
-
-    // **Measure**, between the two. What it turns on is the Size column: every folder on show gets the
-    // total of everything under it, and every row gets a bar of its share of what is displayed. The
-    // one control in this window that costs the disk something after the listing has landed, which is
-    // why the figure it reports — `counting 12 folders`, then how long that took — is on this bar
-    // rather than left to be guessed at. See [`crate::sizes`].
     //
-    // Disabled on This PC, exactly as the flatten on the path bar is: its rows are volumes rather than
-    // folders, each of them a place to measure of its own, and the left panel already draws a capacity
-    // bar for every one.
-    let measure = Rect::from_min_size(pos2(view.right() + space::S2, middle), vec2(SWITCH, SWITCH));
-    if crate::ui::tool_button(
-        ui,
-        t,
-        measure,
-        Id::new(("sizes", pane)),
-        &icons::sizes,
-        // What it does, in the order it does it: the number first, because that is the thing the Size
-        // column was not saying, and the bar second because it is what the number is for. Neither half
-        // is worth a tooltip on its own — a folder's byte count with nothing to compare it against is
-        // a figure to do arithmetic on.
-        "Measure each folder, and bar the share of what is on show",
-        !tab.path.as_os_str().is_empty(),
-        tab.sizes.on,
-        t.bg.layer_alt,
-    )
-    .clicked()
-    {
-        out.push(Action::ToggleSizes(pane));
-    }
-
-    // `space-2` between them and `space-3` after the last: they are one group — the pane's own
-    // switches — and the gap inside a group has to read as smaller than the gap that follows it.
-    // Four points is enough that two latched fills read as two buttons rather than one wide one.
-    let switch = Rect::from_min_size(pos2(measure.right() + space::S2, middle), vec2(SWITCH, SWITCH));
+    // **Every one of the three names its key**, which two of them did not: a switch at the bottom
+    // corner of a pane is found by pointing at it, and the tooltip is the only place the keystroke
+    // that saves the trip next time can be said. The design system dims the bracket on its own — see
+    // `azur_egui_theme::components::shortcut_in`, which is also why `Ctrl+²` is written with the
+    // character the key carries.
+    let middle = (line.center().y - SWITCH * 0.5).round();
+    let switch = Rect::from_min_size(pos2(line.left() + space::S2, middle), vec2(SWITCH, SWITCH));
     if crate::ui::tool_button(
         ui,
         t,
@@ -243,9 +194,70 @@ pub(crate) fn status_line(
     {
         out.push(Action::ToggleConsole(pane));
     }
-    let mut left = switch.right() + space::S3;
-    // Where the right-hand groups have to stop: the bar's own edge, since both switches are at the
-    // other one.
+
+    let tiles = tab.view_mode.is_icons();
+    let view = Rect::from_min_size(pos2(switch.right() + space::S2, middle), vec2(SWITCH, SWITCH));
+    let switched = crate::ui::tool_button(
+        ui,
+        t,
+        view,
+        Id::new(("view-switch", pane)),
+        &icons::grid_view,
+        if tiles {
+            "Show details instead (Ctrl+1)"
+        } else {
+            "Show large icons, with a thumbnail on anything that has one (Ctrl+1)"
+        },
+        true,
+        tiles,
+        t.bg.layer_alt,
+    );
+    if switched.clicked() {
+        out.push(Action::SetView {
+            pane,
+            mode: tab.view_mode.toggled(),
+        });
+    }
+    // And its own menu, which is where "do this for me" lives. See [`tiles_menu`].
+    tiles_menu(ui, t, &switched, tab, auto, providers, out);
+
+    // **Measure**, last of the three. What it turns on is the Size column: every folder on show gets
+    // the total of everything under it, and every row gets a bar of its share of what is displayed.
+    // The one control in this window that costs the disk something after the listing has landed, which
+    // is why the figure it reports — `counting 12 folders`, then how long that took — is on this bar
+    // rather than left to be guessed at. See [`crate::sizes`].
+    //
+    // Disabled on This PC, exactly as the flatten on the path bar is: its rows are volumes rather than
+    // folders, each of them a place to measure of its own, and the left panel already draws a capacity
+    // bar for every one. `Ctrl+2` is refused there too rather than left to do nothing quietly — see
+    // [`Action::ToggleSizes`].
+    //
+    // `space-2` between them and `space-3` after the last: they are one group — the pane's own
+    // switches — and the gap inside a group has to read as smaller than the gap that follows it.
+    // Four points is enough that two latched fills read as two buttons rather than one wide one.
+    let measure = Rect::from_min_size(pos2(view.right() + space::S2, middle), vec2(SWITCH, SWITCH));
+    if crate::ui::tool_button(
+        ui,
+        t,
+        measure,
+        Id::new(("sizes", pane)),
+        &icons::sizes,
+        // What it does, in the order it does it: the number first, because that is the thing the Size
+        // column was not saying, and the bar second because it is what the number is for. Neither half
+        // is worth a tooltip on its own — a folder's byte count with nothing to compare it against is
+        // a figure to do arithmetic on.
+        "Measure each folder, and bar the share of what is on show (Ctrl+2)",
+        !tab.path.as_os_str().is_empty(),
+        tab.sizes.on,
+        t.bg.layer_alt,
+    )
+    .clicked()
+    {
+        out.push(Action::ToggleSizes(pane));
+    }
+    let mut left = measure.right() + space::S3;
+    // Where the right-hand groups have to stop: the bar's own edge, since all three switches are at
+    // the other one.
     let edge = line.right() - space::S3;
     // Cloned, so the rest of this can paint while `ui` is still available for the hit rects the
     // tooltips need.
@@ -702,8 +714,8 @@ pub(crate) fn git_summary(
             x += step;
         }
         if let Some(slot) = slot {
-            // The console switch's height, centred on the line: the two are the only controls on
-            // this bar, and a target that agrees with the one at the other end of it is one
+            // The console switch's height, centred on the line: the switches at the other end of
+            // this bar are the only other controls on it, and a target that agrees with them is one
             // decision instead of two.
             let hit = Rect::from_min_max(
                 pos2(from - PRESS_PAD, (line.center().y - SWITCH * 0.5).round()),

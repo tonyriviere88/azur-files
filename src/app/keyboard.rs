@@ -256,14 +256,13 @@ impl App {
                     delta: if m.shift { -1 } else { 1 },
                 });
             }
-            for (index, key) in [K::Num1, K::Num2, K::Num3, K::Num4, K::Num5, K::Num6, K::Num7, K::Num8, K::Num9]
-                .into_iter()
-                .enumerate()
-            {
-                if m.command && i.key_pressed(key) {
-                    push(Action::ActivateTab { pane, tab: index });
-                }
-            }
+            // **`Ctrl+1`…`9` no longer pick a tab by number**, and that was a trade rather than a
+            // tidy-up: the number row's first two keys went to the pane's own switches further down,
+            // and a range where `1` and `2` mean one thing and `3`…`9` another is a range nobody can
+            // hold. `Ctrl+Tab` and `Ctrl+Shift+Tab` are the way between tabs, and clicking one is the
+            // way to a particular tab — which is what the numbers were competing with, on a bar where
+            // every tab is on screen and named. [`Action::ActivateTab`] is still what a click pushes.
+            //
             // A split of the current folder, so the feature is reachable without
             // knowing that tabs can be dragged.
             if m.command && i.key_pressed(K::Backslash) {
@@ -333,6 +332,32 @@ impl App {
             // not a character it names, so the physical `Backquote` arrives.
             if m.command && i.key_pressed(K::Backtick) {
                 push(Action::ToggleConsole(pane));
+            }
+            // **And the two keys beside it, for the two switches beside the console's.** `Ctrl+1` is
+            // the view, `Ctrl+2` is the measurement, and with `Ctrl+²` before them the three keys are
+            // the three leftmost of the number row in the order the three buttons sit in at the left
+            // end of the status line — see [`crate::ui::filelist::status_line`], which is where that
+            // order is decided and where each key is named in a tooltip.
+            //
+            // They cost `Ctrl+1` and `Ctrl+2` as tab numbers, which is noted up in the tabs block.
+            //
+            // The view switch **toggles**, exactly as the button does, so the key that turned the
+            // tiles on is the key that turns them off — a second binding for the way back would be a
+            // second thing to remember. The mode comes off the pane the keyboard is in, since that is
+            // the listing being switched.
+            if m.command && i.key_pressed(K::Num1) {
+                if let Some(p) = self.panes.iter().find(|p| p.id == pane) {
+                    push(Action::SetView {
+                        pane,
+                        mode: p.tab().view_mode.toggled(),
+                    });
+                }
+            }
+            // No guard for This PC here, unlike the button that is drawn disabled there:
+            // [`Action::ToggleSizes`] refuses it at the other end, which is the one place the answer
+            // cannot be got wrong twice.
+            if m.command && i.key_pressed(K::Num2) {
+                push(Action::ToggleSizes(pane));
             }
             // ---- Files ---------------------------------------------------
             //
