@@ -356,11 +356,17 @@ impl Config {
                         config.auto_tiles.threshold = crate::pane::AutoTiles::clamped(threshold);
                     }
                 }
-                "line_numbers" => config.preview.numbers = value == "1",
+                // One of the two preview flags whose default is *on*, so it is read as "anything but
+                // 0": a settings file written before there was a gutter has no line for it, and the
+                // default has to stand. See [`crate::ui::preview::Layout::numbers`].
+                //
+                // **A file that says `line_numbers=0` still means off**, which is every file written
+                // while the default was the other way round — so this default is one new profiles see,
+                // and nobody who had the gutter off finds it back.
+                "line_numbers" => config.preview.numbers = value != "0",
                 "markdown_source" => config.preview.markup = value == "1",
-                // The one preview flag whose default is *on*, so it is read as "anything but 0":
-                // a settings file written by an older build has no line for it, and the default
-                // stands. See [`crate::ui::preview::Layout::diff`].
+                // The other one, read the same way for the same reason.
+                // See [`crate::ui::preview::Layout::diff`].
                 "diff" => config.preview.diff = value != "0",
                 "diff_collapse" => config.preview.collapse = value == "1",
                 "video_muted" => config.preview.muted = value == "1",

@@ -47,7 +47,6 @@ pub enum FlatMode {
     /// The one the button has always produced, and the default: it is the mode that answers
     /// "where is that file" and "how much of this is build output", which is what people flatten
     /// a folder to ask.
-    #[default]
     List,
     /// The same rows as the hierarchy they came out of: indented, with a twisty on every folder
     /// that has something in it.
@@ -55,6 +54,7 @@ pub enum FlatMode {
     /// What this adds over browsing folder by folder is that it is **one read**: the whole tree is
     /// already in memory, so opening and closing folders in it costs a re-sort rather than a
     /// directory read each, and two folders five levels apart can be on screen together.
+    #[default]
     Tree,
 }
 

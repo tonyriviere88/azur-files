@@ -1857,8 +1857,8 @@ and a file with no extension that is really a database does not. A file with not
 monospaced, since most of what has no extension in a source folder is a build or configuration file
 — with a short list of exceptions for the ones somebody actually sits and reads.
 
-The button on the bar **numbers the lines**, and it is remembered, because it is a way of reading
-rather than a fact about a document. The interesting part is that the panel *wraps*: a wrapped
+The button on the bar **numbers the lines** — on by default, and remembered, because it is a way of
+reading rather than a fact about a document. The interesting part is that the panel *wraps*: a wrapped
 paragraph is several visual rows of one logical line, so the gutter cannot count rows. It walks the
 finished galley and numbers the rows that **begin** a line — which is a fact only the layout knows,
 and the reason the galley is laid out by hand here and then handed to a `Label` rather than left to
@@ -5024,11 +5024,20 @@ reads back as exactly that. A `bookmark_in=` with no group above it means somebo
 file by hand; the folder is worth more than the line it was written on, so it lands at the top
 level rather than nowhere.
 
-`diff=1` shows what changed in a previewed file — the bands on a text file, the three views on a
-picture — and `diff_collapse=0` leaves the unchanged stretches in. Both are toggles in the preview's
-own title bar, and both are preferences about how you read rather than facts about a file. `diff` is
-the one flag here whose default is *on*, so it is read as "anything but `0`": a settings file written
-before it existed has no line for it, and the default has to stand.
+`line_numbers=1` numbers the lines in the text view, `diff=1` shows what changed in a previewed file —
+the bands on a text file, the three views on a picture — and `diff_collapse=0` leaves the unchanged
+stretches in. All three are toggles in the preview's own title bar, and all three are preferences about
+how you read rather than facts about a file. The first two are **the first two of the four flags here
+whose default is *on***, so both are read as "anything but `0`": a settings file written before either
+existed has no line for it, and the default has to stand. The gutter earns that default the way `diff`
+does — a file in this panel is nearly always one somebody is working on, and the number is how a line
+gets named, to an editor, to a compiler's output, to somebody else — against a cost of a gutter
+measured to the file's own last line and one click on the bar to be rid of it for good.
+
+One wrinkle, and it is the honest half of turning a default around: every settings file written while
+the gutter was off by default says `line_numbers=0` outright, and `0` still means off. So this is a
+default a **new** profile sees; nobody who had the gutter off finds it back, and nobody who had it on
+loses it.
 
 `console_share=` is how much of a pane the console panel takes and `console_shell=` is the one it
 opens on — `bash`, `pwsh` or `cmd`, written as the word the dropdown shows so the file stays something
@@ -5043,7 +5052,7 @@ which is what the button produced before there was a choice. See
 [Flattening a folder](#flattening-a-folder).
 
 `regroup=1` is whether a tree shows a chain of folders with nothing in them but each other as one row
-— `src > main > java`. The **second** of the three flags here whose default is on, and read the same way
+— `src > main > java`. The **third** of the four flags here whose default is on, and read the same way
 as `diff` for the same reason: a settings file from before it existed has no line for it, and what it
 turns on is the absence of rows that never had anything to say. See
 [A chain of folders is one row](#a-chain-of-folders-is-one-row).
@@ -5067,8 +5076,8 @@ when the setting is on at all.
 
 `auto_tiles=1` and `tiles_threshold=60` are the only lines here about rows or tiles, and they are a
 *rule* rather than a remembered mode: a folder whose rows are that much pictures opens as tiles. The
-**third** flag here whose default is on, read as "anything but `0`" like `regroup` and `diff` and for the
-same reason — a settings file from before it existed has no line for it, and the default has to stand.
+**fourth** flag here whose default is on, read as "anything but `0`" like `regroup`, `diff` and
+`line_numbers` and for the same reason — a settings file from before it existed has no line for it, and the default has to stand.
 Two keys and not one pair like `preview=`, because each is worth reading alone: the threshold is kept
 while the rule is off, which is what lets somebody turn it back on and find the number they chose still
 there. Whole percent, which is what the slider produces. **What counts as a picture is not a setting**:

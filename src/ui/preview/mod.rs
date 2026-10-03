@@ -238,6 +238,12 @@ pub struct Layout {
     ///
     /// A preference and not per-file, because it is a way of reading rather than a fact about a
     /// document: somebody who wants line numbers wants them in the next file too.
+    ///
+    /// **On by default**, the same kind of default as `diff` below and for the same kind of reason: a
+    /// file in this panel is nearly always a file somebody is working on, and the number is how a line
+    /// gets named — to an editor, to a compiler's output, to somebody else. Against that, what it costs
+    /// is a gutter measured to the file's own last line, so four points on a twelve-line file, and one
+    /// click on the bar takes it away for good.
     pub numbers: bool,
     /// Show a document's markup instead of the document — the source of a `.md`.
     ///
@@ -275,7 +281,7 @@ impl Default for Layout {
         Self {
             at: Where::default(),
             share: SHARE,
-            numbers: false,
+            numbers: true,
             markup: false,
             diff: true,
             collapse: false,

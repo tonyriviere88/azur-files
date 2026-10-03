@@ -29,7 +29,9 @@ fn the_window_comes_back_the_way_it_was_left() {
         preview: crate::ui::preview::Layout {
             at: crate::ui::preview::Where::Bottom,
             share: 0.615,
-            numbers: true,
+            // Away from its default too, which is the gutter showing — so it is the `0` that has to
+            // survive here, the same way round as the two below.
+            numbers: false,
             markup: true,
             // Both away from their defaults, which is the only way a round trip proves anything:
             // a value that is never written still comes back right if the default happens to
@@ -74,15 +76,17 @@ fn the_window_comes_back_the_way_it_was_left() {
     // every session.
     assert_eq!(back.preview.at, crate::ui::preview::Where::Bottom);
     assert!((back.preview.share - 0.615).abs() < 1e-3);
-    assert!(back.preview.numbers);
+    assert!(!back.preview.numbers, "the `0` did not survive");
     assert!(back.preview.markup);
-    assert!(!back.preview.diff, "the one flag whose default is on");
+    assert!(!back.preview.diff, "the `0` did not survive");
     assert!(back.preview.collapse);
     // Whether video plays with its sound, which is a habit in exactly the way the four above are.
     assert!(back.preview.muted);
-    // A settings file from the build before this feature has no line for either, and the diff
-    // has to come back *on* — its default — rather than off because the key was missing.
-    let older = Config::parse("theme=dark\nline_numbers=1\n");
+    // A settings file from the build before these features has no line for any of them, and the two
+    // whose default is *on* — the gutter and the diff — have to come back on rather than off because
+    // the key was missing.
+    let older = Config::parse("theme=dark\n");
+    assert!(older.preview.numbers, "on by default");
     assert!(older.preview.diff, "on by default");
     assert!(!older.preview.collapse);
     // And a file from before there was a player in this program comes back with the sound on, which
@@ -116,8 +120,9 @@ fn the_window_comes_back_the_way_it_was_left() {
     );
     // What *is* here about rows and tiles: the rule for choosing between them as a folder opens,
     // which is a habit and not an answer — see the module header. Its default is **on**, so it is the
-    // `0` that has to survive and the *missing* line that has to come back on — the third flag here
-    // read as "anything but 0", beside `regroup` and `diff`. And the threshold an older file comes
+    // `0` that has to survive and the *missing* line that has to come back on — one of the four flags
+    // here read as "anything but 0", beside `regroup`, `diff` and `line_numbers`. And the threshold an
+    // older file comes
     // back with has to be the default rather than a zero read off a line that is not there: a rule
     // that is on by default against a threshold of 0 would make a grid of every folder with one
     // picture in it.
