@@ -521,7 +521,7 @@ mod tests {
         let t = Theme::dark();
         let pairs: &[(&str, &str)] = &[
             ("!word", "leave it out"),
-            ("@git", "only what git says changed"),
+            ("^src", "match at the start"),
             ("word$", "match at the end"),
         ];
 

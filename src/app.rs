@@ -97,9 +97,16 @@ pub enum Action {
     /// window's preference again, and the path field's own context menu is where it is ticked —
     /// see [`crate::ui::breadcrumb::slash_menu`].
     SetForwardSlashes(bool),
-    /// Everything under this folder that git has something to say about: the flatten on, and the
-    /// filter set to [`crate::fs::sort::CHANGED`]. What the status line's `N changed` asks for.
-    ShowChanges(PaneId),
+    /// Show one of the listings a *name* cannot ask for, or go back to the whole folder.
+    ///
+    /// What the filter box's funnel menu offers, and what the status line's `N changed` asks for —
+    /// see [`crate::pane::Lens`]. **More than the filter, because either half alone answers half the
+    /// question**: the lens over a folder's own children finds only what is in *that* folder, so the
+    /// flatten comes with it, and pictures come with the tiles as well.
+    SetLens {
+        pane: PaneId,
+        lens: Option<crate::pane::Lens>,
+    },
     /// Open or shut a folder in a flattened tree, by its position in the display order.
     ToggleCollapsed { pane: PaneId, position: usize },
     /// Open this folder's preview panel on whatever the keyboard is on, or shut it.
@@ -204,7 +211,7 @@ impl Action {
             Self::SetView { .. } => "SetView",
             Self::SetRegroup(_) => "SetRegroup",
             Self::SetForwardSlashes(_) => "SetForwardSlashes",
-            Self::ShowChanges(_) => "ShowChanges",
+            Self::SetLens { .. } => "SetLens",
             Self::ToggleCollapsed { .. } => "ToggleCollapsed",
             Self::TogglePreview(_) => "TogglePreview",
             Self::ToggleConsole(_) => "ToggleConsole",
@@ -932,6 +939,25 @@ impl App {
         if let Some(text) = text {
             if let Some(pane) = self.panes.first_mut() {
                 pane.tab_mut().filter = text;
+            }
+        }
+        self
+    }
+
+    /// `--lens=<word>`: open the first pane showing one of the funnel's listings.
+    ///
+    /// The other half of [`Self::filtering`], and it exists for a sharper version of the same reason:
+    /// a lens is behind a menu, and a capture run has no pointer to open one with. Set on the tab for
+    /// the same reason the filter is — it is in force on the frame the listing lands.
+    ///
+    /// **What comes with it does not come from here.** The flatten and, for pictures, the tiles are
+    /// what the menu entry sets alongside the lens — see [`Action::SetLens`] — and `main` asks for
+    /// those through the flags that already exist for them, so this flag composes with `--flat=tree`
+    /// instead of arguing with it.
+    pub fn with_lens(mut self, lens: Option<crate::pane::Lens>) -> Self {
+        if let Some(lens) = lens {
+            if let Some(pane) = self.panes.first_mut() {
+                pane.tab_mut().lens = Some(lens);
             }
         }
         self
@@ -1799,10 +1825,10 @@ impl App {
                         // answer may have just written the repository's own index, and that write
                         // is what `collect_changes` is about to see arrive under `.git`.
                         tab.git_settled_at = Some(now);
-                        // **A filter that asked about git has been waiting for this.** `@git`
-                        // cannot be evaluated until the answer is here — see
-                        // [`crate::pane::Tab::git_answered`] — so until now the listing has been
-                        // showing every row, and this is the frame it narrows in. Only when the filter
+                        // **A listing that asked about git has been waiting for this.**
+                        // [`crate::pane::Lens::Git`] cannot be evaluated until the answer is here —
+                        // see [`crate::pane::Tab::git_answered`] — so until now the listing has been
+                        // showing every row, and this is the frame it narrows in. Only when the lens
                         // asks: nothing else about the order depends on git, and rebuilding it for
                         // every folder in a repository would be a sort per navigation for nothing.
                         if tab.filters_on_git() {
@@ -4066,31 +4092,49 @@ impl App {
                 }
                 self.config_dirty = true;
             }
-            // The status line's `N changed`, pressed. **Two settings, because either one alone
-            // answers half the question**: the filter over a folder's own children finds only what
-            // changed in *that* folder, and the flatten without the filter is the whole tree with
-            // the changes buried in it. Together they are the listing the count is a count of.
+            // A lens picked from the filter box's funnel, or the status line's `N changed` pressed.
             //
-            // The flatten is *set*, not toggled — pressing a button whose label is a fact about the
-            // repository should not undo itself when the pane is already showing the tree, and the
-            // filter is what is being changed on the second press. `toggle_flat` is still the one
-            // that does it, because turning the view on is a re-read and everything that comes with
-            // it lives there.
-            Action::ShowChanges(pane) => {
+            // **More than one setting, because each alone answers half the question**: the lens over
+            // a folder's own children finds only what is in *that* folder, and a flatten without the
+            // lens is the whole tree with the answer buried in it. Together they are the listing that
+            // was asked for — and for pictures the tiles are the third part of it, since a gallery
+            // whose only column of interest is the name is what that view is for.
+            //
+            // Everything is *set* rather than toggled: pressing a button whose label is a fact about
+            // the repository should not undo itself over a pane already showing the tree, and it is
+            // the lens that is being changed on the second press. `toggle_flat` is still what turns
+            // the flatten on, because doing so is a re-read and everything that comes with it lives
+            // there.
+            //
+            // **Turning a lens off leaves the view where it is**, which is the one asymmetry here and
+            // is deliberate: the flatten has its own button four points along the same bar and the
+            // tiles their own switch on the status line, both latched to say so, and a menu entry that
+            // quietly put back a view somebody may have changed by hand since would be undoing more
+            // than it did.
+            Action::SetLens { pane, lens } => {
                 let (mode, regroup) = (self.flat_mode, self.regroup);
-                if let Some(p) = self.pane_mut(pane) {
-                    let tab = p.tab_mut();
+                let Some(p) = self.pane_mut(pane) else { return };
+                let tab = p.tab_mut();
+                tab.lens = lens;
+                if let Some(lens) = lens {
                     if !tab.flat {
                         tab.toggle_flat(mode, regroup);
                     }
-                    tab.filter = crate::fs::sort::CHANGED.to_owned();
-                    // Straight away rather than through `filter_changed`: the delay there is for
-                    // keystrokes, and there are none — the whole line arrived at once. A flatten
-                    // that is starting has no listing to rebuild yet, and the walk landing rebuilds
-                    // from the filter as it stands.
-                    tab.rebuild_order();
-                    tab.widths_measured = false;
+                    if lens.wants_tiles() {
+                        tab.view_mode = crate::pane::ViewMode::Icons;
+                    }
                 }
+                // Straight away rather than through `filter_changed`: the delay there is for
+                // keystrokes, and there are none — a menu entry arrives whole. A flatten that is
+                // starting has no listing to rebuild yet, and the walk landing rebuilds from the
+                // filter as it stands.
+                tab.rebuild_order();
+                tab.widths_measured = false;
+                // Where a changed filter goes, and for the same reason — row 200 of the folder is not
+                // row 200 of what the lens left, and in the tiles it is not even the same arithmetic.
+                // See [`Action::SetView`], which is the other half of this pair.
+                tab.scroll_y = 0.0;
+                tab.scroll_to = Some(0.0);
             }
             Action::ToggleCollapsed { pane, position } => {
                 if let Some(p) = self.pane_mut(pane) {
@@ -6559,7 +6603,7 @@ mod click_tests {
     /// overlaps, and that band is registered last — the console switch at the other end of the line
     /// needed the same sweep for the same reason. **It has to be quiet until the pointer is on it**,
     /// which is what "subtle" means here and is a claim about a fill, not about the source. And the
-    /// press has to do *both* halves: a flatten on its own is the whole tree, and a filter on its own
+    /// press has to do *both* halves: a flatten on its own is the whole tree, and the lens on its own
     /// is one folder's children.
     ///
     /// The count is stubbed rather than read. Git is asked for real in this suite — the harness opens
@@ -6627,14 +6671,14 @@ mod click_tests {
 
         let done = h.click_at(at);
         assert!(
-            done.contains(&"ShowChanges"),
+            done.contains(&"SetLens"),
             "the count did not fire, got {done:?}"
         );
         assert!(h.tab(0).flat, "the flatten was not turned on");
         assert_eq!(
-            h.tab(0).filter,
-            crate::fs::sort::CHANGED,
-            "the filter does not ask git"
+            h.tab(0).lens,
+            Some(crate::pane::Lens::Git),
+            "the listing does not ask git"
         );
 
         // And pressed again it stays on, because it is not a toggle: the second press is about the
@@ -6645,9 +6689,15 @@ mod click_tests {
         // flattened listing's rows are not the same paths. So the count is legitimately absent for
         // the frame or two that takes, and a second sweep of the bar would be waiting on a real
         // `git status` of a real checkout to say something in particular.
-        h.app.perform(&ctx, Action::ShowChanges(pane));
+        h.app.perform(
+            &ctx,
+            Action::SetLens {
+                pane,
+                lens: Some(crate::pane::Lens::Git),
+            },
+        );
         assert!(h.tab(0).flat, "a second press turned the flatten back off");
-        assert_eq!(h.tab(0).filter, crate::fs::sort::CHANGED);
+        assert_eq!(h.tab(0).lens, Some(crate::pane::Lens::Git));
     }
 
     /// Scrolled to the end, the space under the last file is [`filelist::TAIL`].
@@ -7856,6 +7906,128 @@ mod click_tests {
         assert!(
             !h.app.panes[0].tab().flat,
             "a setting in this menu turned the flatten on"
+        );
+    }
+
+    /// **The funnel in the filter box is a button, it opens on a *left* click, and what it offers
+    /// takes.**
+    ///
+    /// Three failures only a driven frame can see, and the first one is the reason this test exists.
+    /// The funnel sits *inside* the field, in the room the design system's `prefix_room` keeps for a
+    /// leading affix — and the field's own input covers that corner, so a click there reaches whichever
+    /// widget was registered last. Get that order wrong and the funnel is a picture of a button: the
+    /// caret lands in the box and the menu never opens, which is exactly what the glyph did before it
+    /// was a control.
+    ///
+    /// Then the entries are found the way a reader finds them, by the words on screen, and
+    /// `Show images only` is asked to do all three of its parts — the lens, the flatten and the tiles.
+    /// A gallery of one folder's own children, or one drawn as rows, is half the answer.
+    ///
+    /// Its own sandbox folder rather than a folder of the repository, because the claim is about which
+    /// rows are left: `src` has no pictures in it, so every arrangement of this would pass.
+    #[test]
+    fn the_funnel_in_the_filter_box_opens_on_a_left_click_and_its_listings_take() {
+        use crate::pane::{Lens, ViewMode};
+
+        let root = crate::sandbox::fresh("funnel-lenses");
+        std::fs::create_dir_all(root.join("shots")).expect("a folder");
+        for (name, bytes) in [
+            ("a.png", &b"not really a png"[..]),
+            ("notes.txt", b"words"),
+            (r"shots\b.jpg", b"nor this"),
+            (r"shots\build.log", b"lines"),
+        ] {
+            std::fs::write(root.join(name), bytes).expect("a file");
+        }
+
+        let mut h = Harness::new();
+        let pane = h.app.panes[0].id;
+        let ctx = h.ctx.clone();
+        h.app.perform(
+            &ctx,
+            Action::Navigate {
+                pane,
+                path: root.clone(),
+            },
+        );
+        h.settle();
+
+        let funnel = h
+            .ctx
+            .read_response(Id::new(("filter-lens", pane)))
+            .map(|r| r.rect)
+            .expect("the funnel was not laid out");
+
+        // ---- It opens on the left button ----------------------------------
+        h.click_at(funnel.center());
+        let entry = |h: &Harness, label: &str| {
+            h.texts()
+                .into_iter()
+                .find(|(_, text)| text == label)
+                .map(|(at, _)| at)
+        };
+        let images = entry(&h, Lens::Images.label()).unwrap_or_else(|| {
+            panic!(
+                "a left click on the funnel opened no menu: {:?}",
+                h.texts().into_iter().map(|(_, t)| t).collect::<Vec<_>>()
+            )
+        });
+        assert!(
+            entry(&h, Lens::Git.label()).is_some(),
+            "the menu is missing the other listing"
+        );
+        // And it hangs *below* the button, which is what makes it this control's menu rather than a
+        // popup that happens to be on screen. Only the y: a menu near the right-hand edge of the
+        // window is shifted along to fit, so where it starts is egui's business and not this test's.
+        assert!(
+            images.y > funnel.bottom(),
+            "the menu is over the bar it was opened from: {images:?} against {funnel:?}"
+        );
+
+        // ---- And every part of what it offers happens ----------------------
+        //
+        // A couple of points into the label, which is inside the entry whatever its padding is.
+        let done = h.click_at(pos2(images.x + 2.0, images.y + 6.0));
+        assert!(
+            done.contains(&"SetLens"),
+            "clicking `{}` did nothing, got {done:?}",
+            Lens::Images.label()
+        );
+        assert_eq!(h.tab(0).lens, Some(Lens::Images));
+        assert!(h.tab(0).flat, "a gallery of one folder is half the answer");
+        assert_eq!(
+            h.tab(0).view_mode,
+            ViewMode::Icons,
+            "pictures were not put in the view that shows pictures"
+        );
+
+        h.settle();
+        let mut shown = shown_names(&h, 0);
+        shown.sort();
+        assert_eq!(
+            shown,
+            ["a.png", r"shots\b.jpg"],
+            "the listing is not the pictures under this folder"
+        );
+
+        // ---- Ticked, and the tick is how it is turned off ------------------
+        h.click_at(funnel.center());
+        let images = entry(&h, Lens::Images.label()).expect("the menu did not open again");
+        h.click_at(pos2(images.x + 2.0, images.y + 6.0));
+        assert_eq!(h.tab(0).lens, None, "the entry on show did not turn off");
+        h.settle();
+        let mut shown = shown_names(&h, 0);
+        shown.sort();
+        assert_eq!(
+            shown,
+            [
+                "a.png",
+                "notes.txt",
+                "shots",
+                r"shots\b.jpg",
+                r"shots\build.log"
+            ],
+            "turning the lens off did not put the whole tree back"
         );
     }
 

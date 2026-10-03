@@ -327,7 +327,9 @@ given up together when there is no room. The button survives a little longer tha
 24 points is affordable long after 160 is, and a flatten you could turn on and not off would be
 a trap. It carries a **context menu**, like the eye beside it, and for the same reason: the choice
 between the two flatten modes is a setting of the thing the button opens, and settings belong on the
-control that opens it. See [Flattening a folder](#flattening-a-folder).
+control that opens it. See [Flattening a folder](#flattening-a-folder). The box has a menu of its own,
+on the **left** button rather than the right, because opening it is the whole of what its funnel does
+— see [The funnel is a button](#the-funnel-is-a-button).
 
 **Every word in the box narrows, in any order**, and three characters mean something:
 
@@ -338,7 +340,6 @@ control that opens it. See [Flattening a folder](#flattening-a-folder).
 | `!tmp` | anything *not* containing `tmp` |
 | `^src` | anything **beginning** with `src` |
 | `.rs$` | anything **ending** with `.rs` |
-| `@git` | only what git says has changed — see below |
 
 One substring is a poor way to find a file you half remember: you know two things about it and
 not which comes first. `pane pre` finds `preview.rs` in a pane's worth of source either way
@@ -346,34 +347,62 @@ round, and `!target !.lock` typed once over a flattened tree is a listing you ca
 rule itself is [the design system's](../azur-egui-theme/README.md#a-filter-field-is-its-behaviour-too),
 not this program's, because a filter field is one of its components and what typing in one
 means is as much a part of that component as its border — the same reason the hover grey is
-not decided here either. **The tooltip on the box is that library's own two-line
-description**, so the two cannot drift apart, and so the field says the same thing in every
-window that has one.
+not decided here either. **The tooltip on the box is that library's own** — the two-line description
+and every marker in it — so the two cannot drift apart, and so the field says the same thing in every
+window that has one. What *this* window adds to a filter is not syntax at all. It is on the funnel.
 
-**`@git` is the one word in the box that is not about the name.** It keeps the rows git has
-something to say about — changed, staged, untracked, conflicted, the same set the status line counts
-as `N changed` — and it is the question a folder cannot otherwise be asked: *what have I touched
-here.* Folders are kept when anything under them has changed, however deep, because a folder filtered
-out is a folder you cannot open to reach what is inside it. The word names who is being asked rather
-than what the answer is, which is why it is not `@changes`: staged, untracked and conflicted are all
-in the set, and so is a folder that only has one of them somewhere underneath.
+### The funnel is a button
 
-It is a **word rather than a button**, so it composes with the rest of the line: `@git .rs$` is
-both tests, and it can be typed anywhere in the box rather than only first. (There *is* a button, and
-it types this word: `N changed` in [the status line](#the-status-line). A word that a control can put
-in the box loses nothing; a control that could not be composed with `.rs$` would.) `@` because it cannot
-begin a name anybody is typing a fragment of, so nothing is taken away from the ordinary case — and
-the design system's [`Query`](../azur-egui-theme/README.md#a-filter-field-is-its-behaviour-too) never
-sees it. The word is taken off the line first, which keeps a filter field's syntax the library's and
-git the application's.
+**The glyph at the left-hand end of the box opens a menu**, on a left click, and what is in it are the
+two questions a *name* cannot answer:
 
-One thing about it is not obvious and is deliberate: git answers a frame or two *after* the listing,
-and until then the question cannot be evaluated. An unanswered question **excludes nothing** and the
-order is rebuilt when the answer lands. The alternative was a listing that emptied for two frames on
-every refresh — on every file operation, every `F5`, every time the watcher noticed something — and
-then filled again, which reads as the folder having been wiped. A folder that has been asked about and
-*is* not a repository keeps no rows, which is the honest answer and the one case that needs the two
-states told apart.
+| | |
+| --- | --- |
+| **Show git changes** | only what git says has changed, as this folder's whole tree |
+| **Show images only** | only the pictures under this folder, as a flattened grid of thumbnails |
+
+Each is more than a filter, and that is why each is one gesture rather than three. `Show git changes`
+keeps the rows git has something to say about — changed, staged, untracked, conflicted, the same set
+the status line counts as `N changed` — **and flattens the folder**, because the filter over one
+folder's own children finds only what changed in *that* folder while the flatten without it is the
+whole tree with the answer buried in it. `Show images only` keeps the pictures, flattens, **and puts
+the listing in the [large-icon view](#rows-or-tiles)**: a listing of photographs whose only column of
+interest is the name is what that view is for, and having asked for pictures you should not then have
+to go and find the switch. Folders are kept when there is a picture or a change somewhere under them,
+however deep, because a folder filtered out is a folder you cannot open to reach what is inside it.
+
+**One at a time, and the box still composes on top.** A lens is a different question from the name,
+not a second answer to it, so `Show images only` with `swatch` typed in the box is every picture whose
+path says `swatch`. The entry is **ticked** while its listing is on show, and ticking it again is how
+it is turned off — a listing you are already looking at cannot be asked for again, so the tick is the
+only thing the entry can usefully mean the second time. Turning one off leaves the flatten and the
+view where they are: the flatten has its own button four points along the same bar and the tiles their
+own switch on the status line, both latched to say so, and an entry that quietly put back a view you
+may have changed by hand since would undo more than it did.
+
+The funnel is **subtle** in the sense the rest of this window's chrome uses the word — no fill at rest,
+the bar's own quiet hover, and **latched while a lens is on**, which is the one thing on screen that
+says a listing has been narrowed by something that is not in the text. And **the box is not given up
+while a lens is on**, however narrow the pane gets — the funnel is the only way back off one, and a
+listing narrowed by a control that has gone off the bar is the same trap the flatten button is kept
+against. It sits inside the field's own frame, in the room the design system keeps for a leading affix
+([`TextField::prefix_room`](../azur-egui-theme/src/components/inputs.rs)), and it is drawn *after* the
+field so that a click there reaches the button rather than the caret — the same ordering the `✕` at
+the other end of the box relies on.
+
+It was **a word in the box**: `@git`, taken off the line before the name test saw it. What that bought
+was composition, and the menu keeps it; what it cost was every reader who never found it, because a
+filter field looks exactly the same whether or not it has a private syntax. A menu on the control that
+filters is where somebody looking for "show me what changed" looks — and it is now the one place the
+`.png`-and-thumbnails answer can be asked for at all, which no amount of typing could express.
+
+One thing about the git half is not obvious and is deliberate: git answers a frame or two *after* the
+listing, and until then the question cannot be evaluated. An unanswered question **excludes nothing**
+and the order is rebuilt when the answer lands. The alternative was a listing that emptied for two
+frames on every refresh — on every file operation, every `F5`, every time the watcher noticed
+something — and then filled again, which reads as the folder having been wiped. A folder that has been
+asked about and *is* not a repository keeps no rows, which is the honest answer and the one case that
+needs the two states told apart.
 
 What this program decides is **what the words are matched against: the whole path.** Not the
 name on the row, which was the rule while there was only ever one word. A flattened listing is
@@ -619,9 +648,11 @@ folder's own children sorted among themselves by whatever the header says. So a 
 orders each folder's contents rather than shuffling the tree into a list, and folders still lead
 every level. Three rules are not the sort:
 
-- **A row that is out takes its subtree with it.** Hidden, or excluded by the `@git` filter:
-  you cannot see inside a folder you cannot see, which is what browsing one does too — the folder
-  is what is marked hidden, not each file in it.
+- **A row that is out takes its subtree with it.** Hidden, or excluded by one of the
+  [funnel's lenses](#the-funnel-is-a-button): you cannot see inside a folder you cannot see, which is
+  what browsing one does too — the folder is what is marked hidden, not each file in it. Which is why
+  a lens keeps the folders that lead to what it found, and why it has to work them out rather than ask
+  them: a folder is not a picture, and git's answer about one is the strongest state beneath it.
 - **A shut folder's children are not in the order at all**, which is what makes a collapsed tree
   cheap: those rows are not drawn, not hit-tested and not scrolled past.
 - **A filter ignores what is shut, and keeps the folders that lead to a match.** Both halves are the
@@ -1633,7 +1664,9 @@ polyline rather than four dashed edges, so the dashes stay in step round the cor
 ## Rows or tiles
 
 The first switch on [the status line](#the-status-line) turns the pane into Explorer's **Large icons**:
-a grid of 96-point tiles with a thumbnail on anything that has one.
+a grid of 96-point tiles with a thumbnail on anything that has one. One other thing turns it on, and it
+is the same request in one word: `Show images only` in [the funnel's menu](#the-funnel-is-a-button),
+which is a listing of nothing but pictures and so is this view's own case.
 
 ```
 ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐
@@ -1874,10 +1907,12 @@ other toggle in this window does. Four points apart rather than eight: they are 
 inside a group has to read as smaller than the gap after it.
 
 **`13 changed` is the one fact on this line that is also a question**, so it is the second control on
-it. Pressed, it flattens the folder and puts `@git` in the filter box — the two together are the
-listing the number is a count of, and they were three gestures away: flatten, find the filter, know
-the word. It **sets** rather than toggles, because a button labelled with a fact about the repository
-should not undo itself when you press it twice.
+it. Pressed, it flattens the folder and turns on the funnel's `Show git changes` — the two together
+are the listing the number is a count of, and they were three gestures away: flatten, find the filter,
+know what to ask it for. It **sets** rather than toggles, because a button labelled with a fact about
+the repository should not undo itself when you press it twice. It is the same listing the
+[funnel](#the-funnel-is-a-button) opens, asked for from the other end of the pane, and the tooltip
+here is worded from that menu entry so the two cannot come to describe different things.
 
 It is *subtle* in the sense the rest of this window's chrome uses the word: no border and no fill at
 rest, so the line still reads as a line of figures, and the same quiet hover the switch at the other
@@ -4041,7 +4076,8 @@ Deliberately:
 | --- | --- |
 | `--open=<path>` | repeatable — one pane per path, so `--open=A --open=B` opens side by side |
 | `--reveal=<name>` | select and scroll to an entry once the listing lands |
-| `--filter=<text>` | put a line in the first pane's filter box before anything is drawn — `--filter=@git` for a listing of what has changed |
+| `--filter=<text>` | put a line in the first pane's filter box before anything is drawn |
+| `--lens=git\|images` | open the first pane showing one of [the funnel's listings](#the-funnel-is-a-button), which is otherwise behind a menu and out of reach of a run with no pointer. It brings what the menu entry brings — the flatten, and the tiles for pictures — because those are the listing rather than side effects of it |
 | `--size=WxH` | pin the window size |
 | `--light` / `--dark` | override the remembered palette for this launch |
 | `--shot=<file>` | write the frame as a PNG and exit, for regenerating the images above |

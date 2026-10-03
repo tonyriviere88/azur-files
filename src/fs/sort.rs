@@ -62,62 +62,68 @@ impl Column {
     }
 }
 
-/// The one word in the filter box that is not a word in a name.
+/// Which rows [`crate::pane::Lens::Images`] keeps: every picture, and the folders that lead to one.
 ///
-/// **`@git` filters by what git says rather than by what the row is called**, which is the one
-/// question about a folder that the name cannot answer and that people ask constantly: what have I
-/// touched here. It is a *word* rather than a button because it composes — `@git rs` is both tests —
-/// and because the filter box is already where you go to narrow a listing.
+/// **A bitmap over the listing rather than a test per row**, because the folders are not a question
+/// about themselves. A file is a picture or it is not — `Kind::Image` in [`super::fmt`], the same
+/// answer the Type column prints, so the lens cannot come to disagree with what the listing says a
+/// row *is* — but a folder is kept for what is *under* it, which is only knowable by walking up from
+/// each picture. Handed to [`build_order`] and [`build_tree_order`] as `keep`, where a `false` folder
+/// takes its whole subtree with it.
 ///
-/// `@` for the same reason every other tool uses a sigil for this: it cannot be the start of a name
-/// anybody is typing a fragment of, so nothing is taken away from the ordinary case. [`Query`] never
-/// sees it — [`split_special`] takes it off first — so the design system's syntax is untouched and
-/// this stays an application's idea about an application's data.
+/// `tree` is whether the listing on show is one: the ancestors are what makes a
+/// [`crate::pane::FlatMode::Tree`] gallery reachable — a folder that is out cannot be descended into
+/// — and in a flat list they would be rows saying nothing, since every picture already carries the
+/// path down to it in its name.
 ///
-/// The word names **who is being asked**, not what the answer happens to be. It was `@changes`, which
-/// read as a promise about the rows — and the set is wider than that word: staged, untracked and
-/// conflicted are all in it, and so is a folder with any of them under it. `@git` says the only thing
-/// that is true of all of them, and it is the word somebody reaching for this would guess first.
-pub const CHANGED: &str = "@git";
+/// The walk **up** from each picture, stopping at the first ancestor already marked, is
+/// [`build_tree_order`]'s own for a name match: one step per row plus one per ancestor not yet
+/// accounted for, rather than one per row per level.
+pub fn image_rows(dir: &Dir, tree: bool) -> Vec<bool> {
+    use std::collections::HashMap;
 
-/// What [`CHANGED`] does, in the words the filter box's tooltip says it in.
-///
-/// The value half of a pair whose key is [`CHANGED`] — `azur_egui_theme::filter::MARKERS` holds the
-/// design system's three in the same shape, and `ui::breadcrumb::FILTER_MARKERS` puts this after them.
-/// Appended rather than written into that list: the design system's filter has never heard of git, and
-/// the other windows using the same field would be documenting a word they do not answer to.
-///
-/// "what git says changed" and not "changed files", because the set is wider than either word —
-/// staged, untracked and conflicted rows are all in it, and so is a folder with any of them
-/// underneath. Same reason the word is `@git` and not `@changes`.
-pub const CHANGED_MEANS: &str = "show git diff only";
+    let mut kept = vec![false; dir.len()];
+    for (i, keep) in kept.iter_mut().enumerate() {
+        *keep = !dir.entries[i].is_dir()
+            && super::fmt::kind_of(dir.ext(i), false) == super::fmt::Kind::Image;
+    }
+    if !tree {
+        return kept;
+    }
 
-/// Take [`CHANGED`] off a filter line, and say whether it was there.
-///
-/// Case-insensitively, and from anywhere in the line: it is a switch rather than a prefix, and a
-/// switch that only works when it is typed first is a switch you have to remember the order of.
-pub fn split_special(filter: &str) -> (bool, String) {
-    let mut asked = false;
-    let mut rest = String::with_capacity(filter.len());
-    for word in filter.split_whitespace() {
-        if word.eq_ignore_ascii_case(CHANGED) {
-            asked = true;
+    // Where each folder is, so a picture can be walked back up to the rows that lead to it.
+    // Directories only — nothing is ever inside a file.
+    let mut folder_at: HashMap<&str, u32> = HashMap::new();
+    for i in 0..dir.len() {
+        if dir.entries[i].is_dir() {
+            folder_at.insert(dir.name(i), i as u32);
+        }
+    }
+    for i in 0..dir.len() {
+        if !kept[i] {
             continue;
         }
-        if !rest.is_empty() {
-            rest.push(' ');
+        let mut within = dir.within(i);
+        while !within.is_empty() {
+            let Some(&at) = folder_at.get(within) else {
+                break;
+            };
+            if kept[at as usize] {
+                break;
+            }
+            kept[at as usize] = true;
+            within = dir.within(at as usize);
         }
-        rest.push_str(word);
     }
-    (asked, rest)
+    kept
 }
 
 /// Build the display order for a directory.
 ///
 /// `order` is reused between calls so a re-sort allocates nothing.
 ///
-/// `keep` is the other half of the filter, for the part of it that is not about names: `Some` only when
-/// the line asked a question a name cannot answer, and then a row has to pass both. See [`CHANGED`].
+/// `keep` is the other half of the filter, for the part of it that is not about names: `Some` only
+/// when a lens is on show, and then a row has to pass both. See [`crate::pane::Lens`].
 #[allow(clippy::too_many_arguments)]
 pub fn build_order(
     dir: &Dir,
@@ -949,41 +955,51 @@ mod tests {
         }
     }
 
-    /// `@git` comes off the line before the name test ever sees it.
+    /// **The pictures, and in a tree the folders that lead to one — and nothing else either way.**
     ///
-    /// The two things worth holding: it is **not** passed through to [`Query`], where it would be a
-    /// literal nobody's file is called; and what is left of the line still filters, so the two
-    /// compose. `Tab::rebuild_order` is where the git half is answered — this is only the parsing.
+    /// The three claims worth holding. The type comes from the extension table, so `.PNG` is a
+    /// picture and `.rs` is not, whatever case it is written in. A flat list gets **no folders at
+    /// all**: every row already carries the path down to it, so a folder row there is a row saying
+    /// nothing. And a tree gets exactly the folders on the way to a picture — `src`, holding only
+    /// source, is not one of them, which is the whole difference between this and letting every
+    /// folder through for the sake of the ones that matter.
     #[test]
-    fn the_git_word_is_taken_off_the_filter_and_the_rest_still_filters() {
-        assert_eq!(split_special(""), (false, String::new()));
-        assert_eq!(split_special("report"), (false, "report".to_owned()));
-        assert_eq!(split_special(CHANGED), (true, String::new()));
-        // Case, and either side of the rest of the line.
-        assert_eq!(split_special("@GIT rs"), (true, "rs".to_owned()));
-        assert_eq!(split_special("rs @git"), (true, "rs".to_owned()));
-        assert_eq!(
-            split_special("  @git   ^src  .rs$ "),
-            (true, "^src .rs$".to_owned()),
-            "the words that are left keep their markers and lose the extra air"
-        );
-        // A word that merely starts with it is a word, not the switch — and this one is a file
-        // somebody filtering a repository will genuinely type.
-        assert_eq!(
-            split_special("@gitignore"),
-            (false, "@gitignore".to_owned())
-        );
+    fn the_images_lens_keeps_the_pictures_and_the_folders_that_lead_to_them() {
+        let dir = listing(&[
+            "photos/",
+            "src/",
+            "readme.md",
+            r"photos\a.PNG",
+            r"photos\raw/",
+            r"photos\raw\b.tif",
+            r"src\main.rs",
+        ]);
+        // Named for what it answers rather than `kept`, which in this module is the *name* filter's
+        // own helper a few tests up.
+        let shown = |tree: bool| -> Vec<String> {
+            image_rows(&dir, tree)
+                .iter()
+                .enumerate()
+                .filter(|(_, &keep)| keep)
+                .map(|(i, _)| dir.name(i).to_owned())
+                .collect()
+        };
 
-        // And with it taken off, the rest still narrows by name.
-        let names = ["one.rs", "two.txt"];
-        let (asked, rest) = split_special("@git .rs$");
-        assert!(asked);
-        assert_eq!(kept(&names, &rest), ["one.rs"]);
+        assert_eq!(shown(false), [r"photos\a.PNG", r"photos\raw\b.tif"]);
+        assert_eq!(
+            shown(true),
+            [
+                "photos",
+                r"photos\a.PNG",
+                r"photos\raw",
+                r"photos\raw\b.tif"
+            ]
+        );
     }
 
-    /// The git half: a row has to pass both tests.
+    /// The lens half: a row has to pass both tests.
     #[test]
-    fn the_git_half_of_a_filter_is_asked_of_every_row() {
+    fn the_lens_half_of_a_filter_is_asked_of_every_row() {
         let mut builder = DirBuilder::new(r"C:\repo");
         for name in ["kept.rs", "gone.rs", "kept.txt"] {
             builder.push(name, 1, 0, 0);

@@ -144,6 +144,7 @@ fn main() -> eframe::Result {
     let mut open: Vec<std::path::PathBuf> = Vec::new();
     let mut reveal: Option<String> = None;
     let mut filter: Option<String> = None;
+    let mut lens: Option<pane::Lens> = None;
     let mut menu = false;
     let mut rename = false;
     let mut path: Option<String> = None;
@@ -179,6 +180,18 @@ fn main() -> eframe::Result {
             reveal = Some(name.to_owned());
         } else if let Some(text) = arg.strip_prefix("--filter=") {
             filter = Some(text.to_owned());
+        } else if let Some(name) = arg.strip_prefix("--lens=") {
+            // `--lens=git`, `--lens=images`: open showing one of the filter funnel's listings, which
+            // are behind a menu and so out of reach of a run with no pointer. **What the menu entry
+            // sets alongside the lens is set here too** — the flatten either way, and the tiles for
+            // pictures — because those are part of the listing rather than side effects of it; see
+            // `app::Action::SetLens`. An unrecognised word leaves the run as it was, for the reason
+            // `--flat=` does: a capture flag should not be the thing that refuses to start.
+            if let Some(picked) = pane::Lens::parse(name) {
+                lens = Some(picked);
+                flat = true;
+                tiles |= picked.wants_tiles();
+            }
         } else if arg == "--menu" {
             menu = true;
         } else if arg == "--rename" {
@@ -329,6 +342,7 @@ fn main() -> eframe::Result {
                 )
                 .revealing(reveal)
                 .filtering(filter)
+                .with_lens(lens)
                 .tracing(trace)
                 .walking(walk)
                 .scrolling(scroll)

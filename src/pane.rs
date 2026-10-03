@@ -85,6 +85,101 @@ impl FlatMode {
     }
 }
 
+/// The listings the filter box's funnel offers — **the questions a name cannot answer**.
+///
+/// A filter box narrows by what a row is *called*, and that is the right question nearly always:
+/// see `azur_egui_theme::filter`, whose syntax the box speaks and which this program does not
+/// extend. These two are not about the name at all. They are about what git says about a file and
+/// what kind of file it is, so neither is something anybody can type — and each is worth two more
+/// gestures besides, because a listing of what changed or of every picture is a *view* rather than
+/// a filter: both want the folder's whole tree, and pictures want to be looked at as pictures.
+///
+/// **One at a time, and the box still composes on top.** A lens is a different question from the
+/// name, not a second answer to it, so `Show images only` with `swatch` typed in the box is every
+/// picture whose path says `swatch` — which is what the old `@git .rs$` did, without the word
+/// having to be typed or remembered.
+///
+/// Per tab, and dropped by [`Tab::go_to`] exactly as the filter and [`ViewMode`] are: what has
+/// changed *here* is not a question about the folder you open next.
+///
+/// It was a **word in the box** — `@git`, taken off the line before the name test saw it. What that
+/// bought was composition, and this keeps that; what it cost was every reader who never found it,
+/// since a filter field looks exactly the same whether or not it has a private syntax. A menu on the
+/// control that filters is where somebody looking for "show me what changed" looks.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Lens {
+    /// Every row git has something to say about: changed, staged, untracked, conflicted — the same
+    /// set the status line counts as `N changed`, and a folder is in it when anything under it is,
+    /// because a folder filtered out is a folder you cannot open to reach what is inside it.
+    ///
+    /// One thing about it is not obvious and is deliberate: git answers a frame or two *after* the
+    /// listing, and until then the question cannot be evaluated. See [`Tab::git_answered`].
+    Git,
+    /// Every picture under the folder, by the type its extension names — `Kind::Image` in
+    /// [`crate::fs::fmt`], which is the same answer the Type column prints and so cannot drift from
+    /// what the listing says a row *is*.
+    ///
+    /// Folders are kept when a picture is somewhere under them, for the reason [`Self::Git`]'s are:
+    /// in a tree the folder is the only way to what it holds. Nothing else is — a gallery with
+    /// `.txt` in it is not a gallery.
+    Images,
+}
+
+impl Lens {
+    /// The two, in the order the menu lists them.
+    pub const ALL: [Self; 2] = [Self::Git, Self::Images];
+
+    /// What the menu entry says. **A sentence about the listing, not a name for the filter**: the
+    /// entry does something rather than being a setting whose value is "git".
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Git => "Show git changes",
+            Self::Images => "Show images only",
+        }
+    }
+
+    /// What the listing says when this lens leaves nothing at all.
+    ///
+    /// **A lens that keeps no rows is the one case where an empty listing is not a dead end**, and it
+    /// is worth a sentence of its own: "everything here is hidden" is the answer to a different
+    /// question, and it sends a reader to `Ctrl+H` for a folder that has plenty in it. Beside
+    /// [`Self::label`] so that what the menu asked for and what the pane reports back cannot come to
+    /// disagree — see [`crate::ui::filelist`], which is the only caller.
+    pub fn nothing_found(self) -> &'static str {
+        match self {
+            Self::Git => "Nothing here has changed",
+            Self::Images => "No pictures here",
+        }
+    }
+
+    /// For `--lens=<word>` and nothing else, so a capture run can open showing one of these — it is
+    /// behind a menu, and a capture run has no pointer. **Not** for the settings file, unlike
+    /// [`FlatMode::as_str`]: a lens is a question about the folder in front of you and is not
+    /// remembered anywhere.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Git => "git",
+            Self::Images => "images",
+        }
+    }
+
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|lens| lens.as_str().eq_ignore_ascii_case(text))
+    }
+
+    /// Whether this lens wants the tiles rather than the rows.
+    ///
+    /// Pictures do, and it is the one place in this program that turns the large-icon view on
+    /// without the switch being pressed: a listing of photographs whose only column of interest is
+    /// the name is the case [`ViewMode::Icons`] exists for, and asking for it and then having to
+    /// find the switch would be the same two-gestures-too-many the `@git` word was.
+    pub fn wants_tiles(self) -> bool {
+        matches!(self, Self::Images)
+    }
+}
+
 /// How a folder is drawn: as a table of rows, or as a grid of large icons.
 ///
 /// **Both are the same listing**, exactly as [`FlatMode`]'s two are: the order, the selection, the
@@ -245,7 +340,7 @@ pub struct Tab {
     ///
     /// `git` alone cannot say: `None` is both "not asked yet" and "asked, and there is no repository
     /// here". The window does not care about the difference anywhere it *draws* git, because both mean
-    /// no furniture — but the `@git` filter has to, and its two answers are opposite. Not answered
+    /// no furniture — but [`Lens::Git`] has to, and its two answers are opposite. Not answered
     /// yet is a question that cannot be evaluated, so it keeps every row and runs again when the answer
     /// lands; answered with nothing means there are no changes here, so it keeps none. Without the
     /// distinction, every refresh of a filtered listing would empty it for a frame or two.
@@ -285,6 +380,12 @@ pub struct Tab {
     /// See [`Tab::settle_filter`] and [`FILTER_DELAY`]. `None` means the order on screen is the
     /// order this filter asks for.
     pub filter_at: Option<f64>,
+    /// The other half of the filter: which of the funnel menu's listings is on show, if any.
+    ///
+    /// Beside [`Tab::filter`] and not part of it, because the two are different questions and a row
+    /// has to pass both — see [`Lens`]. No settling delay, unlike the text: it arrives whole, from a
+    /// menu, so there are no keystrokes to wait for.
+    pub lens: Option<Lens>,
     pub show_hidden: bool,
     /// Show everything under this folder rather than its own children. See
     /// [`Tab::toggle_flat`] and [`crate::fs::scan::scan_deep`].
@@ -528,6 +629,7 @@ impl Tab {
             ascending: true,
             filter: String::new(),
             filter_at: None,
+            lens: None,
             show_hidden: false,
             flat: false,
             flat_mode: FlatMode::default(),
@@ -591,6 +693,9 @@ impl Tab {
         // The grid's own geometry is deliberately not carried across: it is a cache over an order
         // this tab is about to build for itself, and one frame of arithmetic beats a stale copy.
         tab.view_mode = self.view_mode;
+        // And which listing the funnel is showing, for the same reason as the flatten it comes with:
+        // a duplicate of a pane showing what changed is a pane showing what changed. See [`Lens`].
+        tab.lens = self.lens;
         // Open the same way, but reading for itself — see `Preview::duplicate`, which explains
         // why the decoded content is deliberately not carried across.
         tab.preview = self.preview.duplicate();
@@ -715,6 +820,10 @@ impl Tab {
         self.anchor = None;
         self.filter.clear();
         self.filter_at = None;
+        // And with it the other half of the filter, for the same reason: what git has touched *here*
+        // is not a question about the folder being opened, any more than a name fragment is. See
+        // [`Lens`]. `Tab::refresh` keeps it, because that is the same folder read again.
+        self.lens = None;
         // And neither do the tiles, for the same reason as the two above: a folder of photographs is
         // worth looking at as pictures and the folder you open out of it is a different question. So
         // every folder opens in the details view — see [`ViewMode`], which is also why there is no
@@ -1184,9 +1293,9 @@ impl Tab {
         None
     }
 
-    /// Whether the filter line asks a question only git can answer. See [`sort::CHANGED`].
+    /// Whether the listing is showing a question only git can answer. See [`Lens::Git`].
     pub fn filters_on_git(&self) -> bool {
-        sort::split_special(&self.filter).0
+        self.lens == Some(Lens::Git)
     }
 
     /// Re-apply the sort and the filter from scratch.
@@ -1201,36 +1310,43 @@ impl Tab {
             self.tree.clear();
             return;
         };
-        // `@git` off the front of the filter, and what is left for the name test.
-        let (on_git, filter) = sort::split_special(&self.filter);
-        // Three states and three different answers — see [`Tab::git_answered`]. The closure holds its
-        // own `Arc`s because the loop it is called from borrows `self.order`.
+        // The half of the filter that is not about the name, as a test per row — see [`Lens`]. The
+        // closures hold their own `Arc`s and their own answer, because the loop they are called from
+        // borrows `self.order`.
         let names = dir.clone();
         let repo = self.git.clone();
-        let by_git: Option<Box<dyn Fn(usize) -> bool>> = match (on_git, self.git_answered) {
-            (false, _) => None,
-            // Asked and not answered: the question cannot be evaluated, so it excludes nothing. The
-            // answer arriving rebuilds this — `App::collect_git`.
-            (true, false) => None,
-            (true, true) => match repo {
+        let by_lens: Option<Box<dyn Fn(usize) -> bool>> = match self.lens {
+            None => None,
+            // Three states and three different answers — see [`Tab::git_answered`].
+            Some(Lens::Git) => match (self.git_answered, repo) {
+                // Asked and not answered: the question cannot be evaluated, so it excludes nothing.
+                // The answer arriving rebuilds this — `App::collect_git`.
+                (false, _) => None,
                 // Every row git has anything to say about, which is the same set the status line
                 // counts as `N changed` — a folder included, because it wears the strongest state
                 // beneath it and a folder filtered out is a folder you cannot open to reach what is
                 // inside it.
-                Some(repo) => Some(Box::new(move |entry| {
+                (true, Some(repo)) => Some(Box::new(move |entry| {
                     repo.state(names.name(entry))
                         .is_some_and(|state| state != crate::git::State::Clean)
                 })),
                 // Answered, and there is no repository here: nothing has changed, because there is
                 // nothing that could have.
-                None => Some(Box::new(|_| false)),
+                (true, None) => Some(Box::new(|_| false)),
             },
+            // Worked out once for the whole listing rather than per row, because the folders are not
+            // a question about themselves: one is kept when a picture is somewhere under it, which is
+            // a walk *up* from every picture. See [`sort::image_rows`].
+            Some(Lens::Images) => {
+                let kept = sort::image_rows(&dir, self.is_tree());
+                Some(Box::new(move |entry| kept[entry]))
+            }
         };
         // Remember what the cursor was pointing at, since its position moves.
         let cursor_entry = self.cursor.and_then(|at| self.order.get(at).copied());
         // The two flatten modes are two orders over one listing, and this is the only place that
         // knows which — see [`FlatMode`]. Everything either side of it is the same for both: the
-        // same filter, the same git question, the same cursor put back on the same file.
+        // same filter, the same lens, the same cursor put back on the same file.
         if self.is_tree() {
             let collapsed = std::mem::take(&mut self.collapsed);
             sort::build_tree_order(
@@ -1240,8 +1356,8 @@ impl Tab {
                 self.sort_by,
                 self.ascending,
                 self.show_hidden,
-                &filter,
-                by_git.as_deref(),
+                &self.filter,
+                by_lens.as_deref(),
                 // Taken out and put back rather than borrowed: the set and the order are both
                 // fields of this tab, and the builder needs one while it fills the other.
                 &|name| collapsed.contains(name),
@@ -1255,8 +1371,8 @@ impl Tab {
                 self.sort_by,
                 self.ascending,
                 self.show_hidden,
-                &filter,
-                by_git.as_deref(),
+                &self.filter,
+                by_lens.as_deref(),
             );
             // Nothing but a tree has a shape, and a stale one would outlive the listing it described.
             self.tree.clear();
@@ -1892,9 +2008,9 @@ mod tests {
         assert_eq!(tab.selected_size, 0);
     }
 
-    /// `@git` has three answers, and the one that matters is the middle one.
+    /// [`Lens::Git`] has three answers, and the one that matters is the middle one.
     ///
-    /// Git answers a frame or two after the listing, and in between the filter is a question that
+    /// Git answers a frame or two after the listing, and in between the lens is a question that
     /// cannot be evaluated. Excluding everything until then would empty the listing on every refresh —
     /// on every file operation, every `F5`, every time the watcher notices something — and then fill it
     /// again, which reads as the folder having been wiped. So an unanswered question excludes nothing,
@@ -1904,7 +2020,7 @@ mod tests {
     /// keeps no rows. It is the one case that needs `git_answered` rather than `git` to tell it from the
     /// second.
     #[test]
-    fn a_filter_on_git_waits_for_git_rather_than_emptying_the_listing() {
+    fn the_git_lens_waits_for_git_rather_than_emptying_the_listing() {
         use crate::fs::dir::DirBuilder;
 
         let mut builder = DirBuilder::new(r"C:\repo");
@@ -1913,8 +2029,8 @@ mod tests {
         }
         let mut tab = Tab::new(r"C:\repo");
         tab.apply(Arc::new(builder.finish(0)));
-        tab.filter = crate::fs::sort::CHANGED.to_owned();
-        assert!(tab.filters_on_git(), "the line asks about git");
+        tab.lens = Some(Lens::Git);
+        assert!(tab.filters_on_git(), "the listing asks about git");
 
         // Asked and not answered: everything, because nothing here can say otherwise yet.
         tab.rebuild_order();
@@ -1948,13 +2064,15 @@ mod tests {
             .collect();
         assert_eq!(names, ["touched.rs"]);
 
-        // And the name half still applies on top of it.
-        tab.filter = format!("{} .txt$", crate::fs::sort::CHANGED);
+        // And the name half still applies on top of it, which is what "the two compose" means: the
+        // lens is a different question from the text, not a second answer to it.
+        tab.filter = ".txt$".to_owned();
         tab.rebuild_order();
         assert_eq!(tab.order.len(), 0, "changed, but not a .txt");
 
-        // With the word gone, the folder comes back whole.
+        // With the lens off the folder comes back whole, whatever git says about it.
         tab.filter.clear();
+        tab.lens = None;
         tab.rebuild_order();
         assert_eq!(tab.order.len(), 2);
     }

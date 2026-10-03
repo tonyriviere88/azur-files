@@ -327,12 +327,20 @@ pub fn show(
     } else if tab.order.is_empty() {
         // "Empty" and "everything is filtered out" are different facts, and telling
         // them apart is the difference between a dead end and a hint.
+        //
+        // Four of them now, and the lens is the one that had to be added: with it on and the box
+        // empty, this said *everything here is hidden* and sent the reader to `Ctrl+H` over a folder
+        // with plenty in it. The text comes first because it is the thing most recently typed and the
+        // first thing anybody would clear — and each lens words its own answer, which is
+        // [`crate::pane::Lens::nothing_found`].
         let message = if tab.dir.as_ref().is_some_and(|d| d.is_empty()) {
             "This folder is empty"
-        } else if tab.filter.is_empty() {
-            "Everything here is hidden — Ctrl+H shows it"
-        } else {
+        } else if !tab.filter.is_empty() {
             "Nothing matches the filter"
+        } else if let Some(lens) = tab.lens {
+            lens.nothing_found()
+        } else {
+            "Everything here is hidden — Ctrl+H shows it"
         };
         text_center(
             ui.painter(),
@@ -2542,8 +2550,9 @@ fn status_line(
 /// # `N changed` is a button
 ///
 /// It is the one thing on this line that is also a *question*, and the answer was three gestures
-/// away: flatten the folder, find the filter box, know the word to type in it. Pressed, it does both
-/// halves at once — see [`Action::ShowChanges`]. Everything else here stays a fact.
+/// away: flatten the folder, find the filter box, know what to ask it for. Pressed, it does every
+/// part of it at once — see [`Action::SetLens`], which is the same listing the funnel's
+/// `Show git changes` opens. Everything else here stays a fact.
 ///
 /// **Subtle, in the sense the rest of this window's chrome uses the word**: no border and no fill at
 /// rest, so the line still reads as a line of figures rather than growing a control in the middle of
@@ -2735,17 +2744,21 @@ fn git_summary(
                 t.stroke.focus,
             );
         }
-        // The word is the constant's, not a copy of it: a tooltip that says to type something the
-        // box no longer understands is worse than no tooltip.
+        // The words are the menu entry's, not a copy of them: this button and the funnel's
+        // `Show git changes` ask for the same listing, and a tooltip naming it something else would
+        // read as a second, subtly different thing.
         azur_egui_theme::components::tooltip(
             response.clone(),
             &format!(
-                "Show what has changed: this folder's whole tree, filtered to {}",
-                crate::fs::sort::CHANGED
+                "{}: this folder's whole tree, filtered to what git says changed",
+                crate::pane::Lens::Git.label()
             ),
         );
         if response.clicked() {
-            out.push(Action::ShowChanges(pane));
+            out.push(Action::SetLens {
+                pane,
+                lens: Some(crate::pane::Lens::Git),
+            });
         }
     }
     x

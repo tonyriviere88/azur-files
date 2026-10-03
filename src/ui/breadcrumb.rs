@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use crate::app::Action;
 use crate::fs;
 use crate::icons;
-use crate::pane::{PaneId, Tab};
+use crate::pane::{Lens, PaneId, Tab};
 use crate::theme::Theme;
 use crate::ui::{text_left, tool_button, truncated, TOOL_SIZE};
 
@@ -63,28 +63,6 @@ const ARROW_DROP: f32 = 1.0;
 /// The box, the funnel and the ✕ stay put — see `TextField::text_lift`, which is what carries this
 /// into the field, and which does not move the things that are already right.
 const FILTER_TEXT_LIFT: f32 = 2.0;
-
-/// Every marker the filter box takes, in the order the tooltip lists them.
-///
-/// The design system's own — `azur_egui_theme::filter::MARKERS` — and then this window's `@git`.
-/// Taken from that list rather than restated, so the shared half cannot drift from the wording the
-/// other windows show; that is why the field passed the design system's text straight through before
-/// [`crate::fs::sort::CHANGED`] existed, and it is the property worth keeping.
-///
-/// `@git` last on purpose. The three above it are the syntax anywhere this field appears; this one is
-/// a question about *this* program's data, and a reader who has met the others recognises the odd one
-/// out at the end rather than in the middle.
-///
-/// `LazyLock` because concatenating a slice is not a `const` operation. Built once: the tooltip's body
-/// only runs while it is on screen, but the list has no reason to be rebuilt even then.
-static FILTER_MARKERS: std::sync::LazyLock<Vec<(&'static str, &'static str)>> =
-    std::sync::LazyLock::new(|| {
-        azur_egui_theme::filter::MARKERS
-            .iter()
-            .copied()
-            .chain([(crate::fs::sort::CHANGED, crate::fs::sort::CHANGED_MEANS)])
-            .collect()
-    });
 
 /// The pen at the right-hand end, and the room reserved for it.
 ///
@@ -675,6 +653,42 @@ fn flatten_menu(
         });
 }
 
+/// The funnel's menu: the listings a *name* cannot ask for.
+///
+/// **A left click, and `Menu` rather than `ContextMenu`.** The two menus above it hang off buttons
+/// that already do something, so theirs is the second gesture and the right button is where it
+/// belongs. This button has no first gesture — opening this *is* what it does — and a control whose
+/// only purpose is behind the button most people never try there is a control nobody finds. That is
+/// the whole reason the `@git` word became this: what it cost was every reader who never learnt it.
+///
+/// **Not sticky**, unlike those two, because these are commands rather than settings: each entry
+/// rebuilds the listing behind the menu, and what a reader wants next is to see it. Dismissal is
+/// also how they know the command was taken.
+///
+/// Ticked, and **ticking the one on show is how it is turned off** — a listing you are already
+/// looking at cannot be asked for again, so the tick is the only thing the entry can usefully mean
+/// the second time. One at a time for the reason [`Lens`] gives: they are two questions, not two
+/// halves of one.
+fn funnel_menu(
+    ui: &Ui,
+    trigger: &egui::Response,
+    pane: PaneId,
+    lens: Option<Lens>,
+    out: &mut Vec<Action>,
+) {
+    azur_egui_theme::components::Menu::new(trigger).show(ui.ctx(), |ui| {
+        for which in Lens::ALL {
+            let on = lens == Some(which);
+            if ui.add(ticked(MenuItem::new(which.label()), on)).clicked() {
+                out.push(Action::SetLens {
+                    pane,
+                    lens: (!on).then_some(which),
+                });
+            }
+        }
+    });
+}
+
 /// The path field's own menu: which slash it writes between the parts of a path.
 ///
 /// **Sticky**, like the two button menus above and for the same reason — it holds a setting rather
@@ -826,7 +840,11 @@ pub fn show(
     const MIN_PATH: f32 = 96.0;
     let room_for = |right: f32, want: f32| right - want - x >= MIN_PATH;
 
-    let filter_width = if !tab.filter.is_empty() || rect.width() > 460.0 {
+    // **A box with something in it is not dropped**, whether that something is typed or is a lens on
+    // the funnel: a listing narrowed by a control that has gone off the bar is the trap the flatten
+    // button is kept for, and the funnel is the only way back off a lens. The lens is a stronger case
+    // than the text, in fact — a filter you cannot see is at least a filter you know you typed.
+    let filter_width = if !tab.filter.is_empty() || tab.lens.is_some() || rect.width() > 460.0 {
         160.0_f32.min((rect.width() - 260.0).max(0.0))
     } else {
         0.0
@@ -849,7 +867,9 @@ pub fn show(
                 field,
                 azur_egui_theme::components::TextField::new(&mut tab.filter)
                     .placeholder("Filter")
-                    .prefix(&icons::filter)
+                    // The funnel's room, and the funnel itself drawn further down rather than here:
+                    // it is a *button* now. See [`funnel_menu`], and the block that puts it there.
+                    .prefix_room(true)
                     .clearable(true)
                     .size(Size::Small)
                     .width(filter_width)
@@ -864,12 +884,13 @@ pub fn show(
             crate::ui::CARET_SHORTER,
             crate::ui::CARET_LOWER,
         );
-        // **What the box understands, where it can be found.** Every word narrows, `!`
-        // excludes, `^` and `$` hold an end, and `@git` asks git instead of the name — invisible
-        // otherwise, because a filter field looks exactly the same whether it takes one substring
-        // or four terms. The shared markers are worded by `azur_egui_theme::filter` rather than by
-        // this program, so that the two cannot drift and so the field says the same thing in every
-        // window that has one; [`FILTER_MARKERS`] adds the one word only this window answers to.
+        // **What the box understands, where it can be found.** Every word narrows, `!` excludes and
+        // `^` and `$` hold an end — invisible otherwise, because a filter field looks exactly the
+        // same whether it takes one substring or four terms. Every marker is worded by
+        // `azur_egui_theme::filter` rather than by this program, and the list is that library's
+        // straight through: the syntax is the component's, so the field says the same thing in every
+        // window that has one and the two cannot drift. What this window adds to a filter is not
+        // syntax at all — it is on the funnel at the head of this box. See [`crate::pane::Lens`].
         //
         // Drawn rather than handed over as a string, because it is a table: the markers are
         // `text-secondary` against their meanings' `text-primary`, and a meaning has to start at the
@@ -882,7 +903,7 @@ pub fn show(
                     .color(t.text.primary),
             );
             ui.add_space(azur_egui_theme::tokens::space::S1);
-            crate::ui::tooltip_table(ui, t, &FILTER_MARKERS);
+            crate::ui::tooltip_table(ui, t, azur_egui_theme::filter::MARKERS);
         });
         if response.changed() {
             // Noted, not applied — see `Tab::settle_filter` at the top of this function, and
@@ -926,6 +947,37 @@ pub fn show(
         }) {
             response.request_focus();
         }
+
+        // ---- The funnel, which is a button -----------------------------------
+        //
+        // In the room the field kept for it — `prefix_room` above, and
+        // `components::prefix_rect` is where that room is — so it sits inside the box's own frame
+        // exactly where the glyph did. Drawn *after* the field, which is what makes it clickable at
+        // all: egui gives a point to the last widget registered over it, and the field's input covers
+        // this corner. It is the ordering the ✕ at the other end relies on too.
+        //
+        // A 24-point button will not fit inside a 24-point field, so it is the ✕'s 18 — the design
+        // system's `.clearButton` size, and this is the same kind of thing at the other end of the
+        // same box. Everything else about it is [`crate::ui::tool_button`]'s: subtle at rest so the
+        // box still reads as a box, the bar's own hover and press, and **latched while a lens is on**,
+        // which is the one thing on screen that says a listing has been narrowed by something you
+        // cannot see in the text.
+        let funnel = azur_egui_theme::components::prefix_rect(field, Size::Small).expand(2.0);
+        let response = tool_button(
+            ui,
+            t,
+            funnel,
+            Id::new(("filter-lens", pane)),
+            &icons::filter,
+            // What the menu is for, rather than a name for the button. The box beside it filters by
+            // the name; this is where the other questions are, and saying so is what stops it reading
+            // as decoration on a field.
+            "Filter by something other than the name",
+            true,
+            tab.lens.is_some(),
+            surface,
+        );
+        funnel_menu(ui, &response, pane, tab.lens, out);
         right = field.left() - space::S2;
     }
 
@@ -1931,19 +1983,25 @@ pub fn start_editing(tab: &mut Tab, slashes: bool) {
 mod tests {
     use super::*;
 
-    /// **Every marker the box takes is a pair in the tooltip, and `@git` is the last of them.**
+    /// **The box's tooltip is the design system's syntax and nothing this window invented, and the
+    /// listings it does add are the funnel's.**
     ///
-    /// The design system tests its own three (`filter::tests::the_markers_are_all_documented_as
-    /// _pairs`); nothing tested that this window's `@git` reaches the tooltip at all, and it is the
-    /// one marker a user has no other way of discovering — the others at least look like regex.
+    /// This used to assert the opposite: the list was the library's three with `@git` appended, and
+    /// what needed testing was that the appended pair reached the tooltip at all. The word is a menu
+    /// now, so the claim is inverted — a marker of this program's own here would send a reader to the
+    /// box to type something it no longer understands, which is the one wrong answer a syntax tooltip
+    /// can give.
     ///
     /// Pairs and not lines, because what makes the two columns possible is that the key and the
-    /// meaning never become one string. A marker smuggled in as `"@git — …"` would draw as one long
-    /// key in `text-secondary` with an empty column beside it, which is the failure this catches.
+    /// meaning never become one string. A marker smuggled in as `"!word — …"` would draw as one long
+    /// key in `text-secondary` with an empty column beside it, which is the failure this catches — the
+    /// design system tests that its own three are *present*
+    /// (`filter::tests::the_markers_are_all_documented_as_pairs`), not that they are still two halves
+    /// by the time this window draws them.
     #[test]
-    fn the_filter_tooltip_documents_every_marker_as_its_own_pair() {
-        let markers: &[(&str, &str)] = &FILTER_MARKERS;
-        for want in ["!word", "^word", "word$", crate::fs::sort::CHANGED] {
+    fn the_filter_tooltip_is_the_design_systems_and_the_lenses_are_the_funnels() {
+        let markers = azur_egui_theme::filter::MARKERS;
+        for want in ["!word", "^word", "word$"] {
             let (key, meaning) = markers
                 .iter()
                 .find(|(key, _)| *key == want)
@@ -1958,16 +2016,24 @@ mod tests {
                 "`{key}`/`{meaning}` has been folded into one string"
             );
         }
-        assert_eq!(
-            markers.last().map(|(key, _)| *key),
-            Some(crate::fs::sort::CHANGED),
-            "`@git` is this window's own and belongs after the shared three"
+
+        // Nothing in the box's syntax is about git or about a kind of file: both are questions about
+        // this program's data, and the funnel is where they are asked.
+        for (key, meaning) in markers {
+            assert!(
+                !key.starts_with('@') && !meaning.contains("git"),
+                "`{key}`/`{meaning}` is a lens dressed up as syntax"
+            );
+        }
+
+        // And each lens says what it does, because the menu is the only place either is named.
+        let labels: Vec<&str> = Lens::ALL.iter().map(|lens| lens.label()).collect();
+        assert_eq!(labels.len(), 2, "{labels:?}");
+        assert!(
+            labels.iter().all(|label| label.starts_with("Show ")),
+            "an entry that does something is a sentence, not a value: {labels:?}"
         );
-        assert_eq!(
-            markers.len(),
-            azur_egui_theme::filter::MARKERS.len() + 1,
-            "the shared markers should be taken from the design system, not restated"
-        );
+        assert_ne!(labels[0], labels[1]);
     }
 
     #[test]

@@ -175,7 +175,7 @@ impl Repo {
 
     /// A repository that says exactly this and nothing else.
     ///
-    /// For the tests in the modules that *ask* a `Repo` rather than read one — the `@git` filter's,
+    /// For the tests in the modules that *ask* a `Repo` rather than read one — [`crate::pane::Lens`]'s,
     /// the listing's — which need an answer to hand and not a repository on disk. The marks are the
     /// only field they read; everything else is [`Default`].
     #[cfg(test)]
