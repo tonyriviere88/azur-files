@@ -46,6 +46,22 @@ impl App {
             return;
         }
 
+        // Two folders selected, which is what `Folder diff` is offered on. Asked of the listing and not
+        // of the disk: the selection is rows of it, and each row already says whether it is a folder.
+        let diffable = items.len() == 2 && {
+            let tab = p.tab();
+            tab.dir.as_ref().is_some_and(|dir| {
+                let folders: Vec<PathBuf> = tab
+                    .selected
+                    .iter()
+                    .enumerate()
+                    .filter(|&(entry, &on)| on && dir.entries.get(entry).is_some_and(|e| e.is_dir()))
+                    .map(|(entry, _)| dir.target(entry))
+                    .collect();
+                folders.len() == 2 && items.iter().all(|item| folders.contains(item))
+            })
+        };
+
         // Whatever was open, or on its way, is not what was asked for.
         self.close_menu();
         let scale = ctx.pixels_per_point();
@@ -58,6 +74,7 @@ impl App {
             items,
             folder,
             depth,
+            diffable,
             since: ctx.cumulative_pass_nr(),
             asked: std::time::Instant::now(),
         });
@@ -141,11 +158,12 @@ impl App {
             && asking.asked.elapsed() > PATIENCE
             && crate::shell::over_network(&asking.folder)
         {
-            let (pane, at, items, folder) = (
+            let (pane, at, items, folder, diffable) = (
                 asking.pane,
                 asking.at,
                 asking.items.clone(),
                 asking.folder.clone(),
+                asking.diffable,
             );
             self.close_menu();
             self.asking = Some(Asking {
@@ -157,6 +175,7 @@ impl App {
                 items,
                 folder,
                 depth: crate::shell::menu::Depth::Fast,
+                diffable,
                 since: ctx.cumulative_pass_nr(),
                 asked: std::time::Instant::now(),
             });
@@ -209,6 +228,7 @@ impl App {
                             depth,
                             token,
                         )
+                        .diffable(asking.diffable)
                         .banded(handlers, can_paste, &self.menu_moves),
                     );
                 }
@@ -636,6 +656,16 @@ impl App {
                 },
             },
             Own::Cancel => return None,
+            // The two in the order the listing shows them, which is the order they were selected in
+            // on screen: the upper one on the left.
+            Own::FolderDiff => match &menu.items[..] {
+                [left, right] => Action::DiffFolders {
+                    pane: menu.pane,
+                    left: left.clone(),
+                    right: right.clone(),
+                },
+                _ => return None,
+            },
             // Into the folder the menu was raised in, which for a background menu is the folder
             // being shown. Named outright rather than as [`Action::Paste`], which would read the
             // pane again: the same reasoning as the redirected `paste` verb, and the same action.

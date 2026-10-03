@@ -85,6 +85,7 @@ mod archive;
 mod brand;
 mod config;
 mod console;
+mod diff;
 mod dock;
 mod fs;
 mod git;
@@ -182,6 +183,8 @@ fn main() -> eframe::Result {
     let mut path: Option<String> = None;
     let mut stack = false;
     let mut tiles = false;
+    let mut diff: Option<Option<crate::diff::Show>> = None;
+    let mut against: Option<std::path::PathBuf> = None;
     let mut preview = false;
     let mut find: Option<String> = None;
     let mut deps: Option<String> = None;
@@ -242,6 +245,14 @@ fn main() -> eframe::Result {
             path = Some(text.to_owned());
         } else if arg == "--tiles" {
             tiles = true;
+        } else if arg == "--diff" {
+            diff = Some(None);
+        } else if let Some(text) = arg.strip_prefix("--diff=") {
+            diff = Some(crate::diff::Show::parse(text));
+        } else if let Some(text) = arg.strip_prefix("--against=") {
+            // Either slash, as `--open=` takes it, and for the same reason: the shell cannot parse
+            // `D:/x`, and a right half the shell cannot parse has no context menu.
+            against = Some(std::path::PathBuf::from(text.replace('/', "\\")));
         } else if arg == "--preview" {
             preview = true;
         } else if arg == "--compare" {
@@ -409,6 +420,8 @@ fn main() -> eframe::Result {
                 rename,
                 path,
                 tiles,
+                diff,
+                against,
                 preview,
                 console,
                 find,
@@ -563,6 +576,13 @@ struct Window {
     /// the view is deliberately not a setting, so unlike `--flat` there is no config key a capture run
     /// could reach it through. See `App::show_tiles_here`.
     tiles: bool,
+    /// `--diff[=all|changes|names]`: open a folder diff of the first pane's folder against the
+    /// second's, as `Folder diff...` in the application menu would — showing the rows the word says,
+    /// or without one the rows the settings say. See [`crate::diff`].
+    diff: Option<Option<crate::diff::Show>>,
+    /// `--against=<path>`: the right half of `--diff`, rather than the next pane's folder — so a
+    /// capture of a diff can be one pane wide.
+    against: Option<std::path::PathBuf>,
     /// `--preview`: put the keyboard on the first previewable file in the listing and open the
     /// preview panel on it, for the same reason — it is behind `Ctrl+P` and a focused row.
     preview: bool,
@@ -659,6 +679,9 @@ impl eframe::App for Window {
             self.tiles = false;
             self.app.show_tiles_here();
         }
+        if let Some(show) = self.diff.take() {
+            self.app.folder_diff_here(show, self.against.take());
+        }
         if self.preview && self.shot.as_ref().is_some_and(|s| s.frame >= 8) && self.app.has_rows() {
             self.preview = false;
             if self.compare {
@@ -725,6 +748,7 @@ impl eframe::App for Window {
             || self.app.git_pending()
             || self.app.sizes_pending()
             || self.app.thumbs_pending()
+            || self.app.diff_pending()
             // The pick above, once it has had the frames to be attempted in. Waiting on it any earlier
             // would be waiting on the capture counter that opens the panel, and that counter only
             // advances when a capture is attempted — a deadlock that complained below about a name

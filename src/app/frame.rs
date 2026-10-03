@@ -222,6 +222,9 @@ impl App {
         }
 
         self.collect_scans(&ctx);
+        // Straight after, so a listing that landed this frame is compared this frame. See
+        // [`App::tend_diffs`], which is also what re-runs a diff when either of its roots changes.
+        self.tend_diffs();
         // Before the next round of asking, so a share that has just been signed in to is re-read on
         // this frame rather than the one after — this is what turns the dialog's OK into a listing.
         self.collect_connections(&ctx);
@@ -620,7 +623,9 @@ impl App {
             }
         }
 
-        // The strips themselves after the panes, so a tab is never under a pane's card.
+        // The strips themselves after the panes, so a tab is never under a pane's card. The right half
+        // of a diff has the keyboard on behalf of the pane it is drawn in.
+        let keyed = self.outer(self.focused);
         for row in &plan.rows {
             for (id, strip) in &row.strips {
                 let Some(index) = self.panes.iter().position(|p| p.id == *id) else {
@@ -630,7 +635,7 @@ impl App {
                     pos2(strip.left() + GUTTER, strip.top()),
                     pos2(strip.right() - GUTTER, strip.bottom()),
                 );
-                let focused = *id == self.focused;
+                let focused = *id == keyed;
                 let slots = chrome::tab_strip(
                     ui,
                     t,
@@ -656,6 +661,11 @@ impl App {
             return;
         };
         self.panes[index].rect = rect;
+        // A folder diff is two listings in one pane, and drawn by its own routine. See [`App::diff_pane`].
+        if let Some(twin) = self.panes[index].tab().diff.as_ref().and_then(|d| d.twin) {
+            self.diff_pane(ui, t, id, twin, rect);
+            return;
+        }
         // The card is drawn whatever the size, so a pane squeezed past the point of
         // usefulness still reads as a pane you can drag wider rather than as a hole
         // in the window.
@@ -715,65 +725,22 @@ impl App {
             crate::ui::console::split(list, self.panes[index].console_open, self.console_share);
         let reserved = (list.bottom() - rows.bottom()).max(0.0);
 
-        let mut child = ui.new_child(
-            egui::UiBuilder::new()
-                .max_rect(inside)
-                .layout(egui::Layout::top_down(egui::Align::Min)),
-        );
-        child.set_clip_rect(inside.intersect(ui.clip_rect()));
-
-        // A click anywhere in the pane moves the keyboard here.
-        let claim = child.interact(rect, egui::Id::new(("pane-claim", id)), egui::Sense::click());
-        if claim.clicked() || claim.secondary_clicked() {
-            self.actions.push(Action::Focus(id));
-        }
-
-        // The path bar paints its own surface, in `breadcrumb::show`. It used to be
-        // `background-layer` like the rest of the pane with a `stroke-subtle` hairline under it
-        // to say where it ended; now it is [`crate::ui::seam`], the fill says it, and a hairline
-        // between two fills that already differ is a third line nobody asked for.
-
-        let Self {
-            panes,
-            crumbs,
-            complete,
-            loader,
-            actions,
-            scratch,
-            zone,
-            icons,
-            thumbs,
-            links,
-            cut,
-            notice,
-            extracting,
-            ops,
-            preview,
-            flat_mode,
-            regroup,
-            forward_slashes,
-            auto_tiles,
-            providers,
-            ..
-        } = self;
-        let (flat_mode, regroup, slashes) = (*flat_mode, *regroup, *forward_slashes);
-        let auto_tiles = *auto_tiles;
-        let status = status_override(ops.in_progress(), extracting, notice.as_deref());
-        let pane = &mut panes[index];
-        let tab = pane.tab_mut();
-
-        breadcrumb::show(
-            &mut child, t, bar, id, tab, crumbs, complete, loader, icons, preview, flat_mode,
-            regroup, slashes, actions,
-        );
-        let outcome = filelist::show(
-            &mut child, t, zone, list, floor, id, tab, focused, icons, links, thumbs, cut, status,
-            console_open, auto_tiles, providers, reserved, scratch, actions,
+        let mut child = self.claimed(ui, id, inside);
+        let outcome = self.listing(
+            &mut child, t, id, index, bar, list, floor, focused, console_open, reserved,
         );
         // After the listing, so the panel's surface is over it rather than under: the listing
         // reaches for the whole body when it measures its own columns, and a panel drawn first
         // would have a row's fill painted across it.
         if let Some(panel) = panel {
+            let Self {
+                panes,
+                preview,
+                scratch,
+                actions,
+                ..
+            } = self;
+            let tab = panes[index].tab_mut();
             // Whether git has a different version of what the panel is about, which is what decides
             // whether a *picture* is offered the diff toggle. A text file answers that from its own
             // payload — the diff came back with it — and a picture cannot: the comparison is what the
@@ -806,6 +773,101 @@ impl App {
             self.console_panel(&mut child, t, id, index, console, list);
         }
 
+        self.landed(ui, t, id, index, outcome);
+    }
+
+    /// The pane's own `Ui` over `rect`, clipped to it, and the click anywhere in it that moves the
+    /// keyboard here. Shared by [`App::pane`] and a folder diff's halves.
+    pub(super) fn claimed(&mut self, ui: &mut Ui, id: PaneId, rect: Rect) -> Ui {
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(rect)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+        child.set_clip_rect(rect.intersect(ui.clip_rect()));
+        let claim = child.interact(rect, egui::Id::new(("pane-claim", id)), egui::Sense::click());
+        if claim.clicked() || claim.secondary_clicked() {
+            self.actions.push(Action::Focus(id));
+        }
+        child
+    }
+
+    /// The path bar over the listing over the status line — everything a pane draws that a folder
+    /// diff's halves draw too. See [`App::pane`] for where each rect comes from.
+    ///
+    /// The status line says what [`status_override`] says, and otherwise, in a diff, what the diff
+    /// found; the counts only when neither has anything to say.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn listing(
+        &mut self,
+        child: &mut Ui,
+        t: &Theme,
+        id: PaneId,
+        index: usize,
+        bar: Rect,
+        list: Rect,
+        floor: Rect,
+        focused: bool,
+        console_open: bool,
+        reserved: f32,
+    ) -> filelist::Outcome {
+        // The path bar paints its own surface, in `breadcrumb::show`. It used to be
+        // `background-layer` like the rest of the pane with a `stroke-subtle` hairline under it
+        // to say where it ended; now it is [`crate::ui::seam`], the fill says it, and a hairline
+        // between two fills that already differ is a third line nobody asked for.
+        let Self {
+            panes,
+            crumbs,
+            complete,
+            loader,
+            actions,
+            scratch,
+            zone,
+            icons,
+            thumbs,
+            links,
+            cut,
+            notice,
+            extracting,
+            ops,
+            preview,
+            flat_mode,
+            regroup,
+            forward_slashes,
+            auto_tiles,
+            providers,
+            ..
+        } = self;
+        let tab = panes[index].tab_mut();
+        // Held by its own `Arc` for the length of the frame, because the tab it hangs off is lent to
+        // the listing mutably while the status line reads it.
+        let found = tab
+            .diff
+            .as_ref()
+            .and_then(|d| Some((d.comparison.clone()?, d.is_left())));
+        let status = status_override(ops.in_progress(), extracting, notice.as_deref())
+            .or(found.as_ref().map(|(c, left)| c.half(*left).1.summary.as_str()));
+
+        breadcrumb::show(
+            child, t, bar, id, tab, crumbs, complete, loader, icons, preview, *flat_mode, *regroup,
+            *forward_slashes, actions,
+        );
+        filelist::show(
+            child, t, zone, list, floor, id, tab, focused, icons, links, thumbs, cut, status,
+            console_open, *auto_tiles, providers, reserved, scratch, actions,
+        )
+    }
+
+    /// What a drawn listing leaves for the next frame — where things can be dropped, and a folder to
+    /// read ahead — and the drop highlight over it.
+    pub(super) fn landed(
+        &mut self,
+        ui: &Ui,
+        t: &Theme,
+        id: PaneId,
+        index: usize,
+        outcome: filelist::Outcome,
+    ) {
         self.panes[index].drop_rows = outcome.drop_rows;
         self.panes[index].drop_area = outcome.drop_area;
         if let Some(path) = outcome.prefetch {

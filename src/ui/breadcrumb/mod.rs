@@ -258,6 +258,11 @@ pub fn show(
     slashes: bool,
     out: &mut Vec<Action>,
 ) {
+    // **A folder diff's half has the path and the four buttons that get about, and nothing else** —
+    // no filter, no flatten, no preview. Each half is always a tree, has no panel beside it, and a
+    // filter on one side would make the two sides disagree about what they are comparing. See
+    // [`crate::diff`].
+    let bare = tab.diff.is_some();
     // **The filter, applied once the typing stops.** Before anything is drawn, so the listing
     // below is laid out from the order this settles on rather than a frame behind it.
     //
@@ -359,7 +364,9 @@ pub fn show(
     // the funnel: a listing narrowed by a control that has gone off the bar is the trap the flatten
     // button is kept for, and the funnel is the only way back off a lens. The lens is a stronger case
     // than the text, in fact — a filter you cannot see is at least a filter you know you typed.
-    let filter_width = if !tab.filter.is_empty() || tab.lens.is_some() || rect.width() > 460.0 {
+    let filter_width = if bare {
+        0.0
+    } else if !tab.filter.is_empty() || tab.lens.is_some() || rect.width() > 460.0 {
         160.0_f32.min((rect.width() - 260.0).max(0.0))
     } else {
         0.0
@@ -510,6 +517,47 @@ pub fn show(
         right = field.left() - space::S2;
     }
 
+    // **A folder diff's one control**, where the filter box is on any other bar: which rows both halves
+    // show. Three states, stepped through by clicking and chosen by name from its right-click menu —
+    // see [`crate::diff::Show`]. Latched while it is narrowing anything, for the reason the funnel
+    // is latched under a lens: it is the only thing on screen that says rows have been left out.
+    if let Some(show) = tab.diff.as_ref().map(|d| d.show) {
+        if room_for(right, TOOL_SIZE) {
+            let rect = button(right - TOOL_SIZE);
+            let tip = match show {
+                crate::diff::Show::All => {
+                    "Showing all files — click to show only what differs, right-click to choose"
+                }
+                crate::diff::Show::Changes => {
+                    "Showing only changes: names, types, sizes and dates — click to show only \
+                     added or missing names"
+                }
+                crate::diff::Show::Names => {
+                    "Showing only names on one side and not the other — click to show all files"
+                }
+            };
+            let response = tool_button(
+                ui,
+                t,
+                rect,
+                Id::new(("diff-show", pane)),
+                &icons::diff,
+                tip,
+                true,
+                show != crate::diff::Show::All,
+                surface,
+            );
+            if response.clicked() {
+                out.push(Action::SetDiffShow {
+                    pane,
+                    show: show.next(),
+                });
+            }
+            diff_show_menu(ui, &response, pane, show, out);
+            right = rect.left() - space::S2;
+        }
+    }
+
     // Flatten, immediately before the filter — the two are the same kind of thing, a question
     // asked of the folder you are looking at rather than somewhere to go, and both are given up
     // together when the pane is too narrow for the path. Latched while it is on, which is what
@@ -524,7 +572,7 @@ pub fn show(
     // lives: one flat list of everything under the folder, or the tree it came from. The same
     // arrangement as the preview button's below, for the same reason — a right click on the
     // control that opens a thing is where the settings of that thing belong.
-    if room_for(right, TOOL_SIZE) {
+    if !bare && room_for(right, TOOL_SIZE) {
         let rect = button(right - TOOL_SIZE);
         let response = tool_button(
             ui,
@@ -561,7 +609,7 @@ pub fn show(
     // and then Right, Bottom or Auto. A right click on the control that opens a thing is where
     // people look for the settings of that thing, and it keeps three radio buttons off a path
     // bar that has no room for them.
-    if room_for(right, TOOL_SIZE) {
+    if !bare && room_for(right, TOOL_SIZE) {
         let rect = button(right - TOOL_SIZE);
         let response = tool_button(
             ui,
@@ -600,6 +648,20 @@ pub fn show(
         segments(
             ui, t, path_rect, pane, tab, menu, loader, icons_cache, slashes, out,
         );
+    }
+
+    // **A diff's second folder, asked for** — an outline round the path in the accent's mark, held
+    // and then faded. Drawn last, over the crumbs, and hit-tests nothing. See [`crate::diff::Flash`].
+    let now = ui.input(|i| i.time);
+    if let Some(strength) = tab.diff.as_mut().and_then(|d| d.flash.strength(now)) {
+        ui.painter().rect_stroke(
+            path_rect.shrink2(vec2(0.0, 3.0)),
+            CornerRadius::ZERO,
+            egui::Stroke::new(2.0, t.accent.mark.gamma_multiply(strength)),
+            egui::StrokeKind::Inside,
+        );
+        // This window is idle between events, and a fade is nothing but frames.
+        ui.ctx().request_repaint();
     }
 }
 

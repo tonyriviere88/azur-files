@@ -566,6 +566,16 @@ pub(crate) fn rows(
             let dim = entry.is_hidden() || pending_cut;
             let name_color = if dim { t.text.tertiary } else { t.text.primary };
             let meta_color = if dim { t.text.disabled } else { t.text.secondary };
+            // **In a folder diff, what this row is against the other side** — see [`crate::diff`].
+            // Only what really differs is highlighted: the name when it has no counterpart, and
+            // otherwise the Type, Size or Modified cell that does not match. Everything that does
+            // steps back; a cut still dims, since that is about this side.
+            let inks = match tab.diff.as_ref().and_then(|d| d.mark(&dir, entry_index)) {
+                Some(mark) if !pending_cut => t.diff_inks(mark, widths[2] > 0.0),
+                _ => crate::theme::DiffInks::plain(name_color, meta_color),
+            };
+            let (name_color, meta_color) = (inks.name, inks.meta);
+            let (type_color, size_color, modified_color) = (inks.kind, inks.size, inks.modified);
 
             // ---- Name ----
             let kind = fmt::kind_of(dir.ext(entry_index), entry.is_dir());
@@ -860,7 +870,7 @@ pub(crate) fn rows(
                         ui.painter(),
                         scratch,
                         meta_font.clone(),
-                        meta_color,
+                        size_color,
                         cell.width(),
                     );
                     if inked {
@@ -886,7 +896,7 @@ pub(crate) fn rows(
                     ui.painter(),
                     scratch,
                     meta_font.clone(),
-                    meta_color,
+                    type_color,
                     cell.width(),
                 );
                 if inked {
@@ -912,7 +922,7 @@ pub(crate) fn rows(
                     ui.painter(),
                     scratch,
                     meta_font.clone(),
-                    meta_color,
+                    modified_color,
                     cell.width(),
                 );
                 if inked {

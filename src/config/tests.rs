@@ -52,6 +52,7 @@ fn the_window_comes_back_the_way_it_was_left() {
         console_shell: crate::console::Kind::PowerShell,
         // Away from their defaults for the same reason the two above are.
         flat_mode: crate::pane::FlatMode::Tree,
+        diff_show: crate::diff::Show::Names,
         regroup: false,
         show_hidden: true,
         forward_slashes: true,
@@ -117,6 +118,11 @@ fn the_window_comes_back_the_way_it_was_left() {
     assert_eq!(back.flat_mode, crate::pane::FlatMode::Tree);
     assert!(saved.to_text().contains("flatten=tree"));
     assert_eq!(older.flat_mode, crate::pane::FlatMode::Tree);
+    // Which rows a folder diff opens showing, as a word too — and every row for a file that predates
+    // the button.
+    assert_eq!(back.diff_show, crate::diff::Show::Names);
+    assert!(saved.to_text().contains("diff_show=names"));
+    assert_eq!(older.diff_show, crate::diff::Show::All);
     // And whether that tree merges its chains of single folders, which is the other flag whose
     // default is *on* — so the older file has to come back with it set, and the saved one, which
     // turned it off, has to come back off.

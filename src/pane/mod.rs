@@ -673,11 +673,21 @@ pub struct Tab {
     /// puts back the one that tab had open. Where the panel *goes* is the window's preference and
     /// lives on `App` — see [`crate::ui::preview::Layout`].
     pub preview: crate::ui::preview::Preview,
+    /// Whether this tab is one half of a **folder diff**, and what it has been compared with.
+    ///
+    /// A diff tab is always a flattened tree — its [`Tab::flat`] survives [`Tab::go_to`], and the
+    /// flatten button, the mode and the regrouping all leave it alone — because the comparison is of
+    /// two whole hierarchies, and a listing of one folder deep would be comparing something else.
+    /// See [`crate::diff`], and [`Tab::diff_side`] for how one is made.
+    pub diff: Option<crate::diff::Side>,
 }
 
 /// Widths for the three fitted columns before anything has been measured. Only
 /// visible for the frame between a listing arriving and being drawn.
 const DEFAULT_WIDTHS: [f32; 4] = [240.0, 88.0, 130.0, 132.0];
+
+/// What a folder diff's tab is called until both halves have landed and it can name them.
+pub const DIFF_TITLE: &str = "Folder diff";
 
 /// How long a folder may take to read before the listing admits to waiting for it.
 ///
@@ -825,7 +835,36 @@ impl Tab {
             renaming: None,
             rename_fresh: false,
             preview: crate::ui::preview::Preview::default(),
+            diff: None,
         }
+    }
+
+    /// One half of a folder diff, on `path`: flattened as a tree, whatever the window's preference
+    /// for flattening says, and showing the rows `show` keeps. `twin` is the pane holding the other
+    /// half, on the left half — see [`crate::diff::Side`].
+    ///
+    /// **Not regrouped**: a chain of folders merged into one row is one mark for several folders,
+    /// and a folder only on one side would be hidden inside a name that looks the same on both.
+    pub fn diff_side(
+        path: impl Into<PathBuf>,
+        show_hidden: bool,
+        show: crate::diff::Show,
+        twin: Option<PaneId>,
+    ) -> Self {
+        let mut tab = Self::showing(path, show_hidden);
+        tab.flat = true;
+        tab.flat_mode = FlatMode::Tree;
+        tab.regroup = false;
+        tab.opening = false;
+        tab.diff = Some(crate::diff::Side {
+            twin,
+            show,
+            ..Default::default()
+        });
+        if twin.is_some() {
+            tab.title = DIFF_TITLE.to_owned();
+        }
+        tab
     }
 
     /// A new tab already showing what the rest of the window is showing.
@@ -945,6 +984,13 @@ pub struct Pane {
     /// failed — spawning a process sixty times a second is the one wrong answer here. Cleared by
     /// picking a different shell, which is the only thing that could change the outcome.
     pub console_failed: Option<crate::console::Kind>,
+    /// Whether this pane is the **right half of a folder diff** rather than a pane of its own.
+    ///
+    /// Such a pane is in `App::panes` but not in the layout: it has no tab strip and no place in the
+    /// tree, and is drawn inside the pane whose diff tab is showing — see [`crate::diff::Side`]. It
+    /// exists so that everything a listing can ask for is addressed the way it always is, by pane.
+    /// It goes when the tab that owns it does.
+    pub twin: bool,
 }
 
 impl Pane {
@@ -961,6 +1007,7 @@ impl Pane {
             console_open: false,
             console_queue: Vec::new(),
             console_failed: None,
+            twin: false,
         }
     }
 

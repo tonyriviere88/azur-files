@@ -114,6 +114,27 @@ list.
 Click a module and two more panels appear below the tree: the symbols this binary imports from
 it, and the symbols it exports.
 
+## Folder diff
+
+- two folder trees side by side, in a tab of their own
+- what is on one side only, and what differs in type, size or date
+- show everything, only the changes, or only what was added or removed
+
+Open it from the menu at the top left (**Folder diff...**), or right-click two selected folders
+and pick **Folder diff**. Both sides are the whole tree, flattened, each with its own path bar —
+point either one somewhere else and the comparison runs again. Everything that is the same on
+both sides steps back to grey, so only the real differences keep a colour: a name found on one
+side only is green, and for a file both sides have, it is the size, date or type that differs
+which is highlighted, not the name. The two trees scroll, open and close together.
+
+![Two releases compared, everything shown](docs/folder-diff.png)
+
+The button at the right of each path bar narrows both sides at once, and the choice is kept for
+the next diff: every file, only the changes, or only the names that are on one side and not the
+other.
+
+![The same two releases, only the changes](docs/folder-diff-changes.png)
+
 ## Console
 
 - basic console support (batch, powershell, bash)

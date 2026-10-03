@@ -79,6 +79,9 @@ pub struct Open {
     /// clipboard. Remembered rather than re-read so that [`Open::arrange`] does not take the
     /// desktop's one clipboard on every right click.
     can_paste: bool,
+    /// Whether the selection is exactly two folders, and so gets `Folder diff`. Decided by whoever
+    /// raised the menu, from the listing — see [`Open::diffable`].
+    diffable: bool,
     /// How much of a menu this is, carried through so that a command chosen here is resolved
     /// against a menu built the same way. See [`crate::shell::menu::invoke`].
     pub depth: crate::shell::menu::Depth,
@@ -155,6 +158,7 @@ impl Open {
             entries,
             handlers: crate::shell::menu::Handlers::new(),
             can_paste: false,
+            diffable: false,
             depth,
             open: Vec::new(),
             cursor: None,
@@ -191,6 +195,13 @@ impl Open {
         self
     }
 
+    /// Offer `Folder diff` — the selection is exactly two folders. Before [`Open::banded`], which is
+    /// what arranges the menu. See [`crate::shell::menu::Own::FolderDiff`].
+    pub fn diffable(mut self, on: bool) -> Self {
+        self.diffable = on;
+        self
+    }
+
     /// Band the shell's entries and put this program's own two in.
     ///
     /// **The one place a menu's contents are decided**, called by [`Open::new`] and again by every
@@ -209,6 +220,12 @@ impl Open {
         // hands over with a gap in it — no Paste. See `crate::shell::menu::Own::Paste`.
         let entries = if self.items.is_empty() {
             crate::shell::menu::with_our_paste(entries, self.can_paste)
+        } else {
+            entries
+        };
+        // `Folder diff`, after Open, when the selection is two folders.
+        let entries = if self.diffable {
+            crate::shell::menu::with_our_folder_diff(entries)
         } else {
             entries
         };

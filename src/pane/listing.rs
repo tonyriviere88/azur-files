@@ -194,7 +194,8 @@ impl Tab {
         auto: AutoTiles,
         providers: &mut crate::shell::providers::Providers,
     ) {
-        if !std::mem::take(&mut self.opening) {
+        // A folder diff is rows, always: the marks are drawn on the Name column.
+        if !std::mem::take(&mut self.opening) || self.diff.is_some() {
             return;
         }
         // Nothing is counted while the rule is off. Which is not merely an optimisation: the walk is a
@@ -349,6 +350,14 @@ impl Tab {
                 Some(Box::new(move |entry| kept[entry]))
             }
         };
+        // And a folder diff's own narrowing, which is a test of the same shape and has to pass as well:
+        // `Show only changes` with a word typed is every change whose path has the word in it.
+        let by_diff = self.diff.as_ref().and_then(|d| d.keeper(&dir));
+        let by_lens: Option<Box<dyn Fn(usize) -> bool>> = match (by_lens, by_diff) {
+            (Some(lens), Some(diff)) => Some(Box::new(move |entry| lens(entry) && diff(entry))),
+            (lens, None) => lens,
+            (None, diff) => diff,
+        };
         // What each row's Size cell is *showing*, for a sort by that column: a file's own bytes, and a
         // folder's counted ones once they are counted. `None` for every other column and whenever the
         // measurement is off — and in the sort, being `Some` is what says folders no longer lead.
@@ -406,6 +415,18 @@ impl Tab {
         // re-sort here would have every settled filter keystroke rebuild the listing a second time on
         // the next frame for an order that cannot have changed.
         self.sizes.rows_moved();
+    }
+
+    /// Attach a folder diff's comparison, or let go of one — and build the order again when a narrowed
+    /// view has just been handed the marks it narrows by: the listing landed before its comparison did,
+    /// and was ordered without them. See [`crate::diff::Side::keeper`].
+    pub fn set_comparison(&mut self, comparison: Option<Arc<crate::diff::Comparison>>) {
+        let Some(side) = self.diff.as_mut() else { return };
+        let narrowed = comparison.is_some() && side.show != crate::diff::Show::All;
+        side.comparison = comparison;
+        if narrowed {
+            self.rebuild_order();
+        }
     }
 
     /// Click a column header: toggle the direction if it is already the sort,

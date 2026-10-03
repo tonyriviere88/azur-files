@@ -837,6 +837,15 @@ fn app_menu(
                 side: crate::pane::Side::Bottom,
             });
         }
+        // Two folder trees side by side, and what one has that the other does not. A tab like the
+        // two entries above make, so it sits with them — see [`crate::diff`]. The ellipsis is the
+        // convention's: it opens on the folder you are in and waits for the second one to be typed.
+        if ui
+            .add(MenuItem::new("Folder diff...").icon(&icons::diff))
+            .clicked()
+        {
+            out.push(Action::FolderDiff);
+        }
         azur_egui_theme::components::menu_divider(ui);
         // The panel down the left, which is the one piece of furniture in this window with no switch
         // of its own anywhere on screen — there is nowhere to put one that is not inside the thing

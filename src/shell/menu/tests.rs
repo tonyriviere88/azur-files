@@ -1633,6 +1633,25 @@ fn copyaspath_is_dropped_and_our_copy_paths_survives() {
     ));
 }
 
+/// `Folder diff` goes straight after the shell's Open, found by its verb whatever it is called.
+#[test]
+fn the_folder_diff_entry_follows_the_first_open() {
+    let labels = |entries: &[Entry]| entries.iter().map(|e| e.label.clone()).collect::<Vec<_>>();
+    let menu = vec![
+        cmd("Ouvrir", "open"),
+        cmd("Ouvrir dans un nouvel onglet", "opennewtab"),
+        cmd("Ouvrir", "open"),
+        cmd("Propriétés", "properties"),
+    ];
+    assert_eq!(
+        labels(&with_our_folder_diff(menu)),
+        ["Ouvrir", "Folder diff", "Ouvrir dans un nouvel onglet", "Ouvrir", "Propriétés"]
+    );
+    // With no Open at all, at the head of the menu.
+    let menu = vec![cmd("Propriétés", "properties")];
+    assert_eq!(labels(&with_our_folder_diff(menu)), ["Folder diff", "Propriétés"]);
+}
+
 /// A right-button drop's menu is this program's own four entries and comes back untouched.
 ///
 /// Not a hypothetical: nothing in one has a verb, so every band would come up empty and the four

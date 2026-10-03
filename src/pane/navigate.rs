@@ -89,7 +89,10 @@ impl Tab {
             .position(|(_, at)| *at == path)
             .and_then(|here| trail.get(here + 1))
             .map(|(_, child)| display_name(child));
-        self.title = display_name(&path);
+        // A diff tab keeps the name it was given: it is about two folders, and this is one of them.
+        if self.diff.is_none() {
+            self.title = display_name(&path);
+        }
         self.path = path;
         self.dir = None;
         self.awaiting = None;
@@ -147,7 +150,11 @@ impl Tab {
         // which is the only way out of the view that does not need the button again — and
         // it is what stops a click on a deep folder from silently starting a second tree
         // walk. `Tab::refresh` keeps it, because that is the same question again.
-        self.flat = false;
+        //
+        // **Except in a folder diff**, which is a comparison of two trees and nothing else — see
+        // [`Tab::diff`]. Opening a folder there moves that side's root down to it, and the walk is
+        // the point.
+        self.flat = self.diff.is_some();
         // And with it what was shut in the tree, which named folders under the folder being
         // left. `Tab::refresh` keeps these too: the same tree, read again, is the same tree.
         self.collapsed.clear();
@@ -185,6 +192,10 @@ impl Tab {
         // drawn disabled and this refuses — rather than latching over a listing that would not
         // have changed.
         if self.path.as_os_str().is_empty() {
+            return;
+        }
+        // A folder diff is always a tree. See [`Tab::diff`].
+        if self.diff.is_some() {
             return;
         }
         self.flat = !self.flat;
@@ -244,6 +255,10 @@ impl Tab {
     /// second case rather than the first — the merge is the tree's shape and the list has no shape to
     /// change.
     pub fn set_regroup(&mut self, on: bool) -> bool {
+        // Never in a folder diff — see [`Tab::diff_side`].
+        if self.diff.is_some() {
+            return false;
+        }
         if !self.is_tree() || self.regroup == on {
             self.regroup = on;
             return false;
@@ -277,6 +292,10 @@ impl Tab {
     }
 
     pub fn set_flat_mode(&mut self, mode: FlatMode) -> bool {
+        // A folder diff is a tree whatever the window prefers. See [`Tab::diff`].
+        if self.diff.is_some() {
+            return false;
+        }
         if !self.flat || self.flat_mode == mode {
             self.flat_mode = mode;
             return false;
@@ -303,13 +322,19 @@ impl Tab {
 
     /// Shut a folder, or open it. Answers whether the tree changed.
     pub fn set_collapsed(&mut self, position: usize, shut: bool) -> bool {
-        if !self.flat || self.flat_mode != FlatMode::Tree {
+        match self.entry_at(position) {
+            Some(entry) => self.set_collapsed_entry(entry, shut),
+            None => false,
+        }
+    }
+
+    /// [`Tab::set_collapsed`] by entry index rather than position — the half both it and
+    /// [`Tab::set_collapsed_named`] come down to.
+    fn set_collapsed_entry(&mut self, entry: usize, shut: bool) -> bool {
+        if !self.is_tree() {
             return false;
         }
         let Some(dir) = self.dir.clone() else {
-            return false;
-        };
-        let Some(entry) = self.entry_at(position) else {
             return false;
         };
         if !dir.entries.get(entry).is_some_and(|e| e.is_dir()) {
@@ -328,6 +353,28 @@ impl Tab {
         // even though it is still on the same file — which `rebuild_order` puts back.
         self.rebuild_order();
         true
+    }
+
+    /// Shut or open the folder called `name`, if this tree has one — the other half of a folder
+    /// diff following a twisty clicked on this one. Answers whether the tree changed.
+    ///
+    /// By name rather than position, because the two halves are two different orders; and matched
+    /// the way the diff matches, ignoring case, so the folder it finds is the one the diff paired up.
+    pub fn set_collapsed_named(&mut self, name: &str, shut: bool) -> bool {
+        let entry = self
+            .dir
+            .as_ref()
+            .zip(self.diff.as_ref())
+            .and_then(|(dir, diff)| diff.entry_named(dir, name));
+        match entry {
+            Some(entry) => self.set_collapsed_entry(entry, shut),
+            None => false,
+        }
+    }
+
+    /// The name of the row at `position` — its path relative to the folder, in a flattened listing.
+    pub fn name_at(&self, position: usize) -> Option<&str> {
+        Some(self.dir.as_ref()?.name(self.entry_at(position)?))
     }
 
     /// Whether the folder at a position in the display order is shut.

@@ -174,52 +174,64 @@ pub(crate) fn status_line(
     // `azur_egui_theme::components::shortcut_in`, which is also why `Ctrl+²` is written with the
     // character the key carries.
     let middle = (line.center().y - SWITCH * 0.5).round();
-    let switch = Rect::from_min_size(pos2(line.left() + space::S2, middle), vec2(SWITCH, SWITCH));
-    if crate::ui::tool_button(
-        ui,
-        t,
-        switch,
-        Id::new(("console-switch", pane)),
-        &icons::terminal,
-        if console_open {
-            "Hide the console (Ctrl+²)"
-        } else {
-            "Show the console (Ctrl+²)"
-        },
-        true,
-        console_open,
-        t.surfaces.status,
-    )
-    .clicked()
+    // Each switch takes the next place along, so one that is not drawn leaves no gap.
+    let mut along = line.left() + space::S2;
+    let mut next = || {
+        let at = Rect::from_min_size(pos2(along, middle), vec2(SWITCH, SWITCH));
+        along = at.right() + space::S2;
+        at
+    };
+    // **A folder diff's half keeps only Measure.** It has no console of its own — the pane it is drawn
+    // in is the diff's — and it is rows always, because the marks are drawn on the Name column. See
+    // [`crate::diff`]. Both keys are refused there too, rather than left to do something unseen.
+    let diffing = tab.diff.is_some();
+    if !diffing
+        && crate::ui::tool_button(
+            ui,
+            t,
+            next(),
+            Id::new(("console-switch", pane)),
+            &icons::terminal,
+            if console_open {
+                "Hide the console (Ctrl+²)"
+            } else {
+                "Show the console (Ctrl+²)"
+            },
+            true,
+            console_open,
+            t.surfaces.status,
+        )
+        .clicked()
     {
         out.push(Action::ToggleConsole(pane));
     }
 
     let tiles = tab.view_mode.is_icons();
-    let view = Rect::from_min_size(pos2(switch.right() + space::S2, middle), vec2(SWITCH, SWITCH));
-    let switched = crate::ui::tool_button(
-        ui,
-        t,
-        view,
-        Id::new(("view-switch", pane)),
-        &icons::grid_view,
-        if tiles {
-            "Show details instead (Ctrl+1)"
-        } else {
-            "Show large icons, with a thumbnail on anything that has one (Ctrl+1)"
-        },
-        true,
-        tiles,
-        t.surfaces.status,
-    );
-    if switched.clicked() {
-        out.push(Action::SetView {
-            pane,
-            mode: tab.view_mode.toggled(),
-        });
+    if !diffing {
+        let switched = crate::ui::tool_button(
+            ui,
+            t,
+            next(),
+            Id::new(("view-switch", pane)),
+            &icons::grid_view,
+            if tiles {
+                "Show details instead (Ctrl+1)"
+            } else {
+                "Show large icons, with a thumbnail on anything that has one (Ctrl+1)"
+            },
+            true,
+            tiles,
+            t.surfaces.status,
+        );
+        if switched.clicked() {
+            out.push(Action::SetView {
+                pane,
+                mode: tab.view_mode.toggled(),
+            });
+        }
+        // And its own menu, which is where "do this for me" lives. See [`tiles_menu`].
+        tiles_menu(ui, t, &switched, tab, auto, providers, out);
     }
-    // And its own menu, which is where "do this for me" lives. See [`tiles_menu`].
-    tiles_menu(ui, t, &switched, tab, auto, providers, out);
 
     // **Measure**, last of the three. What it turns on is the Size column: every folder on show gets
     // the total of everything under it, and every row gets a bar of its share of what is displayed.
@@ -235,7 +247,7 @@ pub(crate) fn status_line(
     // `space-2` between them and `space-3` after the last: they are one group — the pane's own
     // switches — and the gap inside a group has to read as smaller than the gap that follows it.
     // Four points is enough that two latched fills read as two buttons rather than one wide one.
-    let measure = Rect::from_min_size(pos2(view.right() + space::S2, middle), vec2(SWITCH, SWITCH));
+    let measure = next();
     if crate::ui::tool_button(
         ui,
         t,

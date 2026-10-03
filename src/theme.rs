@@ -334,6 +334,29 @@ impl Surfaces {
     }
 }
 
+/// What each part of a row is drawn in. See [`Theme::diff_inks`].
+pub struct DiffInks {
+    pub name: Color32,
+    /// The dimmed half of the Name cell, and any figure with nothing to say.
+    pub meta: Color32,
+    pub kind: Color32,
+    pub size: Color32,
+    pub modified: Color32,
+}
+
+impl DiffInks {
+    /// A row outside a diff: the name in its ink, and every figure in the meta one.
+    pub fn plain(name: Color32, meta: Color32) -> Self {
+        Self {
+            name,
+            meta,
+            kind: meta,
+            size: meta,
+            modified: meta,
+        }
+    }
+}
+
 /// Azur, plus file kinds.
 pub struct Theme {
     az: azur::Theme,
@@ -1175,6 +1198,41 @@ impl Theme {
             // A move is neither a gain nor a loss, and `info` is the role for a fact.
             State::Renamed => self.status.info,
             State::Untracked => self.text.tertiary,
+        }
+    }
+
+    /// The inks a folder diff draws a row in. See [`crate::diff`].
+    ///
+    /// **Only a real difference is in colour.** A name with no counterpart on the other side is
+    /// `success`; every name that is on both sides steps back to the secondary ink, whatever else
+    /// about the row differs — that is said by the Type, Size or Modified cell that differs, in
+    /// `warning`. A folder that is the way down to a difference keeps the ordinary primary ink,
+    /// which is not a highlight but is what stops it reading as identical. Figures that match step
+    /// back a further step, so a changed one stands out of its column.
+    ///
+    /// A folder here and a file there differs in the Type column, and a pane too narrow for that
+    /// column has given it up — `type_shown` false — so the name says it instead of nothing doing.
+    pub fn diff_inks(&self, mark: crate::diff::Mark, type_shown: bool) -> DiffInks {
+        use crate::diff::Mark;
+        let cells = mark.cells();
+        let meta = if mark == Mark::Only {
+            self.text.secondary
+        } else {
+            self.text.tertiary
+        };
+        let cell = |differs: bool| if differs { self.status.warning } else { meta };
+        let name = match mark {
+            _ if cells.kind && !type_shown => self.status.warning,
+            Mark::Only => self.status.success,
+            Mark::Holds => self.text.primary,
+            Mark::Same | Mark::Differs(_) => self.text.secondary,
+        };
+        DiffInks {
+            name,
+            meta,
+            kind: cell(cells.kind),
+            size: cell(cells.size),
+            modified: cell(cells.modified),
         }
     }
 

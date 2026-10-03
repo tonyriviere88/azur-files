@@ -472,9 +472,12 @@ impl App {
         let mut open: Option<(bool, PathBuf)> = None;
         let mut typed: Vec<char> = Vec::new();
         let mut panel = false;
+        // A folder opened or shut from the keyboard, for the other half of a diff to follow.
+        let mut followed: Option<(String, bool)> = None;
 
         {
             let tab = self.panes[index].tab_mut();
+            let diffing = tab.diff.is_some();
             ctx.input(|i| {
                 use crate::ui::grid::Step;
 
@@ -571,12 +574,25 @@ impl App {
                     // `Right` goes to what is inside: the first thing under the folder, or the next
                     // folder along where there is nothing under it. `Left` goes back out — see
                     // [`Tab::step_out`], which is the half the two views answer differently.
-                    if !extend && i.key_pressed(K::ArrowRight) && !tab.set_collapsed_at_cursor(false)
-                    {
-                        tab.walk(Step::Next, 1, 1, Carry::Select);
-                    }
-                    if !extend && i.key_pressed(K::ArrowLeft) && !tab.set_collapsed_at_cursor(true) {
-                        tab.step_out();
+                    //
+                    // In a folder diff the other half follows, which needs the folder's name before
+                    // the order it is looked up in is rebuilt.
+                    let at_cursor = |tab: &Tab| {
+                        let at = tab.cursor.filter(|_| diffing)?;
+                        tab.name_at(at).map(str::to_owned)
+                    };
+                    for (key, shut) in [(K::ArrowRight, false), (K::ArrowLeft, true)] {
+                        if extend || !i.key_pressed(key) {
+                            continue;
+                        }
+                        let name = at_cursor(tab);
+                        if tab.set_collapsed_at_cursor(shut) {
+                            followed = name.map(|name| (name, shut));
+                        } else if shut {
+                            tab.step_out();
+                        } else {
+                            tab.walk(Step::Next, 1, 1, Carry::Select);
+                        }
                     }
                 }
                 if i.key_pressed(K::Escape) {
@@ -678,6 +694,9 @@ impl App {
 
         if panel {
             self.actions.push(Action::TogglePreview(pane));
+        }
+        if let Some((name, shut)) = followed {
+            self.follow_collapse(pane, &name, shut);
         }
         if let Some((is_dir, path)) = open {
             self.actions.push(if is_dir {

@@ -229,6 +229,13 @@ pub fn show(
             "Nothing matches the filter"
         } else if let Some(lens) = tab.lens {
             lens.nothing_found()
+        } else if let Some(show) = tab
+            .diff
+            .as_ref()
+            .map(|d| d.show)
+            .filter(|show| *show != crate::diff::Show::All)
+        {
+            show.nothing_found()
         } else {
             "Everything here is hidden — Ctrl+H shows it"
         };

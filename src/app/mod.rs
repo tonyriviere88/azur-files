@@ -32,6 +32,7 @@ use crate::ui::{filelist, GUTTER};
 mod action;
 mod capture;
 mod connect;
+mod diff;
 mod frame;
 mod git;
 mod keyboard;
@@ -225,6 +226,10 @@ pub struct App {
     /// you want is a habit, not a fact about the folder you are in — and the tabs each keep the
     /// mode their order is currently built in. See [`crate::pane::FlatMode`].
     flat_mode: crate::pane::FlatMode,
+    /// Which rows a folder diff opens showing: the last choice made on any diff's button. The
+    /// window's preference, kept like [`App::flat_mode`]; each diff's halves keep the copy they are
+    /// filtered by. See [`crate::diff::Show`].
+    diff_show: crate::diff::Show,
     /// Whether a tree merges a chain of folders with nothing in them but each other into one row.
     ///
     /// The window's preference beside [`App::flat_mode`], kept the same way and for the same reason.
@@ -318,6 +323,8 @@ pub struct App {
     /// Builds the shell's half of the context menu, off this thread — half a second of
     /// `QueryContextMenu` on a file, which used to be half a second of frozen window.
     menu_builder: crate::shell::menu::Builder,
+    /// Compares the two halves of every folder diff, off this thread. See [`crate::diff`].
+    differ: crate::diff::Differ,
     /// Where the sidebar's Bookmarks group was drawn, so a drag can be dropped on it.
     /// Read a frame later than it is written, which is a frame the sidebar has not moved in.
     bookmarks_rect: Option<Rect>,
@@ -454,10 +461,28 @@ fn ask_for(tab: &Tab, loader: &mut Loader) -> u64 {
 }
 
 /// One pane as the settings file remembers it: where its tabs point, and which was in front.
+///
+/// **Less its folder diffs.** A diff is two folders and a question, and a settings line is one path:
+/// written down, it would come back as an ordinary tab on its left half, which is not what was open.
+/// A pane of nothing but diffs keeps the first one's left folder, because a pane has to have a tab.
 fn pane_tabs(pane: &Pane) -> crate::config::PaneTabs {
+    let kept: Vec<usize> = (0..pane.tabs.len())
+        .filter(|&at| pane.tabs[at].diff.is_none())
+        .collect();
+    if kept.is_empty() {
+        return crate::config::PaneTabs {
+            paths: vec![pane.tab().path.clone()],
+            active: 0,
+        };
+    }
+    let active = pane.active.min(pane.tabs.len().saturating_sub(1));
     crate::config::PaneTabs {
-        paths: pane.tabs.iter().map(|tab| tab.path.clone()).collect(),
-        active: pane.active.min(pane.tabs.len().saturating_sub(1)),
+        paths: kept.iter().map(|&at| pane.tabs[at].path.clone()).collect(),
+        // The tab in front if it is kept, and otherwise the one that was beside it.
+        active: kept
+            .iter()
+            .position(|&at| at >= active)
+            .unwrap_or(kept.len() - 1),
     }
 }
 
@@ -602,6 +627,7 @@ impl App {
             menu: None,
             asking: None,
             menu_builder: crate::shell::menu::Builder::new(ctx),
+            differ: crate::diff::Differ::new(ctx),
             bookmarks_rect: None,
             bookmark_rows: Vec::new(),
             bookmark_edit: crate::ui::sidebar::Editing::default(),
@@ -616,6 +642,7 @@ impl App {
             console_share: config.console_share,
             console_shell: config.console_shell,
             flat_mode: config.flat_mode,
+            diff_show: config.diff_show,
             regroup: config.regroup,
             show_hidden: config.show_hidden,
             forward_slashes: config.forward_slashes,
@@ -711,6 +738,7 @@ impl App {
             console_share: self.console_share,
             console_shell: self.console_shell,
             flat_mode: self.flat_mode,
+            diff_show: self.diff_show,
             regroup: self.regroup,
             show_hidden: self.show_hidden,
             forward_slashes: self.forward_slashes,
@@ -748,7 +776,7 @@ impl App {
                 }
                 return config;
             };
-            if *id == self.focused {
+            if *id == self.outer(self.focused) {
                 config.focus = slot;
             }
             config.panes.push(pane_tabs(pane));
@@ -943,7 +971,8 @@ impl App {
         let Some(position) = self.panes.iter().position(|p| p.id == pane) else {
             return;
         };
-        let last_pane = self.panes.len() == 1;
+        // Counted in the layout: a diff's right half is a pane, but not one the window is made of.
+        let last_pane = self.panes.iter().filter(|p| !p.twin).count() == 1;
         let last_tab = self.panes[position].tabs.len() == 1;
 
         if last_tab && last_pane {
@@ -955,7 +984,13 @@ impl App {
         // `get` for the same reason `Pane::close_tab` guards: an index past the end closes
         // nothing, and a history of tabs that were never closed would hand back folders that
         // are still open.
-        if let Some(path) = self.panes[position].tabs.get(index).map(|t| t.path.clone()) {
+        // Not a diff, which `Ctrl+Shift+T` could only put back as half of itself.
+        if let Some(path) = self.panes[position]
+            .tabs
+            .get(index)
+            .filter(|t| t.diff.is_none())
+            .map(|t| t.path.clone())
+        {
             self.closed.push(path);
             if self.closed.len() > CLOSED_TABS {
                 self.closed.remove(0);

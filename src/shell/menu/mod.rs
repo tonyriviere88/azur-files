@@ -165,6 +165,12 @@ pub enum Own {
     /// with it, because an entry you have to scroll to find is one nobody finds. See
     /// [`with_our_copy_paths`] and `crate::ui::menu::pinned_from`.
     CopyPaths,
+    /// The two folders selected, compared in a folder diff tab — the application menu's
+    /// `Folder diff...` without the second folder to choose. See [`crate::diff`].
+    ///
+    /// **Only on a selection of exactly two folders**, and just after the shell's Open, which is the
+    /// other thing a folder in this menu is for. See [`with_our_folder_diff`].
+    FolderDiff,
 }
 
 impl Own {
@@ -183,6 +189,7 @@ impl Own {
             // selection: a menu entry is the name of a command and not a sentence about what is
             // selected, which is the same choice `Create shortcuts here` above makes.
             Self::CopyPaths => "Copy path(s)",
+            Self::FolderDiff => "Folder diff",
         }
     }
 }
@@ -527,6 +534,22 @@ pub fn properties_at(entries: &[Entry]) -> Option<usize> {
 pub fn with_our_copy_paths(mut entries: Vec<Entry>) -> Vec<Entry> {
     let at = properties_at(&entries).unwrap_or(entries.len());
     entries.insert(at, Entry::own(Own::CopyPaths));
+    entries
+}
+
+/// Put this program's `Folder diff` into a shell menu, just after its first `open` — see
+/// [`Own::FolderDiff`].
+///
+/// Found by verb, never by label: `open` is what the shell calls it on every Windows, and the label
+/// on this machine is `Ouvrir`. The first one at the top level, because that is the one a folder's
+/// menu leads with; at the head of the menu if an extension has taken Open away, which is where the
+/// entry would have been anyway.
+pub fn with_our_folder_diff(mut entries: Vec<Entry>) -> Vec<Entry> {
+    let open = entries.iter().position(|entry| match &entry.kind {
+        Kind::Command(Command::Shell { verb: Some(verb), .. }) => verb.eq_ignore_ascii_case("open"),
+        _ => false,
+    });
+    entries.insert(open.map_or(0, |at| at + 1), Entry::own(Own::FolderDiff));
     entries
 }
 

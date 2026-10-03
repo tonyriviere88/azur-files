@@ -440,6 +440,40 @@ impl App {
         })
     }
 
+    /// `--diff`: open a folder diff in the first pane, of its folder against `against` or else the
+    /// next pane's — the application menu's `Folder diff...`, which a capture run has no pointer to
+    /// reach.
+    pub fn folder_diff_here(&mut self, show: Option<crate::diff::Show>, against: Option<PathBuf>) {
+        let mut order = Vec::new();
+        self.layout.panes(&mut order);
+        if let Some(first) = order.first() {
+            self.focused = *first;
+        }
+        match against {
+            Some(right) => {
+                let host = self.focused;
+                let left = self.panes.iter().find(|p| p.id == host).map(|p| p.tab().path.clone());
+                if let Some(left) = left {
+                    self.diff_folders(host, left, Some(right));
+                }
+            }
+            None => self.open_folder_diff(),
+        }
+        if let Some(show) = show {
+            let pane = self.outer(self.focused);
+            self.show_in_diff(pane, show);
+        }
+    }
+
+    /// Whether a capture should keep waiting for a folder diff's comparison to land.
+    pub fn diff_pending(&self) -> bool {
+        self.panes
+            .iter()
+            .flat_map(|pane| pane.tabs.iter())
+            .filter_map(|tab| tab.diff.as_ref())
+            .any(|side| side.is_left() && side.comparison.is_none())
+    }
+
     /// `--tiles`: show every pane's listing as large icons.
     ///
     /// The same family as `--menu`, `--rename` and `--preview`, and it exists for the same reason each

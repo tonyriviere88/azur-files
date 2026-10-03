@@ -25,6 +25,28 @@ pub(crate) fn ticked<'a>(item: MenuItem<'a>, on: bool) -> MenuItem<'a> {
     }
 }
 
+/// A folder diff's show button's own menu: the three states by name, the one on show ticked.
+pub(crate) fn diff_show_menu(
+    ui: &Ui,
+    trigger: &egui::Response,
+    pane: PaneId,
+    show: crate::diff::Show,
+    out: &mut Vec<Action>,
+) {
+    use azur_egui_theme::components::ContextMenu;
+
+    ContextMenu::new(trigger).show(ui.ctx(), |ui| {
+        for wants in crate::diff::Show::ALL {
+            if ui
+                .add(ticked(MenuItem::new(wants.label()), show == wants))
+                .clicked()
+            {
+                out.push(Action::SetDiffShow { pane, show: wants });
+            }
+        }
+    });
+}
+
 /// The preview button's own menu: whether the panel is showing, and where it goes.
 ///
 /// **Sticky**, which is `azur::components::ContextMenu`'s word for "these are settings, not

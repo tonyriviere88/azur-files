@@ -37,6 +37,21 @@ pub enum Action {
     NewTabFocused,
     /// Split whichever pane has focus, showing the folder it is already on.
     SplitFocused { side: Side },
+    /// Open a folder diff in a new tab of the focused pane: its folder on the left, and on the right
+    /// the folder another pane is showing — or a path field waiting for one. See [`crate::diff`].
+    FolderDiff,
+    /// Open a folder diff of two named folders in a new tab of `pane` — the context menu's
+    /// `Folder diff`, on a selection of two.
+    DiffFolders {
+        pane: PaneId,
+        left: PathBuf,
+        right: PathBuf,
+    },
+    /// Show every row of a folder diff, or only what differs — on both halves, whichever was clicked.
+    SetDiffShow {
+        pane: PaneId,
+        show: crate::diff::Show,
+    },
     CloseTab { pane: PaneId, tab: usize },
     /// Put the last closed tab back, in whichever pane has focus. `Ctrl+Shift+T`.
     ReopenTab,
@@ -258,6 +273,9 @@ impl Action {
             Self::NewTab { .. } => "NewTab",
             Self::NewTabFocused => "NewTabFocused",
             Self::SplitFocused { .. } => "SplitFocused",
+            Self::FolderDiff => "FolderDiff",
+            Self::DiffFolders { .. } => "DiffFolders",
+            Self::SetDiffShow { .. } => "SetDiffShow",
             Self::CloseTab { .. } => "CloseTab",
             Self::ReopenTab => "ReopenTab",
             Self::NextTab { .. } => "NextTab",
@@ -348,6 +366,8 @@ pub(super) struct Asking {
     pub(super) folder: PathBuf,
     /// How much of a menu was asked for, so that a slow one can be asked for again with less.
     pub(super) depth: crate::shell::menu::Depth,
+    /// Whether the menu gets `Folder diff` — see [`crate::shell::menu::Own::FolderDiff`].
+    pub(super) diffable: bool,
     /// The pass this was asked for in, so the click that asked for it is not also the click
     /// that cancels it — see [`App::pump_asking`].
     pub(super) since: u64,

@@ -59,6 +59,13 @@ impl App {
         if let Some(journal) = &mut self.journal {
             journal.push(action.name());
         }
+        // A folder diff's right half is a pane, but not a place in the layout: what it asks of the
+        // tree goes to the pane it is drawn in, and what it has no switch for is not done. See
+        // [`App::in_the_layout`].
+        let action = self.in_the_layout(action);
+        if self.refused_in_a_diff(&action) {
+            return;
+        }
         match action {
             Action::Focus(id) => {
                 if self.panes.iter().any(|p| p.id == id) {
@@ -93,6 +100,12 @@ impl App {
                 let pane = self.focused;
                 self.perform(ctx, Action::NewTab { pane });
             }
+            Action::FolderDiff => self.open_folder_diff(),
+            Action::DiffFolders { pane, left, right } => {
+                let host = self.outer(pane);
+                self.diff_folders(host, left, Some(right));
+            }
+            Action::SetDiffShow { pane, show } => self.set_diff_show(pane, show),
             Action::SplitFocused { side } => {
                 let pane = self.focused;
                 if let Some(path) = self.pane_mut(pane).map(|p| p.tab().path.clone()) {
@@ -434,8 +447,19 @@ impl App {
                 tab.scroll_to = Some(0.0);
             }
             Action::ToggleCollapsed { pane, position } => {
+                let mut followed = None;
                 if let Some(p) = self.pane_mut(pane) {
-                    p.tab_mut().toggle_collapsed(position);
+                    let tab = p.tab_mut();
+                    // Read before the toggle, which rebuilds the order the position is into.
+                    let shut = !tab.is_collapsed(position);
+                    let name = tab.name_at(position).map(str::to_owned);
+                    if tab.toggle_collapsed(position) && tab.diff.is_some() {
+                        followed = name.map(|name| (name, shut));
+                    }
+                }
+                // And the same folder on the other side of a diff, so the two trees move together.
+                if let Some((name, shut)) = followed {
+                    self.follow_collapse(pane, &name, shut);
                 }
             }
             Action::TogglePreview(pane) => {

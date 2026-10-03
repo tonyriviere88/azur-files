@@ -461,6 +461,7 @@ fn a_short_menu_admits_to_being_short() {
         items,
         folder,
         depth: crate::shell::menu::Depth::Fast,
+        diffable: false,
         since: h.ctx.cumulative_pass_nr(),
         asked: std::time::Instant::now(),
     });
@@ -525,6 +526,7 @@ fn a_slow_network_menu_is_asked_for_again_with_less() {
         items,
         folder,
         depth: Depth::Full,
+        diffable: false,
         // Already past the deadline, so the test does not have to sit through it.
         since: h.ctx.cumulative_pass_nr(),
         asked: std::time::Instant::now()
@@ -774,4 +776,109 @@ fn a_right_click_asks_about_the_file_or_the_folder_by_where_it_lands() {
             .is_empty(),
         "the menu is not the folder's"
     );
+}
+
+/// Two folders selected: the menu Windows builds for them gets `Folder diff` straight after its Open,
+/// and choosing it opens a diff of the two. One folder and a file do not get it.
+///
+/// Against the real shell's menu, because where the entry goes is decided by what the shell put there:
+/// the verb this looks for is the shell's, and a test menu made up for the purpose would find it by
+/// construction. Nothing on the menu is invoked.
+#[test]
+#[cfg(windows)]
+fn two_folders_selected_offer_a_folder_diff_after_open() {
+    let _serialised = crate::shell::serialised();
+    crate::shell::init();
+    let dir = crate::sandbox::fresh("menu-folder-diff");
+    for folder in ["one", "two"] {
+        std::fs::create_dir_all(dir.join(folder)).expect("a folder");
+    }
+    std::fs::write(dir.join("file.txt"), b"x").expect("a file");
+
+    let mut h = Harness::new();
+    let pane = h.app.panes[0].id;
+    h.app.perform(
+        &h.ctx.clone(),
+        Action::Navigate {
+            pane,
+            path: dir.clone(),
+        },
+    );
+    h.settle();
+
+    // Select these rows, raise the selection's menu, and wait for the shell to fill it.
+    fn menu_over(h: &mut Harness, names: &[&str]) -> crate::ui::menu::Open {
+        let tab = h.app.panes[0].tab_mut();
+        let positions: Vec<usize> = names
+            .iter()
+            .map(|name| {
+                let entry = tab.names().iter().position(|n| n == name).expect("listed");
+                tab.order.iter().position(|&i| i as usize == entry).expect("on show")
+            })
+            .collect();
+        tab.select_only(positions[0]);
+        for &at in &positions[1..] {
+            tab.toggle(at);
+        }
+        h.app.open_folder_menu(&h.ctx.clone());
+        h.frame(Vec::new());
+        let waited = std::time::Instant::now();
+        while h.app.menu_pending() {
+            h.frame(Vec::new());
+            assert!(waited.elapsed() < std::time::Duration::from_secs(20), "no menu");
+        }
+        let menu = h.app.menu.take().expect("open by now");
+        h.app.menu_builder.close(menu.token);
+        menu
+    }
+    let is_diff = |e: &crate::shell::menu::Entry| {
+        matches!(
+            e.kind,
+            crate::shell::menu::Kind::Command(crate::shell::menu::Command::Own(
+                crate::shell::menu::Own::FolderDiff
+            ))
+        )
+    };
+
+    let menu = menu_over(&mut h, &["one", "two"]);
+    let labels: Vec<&str> = menu.entries.iter().map(|e| e.label.as_str()).collect();
+    let open = menu
+        .entries
+        .iter()
+        .position(|e| {
+            matches!(&e.kind, crate::shell::menu::Kind::Command(
+                crate::shell::menu::Command::Shell { verb: Some(verb), .. },
+            ) if verb.eq_ignore_ascii_case("open"))
+        })
+        .unwrap_or_else(|| panic!("the shell's Open on two folders: {labels:?}"));
+    assert!(
+        menu.entries.get(open + 1).is_some_and(is_diff),
+        "`Folder diff` is not straight after Open: {labels:?}"
+    );
+    assert_eq!(menu.entries.iter().filter(|e| is_diff(e)).count(), 1, "{labels:?}");
+
+    // Choosing it is a diff of the two, in a new tab of this pane.
+    let action = h
+        .app
+        .own_menu_action(&menu, crate::shell::menu::Own::FolderDiff)
+        .expect("an action");
+    h.app.perform(&h.ctx.clone(), action);
+    h.settle();
+    let tab = h.tab(0);
+    let twin = tab.diff.as_ref().and_then(|d| d.twin).expect("a diff tab in front");
+    assert_eq!(tab.path, dir.join("one"));
+    let right = h.app.panes.iter().find(|p| p.id == twin).expect("its right half");
+    assert_eq!(right.tab().path, dir.join("two"));
+
+    // Back to the folder, and a folder with a file is not two folders.
+    let diff = h.app.panes[0].active;
+    h.app.perform(&h.ctx.clone(), Action::CloseTab { pane, tab: diff });
+    h.settle();
+    let menu = menu_over(&mut h, &["one", "file.txt"]);
+    assert!(
+        !menu.entries.iter().any(is_diff),
+        "offered on a folder and a file: {:?}",
+        menu.entries.iter().map(|e| &e.label).collect::<Vec<_>>()
+    );
+    crate::sandbox::remove(&dir);
 }

@@ -117,6 +117,12 @@ pub struct Config {
     /// is flattened is not here, for the same reason its preview being open is not: that is a
     /// question you ask about the folder in front of you. See [`crate::pane::FlatMode`].
     pub flat_mode: crate::pane::FlatMode,
+    /// Which rows a folder diff shows: all of them, only what differs, or only the names on one side.
+    ///
+    /// The last choice made with the button on a diff's path bar, and what the next diff opens
+    /// showing — a habit, like the flatten mode above, rather than a fact about two particular
+    /// folders. See [`crate::diff::Show`].
+    pub diff_show: crate::diff::Show,
     /// Whether a tree merges a chain of folders with nothing in them but each other into one row —
     /// `src > main > java`. See [`crate::fs::sort::build_tree_order`].
     ///
@@ -239,6 +245,7 @@ impl Default for Config {
             console_share: crate::ui::console::SHARE,
             console_shell: crate::console::Kind::default(),
             flat_mode: crate::pane::FlatMode::default(),
+            diff_show: crate::diff::Show::default(),
             regroup: true,
             show_hidden: false,
             forward_slashes: false,
@@ -358,6 +365,12 @@ impl Config {
                 "flatten" => {
                     if let Some(mode) = crate::pane::FlatMode::parse(value.trim()) {
                         config.flat_mode = mode;
+                    }
+                }
+                // `all`, `changes` or `names`. Anything else leaves the default, which is all.
+                "diff_show" => {
+                    if let Some(show) = crate::diff::Show::parse(value.trim()) {
+                        config.diff_show = show;
                     }
                 }
                 // Read as "anything but 0", like `diff` below and for the same reason: its default is
@@ -558,6 +571,7 @@ impl Config {
         text.push_str(&format!("console_share={:.3}\n", self.console_share));
         text.push_str(&format!("console_shell={}\n", self.console_shell.label()));
         text.push_str(&format!("flatten={}\n", self.flat_mode.as_str()));
+        text.push_str(&format!("diff_show={}\n", self.diff_show.as_str()));
         text.push_str(&format!("regroup={}\n", flag(self.regroup)));
         text.push_str(&format!("show_hidden={}\n", flag(self.show_hidden)));
         text.push_str(&format!(
