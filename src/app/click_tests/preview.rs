@@ -635,7 +635,7 @@ fn the_preview_button_carries_the_panels_position() {
         .find(|(_, text)| text == "Bottom")
         .map(|(at, _)| at + vec2(8.0, 6.0))
         .expect("the entry was drawn a moment ago");
-    assert_eq!(h.app.preview.at, Where::Right, "the default has moved");
+    assert_eq!(h.app.preview.at, Where::Auto, "the default has moved");
     h.click_at(bottom);
     assert_eq!(
         h.app.preview.at,

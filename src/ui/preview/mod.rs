@@ -166,12 +166,18 @@ const ACTIONS: f32 = ZOOM_W + TOOL_SIZE * 4.0 + PAD * 4.0;
 pub const FOLLOW_DELAY: f64 = 0.25;
 
 /// Where the panel goes.
+///
+/// [`Auto`](Self::Auto) is the default, and it is the only one of the three that is right about a
+/// window it has never seen: `Right` is wrong in a pane too narrow to give 40% away, `Bottom` is
+/// wrong in a wide one, and which of those a first run is depends on the monitor and on whether the
+/// window opened split. Somebody who wants one side always gets it from the eye's context menu, and
+/// that choice is kept — see [`crate::config`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Where {
-    #[default]
     Right,
     Bottom,
     /// Whichever suits the pane's shape. See the module header.
+    #[default]
     Auto,
 }
 

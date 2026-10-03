@@ -1466,6 +1466,12 @@ right, and anything squarer or taller gets one along the bottom.** Split the win
 pane's preview moves to its bottom by itself, which is the case the setting exists for — a preview
 taking 40% of a 500-point pane leaves no listing at all.
 
+**`Auto` is also the default**, and it is the only one of the three that can be right about a window
+it has never seen: `Right` is wrong in a pane too narrow to give 40% away, `Bottom` is wrong in a
+wide one, and which of those a first run turns out to be depends on the monitor and on whether the
+window opened split. Pick a side and it is kept — the preference is in the settings file, and
+nothing here overrules a choice somebody has made.
+
 Whichever side it is on, the panel stops above [the status line](#the-status-line): the line is the
 pane's floor rather than the listing's, and the shape `Auto` reads is what is left above it.
 
