@@ -1,4 +1,8 @@
-//! TEMPORARY: watch the desktop while the window opens, and say what is on it.
+//! Watch the desktop while the window opens, and say what is on it.
+//!
+//! The instrument behind the table on `main::cloak`: it is what counted the white frames a
+//! maximised window shows on the way up, and the only way to tell one frame of white apart
+//! from none. Reads only — it never touches the window it is watching.
 //!
 //! `cargo run --example flash -- <exe> [ms]`. Reads nine points of the composited desktop as fast
 //! as it can — which is thousands of times a second, fast enough to catch one frame — alongside

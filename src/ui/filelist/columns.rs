@@ -1,0 +1,251 @@
+//! The column strip: how wide each column ends up, and where its header sits.
+
+use super::*;
+use azur_egui_theme::tokens::typography;
+
+/// The header strip: a body line with `space-2` above and below, which is Azur's
+/// table header at this density.
+pub const HEADER_HEIGHT: f32 = typography::LINE_BODY + space::S2 * 2.0;
+
+/// Room for the sort triangle beside a header label.
+pub(crate) const SORT_ARROW: f32 = 10.0 + space::S2;
+
+/// Measure the three fitted columns against the listing's own content.
+///
+/// Cheap because none of the three needs every entry looked at:
+///
+/// - **Modified** is a fixed-width format, so one measurement of the template does.
+/// - **Size** is measured from the one value whose formatted text is longest, found
+///   by comparing lengths in bytes rather than by laying anything out.
+/// - **Type** has as many distinct labels as the folder has kinds of file, which is
+///   a handful — collected with a small linear scan of already-interned strings.
+pub(crate) fn measure_columns(ui: &Ui, t: &Theme, tab: &mut Tab, scratch: &mut String) {
+    let font = t.fonts.body.clone();
+    let measure = |text: &str| {
+        ui.painter()
+            .layout_no_wrap(text.to_owned(), font.clone(), Color32::PLACEHOLDER)
+            .size()
+            .x
+    };
+    // A header can be wider than everything under it.
+    let header_of = |column: Column| {
+        ui.painter()
+            .layout_no_wrap(
+                column.header().to_owned(),
+                t.fonts.body_strong.clone(),
+                Color32::PLACEHOLDER,
+            )
+            .size()
+            .x
+            + SORT_ARROW
+    };
+
+    let mut size_width: f32 = 0.0;
+    let mut type_width: f32 = 0.0;
+
+    if let Some(dir) = tab.dir.clone() {
+        // Size: the longest formatted string, found without formatting them all.
+        let mut widest_size = 0u64;
+        let mut longest = 0usize;
+        for &i in &tab.order {
+            let entry = &dir.entries[i as usize];
+            if entry.is_dir() {
+                continue;
+            }
+            scratch.clear();
+            fmt::size(entry.size, scratch);
+            if scratch.len() > longest {
+                longest = scratch.len();
+                widest_size = entry.size;
+            }
+        }
+        scratch.clear();
+        fmt::size(widest_size, scratch);
+        size_width = measure(scratch);
+
+        // Type: the distinct *extensions*, which is a much smaller set than the
+        // entries and maps one-to-one onto the labels. Comparing extensions rather
+        // than rendered labels means the inner loop touches no allocated string at
+        // all, and the cap stops a folder of ten thousand unique extensions from
+        // turning this into a quadratic scan.
+        let mut seen: Vec<&str> = Vec::new();
+        for &i in &tab.order {
+            let ext = dir.ext(i as usize);
+            let is_dir = dir.entries[i as usize].is_dir();
+            let key = if is_dir { "\0dir" } else { ext };
+            if seen.contains(&key) {
+                continue;
+            }
+            scratch.clear();
+            fmt::type_label(ext, is_dir, scratch);
+            type_width = type_width.max(measure(scratch));
+            if seen.len() >= 96 {
+                break;
+            }
+            seen.push(key);
+        }
+    }
+
+    let date_width = measure(fmt::DATE_TEMPLATE);
+
+    tab.widths[Column::Size.index()] =
+        (size_width.max(header_of(Column::Size)) + CELL_PAD * 2.0).ceil();
+    tab.widths[Column::Type.index()] =
+        (type_width.max(header_of(Column::Type)) + CELL_PAD * 2.0).ceil();
+    tab.widths[Column::Modified.index()] =
+        (date_width.max(header_of(Column::Modified)) + CELL_PAD * 2.0).ceil();
+    tab.widths_measured = true;
+}
+
+/// Widths for this frame: the three fitted columns as stored, and whatever is left
+/// for Name.
+///
+/// When the pane is too narrow for all four, the fitted columns give way from the
+/// right — Type first, then Modified — because a name you cannot read is worse
+/// than a date you cannot see.
+pub(crate) fn resolved_widths(tab: &Tab, total: f32) -> [f32; 4] {
+    let mut widths = tab.widths;
+    const NAME_MIN: f32 = 120.0;
+
+    let fitted = widths[1] + widths[2] + widths[3];
+    let mut spare = total - fitted;
+    if spare < NAME_MIN {
+        for column in [Column::Type, Column::Modified, Column::Size] {
+            if spare >= NAME_MIN {
+                break;
+            }
+            let index = column.index();
+            spare += widths[index];
+            widths[index] = 0.0;
+        }
+    }
+    widths[0] = (total - widths[1] - widths[2] - widths[3]).max(NAME_MIN);
+    widths
+}
+
+/// The left edge of each column, given the resolved widths.
+pub(crate) fn column_x(rect: Rect, widths: &[f32; 4]) -> [f32; 5] {
+    let mut edges = [rect.left(); 5];
+    for i in 0..4 {
+        edges[i + 1] = edges[i] + widths[i];
+    }
+    edges
+}
+
+/// The header: labels, the sort indicator, and the drag grips between columns.
+pub(crate) fn header_strip(
+    ui: &mut Ui,
+    t: &Theme,
+    rect: Rect,
+    pane: PaneId,
+    tab: &mut Tab,
+    widths: &[f32; 4],
+    out: &mut Vec<Action>,
+) {
+    ui.painter().rect_filled(rect, CornerRadius::ZERO, t.bg.layer_alt);
+    let edges = column_x(rect, widths);
+
+    for (index, column) in Column::ALL.into_iter().enumerate() {
+        if widths[index] <= 0.0 {
+            continue;
+        }
+        let cell = Rect::from_min_max(
+            pos2(edges[index], rect.top()),
+            pos2(edges[index + 1], rect.bottom()),
+        );
+        let response = ui.interact(cell, Id::new(("th", pane, index)), Sense::click());
+        if response.hovered() {
+            ui.painter()
+                .rect_filled(cell, CornerRadius::ZERO, t.bg.control_hover);
+        }
+        if response.clicked() {
+            out.push(Action::Sort { pane, column });
+        }
+
+        let sorted = tab.sort_by == column;
+        let color = if response.hovered() || sorted {
+            t.text.primary
+        } else {
+            t.text.secondary
+        };
+        let arrow = if sorted { SORT_ARROW } else { 0.0 };
+        let inner = Rect::from_min_max(
+            pos2(cell.left() + CELL_PAD, cell.top()),
+            pos2(cell.right() - CELL_PAD, cell.bottom()),
+        );
+        let galley = truncated(
+            ui.painter(),
+            column.header(),
+            t.fonts.body_strong.clone(),
+            color,
+            (inner.width() - arrow).max(0.0),
+        );
+        let label_width = galley.size().x;
+        if column.numeric() {
+            // Right-aligned, with the arrow tucked inside the padding so the label
+            // stays flush with the numbers below it.
+            let shifted = Rect::from_min_max(
+                inner.min,
+                pos2(inner.right() - arrow, inner.bottom()),
+            );
+            text_right(ui.painter(), shifted, galley);
+            if sorted {
+                let x = shifted.right() + space::S2 * 0.5;
+                sort_glyph(ui, t, icon_rect(cell, x, 10.0), tab.ascending, color);
+            }
+        } else {
+            text_left(ui.painter(), inner, galley);
+            if sorted {
+                let x = inner.left() + label_width + space::S2;
+                sort_glyph(ui, t, icon_rect(cell, x, 10.0), tab.ascending, color);
+            }
+        }
+
+        // The grip on this column's right edge. Not on Name, whose width is whatever
+        // the other three leave behind.
+        if index > 0 {
+            let grip = Rect::from_min_max(
+                pos2(cell.right() - GRIP, rect.top()),
+                pos2(cell.right() + GRIP, rect.bottom()),
+            );
+            let drag = ui.interact(
+                grip,
+                Id::new(("th-grip", pane, index)),
+                Sense::click_and_drag(),
+            );
+            if drag.hovered() || drag.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+                ui.painter().rect_filled(
+                    Rect::from_min_size(pos2(cell.right() - 1.0, rect.top()), vec2(1.0, rect.height())),
+                    CornerRadius::ZERO,
+                    t.accent.default,
+                );
+            }
+            if drag.dragged() {
+                let delta = drag.drag_delta().x;
+                tab.widths[index] = (tab.widths[index] + delta).clamp(48.0, 480.0);
+            }
+            // Double-clicking an edge re-fits the column, which is the gesture every
+            // table in every operating system has.
+            if drag.double_clicked() {
+                tab.widths_measured = false;
+            }
+        }
+    }
+
+    // A rule under the header, which is what separates a header strip from the
+    // rows in Azur's table.
+    ui.painter().rect_filled(
+        Rect::from_min_size(rect.left_bottom() - vec2(0.0, 1.0), vec2(rect.width(), 1.0)),
+        CornerRadius::ZERO,
+        Color32::from_rgb(0x20, 0x23, 0x29),
+    );
+}
+
+pub(crate) fn sort_glyph(ui: &Ui, _t: &Theme, rect: Rect, ascending: bool, color: Color32) {
+    if ascending {
+        azur_icons::sort_asc(ui.painter(), rect, color);
+    } else {
+        azur_icons::sort_desc(ui.painter(), rect, color);
+    }
+}

@@ -1,0 +1,322 @@
+//! Asking for listings, and taking delivery of them.
+//!
+//! Every scan, icon, link target and thumbnail arrives here — on a channel, from a worker,
+//! between frames. Nothing in this file blocks: a folder that takes twenty seconds to read is
+//! twenty seconds of a window that still scrolls.
+
+use super::*;
+
+impl App {
+
+    /// Hand every finished scan to the tab that asked for it.
+    pub(super) fn collect_scans(&mut self) {
+        // Collected first so the loader is not borrowed while the panes are.
+        let arrived: Vec<_> = self.loader.drain().collect();
+        for loaded in arrived {
+            for pane in &mut self.panes {
+                for tab in &mut pane.tabs {
+                    if tab.awaiting == Some(loaded.token) {
+                        tab.apply(loaded.dir.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    /// Hand each per-file icon answer to the view that asked for it, and drop the rest.
+    ///
+    /// This is where the folder-scoped rule is enforced. An answer names the view it belongs
+    /// to; if no tab still holds that view — because it moved on, or was closed, or the
+    /// folder was refreshed — the answer is discarded here and nothing anywhere remembers the
+    /// file it was about. Nothing is keyed by path, so nothing outlives the folder.
+    pub(super) fn deliver_icons(&mut self) {
+        let answers = self.icons.answers();
+        if answers.is_empty() {
+            return;
+        }
+        for (view, row, index) in answers {
+            let Some(tab) = self
+                .panes
+                .iter_mut()
+                .flat_map(|pane| pane.tabs.iter_mut())
+                .find(|tab| tab.view == view)
+            else {
+                continue;
+            };
+            if let Some(slot) = tab.file_icons.get_mut(row as usize) {
+                *slot = index;
+            }
+        }
+    }
+
+    /// The same, for what each shortcut row points at. See [`crate::shell::links`].
+    ///
+    /// `None` is stored rather than skipped: it means the shortcut was read and had nothing to
+    /// show, and storing it is what stops the row asking about it again on every frame.
+    pub(super) fn deliver_links(&mut self) {
+        let answers = self.links.answers();
+        if answers.is_empty() {
+            return;
+        }
+        for (view, row, target) in answers {
+            let Some(tab) = self
+                .panes
+                .iter_mut()
+                .flat_map(|pane| pane.tabs.iter_mut())
+                .find(|tab| tab.view == view)
+            else {
+                continue;
+            };
+            // Only if the row is still asking. A refresh clears the map, and an answer that
+            // arrives after that would otherwise put back a row's context for a listing the
+            // entry indices no longer belong to.
+            if let Some(slot) = tab.links.get_mut(&row) {
+                *slot = target;
+            }
+        }
+    }
+
+    /// Apply whatever the modal thread came back with.
+    ///
+    /// **Nothing, and that is the point.** A shell command can do anything — rename, delete,
+    /// extract, commit — and there is no way to be told which, so this used to re-read the folder
+    /// on the way out of *every* one of them. Which meant a scan and a rebuilt listing after
+    /// `Copy`, after `Properties`, after `Open with`, after `Scan with Defender`: the whole view
+    /// thrown away and made again to discover that nothing had changed.
+    ///
+    /// [`crate::watch`] is what answers this properly, and it is already running. Every folder on
+    /// screen has a `ReadDirectoryChangesW` handle on it, so a verb that *did* change something is
+    /// noticed within a sixth of a second whoever changed it — this program, Explorer, a terminal,
+    /// or the extension the verb belonged to — and a verb that changed nothing costs nothing.
+    /// Still drained, because the reply is what tells [`crate::shell::Modal`] the gesture is
+    /// over — and while one is in flight this window keeps painting for it.
+    pub(super) fn collect_modal(&mut self) {
+        match self.modal.poll() {
+            Some(crate::shell::Reply::Invoked) | None => {}
+        }
+    }
+
+    /// Watch the folders on screen, and re-read any that changed underneath us.
+    ///
+    /// A listing used to be only as fresh as the last thing *this* program did to it. Anything
+    /// anybody else did went unseen: a file dragged out to Explorer stayed on screen, because
+    /// Explorer performs the move after our drag has finished and there was nothing to wait on;
+    /// a build writing into the folder showed it as it had been; a file deleted from a terminal
+    /// left a row behind. And a stale row is worse than wrong — dragging one cannot start a
+    /// drag, so the window looked like it had stopped responding.
+    pub(super) fn collect_changes(&mut self, ctx: &egui::Context) {
+        let mut folders: Vec<PathBuf> = self
+            .panes
+            .iter()
+            .flat_map(|pane| pane.tabs.iter())
+            .map(|tab| tab.path.clone())
+            .collect();
+        // **And every `.git` behind a folder on screen.** A commit, a pull, a branch switch or a
+        // rebase changes what git says about a folder without changing the folder, so watching the
+        // folder alone would leave the marks describing the last read and nothing to disprove them.
+        // See [`crate::git::Repo::dot_git`].
+        folders.extend(
+            self.panes
+                .iter()
+                .flat_map(|pane| pane.tabs.iter())
+                .filter_map(|tab| tab.git.as_ref())
+                .map(|repo| repo.dot_git.clone()),
+        );
+        folders.dedup();
+        self.watch.keep(&folders);
+
+        // **Our own git write, echoing back as a change to notice.** `git::read` can write the
+        // repository's index as a side effect of the very question we just asked it — see its own
+        // doc — and that write is a rename of `index.lock` to `index`, directly inside `.git`. Two
+        // watches can see it: the one on `.git` itself, which is meant to notice a commit made
+        // elsewhere, and — because `ReadDirectoryChangesW` reports a direct child's own metadata
+        // changing even without watching subtrees — the one on the *folder* too, since `.git` is a
+        // direct child of it. Both read this exactly as they would read a real external change,
+        // because the watch does not look at which file changed, by design.
+        //
+        // The second one is the dangerous one: a folder's own "changed" re-reads its listing, and
+        // that re-read is what resets `git_asked` — see [`crate::pane::Tab::apply`]. So the folder's
+        // watch answers our own write by asking git again, which writes again, which the watch reads
+        // again — a folder that spawns `git status` under itself forever, on its own, whether or not
+        // the window is even being looked at. This is the loop [`GIT_WRITE_SETTLE`] exists to break.
+        let now = ctx.input(|i| i.time);
+        for path in self.watch.changed(now) {
+            // A change under `.git` asks git again and leaves the listing alone: the working tree
+            // did not move, so re-reading the folder would be a scan for nothing.
+            if path.file_name().is_some_and(|name| name == ".git") {
+                for tab in self.panes.iter_mut().flat_map(|pane| pane.tabs.iter_mut()) {
+                    if tab.git.as_ref().is_some_and(|repo| repo.dot_git == path)
+                        && now - tab.git_settled_at.unwrap_or(f64::NEG_INFINITY) > GIT_WRITE_SETTLE
+                    {
+                        tab.git_asked = false;
+                    }
+                }
+                continue;
+            }
+            // **Except when a change to this folder is the thing being waited for.** A file the
+            // user has just asked the shell to make is not our own git write coming back, and the
+            // window the filter below suppresses is two whole seconds — long enough that, in any
+            // folder git has something to say about, `New >` never appeared at all until something
+            // else happened to touch the folder. Measured: git answered at 1.23 s and the file
+            // landed before 2.57 s, so every single one was swallowed.
+            //
+            // It cannot restart the loop the filter is here to break, because the snapshot is
+            // consumed by the very re-read this lets through — one extra read, once, and then the
+            // filter applies again as before. See [`crate::pane::Tab::name_the_new`].
+            let expected = self
+                .panes
+                .iter()
+                .flat_map(|pane| pane.tabs.iter())
+                .any(|tab| tab.path == path && tab.name_the_new.is_some());
+            // The folder itself, echoing the same write back through its own watch. A real change to
+            // this folder's own contents landing in the same short window is missed rather than
+            // acted on immediately — recoverable by `F5`, or by the next thing that touches it — which
+            // is the cheaper mistake next to a loop that never stops on its own.
+            let echo = !expected
+                && self.panes.iter().flat_map(|pane| pane.tabs.iter()).any(|tab| {
+                    tab.path == path
+                        && now - tab.git_settled_at.unwrap_or(f64::NEG_INFINITY) <= GIT_WRITE_SETTLE
+                });
+            if echo {
+                continue;
+            }
+            self.folder_changed(&path);
+        }
+        // A change inside its settle window is a frame that has to come back for it, and there
+        // is no input on the way to bring one.
+        if self.watch.waiting() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(60));
+        }
+    }
+
+    /// Re-read a folder that changed on disk, without blanking what is on screen.
+    ///
+    /// `Tab::refresh` is deliberately *not* used: it drops the listing, which puts "Reading..."
+    /// in the pane until the scan lands. That is right for F5, where somebody asked; here it
+    /// would flash on every file written into the folder being watched. So the old listing stays
+    /// up and only the request is made — `Tab::apply` then carries the selection across by
+    /// name, exactly as it does for a refresh.
+    pub(super) fn folder_changed(&mut self, path: &Path) {
+        self.loader.invalidate(path);
+        let Self { panes, loader, .. } = self;
+        for tab in panes.iter_mut().flat_map(|pane| pane.tabs.iter_mut()) {
+            if tab.path == path {
+                // Replacing a token that is already out means the older answer is dropped when
+                // it arrives, which is what should happen: it read the folder as it was.
+                tab.awaiting = Some(ask_for(tab, loader));
+            }
+        }
+    }
+
+    /// Take delivery of finished file operations and re-read what they changed.
+    pub(super) fn collect_operations(&mut self) {
+        for done in self.ops.drain() {
+            let worked = done.error.is_none();
+            if let Some(why) = done.error.filter(|why| !why.is_empty()) {
+                self.notice = Some(why);
+            }
+            // The documented end of a cut, and only when the move actually happened.
+            if let crate::shell::ops::After::FinishCut(was) = done.after {
+                if worked {
+                    crate::shell::clipboard::cut_pasted(was);
+                    self.cut.clear();
+                }
+            }
+            // A folder this program has just made: select it and open the name for editing as
+            // soon as the re-read brings it in. `New folder` on its own is only half the
+            // gesture; nobody wants a folder called `New folder`.
+            if let crate::shell::ops::After::NameIt(pane) = done.after {
+                if let (true, Some(name)) = (worked, done.created.clone()) {
+                    if let Some(p) = self.pane_mut(pane) {
+                        let tab = p.tab_mut();
+                        tab.reveal = Some(name);
+                        tab.rename_revealed = true;
+                    }
+                }
+            }
+            for path in &done.touched {
+                self.loader.invalidate(path);
+            }
+            // Only a tab showing an affected folder re-reads. A tab elsewhere is left
+            // alone, which is the point of tracking this by path.
+            for pane in &mut self.panes {
+                for tab in &mut pane.tabs {
+                    if done.touched.contains(&tab.path) {
+                        tab.refresh();
+                    }
+                }
+            }
+        }
+        // A cut whose sources have gone is a cut that has been honoured.
+        self.cut.retain(|path| path.exists());
+    }
+
+    /// Ask for anything nobody has asked for yet.
+    ///
+    /// The cache is probed synchronously first, which is what makes Back, Forward
+    /// and revisiting a folder appear in the same frame as the click.
+    pub(super) fn start_scans(&mut self, ctx: &egui::Context, now: f64) {
+        let Self { panes, loader, .. } = self;
+        let mut asked = false;
+        for pane in panes.iter_mut() {
+            for tab in pane.tabs.iter_mut() {
+                if tab.dir.is_some() || tab.awaiting.is_some() {
+                    continue;
+                }
+                // A flattened tab never looks in the cache, in either direction: the
+                // cache holds the folder's own children under this very path, and handing
+                // those over would put a shallow listing on screen with the button lit.
+                // It is not put *in* the cache either — see [`Loader::request_deep`].
+                if tab.flat {
+                    tab.awaiting = Some(ask_for(tab, loader));
+                    tab.asked_at = Some(now);
+                    asked = true;
+                    continue;
+                }
+                match loader.cached(&tab.path) {
+                    Some(dir) => tab.apply(dir),
+                    None => {
+                        tab.awaiting = Some(ask_for(tab, loader));
+                        // When it was asked for, which is what decides whether the listing
+                        // says anything about waiting. See [`crate::pane::SLOW_SCAN`].
+                        tab.asked_at = Some(now);
+                        asked = true;
+                    }
+                }
+            }
+        }
+        // And the frame that would notice the half-second has passed. Nothing else would ask
+        // for it: this program is idle between events, and the answer arriving is the only
+        // other thing that wakes it — so without this, `Reading…` would appear on a slow scan
+        // only if something else happened to want a frame in the meantime.
+        if asked {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(crate::pane::SLOW_SCAN));
+        }
+    }
+
+    /// Back and forward on the mouse's thumb buttons.
+    ///
+    /// The two extra buttons every mouse past a certain price has. Windows sends them as
+    /// `WM_XBUTTONDOWN` with `XBUTTON1` or `XBUTTON2`; winit turns those into `MouseButton::Back`
+    /// and `Forward`, and egui into `PointerButton::Extra1` and `Extra2`. That is the whole chain,
+    /// and it is worth writing down because "button 4 and 5" appear under four different names on
+    /// the way through and `winit::MouseButton::Other` — which is what anything past the fifth
+    /// button becomes — is dropped before egui ever sees it.
+    pub(super) fn thumb_buttons(&mut self, ctx: &egui::Context) {
+        use egui::PointerButton as B;
+
+        let (back, forward) = ctx.input(|i| {
+            (
+                i.pointer.button_pressed(B::Extra1),
+                i.pointer.button_pressed(B::Extra2),
+            )
+        });
+        let pane = self.focused;
+        if back {
+            self.actions.push(Action::Back(pane));
+        }
+        if forward {
+            self.actions.push(Action::Forward(pane));
+        }
+    }
+}

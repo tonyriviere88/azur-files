@@ -1,0 +1,767 @@
+//! One rule table per language: which words are keywords, how a comment starts, and what
+//! quoting it uses.
+//!
+//! Data, not code — [`super::code`] is the one lexer and these are what it is pointed at.
+
+use super::*;
+
+/// How a string is delimited.
+#[derive(Clone, Copy)]
+pub(crate) enum Quote {
+    /// Runs to the matching delimiter — or, unless `multiline`, to the end of the
+    /// line, so one stray quote does not paint the rest of the file.
+    Run {
+        delim: u8,
+        escape: bool,
+        multiline: bool,
+    },
+    /// A `'c'` character literal: one character or one escape, and nothing else.
+    ///
+    /// **This is why `'` is not simply a delimiter in Rust and C.** A lifetime is an
+    /// unclosed quote — `impl<'a, 'b>` has two — and a delimiter that runs to the next
+    /// `'` would colour `'a, '` as a string and then invert the rest of the line.
+    Letter,
+}
+
+/// Everything the generic tokeniser needs to know about one language.
+pub(crate) struct Rules {
+    /// Comment openers that run to the end of the line.
+    pub(crate) line: &'static [&'static str],
+    /// Comment pairs. Not nested, even in Rust, where they can be.
+    pub(crate) block: &'static [(&'static str, &'static str)],
+    pub(crate) quotes: &'static [Quote],
+    /// `"""` and `'''` run across lines. Python only.
+    pub(crate) triple: bool,
+    pub(crate) keywords: &'static [&'static str],
+    /// Words that name a type. The heuristic in `capitals` catches the rest.
+    pub(crate) types: &'static [&'static str],
+    /// Keywords compare without regard to case: SQL, batch, PowerShell, CMake.
+    pub(crate) fold: bool,
+    /// A word with `(` immediately after it is a call.
+    pub(crate) calls: bool,
+    /// A word that starts uppercase and comes back down is a type.
+    pub(crate) capitals: bool,
+    /// A word or string followed by one of these is a key.
+    pub(crate) label: &'static [u8],
+    /// Characters that start a variable.
+    pub(crate) sigils: &'static [u8],
+    /// A `#word` at the head of a line is a preprocessor directive.
+    pub(crate) hash: bool,
+    /// A `[bracketed]` line names a section.
+    pub(crate) sections: bool,
+}
+
+/// The defaults every entry starts from: nothing.
+pub(crate) const BARE: Rules = Rules {
+    line: &[],
+    block: &[],
+    quotes: &[],
+    triple: false,
+    keywords: &[],
+    types: &[],
+    fold: false,
+    calls: false,
+    capitals: false,
+    label: &[],
+    sigils: &[],
+    hash: false,
+    sections: false,
+};
+
+/// A double-quoted string with backslash escapes, which is nearly every language's.
+pub(crate) const DOUBLE: Quote = Quote::Run {
+    delim: b'"',
+    escape: true,
+    multiline: false,
+};
+
+/// And a single-quoted one, for the languages where that is a string and not a letter.
+pub(crate) const SINGLE: Quote = Quote::Run {
+    delim: b'\'',
+    escape: true,
+    multiline: false,
+};
+
+pub(crate) fn rules(lang: Lang) -> &'static Rules {
+    match lang {
+        Lang::CLike => &C_LIKE,
+        Lang::Rust => &RUST,
+        Lang::Web => &WEB,
+        Lang::Python => &PYTHON,
+        Lang::Go => &GO,
+        Lang::Sql => &SQL,
+        Lang::Shell => &SHELL,
+        Lang::PowerShell => &POWERSHELL,
+        Lang::Batch => &BATCH,
+        Lang::Css => &CSS,
+        Lang::Json => &JSON,
+        Lang::Yaml => &YAML,
+        Lang::Toml => &TOML,
+        Lang::Ini => &INI,
+        Lang::Cmake => &CMAKE,
+        // `spans` routes these away before this is reached.
+        Lang::None | Lang::Markup | Lang::Diff | Lang::Markdown => &BARE,
+    }
+}
+
+pub(crate) static C_LIKE: Rules = Rules {
+    line: &["//"],
+    block: &[("/*", "*/")],
+    quotes: &[DOUBLE, Quote::Letter],
+    keywords: &[
+        "alignas",
+        "alignof",
+        "and",
+        "asm",
+        "auto",
+        "base",
+        "bool",
+        "break",
+        "case",
+        "catch",
+        "class",
+        "concept",
+        "const",
+        "const_cast",
+        "consteval",
+        "constexpr",
+        "constinit",
+        "continue",
+        "co_await",
+        "co_return",
+        "co_yield",
+        "decltype",
+        "default",
+        "delegate",
+        "delete",
+        "do",
+        "dynamic_cast",
+        "else",
+        "enum",
+        "event",
+        "explicit",
+        "export",
+        "extends",
+        "extern",
+        "false",
+        "final",
+        "finally",
+        "fixed",
+        "for",
+        "foreach",
+        "friend",
+        "get",
+        "goto",
+        "if",
+        "implements",
+        "implicit",
+        "import",
+        "in",
+        "inline",
+        "instanceof",
+        "interface",
+        "internal",
+        "is",
+        "lock",
+        "mutable",
+        "namespace",
+        "native",
+        "new",
+        "noexcept",
+        "not",
+        "null",
+        "nullptr",
+        "object",
+        "operator",
+        "or",
+        "out",
+        "override",
+        "package",
+        "params",
+        "private",
+        "protected",
+        "public",
+        "readonly",
+        "record",
+        "register",
+        "reinterpret_cast",
+        "requires",
+        "return",
+        "sealed",
+        "set",
+        "sizeof",
+        "stackalloc",
+        "static",
+        "static_assert",
+        "static_cast",
+        "struct",
+        "super",
+        "switch",
+        "synchronized",
+        "template",
+        "this",
+        "throw",
+        "throws",
+        "transient",
+        "true",
+        "try",
+        "typedef",
+        "typeid",
+        "typename",
+        "union",
+        "unsafe",
+        "using",
+        "val",
+        "var",
+        "virtual",
+        "volatile",
+        "when",
+        "where",
+        "while",
+        "xor",
+        "yield",
+    ],
+    types: &[
+        "char",
+        "char16_t",
+        "char32_t",
+        "char8_t",
+        "double",
+        "float",
+        "int",
+        "int16_t",
+        "int32_t",
+        "int64_t",
+        "int8_t",
+        "long",
+        "ptrdiff_t",
+        "short",
+        "signed",
+        "size_t",
+        "ssize_t",
+        "string",
+        "uint",
+        "uint16_t",
+        "uint32_t",
+        "uint64_t",
+        "uint8_t",
+        "unsigned",
+        "void",
+        "wchar_t",
+    ],
+    calls: true,
+    capitals: true,
+    hash: true,
+    ..BARE
+};
+
+pub(crate) static RUST: Rules = Rules {
+    line: &["//"],
+    block: &[("/*", "*/")],
+    quotes: &[DOUBLE, Quote::Letter],
+    keywords: &[
+        "as", "async", "await", "break", "const", "continue", "crate", "dyn", "else", "enum",
+        "extern", "false", "fn", "for", "if", "impl", "in", "let", "loop", "match", "mod", "move",
+        "mut", "pub", "ref", "return", "self", "static", "struct", "super", "trait", "true",
+        "type", "union", "unsafe", "use", "where", "while", "yield",
+    ],
+    types: &[
+        "bool", "char", "f32", "f64", "i128", "i16", "i32", "i64", "i8", "isize", "str", "u128",
+        "u16", "u32", "u64", "u8", "usize",
+    ],
+    calls: true,
+    capitals: true,
+    ..BARE
+};
+
+pub(crate) static WEB: Rules = Rules {
+    line: &["//"],
+    block: &[("/*", "*/")],
+    quotes: &[
+        DOUBLE,
+        SINGLE,
+        // A template literal, which is the one string here that runs across lines.
+        Quote::Run {
+            delim: b'`',
+            escape: true,
+            multiline: true,
+        },
+    ],
+    keywords: &[
+        "abstract",
+        "any",
+        "as",
+        "async",
+        "await",
+        "boolean",
+        "break",
+        "case",
+        "catch",
+        "class",
+        "const",
+        "constructor",
+        "continue",
+        "debugger",
+        "declare",
+        "default",
+        "delete",
+        "do",
+        "else",
+        "enum",
+        "export",
+        "extends",
+        "false",
+        "finally",
+        "for",
+        "from",
+        "function",
+        "get",
+        "if",
+        "implements",
+        "import",
+        "in",
+        "infer",
+        "instanceof",
+        "interface",
+        "is",
+        "keyof",
+        "let",
+        "namespace",
+        "never",
+        "new",
+        "null",
+        "of",
+        "private",
+        "protected",
+        "public",
+        "readonly",
+        "return",
+        "satisfies",
+        "set",
+        "static",
+        "super",
+        "switch",
+        "this",
+        "throw",
+        "true",
+        "try",
+        "type",
+        "typeof",
+        "undefined",
+        "unknown",
+        "var",
+        "void",
+        "while",
+        "with",
+        "yield",
+    ],
+    types: &["bigint", "number", "object", "string", "symbol"],
+    calls: true,
+    capitals: true,
+    ..BARE
+};
+
+pub(crate) static PYTHON: Rules = Rules {
+    line: &["#"],
+    quotes: &[DOUBLE, SINGLE],
+    triple: true,
+    keywords: &[
+        "and", "as", "assert", "async", "await", "break", "class", "continue", "def", "del",
+        "elif", "else", "except", "False", "finally", "for", "from", "global", "if", "import",
+        "in", "is", "lambda", "None", "nonlocal", "not", "or", "pass", "raise", "return", "True",
+        "try", "while", "with", "yield",
+    ],
+    types: &[
+        "bool",
+        "bytes",
+        "dict",
+        "float",
+        "frozenset",
+        "int",
+        "list",
+        "set",
+        "str",
+        "tuple",
+    ],
+    calls: true,
+    capitals: true,
+    ..BARE
+};
+
+pub(crate) static GO: Rules = Rules {
+    line: &["//"],
+    block: &[("/*", "*/")],
+    quotes: &[
+        DOUBLE,
+        Quote::Letter,
+        // A raw string, and it does run across lines.
+        Quote::Run {
+            delim: b'`',
+            escape: false,
+            multiline: true,
+        },
+    ],
+    keywords: &[
+        "break",
+        "case",
+        "chan",
+        "const",
+        "continue",
+        "default",
+        "defer",
+        "else",
+        "fallthrough",
+        "false",
+        "for",
+        "func",
+        "go",
+        "goto",
+        "if",
+        "import",
+        "interface",
+        "iota",
+        "map",
+        "nil",
+        "package",
+        "range",
+        "return",
+        "select",
+        "struct",
+        "switch",
+        "true",
+        "type",
+        "var",
+    ],
+    types: &[
+        "bool",
+        "byte",
+        "complex128",
+        "complex64",
+        "error",
+        "float32",
+        "float64",
+        "int",
+        "int16",
+        "int32",
+        "int64",
+        "int8",
+        "rune",
+        "string",
+        "uint",
+        "uint16",
+        "uint32",
+        "uint64",
+        "uint8",
+        "uintptr",
+    ],
+    calls: true,
+    capitals: true,
+    ..BARE
+};
+
+pub(crate) static SQL: Rules = Rules {
+    line: &["--", "#"],
+    block: &[("/*", "*/")],
+    // A `'literal'`, and `"an identifier"`. Neither takes a backslash escape in
+    // standard SQL — a quote is doubled — so a `\` at the end of one does not swallow
+    // the delimiter.
+    quotes: &[
+        Quote::Run {
+            delim: b'\'',
+            escape: false,
+            multiline: false,
+        },
+        Quote::Run {
+            delim: b'"',
+            escape: false,
+            multiline: false,
+        },
+    ],
+    keywords: &[
+        "add",
+        "all",
+        "alter",
+        "and",
+        "any",
+        "as",
+        "asc",
+        "begin",
+        "between",
+        "by",
+        "case",
+        "cast",
+        "check",
+        "coalesce",
+        "collate",
+        "column",
+        "commit",
+        "constraint",
+        "create",
+        "cross",
+        "database",
+        "default",
+        "delete",
+        "desc",
+        "distinct",
+        "drop",
+        "else",
+        "end",
+        "escape",
+        "except",
+        "exists",
+        "foreign",
+        "from",
+        "full",
+        "grant",
+        "group",
+        "having",
+        "if",
+        "in",
+        "index",
+        "inner",
+        "insert",
+        "intersect",
+        "into",
+        "is",
+        "join",
+        "key",
+        "left",
+        "like",
+        "limit",
+        "not",
+        "null",
+        "offset",
+        "on",
+        "or",
+        "order",
+        "outer",
+        "primary",
+        "references",
+        "returning",
+        "right",
+        "rollback",
+        "select",
+        "set",
+        "table",
+        "then",
+        "transaction",
+        "trigger",
+        "true",
+        "false",
+        "union",
+        "unique",
+        "update",
+        "using",
+        "values",
+        "view",
+        "when",
+        "where",
+        "with",
+    ],
+    types: &[
+        "bigint",
+        "blob",
+        "boolean",
+        "char",
+        "date",
+        "datetime",
+        "decimal",
+        "double",
+        "float",
+        "int",
+        "integer",
+        "numeric",
+        "real",
+        "smallint",
+        "text",
+        "time",
+        "timestamp",
+        "varchar",
+    ],
+    fold: true,
+    calls: true,
+    ..BARE
+};
+
+pub(crate) static SHELL: Rules = Rules {
+    line: &["#"],
+    quotes: &[
+        DOUBLE,
+        // `'` is literal in a shell: no escapes inside it at all.
+        Quote::Run {
+            delim: b'\'',
+            escape: false,
+            multiline: false,
+        },
+    ],
+    keywords: &[
+        "case", "cd", "do", "done", "echo", "elif", "else", "esac", "exit", "export", "fi", "for",
+        "function", "if", "in", "local", "return", "set", "shift", "source", "then", "unset",
+        "until", "while",
+    ],
+    sigils: b"$",
+    ..BARE
+};
+
+pub(crate) static POWERSHELL: Rules = Rules {
+    line: &["#"],
+    block: &[("<#", "#>")],
+    quotes: &[DOUBLE, SINGLE],
+    keywords: &[
+        "begin",
+        "break",
+        "catch",
+        "class",
+        "continue",
+        "data",
+        "do",
+        "dynamicparam",
+        "else",
+        "elseif",
+        "end",
+        "enum",
+        "exit",
+        "filter",
+        "finally",
+        "for",
+        "foreach",
+        "function",
+        "hidden",
+        "if",
+        "in",
+        "param",
+        "process",
+        "return",
+        "switch",
+        "throw",
+        "trap",
+        "try",
+        "until",
+        "using",
+        "while",
+    ],
+    fold: true,
+    sigils: b"$",
+    ..BARE
+};
+
+pub(crate) static BATCH: Rules = Rules {
+    // `rem` is a command rather than a marker, so it only counts as a comment at the
+    // head of a line — which is where the tokeniser tests it.
+    line: &["::", "rem "],
+    quotes: &[DOUBLE],
+    keywords: &[
+        "call", "cd", "copy", "del", "do", "echo", "else", "endlocal", "exist", "exit", "for",
+        "goto", "if", "in", "md", "move", "not", "pause", "popd", "pushd", "set", "setlocal",
+        "shift", "start",
+    ],
+    fold: true,
+    sigils: b"%!",
+    ..BARE
+};
+
+pub(crate) static CSS: Rules = Rules {
+    block: &[("/*", "*/")],
+    quotes: &[DOUBLE, SINGLE],
+    keywords: &[
+        "and",
+        "auto",
+        "important",
+        "inherit",
+        "initial",
+        "none",
+        "not",
+        "only",
+        "revert",
+        "unset",
+    ],
+    calls: true,
+    // A property is a word before its colon, which is the whole of CSS's structure that
+    // a lexer can see.
+    label: b":",
+    ..BARE
+};
+
+pub(crate) static JSON: Rules = Rules {
+    // `.jsonc` allows comments and plain `.json` does not. Colouring them in both is
+    // the forgiving direction: a `//` in strict JSON is a syntax error, and showing it
+    // as a comment is a better description of what somebody meant by it than showing it
+    // as nothing.
+    line: &["//"],
+    block: &[("/*", "*/")],
+    quotes: &[DOUBLE],
+    keywords: &["false", "null", "true"],
+    label: b":",
+    ..BARE
+};
+
+pub(crate) static YAML: Rules = Rules {
+    line: &["#"],
+    quotes: &[DOUBLE, SINGLE],
+    keywords: &["false", "no", "null", "off", "on", "true", "yes", "~"],
+    label: b":",
+    ..BARE
+};
+
+pub(crate) static TOML: Rules = Rules {
+    line: &["#"],
+    quotes: &[DOUBLE, SINGLE],
+    keywords: &["false", "true"],
+    label: b"=",
+    sections: true,
+    ..BARE
+};
+
+pub(crate) static INI: Rules = Rules {
+    line: &["#", ";"],
+    quotes: &[DOUBLE, SINGLE],
+    keywords: &["false", "no", "true", "yes"],
+    label: b"=:",
+    sections: true,
+    ..BARE
+};
+
+pub(crate) static CMAKE: Rules = Rules {
+    line: &["#"],
+    quotes: &[DOUBLE],
+    keywords: &[
+        "and",
+        "break",
+        "continue",
+        "elseif",
+        "else",
+        "endforeach",
+        "endfunction",
+        "endif",
+        "endmacro",
+        "endwhile",
+        "foreach",
+        "function",
+        "if",
+        "macro",
+        "not",
+        "or",
+        "return",
+        "while",
+    ],
+    types: &[
+        "BOOL",
+        "CACHE",
+        "FALSE",
+        "FILEPATH",
+        "INTERNAL",
+        "OFF",
+        "ON",
+        "PARENT_SCOPE",
+        "PATH",
+        "PRIVATE",
+        "PUBLIC",
+        "REQUIRED",
+        "STRING",
+        "TRUE",
+    ],
+    fold: true,
+    calls: true,
+    sigils: b"$",
+    ..BARE
+};
