@@ -372,3 +372,85 @@ fn every_slot_is_its_own_patch_of_its_own_page() {
     let wide = Thumbs::image_uv(0, [CELL as u32, 54]);
     assert!(wide.height() < wide.width(), "{wide:?} did not keep the aspect");
 }
+
+/// One drawing in the sandbox, since the three below differ only in what is inside the `<svg>`.
+///
+/// 64 × 32 for all of them, which the cap assertion below reads as `[CELL, CELL / 2]` — so the aspect
+/// lives in one place rather than in a fixture and an expectation that have to be kept in step.
+fn svg(dir: &Path, name: &str, body: &str) -> PathBuf {
+    let path = dir.join(name);
+    let drawing =
+        format!(r#"<svg xmlns="http://www.w3.org/2000/svg" width="64" height="32">{body}</svg>"#);
+    std::fs::write(&path, drawing).expect("a file");
+    path
+}
+
+/// **A `.svg` is rasterised here, and what the shell would have said is not used.**
+///
+/// The report this is the fix for: filter a large tree to `.svg`, flatten it, switch to tiles, and the
+/// grid fills in over minutes rather than moments. The cause is not this module — it is that the
+/// thumbnail provider registered for `.svg` is PowerToys, which stands up a WebView2 per file for a
+/// flat 1.2 s. The module header has the measurement.
+///
+/// Proved **by pixel identity with [`vector`]**, which is the only way that does not rest on how the
+/// machine's provider happens to behave. Withholding COM from the calling thread was the first attempt
+/// and it does not work — `SHCreateItemFromParsingName` answers perfectly well without an apartment,
+/// so a picture arriving proved nothing about which decoder drew it. A picture that is *byte-for-byte*
+/// what `resvg` produced could not have come from a browser engine.
+///
+/// No [`one_at_a_time`] and no [`crate::shell::init`], unlike every other test here that names
+/// `picture`: if this passes, nothing in it reached the shell, and claiming the lock would only queue
+/// it behind the two tests that do.
+#[test]
+fn an_svg_is_drawn_here_and_not_by_the_shell() {
+    let dir = crate::sandbox::fresh("thumbs-svg");
+    let drawing = svg(&dir, "mark.svg", r##"<rect width="64" height="32" fill="#3070c0"/>"##);
+
+    let ours = vector(&drawing).expect("resvg draws a plain rect");
+    // Fit inside the cell on the drawing's own aspect: 64 × 32 asked for at 96 is 96 × 48. Not the
+    // panel's 2048 cap, which would be a 32-times-too-big picture memcpy'd into a 96-pixel cell.
+    assert_eq!(ours.size, [CELL, CELL / 2], "the aspect or the cap is wrong");
+
+    let Got::Picture(got) = draw(&drawing) else {
+        panic!("the svg was not drawn at all");
+    };
+    assert_eq!(
+        got, ours,
+        "the tile is the shell's render rather than this program's, so it is still paying \
+         PowerToys' 1.2 s a file"
+    );
+}
+
+/// A drawing that rasterises to nothing is handed to the shell after all.
+///
+/// `usvg` here is built without text support, so an SVG whose whole content is `<text>` parses
+/// perfectly and renders nought pixels — and a blank tile is a worse answer than a slow one. 6 of the
+/// 1,233 files behind the module header's measurement were in this position, which is few enough that
+/// the shell is the right place to send them.
+///
+/// Asserted on [`vector`] declining and deliberately **not** on what [`draw`] then returns: what the
+/// shell makes of a text-only drawing is PowerToys' business and varies by what is installed, so a
+/// test that pinned it would be testing the machine.
+#[test]
+fn a_drawing_that_renders_to_nothing_is_left_to_the_shell() {
+    let dir = crate::sandbox::fresh("thumbs-svg-blank");
+    // The three ways `vector` gives up, which are the three early-outs in it: parsed and drew
+    // nothing, would not parse, and could not be read.
+    let wordy = svg(&dir, "words.svg", r##"<text x="4" y="20">no font database, so no pixels</text>"##);
+    let broken = dir.join("broken.svg");
+    std::fs::write(&broken, b"<svg").expect("a file");
+    let missing = dir.join("gone.svg");
+
+    for path in [&wordy, &broken, &missing] {
+        assert!(
+            vector(path).is_none(),
+            "{} was answered locally, so nothing would ever ask the shell about it",
+            path.display()
+        );
+    }
+
+    // And nothing that is not vector art is even read, whatever its bytes are.
+    let lying = dir.join("actually-an-svg.png");
+    std::fs::copy(&wordy, &lying).ok();
+    assert!(vector(&lying).is_none(), "a .png went to resvg on the strength of its bytes");
+}

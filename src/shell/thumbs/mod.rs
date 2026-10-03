@@ -24,6 +24,71 @@
 //! is a hundred-odd of them rather than the forty *rows* × nothing that a listing is. Only cells
 //! actually on screen are ever asked about.
 //!
+//! # `.svg` is the exception, and it is not a close call
+//!
+//! The argument above holds for every format whose provider is a decoder. It does not hold for
+//! `.svg`, because the provider registered for it is not required to be one — and the one people
+//! actually have is **PowerToys**, which renders the drawing through WebView2. A browser engine, per
+//! file:
+//!
+//! ```text
+//! HKCU\Software\Classes\.svg\ShellEx\{E357FCCD-...}  →  {10144713-1526-46C9-88DA-1FB52807A9FF}
+//!     DisplayName     Svg Thumbnail Provider
+//!     InprocServer32  ...\PowerToys\PowerToys.SvgThumbnailProviderCpp.dll
+//! ```
+//!
+//! Measured over `D:\Sources\3DR\Wip`, 1,233 `.svg` files, on a folder the thumbnail cache had never
+//! been asked about:
+//!
+//! | | per file | the whole folder, one worker |
+//! | --- | --- | --- |
+//! | `GetImage`, cold | **1,250 ms** | ~26 minutes |
+//! | `GetImage`, warm from the cache | 1.8 ms | 2.2 s |
+//! | `resvg`, which is already linked in | **0.32 ms** | 389 ms |
+//!
+//! The cold figure is flat — 1.2 s for a 243-byte drawing and 1.2 s for an 18 KB one — so it is not
+//! the drawing being rasterised, it is a fixed per-call price for standing a browser up and taking it
+//! down again. Against a cold **PNG** at 12.95 ms (see `app::click_tests::memory::thumbnail_speed`)
+//! it is a hundred times the cost of a format the shell decodes properly, and the worker is one
+//! thread taking answers in order — so a screenful of 140 SVG tiles is three minutes during which
+//! *nothing else in the window gets a thumbnail either*. That is the report this exists to answer:
+//! filter a large tree to `.svg`, flatten it, switch to tiles.
+//!
+//! So [`draw`] rasterises `.svg` here, with [`crate::preview::vector::raster`] — the same decoder the
+//! preview panel uses, at [`CELL`] instead of the panel's cap. All 1,233 drew. **What it gives up is
+//! `<text>`**: `usvg` is built without its text support, so a drawing whose content is words comes
+//! back without them, where WebView2 would have drawn them. 35 of the 1,233 contained a `<text>`
+//! element at all, and the panel behind the tile has made this same trade since it was written and
+//! says so on its canvas. A tile that agrees with the panel beside it is worth more than 2.8% of a
+//! folder rendering more completely three minutes later.
+//!
+//! A drawing `resvg` cannot parse, or renders to nothing at all — 6 of the 1,233 — falls through to
+//! the shell as before, so PowerToys and the file's own icon are both still behind it. That path costs
+//! the 1.2 s, and it is rare enough to be the right place to spend it.
+//!
+//! ## And it cures `.svg` only, which is worth being plain about
+//!
+//! **Any** blocking provider does this — a CAD or `.psd` extension, a thumbnail on a UNC share that
+//! has gone away — because the worker is one thread taking answers in order, so one slow file stalls
+//! every tile behind it. `.svg` was worth a carve-out because a decoder for it was *already linked
+//! in*; nothing above generalises. The obvious general remedies were considered and are all worse:
+//!
+//! - **A timeout or a per-file deadline cannot be implemented.** `GetImage` is a synchronous in-proc
+//!   COM call running somebody else's DLL on this thread — there is nothing to cancel, so a deadline
+//!   means abandoning the thread mid-call. See [`Thumbs::worker`] for why that is worse than the bug:
+//!   the apartment has to outlive the requests, because the *last* `CoUninitialize` in a process frees
+//!   shell state other threads are still using.
+//! - **A pool only divides the total.** 1,233 files × 1.2 s over eight threads is still three minutes,
+//!   and it costs the in-order delivery the worker is built around.
+//! - **Deprioritising the slow file does nothing here**, because in the folder that was reported
+//!   *every* file is slow. There is no faster work to promote ahead of it.
+//!
+//! What would generalise is a circuit breaker — stop asking about an extension whose answers keep
+//! arriving late — and it is deliberately not here. It needs per-extension state, a third [`Got`]
+//! variant of the kind that enum argues against, and a policy for re-opening once the shell's cache is
+//! warm and the same call costs 1.8 ms. It would also show a file's *icon* where a local decoder shows
+//! the drawing, which is a worse tile. Worth writing when a second format needs it, not before.
+//!
 //! # A page at a time, and why it is not one texture
 //!
 //! Tiles are drawn from an atlas rather than from a texture each, for the reason
@@ -84,13 +149,13 @@ use std::sync::{Arc, Mutex};
 
 use egui::{ColorImage, TextureHandle, TextureOptions};
 
-/// The shell call on its own, for the benchmark in `app::click_tests::memory`.
+/// One file's fetch on its own, for the benchmark in `app::click_tests::memory`.
 ///
 /// The service around it is what a grid uses and what the tests here drive; this is the floor
 /// underneath it — the one cost nothing in this program can make smaller, only ask for less often.
 #[cfg(test)]
-pub(crate) fn picture_for_tests(path: &Path) -> bool {
-    matches!(picture(path), Got::Picture(_))
+pub(crate) fn draw_for_tests(path: &Path) -> bool {
+    matches!(draw(path), Got::Picture(_))
 }
 
 /// One atlas cell, in pixels — and the size a thumbnail is asked for.
@@ -208,7 +273,8 @@ struct Job {
     stamp: u64,
 }
 
-/// What the shell said. **Two answers, and "no" is not one of them.**
+/// What the fetch said — see [`draw`], which is the shell for nearly everything and `resvg` for
+/// `.svg`. **Two answers, and "no" is not one of them.**
 ///
 /// There is deliberately no "this file has no picture" — see [`BACKOFF`]. The shell fails for reasons
 /// that have nothing to do with the file, and it does not label them reliably, so every failure is a
@@ -625,7 +691,7 @@ impl Thumbs {
                         // that one tile its picture.
                         let got = if wanted {
                             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                picture(&path)
+                                draw(&path)
                             }))
                             .unwrap_or(Got::Later)
                         } else {
@@ -866,11 +932,47 @@ impl Thumbs {
     }
 }
 
+/// One file's picture: this program's own decoder where it has a better one, and the shell otherwise.
+///
+/// The one place the "ask the shell for everything" rule in the module header is broken, and only for
+/// `.svg` — where the registered provider is a browser engine and costs 1.2 s a file. See the header
+/// for the measurement and for what the local rasteriser gives up.
+///
+/// Everything else goes straight through, including formats `image` could have decoded: a `.png` costs
+/// the shell 12.95 ms cold and nothing warm, the cache is shared with Explorer, and re-implementing
+/// that would buy nothing and lose the RAW files and the `.mp4`s.
+fn draw(path: &Path) -> Got {
+    if let Some(image) = vector(path) {
+        return Got::Picture(image);
+    }
+    picture(path)
+}
+
+/// A `.svg` rasterised here, or `None` for anything the shell should be asked about after all.
+///
+/// `None` covers three cases and they are deliberately not distinguished, because the answer to all
+/// three is the same — let the shell try:
+///
+/// - not vector art at all, which is nearly every file;
+/// - unreadable, or something `usvg` will not parse;
+/// - **parsed and drawn, but the canvas came back empty.** The one worth naming: `usvg` here is built
+///   without text support, so a drawing that is nothing but `<text>` parses perfectly and renders to
+///   nought pixels. A blank tile is a worse answer than a slow one, so those go to the shell and get
+///   PowerToys' render — or, failing that, the file's icon.
+fn vector(path: &Path) -> Option<ColorImage> {
+    if !crate::preview::is_vector(path) {
+        return None;
+    }
+    let image = crate::preview::vector_art(path, CELL as u32).ok()?.pixels;
+    image.pixels.iter().any(|pixel| pixel.a() > 0).then_some(image)
+}
+
 // ---------------------------------------------------------------------------
 // Windows
 // ---------------------------------------------------------------------------
 
-/// Unreachable: `Thumbs::available` is false off Windows, so nothing is ever asked for.
+/// Unreachable: [`Thumbs::request`] asks for nothing off Windows, so no job ever reaches [`draw`].
+/// Here so that `draw` — which is portable, since `resvg` is — still compiles there.
 #[cfg(not(windows))]
 fn picture(_path: &Path) -> Got {
     Got::Later

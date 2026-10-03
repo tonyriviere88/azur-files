@@ -16,7 +16,7 @@ pub struct Picture {
 
 pub(super) fn load(path: &Path) -> Payload {
     match if is_vector(path) {
-        vector::art(path)
+        vector::art(path, CAP)
     } else {
         raster(path)
     } {
@@ -30,7 +30,11 @@ pub(super) fn load(path: &Path) -> Payload {
 ///
 /// Asked of the *name* because that is all a blob out of git has — and because `usvg` and `image` are
 /// two different decoders rather than two formats one decoder sniffs between.
-pub(super) fn is_vector(path: &Path) -> bool {
+///
+/// `pub(crate)` for [`crate::shell::thumbs`], which asks it to decide the one kind of file it draws
+/// itself instead of handing to the shell. One list of vector extensions, so a tile and the panel
+/// cannot come to different conclusions about the same name.
+pub(crate) fn is_vector(path: &Path) -> bool {
     path.extension()
         .is_some_and(|ext| ext.eq_ignore_ascii_case("svg"))
 }
@@ -41,7 +45,7 @@ pub(super) fn is_vector(path: &Path) -> bool {
 /// the megapixel cap and the [`CAP`] scale-down live, so a blob cannot get past a limit a file cannot.
 pub(super) fn decode(bytes: &[u8], vector: bool) -> Result<Picture, String> {
     if vector {
-        vector::from_bytes(bytes)
+        vector::from_bytes(bytes, CAP)
     } else {
         raster_from(|| {
             image::ImageReader::new(std::io::Cursor::new(bytes))

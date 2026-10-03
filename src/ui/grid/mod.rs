@@ -784,8 +784,10 @@ pub fn show(
             // ---- A tile ---------------------------------------------------
             let (picture, label) = parts(cell.hit);
             let target = dir.target(entry_index);
-            // The shell's own answer for this file: a thumbnail where it has one, its large icon
-            // where it has not. `None` on the first ask, which is what the painted glyph is for.
+            // This file's picture: the shell's own thumbnail where it has one and its large icon
+            // where it has not, or — for `.svg` — the drawing rasterised here, which
+            // `shell::thumbs`' header has the reason for. `None` on the first ask, which is what the
+            // painted glyph is for.
             match thumbs.get(&target, entry.modified, tab.view) {
                 Some(thumb) if thumb.size[0] > 0 && thumb.size[1] > 0 => {
                     let fitted = fit(picture, thumb.size);

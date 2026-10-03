@@ -503,11 +503,12 @@ fn startup_phases() {
 /// measures the *machinery* rather than the shell's decoder and is worth having either way — a
 /// regression in the queue, the cache or the atlas shows up in it just as well.
 ///
-/// Three numbers, because they are three different problems. **The shell call** is
-/// `IShellItemImageFactory` per file and is the floor: nothing here can make it quicker, only ask
-/// for it less. **The wait for a screenful** is what somebody switching to tiles actually sees.
-/// **A frame while they arrive** is the one that must stay under a frame's budget, because the
-/// alternative is a grid that stutters as it fills.
+/// Three numbers, because they are three different problems. **The fetch** is
+/// `shell::thumbs::draw` per file — `IShellItemImageFactory` for nearly everything, `resvg` for
+/// `.svg` — and it is the floor: nothing here can make it quicker, only ask for it less. **The wait
+/// for a screenful** is what somebody switching to tiles actually sees. **A frame while they arrive**
+/// is the one that must stay under a frame's budget, because the alternative is a grid that stutters
+/// as it fills.
 ///
 /// **Windows caches thumbnails, so read the first figure knowing which side of that cache it is
 /// on.** Measured on files it had never been asked about, the shell's call came to **12.95 ms** a
@@ -515,6 +516,11 @@ fn startup_phases() {
 /// opening a folder of holiday photographs waits for, the second is what they get on the way back
 /// to it — and a run of this benchmark reports whichever applies to the sandbox as it stands. To
 /// see the cold number again, point `YAFE_THUMBS` at a folder of pictures nothing has browsed.
+///
+/// A folder of `.svg` is the one place that cache does not come into it, and pointing `YAFE_THUMBS` at
+/// one is how the header of [`crate::shell::thumbs`] was measured: **1,250 ms** a file through the
+/// shell, cold, because the provider registered for `.svg` is PowerToys and it stands up a WebView2
+/// per drawing. **0.32 ms** rasterised here. That module's header has the rest of it.
 #[test]
 #[ignore = "a benchmark, not a test"]
 fn thumbnail_speed() {
@@ -572,17 +578,17 @@ fn thumbnail_speed() {
         return;
     }
 
-    // 1. The shell call itself, on the thread this test is on, one file at a time.
+    // 1. The fetch itself, on the thread this test is on, one file at a time.
     let want = pictures.len().min(48);
     let at = std::time::Instant::now();
     let mut drawn = 0;
     for path in pictures.iter().take(want) {
-        if crate::shell::thumbs::picture_for_tests(path) {
+        if crate::shell::thumbs::draw_for_tests(path) {
             drawn += 1;
         }
     }
     let each = at.elapsed().as_secs_f64() * 1000.0 / want as f64;
-    println!("  the shell's own call         {each:>8.2} ms per picture  ({drawn}/{want} drawn)");
+    println!("  one file's own fetch         {each:>8.2} ms per picture  ({drawn}/{want} drawn)");
 
     // 2. And through the service, which is what the grid uses: a screenful asked for at once,
     //    fetched on workers, with a frame run while they land.

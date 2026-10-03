@@ -55,6 +55,12 @@ pub use diff::Diff;
 pub use picture::Picture;
 pub use search::{hits, Search};
 pub use text::Text;
+// And the two [`crate::shell::thumbs`] needs, for the one file type it draws itself instead of
+// handing to the shell — see that module's header. Named here for the reason just above: which file
+// the SVG decoder lives in is this module's business, and these were the first two names in the
+// program to reach past this line for it.
+pub(crate) use picture::is_vector;
+pub(crate) use vector::art as vector_art;
 
 /// What a file will be shown as.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
