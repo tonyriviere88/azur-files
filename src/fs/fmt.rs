@@ -42,6 +42,22 @@ pub fn size(bytes: u64, out: &mut String) {
     };
 }
 
+/// The widest string [`size`] can produce, for measuring the column against a value nobody has
+/// yet — which is what the Size column needs while the folders on show are being counted and their
+/// totals are still arriving one at a time. See [`crate::ui::filelist::measure_columns`].
+///
+/// Four digits and a two-letter unit is the widest shape there is: the loop above divides until the
+/// value is under 1024, so the `{:.0}` branch tops out at four figures, and `1023 KB` is wider than
+/// `9.34 KB` because a full-width digit stands where the decimal point would. `PB` is no wider than
+/// `KB`.
+///
+/// **With one exception, and it is not reachable**: `PB` is the last unit, so past 1024 PB — 1.15
+/// exabytes — the figure goes on growing and `16384 PB` is eight characters. The largest volume ever
+/// manufactured is four orders of magnitude short of that, and a folder cannot hold more than the
+/// volume it is on. `a_template_wide_enough_for_every_real_size` is where that boundary is written
+/// down rather than assumed.
+pub const SIZE_TEMPLATE: &str = "1023 KB";
+
 /// `dd/MM/yyyy HH:mm` — fixed width, so the Modified column can be measured once
 /// and never re-measured.
 ///
@@ -410,6 +426,52 @@ mod tests {
             size(bytes, &mut out);
             assert_eq!(out, expected, "{bytes} bytes");
         }
+    }
+
+    /// Nothing [`size`] writes for a size that can exist is longer than the template the Size column
+    /// reserves room for while the folders on show are being counted — see [`SIZE_TEMPLATE`], and
+    /// [`crate::ui::filelist::measure_columns`], which would otherwise have to re-measure the column
+    /// every time a total landed.
+    ///
+    /// Every branch's boundary and every unit's, up to the last one that has a unit above it. The
+    /// exception past that is asserted rather than avoided: it is a real property of the formatter,
+    /// and a test that only checked the values it liked would leave the next person to widen the
+    /// column wondering why.
+    #[test]
+    fn a_template_wide_enough_for_every_real_size() {
+        let mut out = String::new();
+        let mut widest = 0usize;
+        let mut cases: Vec<u64> = vec![0, 1, 1023, 1024];
+        // Up to and including TB, whose top of range is the last value that still divides into a
+        // unit with a name — the PB row below is where the figure starts growing instead.
+        for unit in 0..5u32 {
+            let scale = 1024f64.powi(unit as i32);
+            for value in [1.0, 9.99, 10.0, 99.9, 100.0, 1023.99] {
+                cases.push((value * scale) as u64);
+            }
+        }
+        for bytes in cases {
+            out.clear();
+            size(bytes, &mut out);
+            widest = widest.max(out.len());
+            assert!(
+                out.len() <= SIZE_TEMPLATE.len(),
+                "`{out}` ({bytes} bytes) is longer than the template `{SIZE_TEMPLATE}`"
+            );
+        }
+        // And the template is not needlessly wide either: something has to reach it, or the column
+        // would be reserving room for a string that cannot happen.
+        assert_eq!(widest, SIZE_TEMPLATE.len());
+
+        // Past the last unit the figure grows, because there is nothing left to divide by. It takes
+        // an exabyte to get there — four orders of magnitude past the largest volume anyone sells,
+        // and a folder cannot hold more than the volume it is on.
+        out.clear();
+        size(u64::MAX, &mut out);
+        assert_eq!(out, "16384 PB");
+        out.clear();
+        size(1023 * 1024u64.pow(5), &mut out);
+        assert_eq!(out.len(), SIZE_TEMPLATE.len(), "one petabyte short of it");
     }
 
     #[test]

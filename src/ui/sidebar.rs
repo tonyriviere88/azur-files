@@ -39,7 +39,13 @@ use crate::ui::{icon_rect, row_fill, section_label, text_left, truncated};
 /// default this opens at.
 const PAD_Y: f32 = 1.0;
 const ROW: f32 = typography::LINE_BODY + PAD_Y * 2.0;
-const GAUGE_HEIGHT: f32 = 3.0;
+/// How tall a drive's capacity bar is.
+///
+/// **Also the listing's share bar** — see `filelist::rows::share_bar`, whose whole justification is
+/// that it is the same kind of statement said the same way, and one window should not have two
+/// visual languages for "this much of that". One constant rather than the same 3.0 written twice with
+/// a comment claiming they agree.
+pub(crate) const GAUGE_HEIGHT: f32 = 3.0;
 /// The gap between the text and the capacity bar under it.
 const GAUGE_GAP: f32 = 1.0;
 /// A drive row: the name, and the capacity bar under it. The numbers are a tooltip.

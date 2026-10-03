@@ -245,6 +245,27 @@ impl App {
         self
     }
 
+    /// `--sizes`: open with every folder being counted and every row wearing its share, for looking
+    /// at that column without having to press the button first. The same family as [`Self::flattened`]
+    /// — and it composes with it, since the two are different questions and a flattened tree is
+    /// counted off its own listing.
+    ///
+    /// The flag alone is enough: [`crate::pane::Tab::apply`] sizes the column when the listing lands,
+    /// and `App::collect_sizes` starts the counting on the frame after. What a capture then has to do
+    /// is *wait* for it — see [`App::sizes_pending`].
+    pub fn measuring(mut self, on: bool) -> Self {
+        if on {
+            for pane in &mut self.panes {
+                for tab in &mut pane.tabs {
+                    // Not `Tab::set_sizes`: there is no listing yet, so there is nothing to size, put
+                    // back or re-measure. This is the flag pressing the button before the window opens.
+                    tab.sizes.on = true;
+                }
+            }
+        }
+        self
+    }
+
     /// `--scroll`: run the listing up and down for ever. See [`Scrolling`].
     pub fn scrolling(mut self, on: bool) -> Self {
         self.scrolling.on = on;
@@ -378,6 +399,20 @@ impl App {
     /// stops waiting either way; it is not "wait until there is git".
     pub fn git_pending(&self) -> bool {
         self.git_waiting > 0
+    }
+
+    /// Whether a capture should keep waiting for the folders to be counted.
+    ///
+    /// The same reason as [`App::git_pending`], and the longest wait of the family: a tree walk per
+    /// folder is seconds where the shell is milliseconds, so without this `--sizes` photographs a
+    /// column of blank cells — the loading state rather than the view. The caller's own patience is
+    /// what bounds it; a folder big enough to outlast that is one whose screenshot is honestly
+    /// half-counted.
+    pub fn sizes_pending(&self) -> bool {
+        self.panes
+            .iter()
+            .flat_map(|pane| pane.tabs.iter())
+            .any(|tab| tab.sizes.waiting() > 0)
     }
 
     /// Whether a capture should keep waiting for the tiles' pictures.

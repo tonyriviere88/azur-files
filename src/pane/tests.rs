@@ -865,3 +865,430 @@ fn closing_a_tab_keeps_the_active_one_active() {
     assert!(pane.close_tab(1));
     assert_eq!(pane.tab().path, PathBuf::from("/b"));
 }
+
+/// **The measurement's whole state machine, from the tab's side.**
+///
+/// The walk itself is [`crate::sizes`]' and is tested there. What lives here is everything the Size
+/// column reads, and every part of it is a way to get a wrong number onto the screen:
+///
+/// - A folder with no total is a **blank cell** and never a `0 B` — see [`Tab::size_shown`], which
+///   has to tell "not counted" from "counted, and empty".
+/// - A folder is asked about **once**, so a listing that has been counted asks for nothing on the
+///   next frame — which is what `Measurement`'s per-row "asked" state is for.
+/// - The **share** is of what is on show, and in a folder's own listing the rows partition it: the
+///   shares have to add up to one, or the bars are drawn against a total that is not the one the
+///   column adds up to.
+/// - A **link** is given no number rather than a zero, because the walk would not follow it.
+#[test]
+fn measuring_a_folder_fills_its_cells_once_and_shares_out_the_whole_listing() {
+    use crate::fs::dir::{DirBuilder, FLAG_DIR, FLAG_LINK};
+
+    let mut builder = DirBuilder::new(r"C:\here");
+    builder.push("a.txt", 250, 0, 0);
+    builder.push("big", 4096, 0, FLAG_DIR);
+    builder.push("empty", 4096, 0, FLAG_DIR);
+    builder.push("junction", 0, 0, FLAG_DIR | FLAG_LINK);
+    let mut tab = Tab::new(r"C:\here");
+    tab.apply(Arc::new(builder.finish(0)));
+    let (a, big, empty, junction) = (
+        entry_of(&tab, "a.txt"),
+        entry_of(&tab, "big"),
+        entry_of(&tab, "empty"),
+        entry_of(&tab, "junction"),
+    );
+
+    // ---- Off: the column says what it has always said -------------------
+    assert_eq!(tab.size_shown(a), Some(250), "a file has its own bytes");
+    assert_eq!(
+        tab.size_shown(big),
+        None,
+        "a folder's own byte count is noise and must not reach the cell"
+    );
+    assert_eq!(tab.sizes.share(250), None, "no bars while the button is off");
+    assert!(walked(&mut tab).is_empty(), "nothing was asked for");
+
+    // ---- On: two folders asked about, and two rows that are not ----------
+    tab.set_sizes(true);
+    let asked = walked(&mut tab);
+    let rows: Vec<u32> = asked.iter().map(|&(row, _)| row).collect();
+    assert_eq!(
+        rows,
+        [big as u32, empty as u32],
+        "the link should not have been asked about, and a file is not a folder"
+    );
+    assert_eq!(
+        asked[0].1,
+        PathBuf::from(r"C:\here\big"),
+        "asked about by the path the row leads to"
+    );
+    assert_eq!(tab.sizes.waiting(), 2);
+    assert!(
+        walked(&mut tab).is_empty(),
+        "a folder already asked about was asked again — the column would ask on every frame"
+    );
+    // A cell with a question outstanding is blank, exactly as it was with the button off: it is a
+    // folder that has not answered, not a folder of nothing.
+    assert_eq!(tab.size_shown(big), None);
+    assert_eq!(
+        tab.size_shown(junction),
+        None,
+        "a junction is not followed, so `0 B` would be a claim rather than a silence"
+    );
+
+    // ---- The totals land -------------------------------------------------
+    assert!(answer(&mut tab, big as u32, 750));
+    assert!(answer(&mut tab, empty as u32, 0));
+    assert_eq!(tab.sizes.waiting(), 0, "nothing is outstanding now");
+    tab.settle_sizes(1.0);
+
+    assert_eq!(tab.size_shown(big), Some(750));
+    assert_eq!(
+        tab.size_shown(empty),
+        Some(0),
+        "a folder with nothing in it has been counted, and the answer is zero"
+    );
+    // The rows partition the folder, so their shares add to one — which is the property that makes
+    // a bar in a cell readable as "this much of what is on show".
+    assert_eq!(shares(&tab), Some(1.0));
+    assert_eq!(
+        tab.sizes.share(250),
+        Some(0.25),
+        "250 of the 1000 bytes on show: 250 in the file and 750 under `big`"
+    );
+
+    // ---- A filter narrows what the shares are of -------------------------
+    tab.filter.push_str("big");
+    tab.rebuild_order();
+    tab.settle_sizes(2.0);
+    assert_eq!(tab.order.len(), 1, "only `big` survives the filter");
+    assert_eq!(
+        tab.sizes.share(750),
+        Some(1.0),
+        "the total is of what is displayed, so the only row on show is all of it"
+    );
+}
+
+/// **A Size sort is redone as the totals land — on a deadline — and then settles.**
+///
+/// Three failures in one test, because they are three sides of one line. Without the re-sort, a
+/// listing ordered by Size shows the order it had when nothing was counted, for as long as the
+/// counting takes — minutes, on a drive. Without the *deadline*, it rebuilds once per answer, which
+/// because every answer wakes the window is once per frame: the same pass [`super::FILTER_DELAY`]
+/// measures at 220–240 ms on a large listing. And without the round's end overriding the deadline,
+/// what you are finally left looking at is a quarter-second stale.
+#[test]
+fn the_size_sort_follows_the_totals_on_a_deadline_and_then_settles() {
+    use crate::fs::dir::{DirBuilder, FLAG_DIR};
+
+    let mut builder = DirBuilder::new(r"C:\here");
+    builder.push("huge", 4096, 0, FLAG_DIR);
+    builder.push("later", 4096, 0, FLAG_DIR);
+    builder.push("z.bin", 500, 0, 0);
+    let mut tab = Tab::new(r"C:\here");
+    tab.sort_by = Column::Size;
+    tab.ascending = false;
+    tab.apply(Arc::new(builder.finish(0)));
+
+    tab.set_sizes(true);
+    assert_eq!(walked(&mut tab).len(), 2, "both folders were asked about");
+    // By name, not by where they came back: at this point the order is still the one `apply` built
+    // with the button off, which is folders-first in *descending name* order — so `asked[0]` is
+    // `later`, and binding positionally would answer for the wrong folder and still look plausible.
+    let (huge, later) = (
+        entry_of(&tab, "huge") as u32,
+        entry_of(&tab, "later") as u32,
+    );
+    // Turning the button on re-sorts at once — the listing was ordered without the folders in it and
+    // now they are in it — and an uncounted folder keys as zero, so both wait at the quiet end. They
+    // tie there, and the name tie-break follows the sort's own direction like every other one here.
+    assert_eq!(tab.settle_sizes(0.0), None, "the press is due at once");
+    assert_eq!(names(&tab), ["z.bin", "later", "huge"]);
+
+    // ---- One answer, with another still outstanding: owed, not due -------
+    answer(&mut tab, huge, 9_000);
+    let left = tab.settle_sizes(0.0);
+    assert!(
+        matches!(left, Some(left) if left > 0.0),
+        "a re-sort was taken immediately, so every answer would rebuild the order: {left:?}"
+    );
+    assert_eq!(
+        names(&tab),
+        ["z.bin", "later", "huge"],
+        "the order moved before the deadline"
+    );
+    // The bars, though, are right on this frame: the total settles every time even while the order
+    // waits, or the listing would be drawn against a denominator it no longer sums to.
+    assert_eq!(shares(&tab), Some(1.0));
+
+    // ---- The deadline passes ---------------------------------------------
+    assert_eq!(tab.settle_sizes(crate::sizes::RESORT_DELAY + 0.01), None);
+    assert_eq!(
+        names(&tab),
+        ["huge", "z.bin", "later"],
+        "the sort did not follow the total once the deadline had passed"
+    );
+    assert_eq!(tab.sizes.waiting(), 1, "`later` has still not answered");
+
+    // ---- The last answer overrides the deadline --------------------------
+    answer(&mut tab, later, 20_000);
+    assert_eq!(tab.sizes.waiting(), 0, "the round is over");
+    assert_eq!(
+        tab.settle_sizes(crate::sizes::RESORT_DELAY + 0.02),
+        None,
+        "the last answer of a round is due at once, whatever the deadline says"
+    );
+    assert_eq!(names(&tab), ["later", "huge", "z.bin"]);
+
+    // ---- And it stops ----------------------------------------------------
+    //
+    // The re-sort rebuilds the order, which invalidates the total, which is what the same call then
+    // pays. Owing itself another one would mean rebuilding the order on every frame for ever.
+    assert_eq!(tab.settle_sizes(9.0), None);
+    let before = tab.order_gen;
+    assert_eq!(tab.settle_sizes(9.0), None);
+    assert_eq!(
+        tab.order_gen, before,
+        "settling twice rebuilt the order twice, so it would rebuild on every frame"
+    );
+    assert_eq!(shares(&tab), Some(1.0));
+}
+
+/// A rebuilt order does **not** owe a re-sort, so a settled keystroke is not paid for twice.
+///
+/// `rows_moved` invalidates the total and deliberately nothing else. Arming the re-sort there instead
+/// would have every filter keystroke, `Ctrl+H` and column click rebuild the listing, then rebuild it
+/// identically one frame later — for an order that cannot have changed, since no total moved in
+/// between. On a large listing that is a second 240 ms stall per interaction, for nothing.
+#[test]
+fn a_rebuilt_order_does_not_owe_itself_a_second_rebuild() {
+    use crate::fs::dir::{DirBuilder, FLAG_DIR};
+
+    let mut builder = DirBuilder::new(r"C:\here");
+    builder.push("one", 4096, 0, FLAG_DIR);
+    builder.push("z.bin", 500, 0, 0);
+    let mut tab = Tab::new(r"C:\here");
+    tab.sort_by = Column::Size;
+    tab.apply(Arc::new(builder.finish(0)));
+    tab.set_sizes(true);
+    let asked = walked(&mut tab);
+    answer(&mut tab, asked[0].0, 900);
+    tab.settle_sizes(0.0);
+    tab.settle_sizes(crate::sizes::RESORT_DELAY + 0.01);
+
+    // A user's own rebuild — a column click, say — and then a frame.
+    tab.rebuild_order();
+    let after_theirs = tab.order_gen;
+    assert_eq!(tab.settle_sizes(9.0), None, "nothing is owed but the total");
+    assert_eq!(
+        tab.order_gen, after_theirs,
+        "the order was rebuilt again on the next frame, doubling the cost of the click"
+    );
+    assert_eq!(shares(&tab), Some(1.0), "and the total was still settled");
+}
+
+/// A re-read of the same folder throws the totals away, and an answer to the old question cannot
+/// land on the new listing.
+///
+/// **This is the one way this feature could put a real number on the wrong file.** A total names a
+/// *row*, and a row is an index into the listing that was on screen when it was asked for — so after
+/// an `F5`, a file operation, or [`crate::watch`] noticing a write, entry 40 is very likely a
+/// different file. The generation is what makes that impossible, and it is deliberately not
+/// [`Tab::view`]: a view survives a re-read of its own folder, which is exactly the case that has to
+/// be told apart.
+#[test]
+fn a_re_read_will_not_take_an_answer_meant_for_the_listing_it_replaced() {
+    use crate::fs::dir::{DirBuilder, FLAG_DIR};
+
+    let listing = |names: &[&str]| {
+        let mut builder = DirBuilder::new(r"C:\here");
+        for name in names {
+            builder.push(name, 0, 0, FLAG_DIR);
+        }
+        Arc::new(builder.finish(0))
+    };
+
+    let mut tab = Tab::new(r"C:\here");
+    tab.apply(listing(&["one", "two"]));
+    tab.set_sizes(true);
+    let asked = walked(&mut tab);
+    assert_eq!(asked.len(), 2);
+    let stale = crate::sizes::Answer {
+        gen: tab.sizes.gen(),
+        row: asked[0].0,
+        bytes: 4_000,
+    };
+
+    // The folder is read again, with a row inserted at the front of it — so every index has moved.
+    tab.apply(listing(&["aaa", "one", "two"]));
+    assert!(
+        !tab.sizes.take(&stale, 0.0),
+        "an answer to the listing that was replaced was taken for this one"
+    );
+    assert_eq!(tab.sizes.waiting(), 0, "and so was what it was waiting for");
+    assert_eq!(
+        tab.size_shown(entry_of(&tab, "one")),
+        None,
+        "a total from the previous listing survived the read that replaced it"
+    );
+    // The view is *not* what tells the two listings apart, which is why the generation exists.
+    let view = tab.view;
+    tab.apply(listing(&["aaa", "one", "two"]));
+    assert_eq!(
+        tab.view, view,
+        "a re-read is the same view of the same folder"
+    );
+}
+
+/// Pressing the button twice keeps what was already counted, and puts back what was outstanding.
+///
+/// Turning it off is a cancellation — the generation stops being reported and the walks are
+/// abandoned — so the folders that were waiting are never going to be answered. Left marked as asked
+/// they would stay blank for ever. The answers that did land are still true of the same listing and
+/// are kept, which is what makes the second press cheap.
+#[test]
+fn turning_the_measurement_off_and_on_keeps_the_answers_and_re_asks_the_rest() {
+    use crate::fs::dir::{DirBuilder, FLAG_DIR};
+
+    let mut builder = DirBuilder::new(r"C:\here");
+    builder.push("done", 0, 0, FLAG_DIR);
+    builder.push("waiting", 0, 0, FLAG_DIR);
+    let mut tab = Tab::new(r"C:\here");
+    tab.apply(Arc::new(builder.finish(0)));
+    tab.set_sizes(true);
+
+    let asked = walked(&mut tab);
+    assert_eq!(asked.len(), 2);
+    let done = asked[0].0;
+    answer(&mut tab, done, 512);
+    assert_eq!(tab.sizes.waiting(), 1, "one is still outstanding");
+
+    tab.set_sizes(false);
+    let off = tab.sizes.gen();
+    assert_eq!(
+        tab.size_shown(done as usize),
+        None,
+        "the column stops showing folder sizes with the button off"
+    );
+
+    tab.set_sizes(true);
+    assert_ne!(
+        tab.sizes.gen(),
+        off,
+        "the same generation would let a straggler from the last press land"
+    );
+    assert_eq!(
+        tab.size_shown(done as usize),
+        Some(512),
+        "an answer that landed is still true of this listing and should not be thrown away"
+    );
+    let again = walked(&mut tab);
+    assert_eq!(
+        again.len(),
+        1,
+        "the folder left waiting was not asked again, so its cell would stay blank for ever"
+    );
+    assert_ne!(again[0].0, done, "and the one already answered was re-asked");
+}
+
+/// A flattened listing counts itself, with no disk at all, and its shares are of the whole tree.
+///
+/// Two things at once, and the second is why [`Tab::settle_sizes`] has two branches. A folder's own
+/// listing partitions itself; a flattened one does not — a folder and the files inside it are both
+/// rows — so summing the rows there counts every byte once per level and every bar would be a
+/// fraction of a number that means nothing.
+///
+/// It goes through [`Tab::wanted_sizes`] like every other listing, which is the point of that method
+/// existing: this used to reimplement `App`'s flat branch by hand, so the timing half of it was
+/// untested and the tab it left behind would have re-counted on a real frame.
+#[test]
+fn a_flattened_listing_counts_itself_against_the_whole_tree() {
+    use crate::fs::dir::{DirBuilder, FLAG_DIR};
+
+    let mut builder = DirBuilder::new(r"C:\x");
+    builder.push("top.txt", 250, 0, 0);
+    builder.push("sub", 0, 0, FLAG_DIR);
+    builder.push(r"sub\deep.bin", 750, 0, 0);
+    let dir = Arc::new(builder.finish(0));
+    assert_eq!(dir.total_size, 1000, "every file under the folder, once");
+
+    let mut tab = Tab::new(r"C:\x");
+    tab.flat = true;
+    tab.apply(dir);
+    tab.set_sizes(true);
+    // No disk at all, and no walk to wait for: the answer is the listing.
+    assert!(matches!(tab.wanted_sizes(), crate::sizes::Work::Done));
+    assert_eq!(tab.sizes.waiting(), 0, "nothing was handed to the service");
+    assert!(
+        matches!(tab.wanted_sizes(), crate::sizes::Work::None),
+        "a flattened listing was counted twice"
+    );
+    assert!(
+        tab.sizes.micros() > 0,
+        "the flat pass did not time itself, so the status line has nothing to report"
+    );
+    tab.settle_sizes(1.0);
+
+    assert_eq!(tab.size_shown(entry_of(&tab, "sub")), Some(750));
+    // The nested file and the folder holding it are both three quarters of the tree, which is the
+    // right answer for both — and only possible because the denominator is the tree rather than the
+    // sum of rows that overlap.
+    assert_eq!(tab.sizes.share(750), Some(0.75));
+    assert_eq!(
+        tab.sizes.share(1000),
+        Some(1.0),
+        "and the tree's own total is all of it"
+    );
+}
+
+// ---- What the measurement tests say in one line each ----------------------
+//
+// `Measurement` owns its state and hands nothing out, so these four are how a test says "ask about
+// the folders on show" and "one answered" without naming a field.
+
+/// Which entry a name is at, in the listing the tab is showing.
+fn entry_of(tab: &Tab, want: &str) -> usize {
+    let dir = tab.dir.as_ref().expect("a listing");
+    (0..dir.len())
+        .find(|&i| dir.name(i) == want)
+        .expect("pushed above")
+}
+
+/// The rows the measurement wants walked, which is what `App::collect_sizes` hands to the service.
+fn walked(tab: &mut Tab) -> Vec<(u32, PathBuf)> {
+    match tab.wanted_sizes() {
+        crate::sizes::Work::Walk(folders) => folders,
+        crate::sizes::Work::Done | crate::sizes::Work::None => Vec::new(),
+    }
+}
+
+/// One folder answering, the way the service's answer arrives.
+fn answer(tab: &mut Tab, row: u32, bytes: u64) -> bool {
+    let gen = tab.sizes.gen();
+    tab.sizes
+        .take(&crate::sizes::Answer { gen, row, bytes }, 0.0)
+}
+
+/// The rows on show, in order.
+fn names(tab: &Tab) -> Vec<String> {
+    let dir = tab.dir.as_ref().expect("a listing");
+    tab.order
+        .iter()
+        .map(|&i| dir.name(i as usize).to_owned())
+        .collect()
+}
+
+/// Every bar the listing draws, added up — which for rows that partition the folder has to be one.
+///
+/// Rows with no number draw no bar and are not in the total either, so they are skipped rather than
+/// failing the sum: a junction is the case, and `0 B` for one would be the wrong answer twice over.
+/// Rounded, because these are `f32` shares of a `u64`.
+fn shares(tab: &Tab) -> Option<f32> {
+    let mut total = 0.0;
+    for &row in &tab.order {
+        let Some(bytes) = tab.size_shown(row as usize) else {
+            continue;
+        };
+        total += tab.sizes.share(bytes)? as f64;
+    }
+    Some(((total * 1e5).round() / 1e5) as f32)
+}

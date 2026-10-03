@@ -498,6 +498,17 @@ pub struct Tab {
     /// preference, kept here for the same reason [`Tab::flat_mode`] is — see
     /// [`sort::build_tree_order`], which is what it means.
     pub regroup: bool,
+    /// What is inside every folder on show, and how much of the listing each row is.
+    ///
+    /// **What the measure button on the status line turns on**, and the one view setting on this tab
+    /// that costs the disk something after the listing has landed — see [`crate::sizes`], which is
+    /// where that cost, its bounds and every field of this live.
+    ///
+    /// A struct rather than the nine loose fields it was, for the reason [`Tab::preview`] and
+    /// [`Tab::grid`] are structs: it is reset from four different places, and as nine fields two of
+    /// those four had already forgotten two of them. It also keeps the sentinel encoding of "not
+    /// counted yet" private to the module that defines it.
+    pub sizes: crate::sizes::Measurement,
     /// Which folders of a [`FlatMode::Tree`] listing are shut, by their path relative to the
     /// folder being flattened — the same string the row is stored under.
     ///
@@ -747,6 +758,9 @@ impl Tab {
             // The window's preference, and its default is on — see `Config::regroup`. A tab that
             // has never been flattened takes the real one the moment it is.
             regroup: true,
+            // Off, and nothing anywhere remembers otherwise: a folder's tree is not counted
+            // because a folder was opened. See [`Tab::sizes`].
+            sizes: crate::sizes::Measurement::default(),
             collapsed: std::collections::HashSet::new(),
             selected: Vec::new(),
             selected_count: 0,
@@ -798,6 +812,12 @@ impl Tab {
         tab.flat = self.flat;
         tab.flat_mode = self.flat_mode;
         tab.collapsed = self.collapsed.clone();
+        // And the measurement, for exactly the reason the flatten's listing comes across: this is the
+        // same folder and the same `Arc<Dir>`, so every entry index still names the same file — and a
+        // copy that quietly re-walked the tree would cost the seconds the original has already spent.
+        // Grafted on after `apply` below, which is what would otherwise size the column from nothing.
+        // See [`crate::sizes::Measurement::duplicate`].
+        tab.sizes.on = self.sizes.on;
         tab.widths = self.widths;
         tab.widths_measured = self.widths_measured;
         // Rows or tiles, because "as it currently looks" is the whole of what a duplicate is — and
@@ -819,6 +839,7 @@ impl Tab {
         tab.preview = self.preview.duplicate();
         if let Some(dir) = &self.dir {
             tab.apply(dir.clone());
+            tab.sizes = self.sizes.duplicate();
         }
         tab
     }

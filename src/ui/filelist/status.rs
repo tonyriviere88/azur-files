@@ -30,6 +30,38 @@ pub(crate) fn plural(count: u32) -> &'static str {
     }
 }
 
+/// How long something took, in the shortest form that keeps three figures.
+///
+/// Two things on this line report a duration and they differ by four orders of magnitude: reading a
+/// folder is a tenth of a millisecond and counting one is seconds. One formatter for both, because a
+/// bar with two ways of writing a duration on it is a bar you have to read twice — and because either
+/// figure can land in the other's range, a sleeping network share taking twenty seconds to enumerate
+/// and a small folder counted in three milliseconds.
+///
+/// Three tiers, and the reason for each: **`0.3 ms`** because a tenth of a millisecond is the
+/// difference a fast scan is claiming and rounding it away would throw the claim out; **`47 ms`**
+/// because a decimal there is a digit nobody reads; **`2.4 s`** because `2412 ms` is a figure you
+/// have to convert before it means anything.
+///
+/// Something faster than a tenth of a millisecond reads `0.0 ms`, and that is left as it is: it is
+/// the honest thing for a pass that was over before the clock could resolve it — a flattened listing
+/// counted off itself is exactly that — and one more decimal to avoid a rounded zero would be a digit
+/// on the bar for the one case nobody is waiting on.
+pub(crate) fn took(micros: u64) -> String {
+    use std::fmt::Write as _;
+
+    let millis = micros as f64 / 1000.0;
+    let mut out = String::with_capacity(8);
+    let _ = if millis >= 1000.0 {
+        write!(out, "{:.1} s", millis / 1000.0)
+    } else if millis >= 10.0 {
+        write!(out, "{millis:.0} ms")
+    } else {
+        write!(out, "{millis:.1} ms")
+    };
+    out
+}
+
 /// The band the status line actually paints, and the one baseline everything on it sits on.
 ///
 /// Two steps that have to happen in this order, which is why they are one function with a test of
@@ -112,16 +144,19 @@ pub(crate) fn status_line(
         Stroke::new(1.0, t.stroke.subtle),
     );
 
-    // ---- The two switches, at the left edge -------------------------------
+    // ---- The three switches, at the left edge ------------------------------
     //
     // Controls rather than statuses, and the only ones on this line that are not a fact about the
     // folder. They are here because the left group is the one that never gives way — a switch nobody
     // can see is a switch nobody can find — and they are **in front of** the figures because that is
     // where a control belongs on a bar that is otherwise read left to right.
     //
-    // **The view switch first**, and the console's after it. The order is the order of what they are
-    // about: one changes the listing filling the pane above, the other opens a band at the bottom of
-    // it, and the further-reaching of the two goes first.
+    // **The view switch, then measure, then the console's.** The order is the order of what they are
+    // about, outwards from the listing: one changes how every row is drawn, one adds a figure and a
+    // bar to one column of them, and the last opens a band at the bottom of the pane. The measure
+    // toggle is in the middle because it belongs with the numbers on this line rather than with the
+    // buttons on the path bar — what it turns on is a *column*, and the figure it reports is on this
+    // bar beside the scan's own.
     //
     // **One glyph each, latched**, rather than a pair that swap places. That is the rule every other
     // toggle in this window follows — see [`crate::icons::flatten`] and [`crate::icons::eye`], which
@@ -155,10 +190,40 @@ pub(crate) fn status_line(
     // And its own menu, which is where "do this for me" lives. See [`tiles_menu`].
     tiles_menu(ui, t, &switched, tab, auto, providers, out);
 
-    // `space-2` between the two and `space-3` after them: they are one group — the pane's own two
+    // **Measure**, between the two. What it turns on is the Size column: every folder on show gets the
+    // total of everything under it, and every row gets a bar of its share of what is displayed. The
+    // one control in this window that costs the disk something after the listing has landed, which is
+    // why the figure it reports — `counting 12 folders`, then how long that took — is on this bar
+    // rather than left to be guessed at. See [`crate::sizes`].
+    //
+    // Disabled on This PC, exactly as the flatten on the path bar is: its rows are volumes rather than
+    // folders, each of them a place to measure of its own, and the left panel already draws a capacity
+    // bar for every one.
+    let measure = Rect::from_min_size(pos2(view.right() + space::S2, middle), vec2(SWITCH, SWITCH));
+    if crate::ui::tool_button(
+        ui,
+        t,
+        measure,
+        Id::new(("sizes", pane)),
+        &icons::sizes,
+        // What it does, in the order it does it: the number first, because that is the thing the Size
+        // column was not saying, and the bar second because it is what the number is for. Neither half
+        // is worth a tooltip on its own — a folder's byte count with nothing to compare it against is
+        // a figure to do arithmetic on.
+        "Measure each folder, and bar the share of what is on show",
+        !tab.path.as_os_str().is_empty(),
+        tab.sizes.on,
+        t.bg.layer_alt,
+    )
+    .clicked()
+    {
+        out.push(Action::ToggleSizes(pane));
+    }
+
+    // `space-2` between them and `space-3` after the last: they are one group — the pane's own
     // switches — and the gap inside a group has to read as smaller than the gap that follows it.
     // Four points is enough that two latched fills read as two buttons rather than one wide one.
-    let switch = Rect::from_min_size(pos2(view.right() + space::S2, middle), vec2(SWITCH, SWITCH));
+    let switch = Rect::from_min_size(pos2(measure.right() + space::S2, middle), vec2(SWITCH, SWITCH));
     if crate::ui::tool_button(
         ui,
         t,
@@ -292,17 +357,43 @@ pub(crate) fn status_line(
     // whole argument for putting a timing on the bar is that a claim about speed nobody can check is
     // not a claim, and a figure nobody can read is not checkable. `text-tertiary` is 3.62:1: still the
     // quietest thing on the line, and legible.
-    let millis = dir.scan_micros as f64 / 1000.0;
-    let mut figure = String::new();
-    let _ = if millis < 10.0 {
-        write!(figure, "{millis:.1} ms")
-    } else {
-        write!(figure, "{millis:.0} ms")
-    };
     runs.push(vec![
-        ink(&figure, t.text.tertiary),
+        ink(&took(dir.scan_micros), t.text.tertiary),
         ink(SEPARATOR, t.text.tertiary),
     ]);
+
+    // **What the measurement is doing, and then what it cost.** Two states of one figure in one
+    // place, next to the scan's own — because they are the same kind of claim: counting a folder's
+    // tree is the one thing this window does that is worth waiting for, and a wait nobody can put a
+    // number on is a wait people take for a hang.
+    //
+    // While it runs, the folders still outstanding. That is worth saying on its own, because the
+    // alternative is silence over a blank cell — a folder that has no number *yet* and one that will
+    // never have one (a junction) look exactly the same in the column. When the last total lands the
+    // word becomes the duration and stays, exactly as the scan's milliseconds do.
+    //
+    // Last, so it is the first thing a narrow pane drops: the counts and the size are what somebody is
+    // reading. In `text-tertiary` beside the timing for the same reason — quiet, and legible, which
+    // `text-disabled` is not on this surface.
+    if tab.sizes.on {
+        let counting = tab.sizes.waiting();
+        let word = if counting > 0 {
+            Some(format!(
+                "counting {counting} folder{}",
+                plural(counting as u32)
+            ))
+        } else if tab.sizes.micros() > 0 {
+            Some(format!("counted in {}", took(tab.sizes.micros())))
+        } else {
+            None
+        };
+        if let Some(word) = word {
+            runs.push(vec![
+                ink(&word, t.text.tertiary),
+                ink(SEPARATOR, t.text.tertiary),
+            ]);
+        }
+    }
 
     let mut right = edge;
     let mut counted: Option<Rect> = None;

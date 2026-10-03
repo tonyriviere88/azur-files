@@ -443,6 +443,11 @@ pub fn show(
         right = rect.left() - space::S2;
     }
 
+    // Measure is **not** here, and was for an afternoon. It is on the status line between the view
+    // switch and the console's — see [`crate::ui::filelist::status_line`] — because what it turns on
+    // is a *column*, and because the figure it reports goes next to the scan's own timing, which is
+    // on that bar. This one is where the questions about *where you are* live.
+
     // The preview toggle, before the flatten one. Both are questions asked about the folder
     // rather than places to go, so they belong at this end — and this one is furthest from the
     // filter because it is the least to do with it.

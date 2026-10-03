@@ -866,6 +866,220 @@ a question about the folder you were looking at. That is also what makes opening
 on arrival and there would be no gesture that ended one. `F5` keeps it, because a re-read is the
 same question again, and so does a duplicated tab, which is the same place as it currently looks.
 
+## Measuring what is in each folder
+
+A directory's own byte count is noise, so the Size column has always left a folder's cell blank —
+and the question a file manager gets asked more than any other is *what is taking the space in
+here.* The **measure** button, on the status line between the view switch and the console's:
+
+```
+Name                 Size            Name                 Size
+target                        →      target            2.36 GB  ▰▰▰▰▰▰▰▰▰▰▰▰▱▱▱▱
+src                                  src                1.42 MB  ▰▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱
+Cargo.lock         206 KB            Cargo.lock          206 KB  ▰▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱
+README.md          118 KB            README.md           118 KB  ▰▱▱▱▱▱▱▱▱▱▱▱▱▱▱▱
+```
+
+Two things at once, and both halves are the point. Every folder gets **the total of everything
+under it**, however deep. And every row gets a **bar of its share of what is on show** — the track
+is the cell, so a folder holding a quarter of the listing fills a quarter of it. No percentage
+anywhere: the bars are already a ranking at a glance, which is what a column of numbers is not, and
+a figure would only be something to do arithmetic with. The exact byte count is in the row's
+tooltip, where a file's has always been.
+
+It is on that bar rather than on the path bar — where it spent an afternoon — because what it turns
+on is a **column**, and because the figure it reports belongs next to the scan's own timing, which is
+there. Its glyph is three bars of different lengths off a common left edge, longest at the top: a
+picture of the column it produces, sorted the way Size sorts. Drawn vertically first, which is the
+universal glyph for *a chart* and says statistics rather than *these proportions*.
+
+**The numbers arrive one folder at a time.** Summing a folder means walking its whole tree, which is
+the one read in this program with no natural bound — `C:\Users\you` is minutes, and there is no way
+to know that before starting — so nothing happens on the UI thread and nothing is waited for. Each
+folder's cell fills in as its own total lands, and until then it draws exactly what it drew before
+the button was pressed.
+
+The status line says **`counting 12 folders`** while any are outstanding, and then **`counted in
+2.4 s`** — the same figure the scan's milliseconds are, beside them, and for the same reason: the
+counting is the one thing this window does that is worth waiting for, and a wait nobody can put a
+number on is a wait people take for a hang. The count while it runs earns its place separately,
+because the alternative is silence over a blank cell — a folder that has no number *yet* and one that
+will never have one look identical in the column. One formatter writes both durations
+(`status::took`), since either can land in the other's range: a sleeping share takes twenty seconds
+to enumerate, and a flattened tree is counted in three milliseconds.
+
+A **junction or symlink gets no number at all**, and that is not the same as zero: the walk does not
+follow one — `C:\Users\All Users` points at `C:\ProgramData`, and following it on a system drive never
+finishes — so there is no total to have, and `0 B` beside a link pointing at a full folder would be a
+wrong answer where a blank cell is a quiet one. Nothing is cached between folders either, for the
+reason [git's status is not](#there-is-no-cache-and-that-is-the-feature): a byte count is only true
+of the moment it was taken.
+
+**A flattened tree is counted with no disk at all.** The walk has already read every file there is to
+count, and a row's name *is* its path relative to the root — so each folder's total is one pass over
+the listing, adding every file's size to the ancestors its own name spells out. Over `C:\Program
+Files` flattened, 188,729 entries, that is a few milliseconds against the 561 ms the walk itself
+cost. Asking the service to walk each of twenty thousand folder rows would have been the same tree
+read twenty thousand times.
+
+### The unit of work is a directory, not a folder
+
+**This is the whole of why it is fast, and it was the other way round first.** The obvious
+arrangement is one worker per folder on show: hand thread 1 `Windows`, thread 2 `Program Files`, and
+let each walk its own tree. It is simpler, and it is wrong for the case that actually hurts — `C:\`
+has a handful of children and two of them are nearly all of it, so two threads work and the rest
+idle, and the answer takes as long as the largest single tree takes *serially*.
+
+So the queue holds **directories**, each tagged with the folder whose total it contributes to. Every
+worker takes whatever directory is next, whoever it belongs to, and pushes the subdirectories it finds
+back for anyone to pick up. One enormous folder therefore saturates every thread, and so does a folder
+of ten thousand small ones. A folder is finished when the last of *its* directories is read, which is
+a counter per folder rather than a thread per folder.
+
+Measured warm over this crate's own folder — `target` included, which is most of it — by
+`sizes::tests::measuring_speed`. The first three rows are the arrangement this replaced:
+
+| threads | unit of work | warm |
+| --- | --- | --- |
+| 1 | a folder | 81 ms |
+| 4 | a folder | 74 ms |
+| 8 | a folder | 72 ms |
+| 1 | a directory | 78 ms |
+| 2 | a directory | 51 ms |
+| 4 | a directory | 34 ms |
+| **8** | **a directory** | **26 ms** |
+| 16 | a directory | 24 ms |
+
+**Threads bought almost nothing while the unit was a folder** — 81 ms down to 74, which is nine
+percent for four times the threads — because `target` is most of the tree and one thread had to carry
+the whole of it however many others were idle. The same four threads over directories come back
+**2.4× sooner**, and the two single-threaded rows either side (81 against 78) say that none of that is
+the change in traversal order: it is only what the work being handed out is. Sixteen is a wash against
+eight, which is where the thread count stops — this is bound by the file system rather than by the
+CPU, the same figure [`fs::scan`](src/fs/scan/mod.rs)'s deep walk settled on for the same reason.
+
+Subdirectories go on the **front** of the queue and a fresh folder's root on the back, so the frontier
+in memory is the siblings along one path rather than a whole level of the tree — on
+`C:\Windows\WinSxS` that is a few dozen paths against tens of thousands — while the rows at the top of
+the listing are still the ones started first.
+
+The counter is what the correctness rests on, and it has one rule: **every subdirectory is counted in
+before the directory that found it retires.** The other way round and the count can reach zero with a
+subtree still to read, and the folder answers with part of its tree — silently, and only sometimes.
+`counting_a_directory_at_a_time_totals_the_same_as_counting_a_folder_at_a_time` measures five real
+folders at 1, 4 and 8 threads and compares every total against a serial walk.
+
+### What the bar is a share of
+
+The two kinds of listing need different denominators, and they are not the same question.
+
+A folder's own listing **partitions** it: every row is either a file counted once or a subfolder
+standing for its whole subtree, counted once. So the total is the sum of the rows *on show* — the
+shares add to exactly one, and narrowing with the filter box narrows the total with it, which is what
+"of what is displayed" has to mean.
+
+A **flattened** one does not partition anything: a folder and the files inside it are both rows, so
+summing the rows counts every byte once per level and every bar would be a fraction of a number that
+means nothing. There the total is the tree's own — `Dir::total_size`, every file under the folder
+counted once, which the walk already added up — so a bar is a row's share of the whole tree whether
+the row is a file five levels down or the folder above it. It does not move with the filter, and that
+is the right way round for a listing whose rows overlap: `13 MB of everything under here` is a fact,
+and `13 MB of whatever survived my filter` is not one worth drawing.
+
+### And a Size sort stops putting folders first
+
+**Folders lead every column** — a folder is a place and a file is a thing, and mixing them makes a
+listing you have to read twice, which is what Explorer and every other shell do. The measured Size
+column is the one exception, and it is the same argument turned round: the question that sort is asking
+is *what is taking the space*, and once a folder has a figure in its cell it is one of the answers. A
+2.4 GB folder in a block at the top, above a 300 MB file it is bigger than and a 3-byte one it is not,
+is a ranking you cannot read off the screen at all.
+
+So with the button on and Size as the column, folders and files are ordered together by what their
+cells are showing. Every other column keeps the rule, and so does Size with the button off. In a
+**tree** it applies per sibling group, so the subfolder holding most of a branch rises to the top of
+that branch — the same question the flat list answers, asked one level at a time.
+
+A folder that has not answered yet keys as **zero**, so it waits at the quiet end and rises as its
+total lands. That is the honest place for "not known yet"; the alternative puts an unmeasured folder at
+the top, claiming to be the biggest thing here on the strength of nothing.
+
+Which means **the order is redone as the totals arrive**, because the numbers it sorted by are the ones
+that just changed — and that is debounced on the same quarter-second the filter box is, for the same
+measured reason. A rebuild is one filter pass plus a sort of whatever survives, which
+[`FILTER_DELAY`](src/pane/mod.rs) measures at 220–240 ms on a 188,690-row listing; totals arrive one
+folder at a time and each one wakes the window, so a rebuild per answer is a rebuild *per frame* for as
+long as the counting takes. So the order settles in steps while the numbers stream, and the round
+finishing overrides the deadline — the last answer is the one whose order somebody is going to sit and
+read. The bars, meanwhile, are right on every frame: only the order waits.
+
+Two flags rather than one, and each says exactly one thing: a rebuilt order invalidates the **total**
+and deliberately not the order. Otherwise every settled filter keystroke, `Ctrl+H` and column click
+would rebuild the listing and then rebuild it identically one frame later, for an order that cannot have
+changed — a second 240 ms stall per interaction, for nothing. That, the deadline, and the fact that the
+re-sort stops owing itself another one are what `the_size_sort_follows_the_totals_on_a_deadline_and_then_settles`
+and `a_rebuilt_order_does_not_owe_itself_a_second_rebuild` are about.
+
+The totals reach the sort as **plain byte counts**, `Option<&[u64]>` — a file's own size and a folder's
+counted one, resolved once per row before the sort starts, exactly as the Type column's labels are.
+[`fs::sort`](src/fs/sort/mod.rs) is the bottom of the stack and learns nothing about how a tab stores
+its totals or what "not counted yet" looks like in one. It was a closure the sort called per row for an
+afternoon, which bought nothing: the sort turned it straight back into this same vector, plus a `Box`,
+an `Arc` clone, and an 800 KB index vector on *every* tree rebuild whatever the column.
+
+### It is abandoned, not cancelled
+
+Navigating away, refreshing, or pressing the button again drops the **generation** the walks were
+started under, and each walk notices between two directory reads and returns nothing rather than a
+partial sum. One call with the generations still wanted covers all five ways a walk stops being
+wanted — the tab moved on, the folder was refreshed, the button went off, the tab was closed, the pane
+was closed — so a mistaken press on `C:\` costs the disk nothing after the reader has moved on.
+
+That generation is also the one thing standing between this feature and a real number on the wrong
+file. A total names a *row*, and a row is an index into the listing that was on screen when the
+question was asked — so after an `F5`, a file operation, or the watcher noticing a write, entry 40 is
+very likely a different file. It is deliberately **not** `Tab::view`, which is what the icons and git
+are keyed by: a view survives a re-read of its own folder, which is exactly the case that has to be
+told apart. `a_re_read_will_not_take_an_answer_meant_for_the_listing_it_replaced` is that assertion,
+and it checks the view is unchanged in the same breath.
+
+Handing the live set over is itself only done **when it changes**, which is not a micro-optimisation:
+that call holds the one lock all eight workers need in order to pop a directory or push its children,
+while it retains over a queue that a listing of twenty thousand folder rows fills in one request. Doing
+that sixty times a second to hand over a set that is almost always identical would stall the walk to say
+nothing. Cancellation stays immediate, because the *difference* is the cancellation.
+
+All of it — the button, the per-row totals, the generation, the round's timing, the deadline — is one
+`Measurement` struct that [`sizes`](src/sizes.rs) owns, which is the shape `Tab::preview` and
+`Tab::grid` already have. It was nine loose fields on `Tab` for an afternoon and reset by hand in four
+places, two of which had already forgotten two of the fields; and the sentinel encoding of "not counted
+yet" had leaked out far enough that a `NO_NUMBER - 1` clamp appeared in `pane` — a second copy of where
+the state space ends, on the rows most likely to be large. The three states are private now, and adding
+a fourth is a change to one file.
+
+### The one view setting that follows you
+
+The flatten, the filter, the lens and the tiles are all dropped when a tab opens a folder — each is a
+question asked of the folder you *were* looking at. This one is kept, and the exception is the whole
+gesture: you measure a folder, see that `target` is most of it, open `target`, and want the same
+question asked of what is inside. A mode that switched itself off would have to be pressed once per
+level for as long as the hunt went on. The numbers do not follow — they are indices into a listing
+that has gone — and the column starts filling in again on the folder that arrives.
+
+Pressing the button twice is cheap: what has already been answered is still true of the same listing
+and is kept, and only the folders left outstanding are asked about again. That last part is not free —
+the walks they were waiting on belong to a generation that is no longer live, so a folder left marked
+as *asked* would stay blank for ever.
+
+**Nothing is remembered between sessions**, and there is no config key. On This PC the button is
+drawn disabled, as the flatten is: its rows are volumes rather than folders, each of them a place to
+measure of its own, and the left panel already draws a capacity bar for every one.
+
+The Size column is measured against `fmt::SIZE_TEMPLATE` — the widest string the formatter can
+produce — for as long as the button is on. Sized from its content instead, it would be re-measured
+every time a total landed, and the listing would spend the whole measurement widening by a pixel or
+two under the reader's hands.
+
 ## A row says where it is
 
 The Name column is two things in one cell: **the name, and then — after a `>`, in secondary ink —

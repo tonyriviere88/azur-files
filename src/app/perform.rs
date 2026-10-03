@@ -223,6 +223,22 @@ impl App {
                     p.tab_mut().toggle_flat(mode, regroup);
                 }
             }
+            // And this one changes neither what was read nor how it is ordered: the rows, the sort,
+            // the selection and the scroll are all untouched, and what changes is that a folder's
+            // Size cell has a figure in it. The work it starts is `App::start_sizes`', on the next
+            // frame, which is also what turning it off cancels. See [`crate::sizes`].
+            Action::ToggleSizes(pane) => {
+                let Some(p) = self.pane_mut(pane) else { return };
+                let tab = p.tab_mut();
+                // Refused on This PC as well as drawn disabled there — see `filelist::status_line`
+                // for why there is nothing to count — for the reason `Tab::toggle_flat` refuses: a
+                // latched button over a listing that did not change.
+                if tab.path.as_os_str().is_empty() {
+                    return;
+                }
+                let on = !tab.sizes.on;
+                tab.set_sizes(on);
+            }
             // And this one changes neither: both flatten modes are orders over the one listing the
             // walk already produced, so every tab showing a tree re-sorts and nothing is re-read.
             // See [`crate::pane::FlatMode`].

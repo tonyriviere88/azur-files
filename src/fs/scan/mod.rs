@@ -304,20 +304,29 @@ const BATCH: usize = 1024;
 /// system rather than by the CPU, so more threads than a handful buys nothing and costs context
 /// switches. Eight rather than the loader's four because a flatten is one burst of thousands of
 /// reads rather than a steady trickle of one.
-fn hands() -> usize {
+///
+/// **Shared with [`crate::sizes`]**, which is the other unbounded walk in this program and arrived at
+/// the same figure by its own measurement — see its module header. One function rather than two
+/// identical ones, so the clamp cannot drift in one place while both docs go on claiming they agree.
+pub(crate) fn hands() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get().clamp(2, 8))
         .unwrap_or(2)
 }
 
-/// Whether [`scan_deep`] opens an entry with these flags.
+/// Whether a walk opens an entry with these flags.
 ///
 /// A directory, unless it is a reparse point. Named and taken apart from the walk so the rule
 /// that keeps the walk finite can be tested without a link in the filesystem — making one
 /// needs either a privilege this program does not ask for or a shell-out, and the rule is too
 /// important to leave to a test that gets skipped on the machines that have neither.
+///
+/// **Both unbounded walks in this program ask it**: [`scan_deep`] here and [`crate::sizes`]' own.
+/// That is the point of it being one named, tested function — a second walk that re-expressed the
+/// rule would be a second chance to get `C:\Users\All Users` wrong, outside the one place a test
+/// looks.
 #[inline]
-fn descends(flags: u16) -> bool {
+pub(crate) fn descends(flags: u16) -> bool {
     flags & FLAG_DIR != 0 && flags & FLAG_LINK == 0
 }
 

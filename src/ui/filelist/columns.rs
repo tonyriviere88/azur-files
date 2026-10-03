@@ -45,23 +45,34 @@ pub(crate) fn measure_columns(ui: &Ui, t: &Theme, tab: &mut Tab, scratch: &mut S
 
     if let Some(dir) = tab.dir.clone() {
         // Size: the longest formatted string, found without formatting them all.
-        let mut widest_size = 0u64;
-        let mut longest = 0usize;
-        for &i in &tab.order {
-            let entry = &dir.entries[i as usize];
-            if entry.is_dir() {
-                continue;
+        //
+        // **Except while the folders are being measured**, where it is the template instead. The
+        // totals arrive one folder at a time over seconds — see [`crate::sizes`] — and a column
+        // measured from its content would then be re-measured every time one landed, so a listing
+        // would spend the whole measurement widening by a pixel or two under the reader's hands.
+        // The template is what [`fmt::size`] can produce at its widest, so the column is decided
+        // once and no answer can ever need more room than it has.
+        if tab.sizes.on {
+            size_width = measure(fmt::SIZE_TEMPLATE);
+        } else {
+            let mut widest_size = 0u64;
+            let mut longest = 0usize;
+            for &i in &tab.order {
+                let entry = &dir.entries[i as usize];
+                if entry.is_dir() {
+                    continue;
+                }
+                scratch.clear();
+                fmt::size(entry.size, scratch);
+                if scratch.len() > longest {
+                    longest = scratch.len();
+                    widest_size = entry.size;
+                }
             }
             scratch.clear();
-            fmt::size(entry.size, scratch);
-            if scratch.len() > longest {
-                longest = scratch.len();
-                widest_size = entry.size;
-            }
+            fmt::size(widest_size, scratch);
+            size_width = measure(scratch);
         }
-        scratch.clear();
-        fmt::size(widest_size, scratch);
-        size_width = measure(scratch);
 
         // Type: the distinct *extensions*, which is a much smaller set than the
         // entries and maps one-to-one onto the labels. Comparing extensions rather

@@ -880,6 +880,46 @@ pub fn flatten(p: &Painter, rect: Rect, color: Color32) {
     }
 }
 
+/// Three bars of different lengths off a common left edge — the status line's measure toggle.
+///
+/// **The art is the answer, not the work.** A stopwatch or a `Σ` would be about the counting, and
+/// what the button is about is the shape the counting produces: a column of bars saying which
+/// folder holds the space.
+///
+/// **Horizontal, and that is the whole of it**: this is a picture of what appears in the Size
+/// column, one bar per row, each as long as its share. It was drawn vertically first — three bars
+/// rising off a baseline, which is the universal glyph for "a chart" and says *statistics* rather
+/// than *these proportions*. Turning them on their side costs the generic reading and buys the
+/// specific one, which is the better trade for a toggle whose whole job is to put those bars on
+/// screen. Longest at the top, because that is the order the column comes out in: Size sorts
+/// biggest-first, which is what somebody presses this to see.
+///
+/// Filled rather than stroked, so it cannot be mistaken for [`flatten`] over on the path bar —
+/// which is also three horizontal marks, and is three *hairlines* stepping in from the right. The
+/// two differences are the weight and the edge they line up on, and both are legible at 14 pixels.
+/// Three outlined boxes would not be: that is six edges in twelve units, and it reads as hatching.
+/// [`columns`] has the same note from the other side.
+///
+/// **The air between the bars is wider than they are thick**, which is the one measurement here that
+/// had to be redone. `TOOL_ICON` is 14 pixels, so a grid unit is 0.875 of one — and the first version
+/// put 2.8-unit bars a 0.8-unit gap apart, which is two and a half pixels of ink separated by
+/// *seven tenths of a pixel*. It survived on antialiasing alone and read as one solid block with two
+/// scratches in it. At 2.4 and 1.4 the ratio is 1.75:1 the other way, and the three bars resolve.
+///
+/// The axis is a [`Grid::hairline`] and not a [`Grid::stroke`], so it reads as the zero the bars
+/// are measured from rather than as a fourth bar standing on end.
+///
+/// The ink spans 2.4..13.6 across and 2.6..13.4 down, symmetric about the centre of the grid, so
+/// centring the box centres the drawing — see [`pencil`], where getting that wrong cost two units.
+pub fn sizes(p: &Painter, rect: Rect, color: Color32) {
+    let g = Grid::new(rect);
+    // The zero every bar starts at, a little past them at each end so it reads as an axis.
+    p.line_segment([g.at(2.4, 2.6), g.at(2.4, 13.4)], g.hairline(color));
+    for (top, end) in [(3.0, 13.6), (6.8, 10.2), (10.6, 6.8)] {
+        p.rect_filled(g.rect(2.4, top, end, top + 2.4), g.radius(0.4), color);
+    }
+}
+
 /// An eye — the path bar's preview toggle.
 ///
 /// A lens rather than a panel-with-content, and the choice is the same one [`flatten`] makes:

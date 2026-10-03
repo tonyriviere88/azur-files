@@ -160,6 +160,10 @@ impl App {
         // frame — the branch and the marks then arrive one answer later rather than one navigation
         // later.
         self.collect_git(now);
+        // And after both, for the same reason: a listing that landed this frame is a folder to start
+        // counting this frame, and a folder counted this frame is one whose bars are right on the
+        // frame it appears in rather than one behind. See [`crate::sizes`].
+        self.collect_sizes(&ctx, now);
 
         // Swapped out rather than borrowed, because the drawing code needs `&Theme`
         // and `&mut self` at the same time. The placeholder is the same side of the

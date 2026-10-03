@@ -170,6 +170,63 @@ pub(crate) fn cursor_ring(painter: &egui::Painter, rect: Rect, color: Color32) {
     ));
 }
 
+/// How far off the bottom of the row the bar in a Size cell sits.
+///
+/// Its *height* is the sidebar's [`crate::ui::sidebar::GAUGE_HEIGHT`] — the capacity bar under a drive
+/// row — because it is the same kind of thing said the same way, and one window should not have two
+/// visual languages for "this much of that".
+///
+/// The room comes out of the two points every cell's text is lifted by, plus the slack a
+/// 16-point caption line leaves in a 24-point row: the text's line box ends 6 points off the
+/// bottom, and its descenders a point and a half above that. So the bar sits under the number
+/// rather than behind it, and nothing has to be moved to make space.
+const SHARE_DROP: f32 = 2.0;
+
+/// The least a Size cell can be and still carry a bar worth reading.
+///
+/// Under this the track is shorter than a couple of dozen pixels, at which point a 3% share and a
+/// 12% one are the same one-pixel stub and the bar is decoration. The column is draggable, so it
+/// can be squeezed to anything.
+const SHARE_MIN: f32 = 24.0;
+
+/// The bar in a Size cell: how much of what is on show this row is.
+///
+/// **Track and fill, not fill alone.** A bar with nothing behind it has no reference to be read
+/// against — 26% of an invisible extent is a stub of unknown meaning — and the track is what makes
+/// the cell's own width the hundred percent. It is `stroke-subtle`, the quietest line in the
+/// palette and the same one the drive gauge uses, so a column of forty of them does not read as
+/// ruling.
+///
+/// The fill is `accent-mark`, which is the accent as *ink on a surface* rather than as a surface:
+/// that is the rung that stays legible on a selected row, where the row's own fill is the accent's
+/// subtle end. A hidden row's bar goes the way its text does — see the `dim` argument — because a
+/// full-strength bar on a faded row would be the loudest thing in it.
+///
+/// A share that rounds to nothing still gets a point of fill. A folder that holds a thousandth of
+/// the listing is not the same as one that has not been counted, and a bar that vanished at some
+/// threshold would make it look like one.
+fn share_bar(painter: &egui::Painter, t: &Theme, cell: Rect, share: f32, dim: bool) {
+    if cell.width() < SHARE_MIN {
+        return;
+    }
+    let height = crate::ui::sidebar::GAUGE_HEIGHT;
+    let top = (cell.bottom() - SHARE_DROP - height).round();
+    let track = Rect::from_min_size(
+        pos2(cell.left().round(), top),
+        vec2(cell.width().round(), height),
+    );
+    let corner = CornerRadius::same(radius::CIRCULAR);
+    painter.rect_filled(track, corner, t.gauge_track);
+    painter.rect_filled(
+        Rect::from_min_size(
+            track.min,
+            vec2((track.width() * share).max(1.0), track.height()),
+        ),
+        corner,
+        if dim { t.text.disabled } else { t.accent.mark },
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn rows(
     ui: &mut Ui,
@@ -692,28 +749,50 @@ pub(crate) fn rows(
             }
 
             // ---- Size ----
-            if widths[1] > 0.0 && !entry.is_dir() {
-                scratch.clear();
-                fmt::size(entry.size, scratch);
-                let cell = Rect::from_min_max(
-                    pos2(edges[1] + CELL_PAD, text_row.top()),
-                    pos2(edges[2] - CELL_PAD, text_row.bottom()),
-                );
-                let galley = truncated(
-                    ui.painter(),
-                    scratch,
-                    meta_font.clone(),
-                    meta_color,
-                    cell.width(),
-                );
-                if inked {
-                    // Right-aligned, so its ink is against the right edge of the cell.
-                    ink.push(Rect::from_min_max(
-                        pos2((cell.right() - galley.size().x).max(cell.left()), row.top()),
-                        pos2(cell.right(), row.bottom()),
-                    ));
+            //
+            // A file's own bytes, as ever — and, while the status line's measure button is on, a
+            // folder's counted ones with a bar under them saying how much of the listing that is.
+            // `Tab::size_shown` is what decides whether there is a number at all; `None` is the
+            // blank cell a folder has always had. See [`crate::sizes`].
+            if widths[1] > 0.0 {
+                if let Some(bytes) = tab.size_shown(entry_index) {
+                    let cell = Rect::from_min_max(
+                        pos2(edges[1] + CELL_PAD, text_row.top()),
+                        pos2(edges[2] - CELL_PAD, text_row.bottom()),
+                    );
+                    // Under the text rather than behind it, and on `row` rather than `text_row`:
+                    // the bar belongs to the row's own bottom edge, where the two points every
+                    // cell's text is lifted by are exactly the room it needs. See [`share_bar`].
+                    if let Some(share) = tab.sizes.share(bytes) {
+                        share_bar(
+                            ui.painter(),
+                            t,
+                            Rect::from_min_max(
+                                pos2(cell.left(), row.top()),
+                                pos2(cell.right(), row.bottom()),
+                            ),
+                            share,
+                            dim,
+                        );
+                    }
+                    scratch.clear();
+                    fmt::size(bytes, scratch);
+                    let galley = truncated(
+                        ui.painter(),
+                        scratch,
+                        meta_font.clone(),
+                        meta_color,
+                        cell.width(),
+                    );
+                    if inked {
+                        // Right-aligned, so its ink is against the right edge of the cell.
+                        ink.push(Rect::from_min_max(
+                            pos2((cell.right() - galley.size().x).max(cell.left()), row.top()),
+                            pos2(cell.right(), row.bottom()),
+                        ));
+                    }
+                    text_right(ui.painter(), cell, galley);
                 }
-                text_right(ui.painter(), cell, galley);
             }
 
             // ---- Type ----
@@ -1107,7 +1186,7 @@ pub(crate) fn name_galley(
 /// Target     C:\Windows\System32\cmd.exe   ← only on a shortcut, once it has resolved
 /// Arguments  /k build.bat              ← only on a shortcut that runs something
 /// Type       C++ source
-/// Size       9.38 KB (9,605 bytes)     ← only on a file
+/// Size       9.38 KB (9,605 bytes)     ← on a file, and on a folder that has been measured
 /// Modified   07/08/2026 18:24
 /// Git        Changed on disk           ← only where git has something to say
 /// ```
@@ -1183,17 +1262,22 @@ pub(crate) fn row_tooltip(
     scratch.clear();
     fmt::type_label(dir.ext(entry_index), entry.is_dir(), scratch);
     about.push(("Type", scratch.clone()));
-    if !entry.is_dir() {
+    // Whatever the Size cell is showing — a file's own bytes, or a folder's counted ones while the
+    // measure button is on. Asked of the same [`crate::pane::Tab::size_shown`] the cell is drawn
+    // from, so the tooltip cannot come to disagree with the column about a folder that has not
+    // answered yet: there is no line rather than a wrong one.
+    if let Some(bytes) = tab.size_shown(entry_index) {
         scratch.clear();
-        fmt::size(entry.size, scratch);
+        fmt::size(bytes, scratch);
         // The rounded figure the column shows *and* the exact one, because they answer different
         // questions: `9.38 KB` is for comparing two files at a glance and `9,605 bytes` is for the
         // times only the number will do. Grouped in threes by hand — `fmt` has no separator for it,
         // and one call site does not make a formatter.
-        about.push((
-            "Size",
-            format!("{scratch} ({} bytes)", grouped(entry.size)),
-        ));
+        about.push(("Size", format!("{scratch} ({} bytes)", grouped(bytes))));
+        // **And deliberately not the share as a figure.** The bar is the whole of that answer: a
+        // percentage is a number to compare against other numbers, and comparing is what the column
+        // of bars already does at a glance and does better. It would also be the one line here that
+        // is about the *listing* rather than about the row.
     }
     scratch.clear();
     fmt::modified(entry.modified, zone, scratch);

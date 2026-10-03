@@ -56,6 +56,13 @@ pub enum Action {
     ToggleHidden(PaneId),
     /// Show this folder's whole tree instead of its own children, or stop.
     ToggleFlat(PaneId),
+    /// Count what is inside every folder on show, and draw each row's share of the total — or stop.
+    ///
+    /// Unlike [`Self::ToggleFlat`] beside it, nothing is re-read: the listing is the same listing and
+    /// this adds a figure to a cell that was blank. What it does start is a tree walk per folder, off
+    /// the UI thread — see [`crate::sizes`]. Per tab, and it survives a navigation, which is the one
+    /// view setting that does; [`crate::pane::Tab::sizes`] is where that exception is argued.
+    ToggleSizes(PaneId),
     /// Show a flattened tree as a list or as a tree — the window's preference, so every pane
     /// showing one follows. See [`crate::pane::FlatMode`].
     SetFlatMode(crate::pane::FlatMode),
@@ -200,6 +207,7 @@ impl Action {
             Self::SelectAll(_) => "SelectAll",
             Self::ToggleHidden(_) => "ToggleHidden",
             Self::ToggleFlat(_) => "ToggleFlat",
+            Self::ToggleSizes(_) => "ToggleSizes",
             Self::SetFlatMode(_) => "SetFlatMode",
             Self::SetView { .. } => "SetView",
             Self::SetRegroup(_) => "SetRegroup",

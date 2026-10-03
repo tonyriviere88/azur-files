@@ -124,6 +124,10 @@ pub fn image_rows(dir: &Dir, tree: bool) -> Vec<bool> {
 ///
 /// `keep` is the other half of the filter, for the part of it that is not about names: `Some` only
 /// when a lens is on show, and then a row has to pass both. See [`crate::pane::Lens`].
+///
+/// `sizes` is what every row's Size cell is *showing*, by entry index, and `Some` only while the
+/// folders on show are being measured *and* Size is the column. See [`compare`], where being `Some` is
+/// also what says folders no longer lead.
 #[allow(clippy::too_many_arguments)]
 pub fn build_order(
     dir: &Dir,
@@ -133,6 +137,7 @@ pub fn build_order(
     show_hidden: bool,
     filter: &str,
     keep: Option<&dyn Fn(usize) -> bool>,
+    sizes: Option<&[u64]>,
 ) {
     order.clear();
     order.reserve(dir.len());
@@ -162,7 +167,7 @@ pub fn build_order(
         order.push(i as u32);
     }
 
-    sort_order(dir, order, column, ascending);
+    sort_order(dir, order, column, ascending, sizes);
 }
 
 /// What the tree made of one row of the display order.
@@ -278,6 +283,7 @@ pub fn build_tree_order(
     show_hidden: bool,
     filter: &str,
     keep: Option<&dyn Fn(usize) -> bool>,
+    sizes: Option<&[u64]>,
     collapsed: &dyn Fn(&str) -> bool,
     regroup: bool,
 ) {
@@ -347,12 +353,15 @@ pub fn build_tree_order(
     } else {
         Vec::new()
     };
-
+    // The Size column's keys arrive already resolved over the whole listing, so unlike `ranks` there
+    // is nothing to build here. Note what they mean in a tree: each folder's own children are mixed
+    // by size among themselves, so a subfolder holding most of a branch rises to the top *of that
+    // branch* — the same question the flat list answers, asked one level at a time.
     let blocked = |i: usize| {
         (!show_hidden && dir.entries[i].is_hidden()) || keep.is_some_and(|keep| !keep(i))
     };
     let sort_kids = |group: &mut [u32]| {
-        group.sort_unstable_by(|&a, &b| compare(dir, &ranks, column, ascending, a, b));
+        group.sort_unstable_by(|&a, &b| compare(dir, &ranks, sizes, column, ascending, a, b));
     };
     // A folder's children, in display order, with everything that is out **taken off first**.
     //
@@ -422,7 +431,13 @@ pub fn build_tree_order(
 }
 
 /// Sort an existing order in place, leaving the filter alone.
-pub fn sort_order(dir: &Dir, order: &mut [u32], column: Column, ascending: bool) {
+pub fn sort_order(
+    dir: &Dir,
+    order: &mut [u32],
+    column: Column,
+    ascending: bool,
+    sizes: Option<&[u64]>,
+) {
     // Type sorts on the label the column shows, which is a lookup per row rather than a
     // field — so the lookups happen once, up front, and become an integer per entry.
     // Empty for every other column, and never indexed by one. See [`type_ranks`].
@@ -433,7 +448,7 @@ pub fn sort_order(dir: &Dir, order: &mut [u32], column: Column, ascending: bool)
     };
     // `sort_unstable_by` because the comparator is a total order down to the name,
     // so stability would only cost time.
-    order.sort_unstable_by(|&a, &b| compare(dir, &ranks, column, ascending, a, b));
+    order.sort_unstable_by(|&a, &b| compare(dir, &ranks, sizes, column, ascending, a, b));
 }
 
 /// Which of two entries comes first, by the column on show.
@@ -445,9 +460,15 @@ pub fn sort_order(dir: &Dir, order: &mut [u32], column: Column, ascending: bool)
 /// `ranks` is [`type_ranks`]' answer, and empty for every column but Type. It is passed in
 /// rather than built here for the reason the tree needs it: one `Vec` the size of the listing
 /// per sibling group would be the listing's length squared.
+///
+/// `sizes` is what every row's Size cell is *showing*, by entry index — a file's own bytes and a
+/// folder's counted ones — and `Some` only when the listing is being sorted by Size while the folders
+/// are measured. See [`crate::sizes::Measurement::keys`], which resolves it once per row for the same
+/// reason `ranks` is resolved once per row.
 fn compare(
     dir: &Dir,
     ranks: &[u32],
+    sizes: Option<&[u64]>,
     column: Column,
     ascending: bool,
     a: u32,
@@ -457,13 +478,30 @@ fn compare(
     // Directories first regardless of column or direction: a folder is a place and
     // a file is a thing, and mixing them by size makes a listing you have to read
     // twice. Explorer, File Pilot and every other shell do the same.
-    match eb.is_dir().cmp(&ea.is_dir()) {
-        Ordering::Equal => {}
-        folders_first => return folders_first,
+    //
+    // **Except when the folders have been measured and Size is the column**, where mixing them is
+    // exactly the question being asked: *what is taking the space*, to which a 2.4 GB folder is one of
+    // the answers and belongs above the 300 MB file it is bigger than.
+    //
+    // Both halves are tested here rather than trusted to the caller. A `Some` handed in with any other
+    // column would otherwise silently drop the folders-first rule for a column whose key a folder does
+    // not even have — the kind of coupling that reads as correct at both ends and is wrong in the
+    // middle. `Measurement::keys` does return `None` off the Size column, and this does not rely on it.
+    let mixed = sizes.filter(|_| column == Column::Size);
+    if mixed.is_none() {
+        match eb.is_dir().cmp(&ea.is_dir()) {
+            Ordering::Equal => {}
+            folders_first => return folders_first,
+        }
     }
 
     let primary = match column {
         Column::Name => Ordering::Equal,
+        // What the two cells are actually showing, once the folders have a figure in them.
+        Column::Size if mixed.is_some() => {
+            let keys = mixed.unwrap_or_default();
+            keys[a as usize].cmp(&keys[b as usize])
+        }
         // A directory has no meaningful size, so within the folder block the
         // Size column may as well fall through to the name.
         Column::Size if ea.is_dir() => Ordering::Equal,

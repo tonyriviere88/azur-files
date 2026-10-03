@@ -23,6 +23,7 @@ use egui::{pos2, vec2, Event, Id, Modifiers, PointerButton, Pos2, RawInput, Rect
 // | [`panes`] | the dock: focus, splits, seams |
 // | [`path_field`] | the path field and every other text field |
 // | [`flatten`] | the whole tree in one listing |
+// | [`sizes`] | measuring the folders, and the bars that share the total out |
 // | [`filter`] | the filter box and the shortcuts past it |
 // | [`preview`] | the preview panel, every view of it |
 // | [`grid`] | the tiles view |
@@ -44,6 +45,7 @@ mod path_field;
 mod preview;
 mod rescan;
 mod sidebar;
+mod sizes;
 mod title_bar;
 mod transfer;
 

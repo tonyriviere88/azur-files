@@ -46,6 +46,11 @@ impl Tab {
         self.selected = vec![false; dir.len()];
         self.file_icons = vec![crate::shell::icons::UNASKED; dir.len()];
         self.links.clear();
+        // **A new listing is a new measurement**, and the reason is sharper than it is for the icons
+        // beside it: a total is addressed to a *row*, and a row is an index into the listing that was
+        // on screen when it was asked for. Kept across a re-read, the answer for entry 40 would land
+        // on whatever file entry 40 now is. See [`crate::sizes::Measurement::gen`].
+        self.sizes.for_listing(dir.len());
         // **A new listing is a new question for git**, and the old answer goes with the old listing
         // rather than being kept while it is checked. A tick that survives the read that would have
         // disproved it is the whole failure this design is avoiding.
@@ -329,6 +334,16 @@ impl Tab {
                 Some(Box::new(move |entry| kept[entry]))
             }
         };
+        // What each row's Size cell is *showing*, for a sort by that column: a file's own bytes, and a
+        // folder's counted ones once they are counted. `None` for every other column and whenever the
+        // measurement is off — and in the sort, being `Some` is what says folders no longer lead.
+        //
+        // Resolved here rather than handed over as a closure the sort calls per row, which is what this
+        // was: the sort turned the closure straight back into this same vector, so the indirection
+        // bought nothing but a `Box`, an `Arc` clone and a second `dir.len()`-long allocation on every
+        // tree rebuild whatever the column. `fs::sort` still learns nothing about how the totals are
+        // stored — these are plain byte counts. See [`crate::sizes::Measurement::keys`].
+        let keys = self.sizes.keys(&dir, self.sort_by == Column::Size);
         // Remember what the cursor was pointing at, since its position moves.
         let cursor_entry = self.cursor.and_then(|at| self.order.get(at).copied());
         // The two flatten modes are two orders over one listing, and this is the only place that
@@ -345,6 +360,7 @@ impl Tab {
                 self.show_hidden,
                 &self.filter,
                 by_lens.as_deref(),
+                keys.as_deref(),
                 // Taken out and put back rather than borrowed: the set and the order are both
                 // fields of this tab, and the builder needs one while it fills the other.
                 &|name| collapsed.contains(name),
@@ -360,12 +376,21 @@ impl Tab {
                 self.show_hidden,
                 &self.filter,
                 by_lens.as_deref(),
+                keys.as_deref(),
             );
             // Nothing but a tree has a shape, and a stale one would outlive the listing it described.
             self.tree.clear();
         }
         self.cursor = cursor_entry.and_then(|entry| self.order.iter().position(|&i| i == entry));
         self.anchor = self.cursor;
+        // The bars are a share of what is *on show*, and this is what changed which rows those are.
+        // Marked rather than recomputed, because every path into here already costs a pass over the
+        // folder and this one is owed at most once before the next frame — see [`Tab::settle_sizes`].
+        //
+        // The *order* is deliberately not marked: rebuilding it is what just happened, and arming a
+        // re-sort here would have every settled filter keystroke rebuild the listing a second time on
+        // the next frame for an order that cannot have changed.
+        self.sizes.rows_moved();
     }
 
     /// Click a column header: toggle the direction if it is already the sort,
@@ -412,5 +437,88 @@ impl Tab {
         self.entry_at(position)
             .and_then(|i| self.dir.as_ref().map(|d| d.entries[i].is_dir()))
             .unwrap_or(false)
+    }
+
+    // ---- Measuring what is in each folder ------------------------------
+    //
+    // Four methods, and every one of them is here because it needs the *listing* as well as the
+    // measurement: [`crate::sizes::Measurement`] owns the state and every transition of it, and what
+    // a tab adds is the `Dir` and the display order to ask it about.
+
+    /// Turn the measurement on or off — what the status line's measure button does.
+    ///
+    /// The column is re-measured either way: with the button on, a folder's cell has a figure in it
+    /// where it had nothing, and the Size column is sized to what is in it. See
+    /// [`crate::ui::filelist::measure_columns`], and [`crate::sizes::Measurement::set`] for what
+    /// pressing it twice does and does not throw away.
+    pub fn set_sizes(&mut self, on: bool) {
+        let rows = self.dir.as_ref().map_or(0, |dir| dir.len());
+        self.sizes.set(on, rows);
+        self.widths_measured = false;
+    }
+
+    /// What the folders on show want counted, if anything. See [`crate::sizes::Measurement::wanted`].
+    pub fn wanted_sizes(&mut self) -> crate::sizes::Work {
+        let Some(dir) = self.dir.clone() else {
+            return crate::sizes::Work::None;
+        };
+        self.sizes
+            .wanted(&dir, &self.order, self.order_gen, self.flat)
+    }
+
+    /// Bring the total the bars are a share of up to date, and re-sort if the order owes it.
+    ///
+    /// `Some(seconds)` means a re-sort is owed and not due yet, and the caller has to make sure there
+    /// *is* a frame then — this program is idle between events. The same contract [`Tab::settle_filter`]
+    /// has, for the same reason and against the same measured cost: see
+    /// [`crate::sizes::Measurement::resort_at`].
+    ///
+    /// **The denominator is not the same question in the two kinds of listing**, and this is the one
+    /// place that is decided:
+    ///
+    /// - A folder's own listing **partitions** it: every row is either a file, counted once, or a
+    ///   subfolder standing for its whole subtree, counted once. So the total is the sum of the rows
+    ///   on show — which is exactly "of what is displayed", and narrows with the filter.
+    /// - A **flattened** one does not: a folder and the files inside it are both rows, so summing
+    ///   the rows counts every byte once per level and the shares would all be a fraction of a
+    ///   number that means nothing. [`crate::fs::Dir::total_size`] is the honest total there — every
+    ///   file under the folder, counted once, which the walk has already added up — and it makes a
+    ///   row's bar its share of the whole tree whether the row is a file five levels down or the
+    ///   folder above it. It does not move with the filter, which is the right way round for a
+    ///   listing whose rows overlap: `13 MB of everything under here` is a fact, and `13 MB of
+    ///   whatever survived my filter` is not one worth drawing.
+    pub fn settle_sizes(&mut self, now: f64) -> Option<f64> {
+        let (owed, left) = self.sizes.owed(now, self.sort_by == Column::Size);
+        if owed == crate::sizes::Owed::Nothing {
+            return left;
+        }
+        // **A Size sort is redone as the totals land**, because the numbers it ordered by are the ones
+        // that just changed: a folder answering 2.4 GB belongs at the top now. Rebuilt rather than
+        // re-sorted in place, because a tree's order is not a permutation the comparator can produce —
+        // see [`sort::build_tree_order`]. It invalidates the total on the way through, which the lines
+        // below then pay: nothing here has to undo it.
+        if owed == crate::sizes::Owed::Order {
+            self.rebuild_order();
+        }
+        let Some(dir) = self.dir.clone() else {
+            self.sizes.set_total(0);
+            return left;
+        };
+        let total = if self.flat {
+            dir.total_size
+        } else {
+            self.order
+                .iter()
+                .filter_map(|&row| self.sizes.shown(&dir, row as usize))
+                .fold(0u64, u64::saturating_add)
+        };
+        self.sizes.set_total(total);
+        left
+    }
+
+    /// What a row's Size cell has to say, by entry index — the listing's half of
+    /// [`crate::sizes::Measurement::shown`], which is what the cell and its tooltip both draw from.
+    pub fn size_shown(&self, entry: usize) -> Option<u64> {
+        self.sizes.shown(self.dir.as_ref()?, entry)
     }
 }

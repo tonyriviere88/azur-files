@@ -10,6 +10,7 @@
 //! | --- | --- |
 //! | [`fs`] | everything that touches the disk, and nothing that touches the screen |
 //! | [`loader`] | scans on worker threads, with a cache in front of them |
+//! | [`sizes`] | what is inside each folder, counted on worker threads too |
 //! | [`pane`] | tabs: where they point, how they are sorted, what is selected |
 //! | [`dock`] | the tree that arranges panes on screen |
 //! | [`ui`] | painting, at explicit rects |
@@ -95,6 +96,7 @@ mod preview;
 #[cfg(test)]
 mod sandbox;
 mod shell;
+mod sizes;
 mod syntax;
 mod theme;
 mod ui;
@@ -185,6 +187,7 @@ fn main() -> eframe::Result {
     let mut walk: Option<std::path::PathBuf> = None;
     let mut scroll = false;
     let mut flat = false;
+    let mut sizes = false;
     let mut console: Option<Vec<String>> = None;
 
     // `--open=<path>`, repeatable: one pane per path, so `--open=A --open=B` comes up
@@ -256,6 +259,12 @@ fn main() -> eframe::Result {
                     .map(str::to_owned)
                     .collect(),
             );
+        } else if arg == "--sizes" {
+            // `--sizes`: count every folder on show and bar each row's share of the total, which is
+            // behind the measure button on the status line and behind nothing else — there is no config
+            // key for it, since it is a question about the folder in front of you. See
+            // `App::measuring`, and `App::sizes_pending` for why a capture then has to wait.
+            sizes = true;
         } else if arg == "--flat" {
             flat = true;
         } else if let Some(mode) = arg.strip_prefix("--flat=") {
@@ -374,7 +383,8 @@ fn main() -> eframe::Result {
                 .tracing(trace)
                 .walking(walk)
                 .scrolling(scroll)
-                .flattened(flat),
+                .flattened(flat)
+                .measuring(sizes),
                 shot,
                 menu,
                 rename,
@@ -649,6 +659,7 @@ impl eframe::App for Window {
             || self.app.preview_pending()
             || self.app.console_busy()
             || self.app.git_pending()
+            || self.app.sizes_pending()
             || self.app.thumbs_pending())
             && self.waited < PATIENCE
         {

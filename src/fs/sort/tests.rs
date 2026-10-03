@@ -54,7 +54,7 @@ fn filter_speed() {
         let mut tree_rows = 0;
         for _ in 0..2 {
             let started = std::time::Instant::now();
-            build_order(&dir, &mut order, Column::Type, true, false, filter, None);
+            build_order(&dir, &mut order, Column::Type, true, false, filter, None, None);
             took = started.elapsed();
 
             let started = std::time::Instant::now();
@@ -66,6 +66,7 @@ fn filter_speed() {
                 true,
                 false,
                 filter,
+                None,
                 None,
                 &|_| false,
                 true,
@@ -101,7 +102,7 @@ fn listing(names: &[&str]) -> Dir {
 
 fn by(dir: &Dir, column: Column, ascending: bool) -> Vec<String> {
     let mut order = Vec::new();
-    build_order(dir, &mut order, column, ascending, true, "", None);
+    build_order(dir, &mut order, column, ascending, true, "", None, None);
     order
         .iter()
         .map(|&i| dir.name(i as usize).to_owned())
@@ -146,6 +147,89 @@ fn folders_lead_every_column_and_ignore_its_key() {
         "zebra",
         "still folders first when reversed"
     );
+}
+
+/// **With the folders measured, a Size sort mixes them in with the files.**
+///
+/// The one exception to the rule above, and the point of it: the question a Size sort is asking is
+/// *what is taking the space*, and once a folder has a figure in its cell it is one of the answers. A
+/// 4 GB folder in a block at the top, above a 2 GB file it is bigger than and a 3-byte one it is not,
+/// is a listing that has to be read twice to be ranked at all.
+///
+/// It applies to that column and no other — [`Column::Type`] below stays folders-first while the
+/// measurement is on — and only while the measurement is on, which is what the two halves of this
+/// test say. See [`super::size_keys`].
+#[test]
+fn a_measured_size_sort_ranks_folders_among_the_files() {
+    let mut builder = DirBuilder::new(r"C:\x");
+    builder.push("big", 4096, 0, FLAG_DIR);
+    builder.push("small", 4096, 0, FLAG_DIR);
+    builder.push("middling.bin", 500, 0, 0);
+    builder.push("tiny.txt", 3, 0, 0);
+    let dir = builder.finish(0);
+
+    // What the cells are showing, by entry index — a folder's counted total and a file's own bytes,
+    // which is what `Measurement::keys` resolves. Straddling the files deliberately: `big` above both
+    // and `small` between them, so an order that had kept the folders in a block could not pass by
+    // accident.
+    let keys: Vec<u64> = (0..dir.len())
+        .map(|entry| match dir.name(entry) {
+            "big" => 900,
+            "small" => 100,
+            _ => dir.entries[entry].size,
+        })
+        .collect();
+    let ordered = |ascending: bool, measured: bool| -> Vec<String> {
+        let mut order = Vec::new();
+        let sizes = measured.then_some(keys.as_slice());
+        build_order(&dir, &mut order, Column::Size, ascending, true, "", None, sizes);
+        order
+            .iter()
+            .map(|&i| dir.name(i as usize).to_owned())
+            .collect()
+    };
+
+    assert_eq!(
+        ordered(false, true),
+        ["big", "middling.bin", "small", "tiny.txt"],
+        "biggest first, folders and files ranked together"
+    );
+    assert_eq!(
+        ordered(true, true),
+        ["tiny.txt", "small", "middling.bin", "big"],
+        "and the whole listing reverses rather than each block reversing inside itself"
+    );
+
+    // With the measurement off, nothing has changed: a directory's own byte count is noise, so the
+    // folders lead — every one of them tying, and falling through to the name tie-break, which follows
+    // the sort's direction like every other tie-break here. Hence `small` before `big` descending,
+    // which is the listing this column has always produced.
+    assert_eq!(
+        ordered(false, false),
+        ["small", "big", "middling.bin", "tiny.txt"]
+    );
+
+    // And a folder that has not answered yet keys as zero, so it waits at the quiet end rather than
+    // claiming to be the largest thing here on the strength of nothing.
+    let unanswered: Vec<u64> = (0..dir.len())
+        .map(|entry| match dir.name(entry) {
+            "big" | "small" => 0,
+            _ => dir.entries[entry].size,
+        })
+        .collect();
+    let mut order = Vec::new();
+    build_order(&dir, &mut order, Column::Size, false, true, "", None, Some(&unanswered));
+    let names: Vec<&str> = order.iter().map(|&i| dir.name(i as usize)).collect();
+    // Both tie at zero, so the name tie-break decides between them — reversed, like every tie-break
+    // here, because the sort is descending.
+    assert_eq!(names, ["middling.bin", "tiny.txt", "small", "big"]);
+
+    // Every other column keeps the folders in front, measured or not: it is only the Size column
+    // whose key a folder now has.
+    let mut order = Vec::new();
+    build_order(&dir, &mut order, Column::Type, true, true, "", None, Some(&keys));
+    let names: Vec<&str> = order.iter().map(|&i| dir.name(i as usize)).collect();
+    assert_eq!(names, ["big", "small", "middling.bin", "tiny.txt"]);
 }
 
 #[test]
@@ -207,7 +291,7 @@ fn ordering_is_a_total_order() {
 fn kept(names: &[&str], filter: &str) -> Vec<String> {
     let dir = listing(names);
     let mut order = Vec::new();
-    build_order(&dir, &mut order, Column::Name, true, true, filter, None);
+    build_order(&dir, &mut order, Column::Name, true, true, filter, None, None);
     order
         .iter()
         .map(|&i| dir.name(i as usize).to_owned())
@@ -329,6 +413,7 @@ fn the_lens_half_of_a_filter_is_asked_of_every_row() {
         true,
         "",
         Some(&changed),
+        None,
     );
     let names: Vec<&str> = order.iter().map(|&i| dir.name(i as usize)).collect();
     assert_eq!(names, ["kept.rs", "kept.txt"], "the git test alone");
@@ -341,6 +426,7 @@ fn the_lens_half_of_a_filter_is_asked_of_every_row() {
         true,
         ".rs$",
         Some(&changed),
+        None,
     );
     let names: Vec<&str> = order.iter().map(|&i| dir.name(i as usize)).collect();
     assert_eq!(names, ["kept.rs"], "and both tests together");
@@ -392,6 +478,7 @@ fn as_shown_by(
         true,
         true,
         filter,
+        None,
         None,
         &|name| shut.contains(&name),
         regroup,
@@ -528,6 +615,7 @@ fn a_hidden_folder_hides_what_is_under_it() {
         false,
         "",
         None,
+        None,
         &|_| false,
         false,
     );
@@ -544,6 +632,7 @@ fn a_hidden_folder_hides_what_is_under_it() {
         true,
         true,
         "",
+        None,
         None,
         &|_| false,
         false,
@@ -571,6 +660,7 @@ fn a_column_sort_orders_siblings_and_not_the_tree() {
         false,
         true,
         "",
+        None,
         None,
         &|_| false,
         false,
@@ -755,7 +845,7 @@ fn the_filter_survives_a_listing_with_no_folder_of_its_own() {
     let dir = builder.finish(0);
 
     let mut order = Vec::new();
-    build_order(&dir, &mut order, Column::Name, true, true, "(c:)", None);
+    build_order(&dir, &mut order, Column::Name, true, true, "(c:)", None, None);
     assert_eq!(order.len(), 1);
     assert_eq!(dir.name(order[0] as usize), "Windows (C:)");
 }
@@ -802,11 +892,11 @@ fn order_phases() {
     // The whole pass, for the total the other rows have to add up to.
     let mut order = Vec::new();
     best("build_order, Name, no filter", &mut || {
-        build_order(&dir, &mut order, Column::Name, true, false, "", None);
+        build_order(&dir, &mut order, Column::Name, true, false, "", None, None);
         order.len()
     });
     best("build_order, Type, no filter", &mut || {
-        build_order(&dir, &mut order, Column::Type, true, false, "", None);
+        build_order(&dir, &mut order, Column::Type, true, false, "", None, None);
         order.len()
     });
 
@@ -831,12 +921,12 @@ fn order_phases() {
     let mut scratch = full.clone();
     best("sort_order, Name", &mut || {
         scratch.copy_from_slice(&full);
-        sort_order(&dir, &mut scratch, Column::Name, true);
+        sort_order(&dir, &mut scratch, Column::Name, true, None);
         scratch.len()
     });
     best("sort_order, Type", &mut || {
         scratch.copy_from_slice(&full);
-        sort_order(&dir, &mut scratch, Column::Type, true);
+        sort_order(&dir, &mut scratch, Column::Type, true, None);
         scratch.len()
     });
     best("type_ranks alone", &mut || type_ranks(&dir, &full).len());
@@ -850,7 +940,7 @@ fn order_phases() {
     for k in 0..rounds {
         let a = (k * 7919) % dir.len();
         let b = (k * 104_729 + 13) % dir.len();
-        if compare(&dir, &ranks, Column::Name, true, a as u32, b as u32) == std::cmp::Ordering::Less
+        if compare(&dir, &ranks, None, Column::Name, true, a as u32, b as u32) == std::cmp::Ordering::Less
         {
             sink += 1;
         }

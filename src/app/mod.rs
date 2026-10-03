@@ -102,6 +102,17 @@ pub struct App {
     thumbs: crate::shell::thumbs::Thumbs,
     /// What each shortcut row points at, asked once per row per view.
     links: crate::shell::links::Links,
+    /// Counts what is inside each folder on show, for the panes whose measure button is on.
+    ///
+    /// The totals live on the tabs — [`crate::pane::Tab::deep_size`] — and die with the listing they
+    /// describe. Nothing here is keyed by path, for the reason [`crate::git`] gives about a status
+    /// cache: a byte count is only true of the moment it was taken. See [`crate::sizes`].
+    sizes: crate::sizes::Sizes,
+    /// The measurements handed to it last frame, so the set is only handed over when it changes.
+    ///
+    /// See [`App::collect_sizes`]: telling the service the same thing sixty times a second means
+    /// taking the lock its workers need in order to make any progress at all.
+    measuring: Vec<u64>,
     /// Asks git about the folder each pane is showing, once per view of it.
     ///
     /// The answers live on the tabs — [`Tab::git`] — and die with them. There is no map keyed by
@@ -370,6 +381,8 @@ impl App {
             icons: crate::shell::icons::Icons::new(),
             thumbs: crate::shell::thumbs::Thumbs::new(ctx),
             links: crate::shell::links::Links::new(ctx),
+            sizes: crate::sizes::Sizes::new(ctx),
+            measuring: Vec::new(),
             git: crate::git::Git::new(ctx),
             git_waiting: 0,
             previews: crate::preview::Previews::new(ctx),

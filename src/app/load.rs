@@ -29,6 +29,96 @@ impl App {
         }
     }
 
+    /// Count what is inside the folders on show, take the totals, and keep the shares in step.
+    ///
+    /// Everything the measure button costs after the click is here, and it is three things in the
+    /// order they have to happen:
+    ///
+    /// 1. **Abandon what nobody is waiting for.** One call, with the generation of every tab still
+    ///    measuring, which is the whole of the cancellation — see [`crate::sizes::Sizes::only`] for the
+    ///    five ways a walk stops being wanted and why they are one rule.
+    /// 2. **Ask about whatever is on show and has not been asked about**, which is
+    ///    [`crate::sizes::Measurement::wanted`]'s answer — including the flattened case, which is
+    ///    counted off its own listing with no disk at all. This layer only decides *where* the answer
+    ///    goes; which kind of listing it is came out of the state that knows.
+    /// 3. **Take the answers**, and settle the total the bars are a share of. See
+    ///    [`crate::pane::Tab::settle_sizes`], which also re-sorts a Size-sorted listing — on a
+    ///    deadline, because a rebuild per answer is a rebuild per frame.
+    ///
+    /// **Every tab, not just the active one**, which is where this parts company with
+    /// [`App::collect_git`]: a background tab is not on screen, but it holds the numbers for its own
+    /// folder and switching to it should show them rather than start over. The work is bounded by
+    /// what each tab has actually asked for, and a tab that has never had the button pressed asks for
+    /// nothing.
+    ///
+    /// # A re-read starts over, and that is bounded by step 1
+    ///
+    /// Every listing that lands throws the totals away, because a total names a row — see
+    /// [`crate::sizes::Measurement::gen`] — so a build writing into a folder that is being measured
+    /// has [`crate::watch`] re-reading it and this counting it again. What stops that being a
+    /// treadmill is that the *previous* round is abandoned rather than left running: only one
+    /// generation is ever live per tab, so at most one round of walks exists at a time and each of the
+    /// old ones stops at its next directory read. The cost of a folder changing under a measurement is
+    /// therefore one re-count, not one re-count per notification piled on top of the last.
+    pub(super) fn collect_sizes(&mut self, ctx: &egui::Context, now: f64) {
+        // Which measurements are still wanted. A tab whose button is off contributes nothing, which
+        // is what makes turning it off a cancellation.
+        //
+        // **Handed over only when it has changed**, and that is not a micro-optimisation: `only` holds
+        // the one lock all eight workers need in order to pop a directory or push its children, while
+        // it retains over a queue that a listing of twenty thousand folder rows fills in one request.
+        // Doing that sixty times a second to hand over a set that is almost always identical would
+        // stall the walk to say nothing. Cancellation stays immediate, because the *difference* is the
+        // cancellation.
+        let live: Vec<u64> = self
+            .panes
+            .iter()
+            .flat_map(|pane| pane.tabs.iter())
+            .filter_map(|tab| tab.sizes.live())
+            .collect();
+        if live != self.measuring {
+            self.sizes.only(&live);
+            self.measuring = live;
+        }
+
+        for tab in self.panes.iter_mut().flat_map(|pane| pane.tabs.iter_mut()) {
+            // This PC has nothing to count — see `filelist::status_line`, where the button that says
+            // so is drawn disabled. The same answer from the other end.
+            if tab.path.as_os_str().is_empty() {
+                continue;
+            }
+            match tab.wanted_sizes() {
+                crate::sizes::Work::Walk(folders) => self.sizes.request(tab.sizes.gen(), folders),
+                // A flattened listing, already summed off itself by the call above.
+                crate::sizes::Work::Done | crate::sizes::Work::None => {}
+            }
+        }
+
+        for answer in self.sizes.drain().collect::<Vec<_>>() {
+            // By generation and not by path: two tabs on the same folder are two measurements, and an
+            // answer belongs to the one that asked. `take` checks it, and stopping at the first match
+            // is what `deliver_icons` and `deliver_links` beside this do — a generation is unique, so
+            // there is never a second tab to offer it to.
+            self.panes
+                .iter_mut()
+                .flat_map(|pane| pane.tabs.iter_mut())
+                .any(|tab| tab.sizes.take(&answer, now));
+        }
+
+        // And the frame that would notice a re-sort has come due. Nothing else would ask for it once
+        // the last answer has landed: this program is idle between events. The same booking
+        // `start_scans` makes for `SLOW_SCAN`, and `breadcrumb::show` for the filter.
+        let mut soonest: Option<f64> = None;
+        for tab in self.panes.iter_mut().flat_map(|pane| pane.tabs.iter_mut()) {
+            if let Some(left) = tab.settle_sizes(now) {
+                soonest = Some(soonest.map_or(left, |best: f64| best.min(left)));
+            }
+        }
+        if let Some(left) = soonest {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(left));
+        }
+    }
+
     /// Hand each per-file icon answer to the view that asked for it, and drop the rest.
     ///
     /// This is where the folder-scoped rule is enforced. An answer names the view it belongs

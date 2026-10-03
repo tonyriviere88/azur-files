@@ -380,6 +380,7 @@ fn scan_speed() {
         false,
         "",
         None,
+        None,
     );
     let sort_us = started.elapsed().as_micros();
     println!("natural sort of {COUNT} entries: {:.1} ms", sort_us as f64 / 1000.0);

@@ -101,6 +101,15 @@ impl Tab {
         self.file_icons = Vec::new();
         self.file_icons.shrink_to_fit();
         self.links = std::collections::HashMap::new();
+        // The measurement goes with the folder it was about — a fresh generation inside `forget`
+        // rather than waiting for the next listing to land, so the walks under way are abandoned on
+        // this frame instead of at whatever point the new folder arrives. See
+        // [`crate::sizes::Sizes::only`].
+        //
+        // **The button itself stays as it was**, which is the one place this function keeps a view
+        // setting rather than dropping it. See [`crate::sizes::Measurement::on`] for why: the whole
+        // gesture is to open the folder that turned out to be big and ask the same question of it.
+        self.sizes.forget();
         self.order.clear();
         self.order_gen = next_order_gen();
         self.tree.clear();
@@ -203,6 +212,11 @@ impl Tab {
         self.order_gen = next_order_gen();
         self.tree.clear();
         self.widths_measured = false;
+        // And the measurement, because the two sides of this are counted differently and neither
+        // answer is the other's: a folder's own children are walked one by one, and a flattened tree
+        // already holds every file it would have walked. See [`Tab::settle_sizes`], which is where
+        // the two totals part company, and [`crate::sizes::Measurement::wanted`].
+        self.sizes.forget();
         // The top, because row 200 of a folder's own children is not row 200 of its
         // whole tree — the same reason a new folder opens at the top in [`Tab::go_to`].
         self.scroll_y = 0.0;
