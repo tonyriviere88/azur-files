@@ -1287,9 +1287,39 @@ impl App {
         // ---- The panes ----------------------------------------------------
         //
         // Already laid out by `plan_layout`, which had to run before the title bar.
+
+        // ---- The tab bands, for the rows the title bar cannot reach --------
         //
-        // Splitters first, so a pane's own content is painted over their edges
-        // rather than under them.
+        // Painted like the title bar, because that is what they are for the row below
+        // them: `background-layer-alt` and a hairline along the bottom.
+        for row in &plan.rows {
+            ui.painter()
+                .rect_filled(row.band, egui::CornerRadius::ZERO, t.bg.layer_alt);
+            crate::ui::rule_below(ui.painter(), row.band, t);
+        }
+
+        let rects = self.pane_rects.clone();
+        for (id, rect) in rects {
+            self.pane(ui, t, id, rect);
+        }
+
+        // ---- The splitters, between the panes and the tabs ------------------
+        //
+        // **The order here is the priority, and it has to be exactly this.** Within a layer egui
+        // gives a click to the *last* widget that asked for it ("in tie, pick last = topmost" in its
+        // `hit_test`), so registering these decides what wins where they overlap — and they overlap
+        // two things, in opposite directions.
+        //
+        // *After the panes*, because [`dock::GRAB`] reaches four points into the pane on each side and
+        // the listing's vertical scrollbar is exactly those four points. Registered before the panes,
+        // the scrollbar won and **two panes side by side could not be resized at all** — the pointer
+        // over the divider was the scrollbar's. A stacked pair was never affected: there the grab
+        // reaches into the pane's *bottom* edge, and a `ScrollArea::vertical` has nothing there.
+        //
+        // *Before the tab strips*, because the grab spans the split's full height, tab bands included.
+        // Last would mean a splitter taking clicks off the tabs nearest a pane boundary.
+        //
+        // Nothing here paints, so none of this changes what is drawn.
         let mut ratios: Vec<(Vec<u8>, f32)> = Vec::new();
         for splitter in &self.splitters {
             let response = ui.interact(
@@ -1323,21 +1353,6 @@ impl App {
             if let Some(ratio) = self.layout.ratio_at(&route) {
                 *ratio = (*ratio + delta).clamp(dock::RATIO_MIN, dock::RATIO_MAX);
             }
-        }
-
-        // ---- The tab bands, for the rows the title bar cannot reach --------
-        //
-        // Painted like the title bar, because that is what they are for the row below
-        // them: `background-layer-alt` and a hairline along the bottom.
-        for row in &plan.rows {
-            ui.painter()
-                .rect_filled(row.band, egui::CornerRadius::ZERO, t.bg.layer_alt);
-            crate::ui::rule_below(ui.painter(), row.band, t);
-        }
-
-        let rects = self.pane_rects.clone();
-        for (id, rect) in rects {
-            self.pane(ui, t, id, rect);
         }
 
         // The strips themselves after the panes, so a tab is never under a pane's card.
@@ -9749,6 +9764,93 @@ mod click_tests {
         // And the default is one value, not two: the size the window opens at on a first run is
         // the size this puts it back to.
         assert_eq!(Config::default().window.unwrap_or(crate::config::WINDOW_SIZE), [w, hh]);
+    }
+
+    /// **Two panes side by side can be resized, scrollbar or no scrollbar.**
+    ///
+    /// [`dock::GRAB`] reaches four points into the pane on each side of the divider, because a
+    /// one-point grab target is not one — and in a horizontal split those four points are exactly
+    /// where the listing's vertical scrollbar is. Within a layer egui gives a click to the *last*
+    /// widget registered, so while the splitters went up before the panes the scrollbar took the
+    /// pointer and **the divider between two side-by-side panes did nothing at all**. A stacked pair
+    /// never showed it: there the grab reaches the pane's bottom edge, where a vertical scroll area
+    /// has nothing to claim.
+    ///
+    /// **What this does and does not show.** It drives a real double-click at the divider over a
+    /// listing long enough to have a scrollbar, and the splitter answers by evening the split up —
+    /// so the divider is reachable and its `Sense` is right. It is *not* a guard on the ordering:
+    /// moving the block back above the panes was tried, and this still passed. Whatever competes for
+    /// those four points in the window does not exist in the harness, so the ordering itself is only
+    /// checked by using the window. Worth knowing before trusting this test to catch a regression in
+    /// it.
+    #[test]
+    fn side_by_side_panes_can_be_resized_over_the_scrollbar() {
+        // Long enough to overflow the pane and put a scrollbar down its right edge.
+        let deep = crate::sandbox::fresh("splitter-over-scrollbar");
+        for i in 0..200 {
+            std::fs::write(deep.join(format!("file-{i:03}.txt")), b"x").expect("a fixture file");
+        }
+
+        let mut h = Harness::with_panes(2);
+        h.settle();
+        let route = h
+            .app
+            .splitters
+            .iter()
+            .find(|s| s.horizontal)
+            .map(|s| s.route.clone())
+            .expect("two panes opened side by side have a horizontal splitter");
+
+        // The pane on the left of it is the one whose scrollbar is in the way.
+        let left = h
+            .app
+            .pane_rects
+            .iter()
+            .min_by(|a, b| a.1.left().total_cmp(&b.1.left()))
+            .map(|(id, _)| *id)
+            .expect("a pane");
+        let index = h.app.panes.iter().position(|p| p.id == left).expect("its tab");
+        let ctx = h.ctx.clone();
+        h.app.perform(
+            &ctx,
+            Action::Navigate {
+                pane: left,
+                path: deep.clone(),
+            },
+        );
+        h.settle();
+        assert!(
+            h.tab(index).order.len() > 100,
+            "the left pane holds {} rows, which may not overflow it -- then there is no scrollbar \
+             here and this test is not testing anything",
+            h.tab(index).order.len()
+        );
+
+        // Somewhere other than even, so evening it up is a visible change.
+        if let Some(ratio) = h.app.layout.ratio_at(&route) {
+            *ratio = 0.3;
+        }
+        h.settle();
+        let moved = h
+            .app
+            .splitters
+            .iter()
+            .find(|s| s.route == route)
+            .map(|s| s.rect)
+            .expect("the splitter after the ratio moved");
+
+        let at = moved.center();
+        assert!(
+            h.hovers(egui::Id::new(("splitter", &route)), at),
+            "the divider at {at:?} is not the widget under the pointer -- something registered \
+             later is on top of it, which is how the scrollbar used to win"
+        );
+        h.double_click_at(at);
+        assert_eq!(
+            h.app.layout.ratio_at(&route).copied(),
+            Some(0.5),
+            "double-clicking the divider did not even the split up, so the gesture never reached it"
+        );
     }
 
     /// Double-clicking the sidebar splitter puts it back where it started.

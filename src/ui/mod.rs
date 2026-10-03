@@ -23,7 +23,7 @@ pub mod sidebar;
 use std::sync::Arc;
 
 use azur_egui_theme::icons::Icon;
-use azur_egui_theme::tokens::{radius, space};
+use azur_egui_theme::tokens::{radius, space, typography};
 use egui::{
     pos2, vec2, Align2, Color32, CornerRadius, FontId, Id, Painter, Rect, Response, Sense, Stroke,
     Ui,
@@ -131,6 +131,146 @@ pub fn truncated(
 pub fn snap(painter: &Painter, at: egui::Pos2) -> egui::Pos2 {
     use egui::emath::GuiRounding as _;
     at.round_to_pixels(painter.pixels_per_point())
+}
+
+/// What every inline text field in this window takes off its caret, and how far it drops it.
+///
+/// Three points off the top and three points down, applied by [`nudge_caret`]. One pair rather than
+/// a figure per field: the correction is not about any one box, it is about egui measuring the caret
+/// against the galley's *line box* — see [`nudge_caret`] — so a field of mostly x-height text gets a
+/// caret that stands above the words and below them. That is the same in the breadcrumb's filter and
+/// in the preview's find bar, and it would be the same in the next one.
+///
+/// Two figures because they are two decisions. Reducing the height alone leaves the caret high;
+/// dropping it alone leaves it long. It is the caret's half of the correction
+/// `breadcrumb::FILTER_TEXT_LIFT` makes for the words — the lift deliberately does not move the
+/// caret, because the two do not want the same number.
+pub const CARET_SHORTER: f32 = 3.0;
+pub const CARET_LOWER: f32 = 3.0;
+
+/// Where the next shape a widget paints will land, so [`nudge_caret`] can find it again.
+pub fn shape_mark(ui: &Ui) -> egui::layers::ShapeIdx {
+    let layer = ui.layer_id();
+    ui.ctx().graphics_mut(|g| g.entry(layer).next_idx())
+}
+
+/// How wide a value may get before it wraps.
+///
+/// The design system's tooltip measure is 280 — a *paragraph's*, and the reason this tooltip is not
+/// one: `9.38 KB (9,605 bytes)` in a column beside its key does not fit in it, so every value long
+/// enough to be worth reading wrapped under its own key. Twice that clears every value the four
+/// columns can hold and most names besides, and it is still a bound rather than none: a two-hundred
+/// character name wraps instead of making the tooltip as wide as the window.
+pub const TIP_VALUE: f32 = 560.0;
+
+/// Draw a tooltip's key/value pairs as two columns.
+///
+/// **Two columns and not two labels a line**, which is the whole reason this is drawn rather than
+/// written into a string: a value has to start at the same `x` on every line, and a proportional font
+/// cannot be padded into a column with spaces. Both halves are laid out here, the keys' column is as
+/// wide as the widest key, and the values start after it.
+///
+/// The keys are `text-secondary` against the values' `text-primary` — the same two colours the dimmed
+/// half of a Name cell uses, saying the same thing about which half of the line is the answer.
+///
+/// A pair is **one line unless the value wraps**, and then the line is as tall as the value and the key
+/// sits on the first of its rows. Both are the same font, so a shared top is a shared baseline — which
+/// is what the two halves of a line have to agree on, and the one thing that would go wrong if a key
+/// and a value were ever set differently. `space-1` between the lines: this is a table of five or six
+/// things read at a glance, not a paragraph, so it is set tighter than the caption's own leading.
+pub fn tooltip_table<S: AsRef<str>>(ui: &mut Ui, t: &Theme, about: &[(&str, S)]) {
+    let font = t.fonts.caption.clone();
+    let painter = ui.painter().clone();
+
+    let keys: Vec<_> = about
+        .iter()
+        .map(|(key, _)| painter.layout_no_wrap(key.to_string(), font.clone(), t.text.secondary))
+        .collect();
+    let values: Vec<_> = about
+        .iter()
+        .map(|(_, value)| {
+            painter.layout(value.as_ref().to_owned(), font.clone(), t.text.primary, TIP_VALUE)
+        })
+        .collect();
+
+    let column = keys.iter().map(|g| g.size().x).fold(0.0, f32::max) + space::S4;
+    let width = column + values.iter().map(|g| g.size().x).fold(0.0, f32::max);
+    let height: f32 = values
+        .iter()
+        .map(|g| g.size().y.max(typography::LINE_CAPTION) + space::S1)
+        .sum();
+    // Allocated, so the tooltip's frame is the size of its table: the popup has no measure of its own
+    // — see `tooltip_at_pointer_ui` — and this is what it hugs.
+    let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
+
+    let mut y = rect.top();
+    for (key, value) in keys.into_iter().zip(values) {
+        let step = value.size().y.max(typography::LINE_CAPTION) + space::S1;
+        painter.galley(
+            crate::ui::snap(&painter, pos2(rect.left(), y)),
+            key,
+            Color32::PLACEHOLDER,
+        );
+        painter.galley(
+            crate::ui::snap(&painter, pos2(rect.left() + column, y)),
+            value,
+            Color32::PLACEHOLDER,
+        );
+        y += step;
+    }
+}
+
+/// Shorten the text caret a field has just painted, and move it down.
+///
+/// # Why it is done to the shape and not to the field
+///
+/// egui owns the caret. `TextEdit` paints it in `paint_cursor_end` as a one-point line segment from
+/// the centre-top of the galley row's box to its centre-bottom — a *line box*, so it spans the
+/// ascender space above the capitals and the descender space below the baseline, and in a field of
+/// mostly x-height text it reads tall and high. There is no knob for it: `Visuals::text_cursor`
+/// carries the colour and the blink and no geometry, and the rect comes from the galley.
+///
+/// `TextField::text_lift` cannot do this either — it moves the whole inner rect, so the words go
+/// with the caret. That is the correction the *text* needs and it is already applied; this is the
+/// separate one the caret needs on top, and the two have to be able to differ.
+///
+/// So the segment is edited after the fact. Painting is retained-mode here: the shape sits in the
+/// layer's list until the frame is tessellated, and [`shape_mark`] is where the field's shapes
+/// start. The caret is picked out of that range by being a vertical segment in the caret's own
+/// colour ([`azur_egui_theme`] sets it to `text.primary`), and only the first match is touched.
+///
+/// `shorter_by` comes off the **top**, which is the end that overshoots; `lower_by` moves both ends.
+/// A blink that is currently off has painted nothing, and then there is nothing to find and nothing
+/// to do — which is why this is a no-op rather than an assertion.
+pub fn nudge_caret(ui: &Ui, from: egui::layers::ShapeIdx, shorter_by: f32, lower_by: f32) {
+    use egui::epaint::Shape;
+    use egui::layers::ShapeIdx;
+
+    let want = ui.visuals().text_cursor.stroke.color;
+    let layer = ui.layer_id();
+    ui.ctx().graphics_mut(|g| {
+        let list = g.entry(layer);
+        let end = list.next_idx().0;
+        let mut found = false;
+        for i in from.0..end {
+            if found {
+                break;
+            }
+            list.mutate_shape(ShapeIdx(i), |clipped| {
+                let Shape::LineSegment { points, stroke } = &mut clipped.shape else {
+                    return;
+                };
+                let vertical = (points[0].x - points[1].x).abs() < 0.5;
+                if !vertical || stroke.color != want {
+                    return;
+                }
+                let (top, bottom) = if points[0].y <= points[1].y { (0, 1) } else { (1, 0) };
+                points[top].y += shorter_by + lower_by;
+                points[bottom].y += lower_by;
+                found = true;
+            });
+        }
+    });
 }
 
 /// Paint a galley vertically centred in `rect`, starting at its left edge.
@@ -362,6 +502,171 @@ pub fn text_center(painter: &Painter, rect: Rect, font: FontId, color: Color32, 
 mod tests {
     use super::*;
     use azur_egui_theme::desktop;
+
+    /// **The two columns line up, and the keys are the quiet half.**
+    ///
+    /// The two things [`tooltip_table`] exists to do, and neither of them survives being written into
+    /// a string: a meaning has to start at the same `x` whatever the marker beside it is as wide as,
+    /// and the marker is `text-secondary` against the meaning's `text-primary`. Both were untested
+    /// while this was private to the listing — it drew the row tooltip, where a wrong column reads as
+    /// untidy. The filter box's syntax is the case where a ragged column is the whole problem.
+    ///
+    /// The keys here are deliberately of **different widths**, because equal ones would pass with the
+    /// column arithmetic removed altogether.
+    #[test]
+    fn a_tooltip_table_aligns_its_values_and_dims_its_keys() {
+        let ctx = egui::Context::default();
+        azur_egui_theme::fonts::install(&ctx);
+        let t = Theme::dark();
+        let pairs: &[(&str, &str)] = &[
+            ("!word", "leave it out"),
+            ("@git", "only what git says changed"),
+            ("word$", "match at the end"),
+        ];
+
+        let mut drawn: Vec<(egui::Pos2, Color32, String)> = Vec::new();
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            let from = shape_mark(ui);
+            tooltip_table(ui, &t, pairs);
+            let layer = ui.layer_id();
+            ui.ctx().graphics_mut(|g| {
+                for clipped in g.entry(layer).all_entries().skip(from.0) {
+                    if let egui::epaint::Shape::Text(text) = &clipped.shape {
+                        let colour = text
+                            .galley
+                            .job
+                            .sections
+                            .first()
+                            .map(|s| s.format.color)
+                            .unwrap_or(Color32::PLACEHOLDER);
+                        drawn.push((text.pos, colour, text.galley.text().to_owned()));
+                    }
+                }
+            });
+        });
+
+        assert_eq!(drawn.len(), pairs.len() * 2, "expected a key and a value each: {drawn:?}");
+        let find = |want: &str| {
+            drawn
+                .iter()
+                .find(|(_, _, text)| text == want)
+                .unwrap_or_else(|| panic!("`{want}` was not painted: {drawn:?}"))
+        };
+
+        // Every meaning starts at the same x, however wide its marker is.
+        let xs: Vec<f32> = pairs.iter().map(|(_, meaning)| find(meaning).0.x).collect();
+        for x in &xs {
+            assert_eq!(
+                *x, xs[0],
+                "the meanings start at {xs:?}, so they are not a column"
+            );
+        }
+        // And that column is past the widest key, not merely a shared arbitrary x.
+        let widest = pairs
+            .iter()
+            .map(|(key, _)| find(key).0.x + 1.0)
+            .fold(0.0_f32, f32::max);
+        assert!(xs[0] > widest, "the values start at {} , inside the keys", xs[0]);
+
+        // The markers are the quiet half; the meanings are the answer.
+        for (key, meaning) in pairs {
+            assert_eq!(find(key).1, t.text.secondary, "`{key}` is not `text-secondary`");
+            assert_eq!(find(meaning).1, t.text.primary, "`{meaning}` is not `text-primary`");
+        }
+    }
+
+    /// The caret really is the shape [`nudge_caret`] goes looking for.
+    ///
+    /// This is a guard against **egui**, not against this crate. The helper finds the caret by what
+    /// it looks like — a vertical one-point segment in `Visuals::text_cursor`'s colour — so an egui
+    /// that painted it as a rect, or in a colour of its own, would turn `nudge_caret` into a silent
+    /// no-op and the filter's caret would quietly go back to standing tall. Nothing else would fail.
+    ///
+    /// So the caret here is painted by a real `TextEdit` and then measured: found at all, moved by
+    /// the figures asked for, and shorter by the difference between them.
+    #[test]
+    fn the_caret_is_found_shortened_from_the_top_and_dropped() {
+        /// The first vertical segment in the caret's colour, at or after `from`.
+        fn caret_of(ui: &Ui, from: egui::layers::ShapeIdx) -> Option<[egui::Pos2; 2]> {
+            let want = ui.visuals().text_cursor.stroke.color;
+            let layer = ui.layer_id();
+            ui.ctx().graphics_mut(|g| {
+                g.entry(layer)
+                    .all_entries()
+                    .skip(from.0)
+                    .find_map(|clipped| match &clipped.shape {
+                        egui::epaint::Shape::LineSegment { points, stroke }
+                            if stroke.color == want
+                                && (points[0].x - points[1].x).abs() < 0.5 =>
+                        {
+                            Some(*points)
+                        }
+                        _ => None,
+                    })
+            })
+        }
+
+        // Run one frame with a focused field and return the caret, nudged by `by` or left alone.
+        let run = |by: Option<(f32, f32)>| -> [egui::Pos2; 2] {
+            let ctx = egui::Context::default();
+            azur_egui_theme::fonts::install(&ctx);
+            let id = Id::new("azur-caret-probe");
+            let mut text = String::from("abc");
+            let mut found = None;
+            // Twice: focus asked for in one frame is focus the field has in the next, and the
+            // caret is only painted for a field that has it.
+            for _ in 0..2 {
+                let mut seen = None;
+                let _ = ctx.run_ui(Default::default(), |ui| {
+                    // A blink that is off has painted nothing, and this test is not about timing.
+                    ui.visuals_mut().text_cursor.blink = false;
+                    ui.memory_mut(|m| m.request_focus(id));
+                    let from = shape_mark(ui);
+                    ui.add(egui::TextEdit::singleline(&mut text).id(id));
+                    if let Some((shorter, lower)) = by {
+                        nudge_caret(ui, from, shorter, lower);
+                    }
+                    seen = caret_of(ui, from);
+                });
+                found = seen;
+            }
+            found.expect(
+                "no caret was painted for a focused field -- either egui no longer draws one as a \
+                 vertical segment in `text_cursor`'s colour, in which case `nudge_caret` is now a \
+                 no-op, or this test failed to give the field focus",
+            )
+        };
+
+        let plain = run(None);
+        let moved = run(Some((3.0, 3.0)));
+
+        let ends = |seg: [egui::Pos2; 2]| {
+            let (a, b) = (seg[0].y, seg[1].y);
+            if a <= b { (a, b) } else { (b, a) }
+        };
+        let (plain_top, plain_bottom) = ends(plain);
+        let (moved_top, moved_bottom) = ends(moved);
+
+        assert!(
+            plain_bottom - plain_top > 3.0,
+            "the caret is only {} points tall, so taking 3 off it is not a correction",
+            plain_bottom - plain_top
+        );
+        assert_eq!(
+            moved_bottom, plain_bottom + 3.0,
+            "the caret's bottom did not drop by 3"
+        );
+        assert_eq!(
+            moved_top,
+            plain_top + 6.0,
+            "the caret's top should drop by the 3 it loses in height plus the 3 it moves"
+        );
+        assert_eq!(
+            (moved_bottom - moved_top),
+            (plain_bottom - plain_top) - 3.0,
+            "the caret is not 3 points shorter"
+        );
+    }
 
     /// This window is wearing the design system's application-window preset, and every
     /// colour helper here is the same value the preset decided.

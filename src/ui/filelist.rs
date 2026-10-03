@@ -1284,7 +1284,7 @@ fn rows(
         if let Some(position) = hovered_row.filter(|_| !busy) {
             if let Some(about) = row_tooltip(tab, zone, position, scratch) {
                 azur_egui_theme::components::tooltip_at_pointer_ui(response.clone(), |ui| {
-                    tooltip_table(ui, t, &about);
+                    crate::ui::tooltip_table(ui, t, &about);
                 });
             }
         }
@@ -2107,70 +2107,6 @@ fn row_tooltip(
         about.push(("Git", state.describe(entry.is_dir()).to_owned()));
     }
     Some(about)
-}
-
-/// How wide a value may get before it wraps.
-///
-/// The design system's tooltip measure is 280 — a *paragraph's*, and the reason this tooltip is not
-/// one: `9.38 KB (9,605 bytes)` in a column beside its key does not fit in it, so every value long
-/// enough to be worth reading wrapped under its own key. Twice that clears every value the four
-/// columns can hold and most names besides, and it is still a bound rather than none: a two-hundred
-/// character name wraps instead of making the tooltip as wide as the window.
-const TIP_VALUE: f32 = 560.0;
-
-/// Draw [`row_tooltip`]'s pairs as two columns.
-///
-/// **Two columns and not two labels a line**, which is the whole reason this is drawn rather than
-/// written into a string: a value has to start at the same `x` on every line, and a proportional font
-/// cannot be padded into a column with spaces. Both halves are laid out here, the keys' column is as
-/// wide as the widest key, and the values start after it.
-///
-/// The keys are `text-secondary` against the values' `text-primary` — the same two colours the dimmed
-/// half of a Name cell uses, saying the same thing about which half of the line is the answer.
-///
-/// A pair is **one line unless the value wraps**, and then the line is as tall as the value and the key
-/// sits on the first of its rows. Both are the same font, so a shared top is a shared baseline — which
-/// is what the two halves of a line have to agree on, and the one thing that would go wrong if a key
-/// and a value were ever set differently. `space-1` between the lines: this is a table of five or six
-/// things read at a glance, not a paragraph, so it is set tighter than the caption's own leading.
-fn tooltip_table(ui: &mut Ui, t: &Theme, about: &[(&str, String)]) {
-    let font = t.fonts.caption.clone();
-    let painter = ui.painter().clone();
-
-    let keys: Vec<_> = about
-        .iter()
-        .map(|(key, _)| painter.layout_no_wrap(key.to_string(), font.clone(), t.text.secondary))
-        .collect();
-    let values: Vec<_> = about
-        .iter()
-        .map(|(_, value)| painter.layout(value.clone(), font.clone(), t.text.primary, TIP_VALUE))
-        .collect();
-
-    let column = keys.iter().map(|g| g.size().x).fold(0.0, f32::max) + space::S4;
-    let width = column + values.iter().map(|g| g.size().x).fold(0.0, f32::max);
-    let height: f32 = values
-        .iter()
-        .map(|g| g.size().y.max(typography::LINE_CAPTION) + space::S1)
-        .sum();
-    // Allocated, so the tooltip's frame is the size of its table: the popup has no measure of its own
-    // — see `tooltip_at_pointer_ui` — and this is what it hugs.
-    let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
-
-    let mut y = rect.top();
-    for (key, value) in keys.into_iter().zip(values) {
-        let step = value.size().y.max(typography::LINE_CAPTION) + space::S1;
-        painter.galley(
-            crate::ui::snap(&painter, pos2(rect.left(), y)),
-            key,
-            Color32::PLACEHOLDER,
-        );
-        painter.galley(
-            crate::ui::snap(&painter, pos2(rect.left() + column, y)),
-            value,
-            Color32::PLACEHOLDER,
-        );
-        y += step;
-    }
 }
 
 /// A byte count with its thousands grouped: `9605` as `9,605`.

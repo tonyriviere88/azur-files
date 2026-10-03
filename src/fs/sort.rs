@@ -80,6 +80,18 @@ impl Column {
 /// that is true of all of them, and it is the word somebody reaching for this would guess first.
 pub const CHANGED: &str = "@git";
 
+/// What [`CHANGED`] does, in the words the filter box's tooltip says it in.
+///
+/// The value half of a pair whose key is [`CHANGED`] — `azur_egui_theme::filter::MARKERS` holds the
+/// design system's three in the same shape, and `ui::breadcrumb::FILTER_MARKERS` puts this after them.
+/// Appended rather than written into that list: the design system's filter has never heard of git, and
+/// the other windows using the same field would be documenting a word they do not answer to.
+///
+/// "what git says changed" and not "changed files", because the set is wider than either word —
+/// staged, untracked and conflicted rows are all in it, and so is a folder with any of them
+/// underneath. Same reason the word is `@git` and not `@changes`.
+pub const CHANGED_MEANS: &str = "show git diff only";
+
 /// Take [`CHANGED`] off a filter line, and say whether it was there.
 ///
 /// Case-insensitively, and from anywhere in the line: it is a switch rather than a prefix, and a

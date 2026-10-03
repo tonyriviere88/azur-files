@@ -64,6 +64,28 @@ const ARROW_DROP: f32 = 1.0;
 /// into the field, and which does not move the things that are already right.
 const FILTER_TEXT_LIFT: f32 = 2.0;
 
+/// Every marker the filter box takes, in the order the tooltip lists them.
+///
+/// The design system's own — `azur_egui_theme::filter::MARKERS` — and then this window's `@git`.
+/// Taken from that list rather than restated, so the shared half cannot drift from the wording the
+/// other windows show; that is why the field passed the design system's text straight through before
+/// [`crate::fs::sort::CHANGED`] existed, and it is the property worth keeping.
+///
+/// `@git` last on purpose. The three above it are the syntax anywhere this field appears; this one is
+/// a question about *this* program's data, and a reader who has met the others recognises the odd one
+/// out at the end rather than in the middle.
+///
+/// `LazyLock` because concatenating a slice is not a `const` operation. Built once: the tooltip's body
+/// only runs while it is on screen, but the list has no reason to be rebuilt even then.
+static FILTER_MARKERS: std::sync::LazyLock<Vec<(&'static str, &'static str)>> =
+    std::sync::LazyLock::new(|| {
+        azur_egui_theme::filter::MARKERS
+            .iter()
+            .copied()
+            .chain([(crate::fs::sort::CHANGED, crate::fs::sort::CHANGED_MEANS)])
+            .collect()
+    });
+
 /// The pen at the right-hand end, and the room reserved for it.
 ///
 /// Larger than [`crate::ui::TOOL_ICON`], which every other glyph on this bar is drawn at, and
@@ -818,6 +840,10 @@ pub fn show(
             vec2(filter_width, TOOL_SIZE),
         );
         // Square, like the bar it sits in. See [`crate::ui::squared`].
+        //
+        // The mark is taken before the field paints anything, so [`crate::ui::nudge_caret`] has a
+        // place to start looking for the caret afterwards. See [`crate::ui::CARET_SHORTER`].
+        let first_shape = crate::ui::shape_mark(ui);
         let response = crate::ui::squared(ui, |ui| {
             ui.put(
                 field,
@@ -832,13 +858,32 @@ pub fn show(
                     .text_lift(FILTER_TEXT_LIFT),
             )
         });
+        crate::ui::nudge_caret(
+            ui,
+            first_shape,
+            crate::ui::CARET_SHORTER,
+            crate::ui::CARET_LOWER,
+        );
         // **What the box understands, where it can be found.** Every word narrows, `!`
-        // excludes, `^` and `$` hold an end — invisible otherwise, because a filter field
-        // looks exactly the same whether it takes one substring or four terms. The wording
-        // is `azur_egui_theme::filter::SYNTAX` rather than this program's, so that the two
-        // cannot drift and so the field says the same thing in every window that has one.
-        let response =
-            azur_egui_theme::components::tooltip(response, azur_egui_theme::filter::SYNTAX);
+        // excludes, `^` and `$` hold an end, and `@git` asks git instead of the name — invisible
+        // otherwise, because a filter field looks exactly the same whether it takes one substring
+        // or four terms. The shared markers are worded by `azur_egui_theme::filter` rather than by
+        // this program, so that the two cannot drift and so the field says the same thing in every
+        // window that has one; [`FILTER_MARKERS`] adds the one word only this window answers to.
+        //
+        // Drawn rather than handed over as a string, because it is a table: the markers are
+        // `text-secondary` against their meanings' `text-primary`, and a meaning has to start at the
+        // same x on every line. The caption face is not monospaced, so that column is measured and
+        // painted — [`crate::ui::tooltip_table`], which is the listing's row tooltip's table as well.
+        let response = azur_egui_theme::components::tooltip_ui(response, |ui| {
+            ui.label(
+                egui::RichText::new(azur_egui_theme::filter::RULE)
+                    .font(t.fonts.caption.clone())
+                    .color(t.text.primary),
+            );
+            ui.add_space(azur_egui_theme::tokens::space::S1);
+            crate::ui::tooltip_table(ui, t, &FILTER_MARKERS);
+        });
         if response.changed() {
             // Noted, not applied — see `Tab::settle_filter` at the top of this function, and
             // `pane::FILTER_DELAY` for the 240 ms one pass can cost.
@@ -1885,6 +1930,45 @@ pub fn start_editing(tab: &mut Tab, slashes: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **Every marker the box takes is a pair in the tooltip, and `@git` is the last of them.**
+    ///
+    /// The design system tests its own three (`filter::tests::the_markers_are_all_documented_as
+    /// _pairs`); nothing tested that this window's `@git` reaches the tooltip at all, and it is the
+    /// one marker a user has no other way of discovering — the others at least look like regex.
+    ///
+    /// Pairs and not lines, because what makes the two columns possible is that the key and the
+    /// meaning never become one string. A marker smuggled in as `"@git — …"` would draw as one long
+    /// key in `text-secondary` with an empty column beside it, which is the failure this catches.
+    #[test]
+    fn the_filter_tooltip_documents_every_marker_as_its_own_pair() {
+        let markers: &[(&str, &str)] = &FILTER_MARKERS;
+        for want in ["!word", "^word", "word$", crate::fs::sort::CHANGED] {
+            let (key, meaning) = markers
+                .iter()
+                .find(|(key, _)| *key == want)
+                .unwrap_or_else(|| panic!("`{want}` is not in the tooltip: {markers:?}"));
+            assert!(
+                !meaning.trim().is_empty(),
+                "`{key}` is in the tooltip with nothing said about it"
+            );
+            // Neither half may carry the other: that is what makes them two columns.
+            assert!(
+                !key.contains('—') && !meaning.contains('—') && !meaning.contains(key),
+                "`{key}`/`{meaning}` has been folded into one string"
+            );
+        }
+        assert_eq!(
+            markers.last().map(|(key, _)| *key),
+            Some(crate::fs::sort::CHANGED),
+            "`@git` is this window's own and belongs after the shared three"
+        );
+        assert_eq!(
+            markers.len(),
+            azur_egui_theme::filter::MARKERS.len() + 1,
+            "the shared markers should be taken from the design system, not restated"
+        );
+    }
 
     #[test]
     fn the_bold_segment_is_the_folder_being_shown() {

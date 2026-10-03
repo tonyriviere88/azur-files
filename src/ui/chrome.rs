@@ -243,8 +243,21 @@ pub fn plan_strips(panes: &mut [(PaneId, Rect)], bar: Rect) -> StripPlan {
     };
 
     // ---- A band for every other row -------------------------------------
+    //
+    // **Membership is decided against the tops the panes came in with**, not against `panes`, which
+    // this loop is in the middle of moving. Taking a band's height off a pane (below) pushes its top
+    // down by `STRIP_ROW`; ask `panes` again afterwards and that pane answers to the *next* row down
+    // whenever the two rows are `STRIP_ROW` apart. It then gets a strip in both, so its tabs are laid
+    // out twice under one `Id::new(("tab", pane, index))` — egui's duplicate-id warning, in red, over
+    // two stacked copies of the same tab bar.
+    //
+    // Which is reachable by dragging: with the window split in four and the left divider moving, the
+    // left column's bottom top sweeps continuously past the right column's, and one of the pixels it
+    // crosses is exactly `STRIP_ROW` below the row above. A glitch that appears for one frame of a
+    // drag and leaves nothing behind.
+    let arrived: Vec<(PaneId, Rect)> = panes.to_vec();
     for &top in banded {
-        let row = row_of(top, panes);
+        let row = row_of(top, &arrived);
         let (from, to) = row.iter().fold((f32::MAX, f32::MIN), |(from, to), (_, r)| {
             (from.min(r.left()), to.max(r.right()))
         });
@@ -293,7 +306,10 @@ pub fn title_bar(
     let bar = ui
         .allocate_exact_size(vec2(ui.available_width(), HEIGHT), Sense::hover())
         .0;
-    ui.painter().rect_filled(bar, CornerRadius::ZERO, t.bg.layer_alt);
+    // `background-layer`, which is `#14171A` in the dark theme — the design system's
+    // `tokens::palette::GRAY_2`. Named by its role rather than by the hex so the light theme still
+    // gets `paper::SHEET` instead of a near-black bar.
+    ui.painter().rect_filled(bar, CornerRadius::ZERO, t.bg.layer);
 
     // ---- Dragging and maximising, over the whole bar --------------------
     //
@@ -1222,12 +1238,19 @@ pub fn resize_borders(ui: &mut Ui, maximized: bool) {
         ),
     ];
 
+    // **The left button only.** `Sense::drag()` senses a drag from *any* button, and
+    // `Response::drag_started` does not say which — so a middle-button drag on an edge resized the
+    // window, and a middle-button drag is a paste on X11 and a scroll gesture everywhere else.
+    // Nothing in this program resizes on middle-click, so the button is named here rather than
+    // filtered further up. The same restriction on the cursor icon, or an edge would promise a
+    // resize under a button that no longer performs one.
+    let with = egui::PointerButton::Primary;
     for (name, rect, direction, cursor) in bands {
         let response = ui.interact(rect, Id::new(("yafe-resize", name)), Sense::drag());
-        if response.hovered() || response.dragged() {
+        if response.hovered() || response.dragged_by(with) {
             ui.ctx().set_cursor_icon(cursor);
         }
-        if response.drag_started() {
+        if response.drag_started_by(with) {
             ui.ctx().send_viewport_cmd(Cmd::BeginResize(direction));
         }
     }
@@ -1242,6 +1265,56 @@ mod tests {
         let screen = Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 700.0));
         let bar = bar_rect(screen);
         (bar, 250.0, 996.0)
+    }
+
+    /// **No pane is ever given two tab strips**, however the rows line up.
+    ///
+    /// The case that broke it: two banded rows exactly [`STRIP_ROW`] apart. Planning the upper row
+    /// takes the band's height off its panes, which moves their tops onto the lower row's top — and
+    /// a membership test made against `panes` after that puts them in the lower row as well. Both
+    /// strips then lay tabs out under the same `Id::new(("tab", pane, index))`, which egui answers
+    /// with "First/Second use of widget ID" painted in red over two stacked tab bars.
+    ///
+    /// Reached in the window by dragging the divider between a split column's two panes: the moving
+    /// top sweeps through every pixel, including that one. It lasted a frame, so the fix is checked
+    /// here rather than by eye.
+    #[test]
+    fn two_rows_a_strip_apart_do_not_give_one_pane_two_strips() {
+        // A bar with no room for tabs, so every row is banded and both go through the loop.
+        let bar = Rect::from_min_size(Pos2::ZERO, vec2(40.0, 32.0));
+        let top = 100.0;
+        let mut panes = vec![
+            (1u32, Rect::from_min_max(pos2(0.0, top), pos2(500.0, 400.0))),
+            (
+                2u32,
+                Rect::from_min_max(pos2(500.0, top + STRIP_ROW), pos2(1000.0, 400.0)),
+            ),
+        ];
+        let plan = plan_strips(&mut panes, bar);
+        assert!(
+            plan.in_bar.is_empty(),
+            "this bar is too narrow to hold a strip, so nothing should be in it"
+        );
+
+        let mut seen: Vec<PaneId> = plan
+            .in_bar
+            .iter()
+            .chain(plan.rows.iter().flat_map(|row| row.strips.iter()))
+            .map(|(id, _)| *id)
+            .collect();
+        let planned = seen.len();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(
+            planned,
+            seen.len(),
+            "a pane was given more than one tab strip: {:?}",
+            plan.rows
+                .iter()
+                .map(|r| r.strips.iter().map(|(id, _)| *id).collect::<Vec<_>>())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(seen, vec![1, 2], "both panes should still get a strip each");
     }
 
     #[test]

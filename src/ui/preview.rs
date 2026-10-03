@@ -3070,6 +3070,8 @@ fn find_bar(ui: &mut Ui, t: &Theme, canvas: Rect, pane: PaneId, find: &mut Find)
                 pos2(glyph.right() + PAD * 0.5, field.top()),
                 pos2(x - PAD * 0.5, field.bottom()),
             );
+            // The mark is taken before the field paints, so the caret can be found again below.
+            let first_shape = crate::ui::shape_mark(ui);
             let edit = ui.put(
                 typing,
                 egui::TextEdit::singleline(&mut find.search.text)
@@ -3084,6 +3086,15 @@ fn find_bar(ui: &mut Ui, t: &Theme, canvas: Rect, pane: PaneId, find: &mut Find)
                     .desired_width(typing.width())
                     .font(egui::FontSelection::FontId(t.fonts.body.clone()))
                     .text_color(t.text.primary),
+            );
+            // The same correction the filter's caret gets, for the same reason — see
+            // [`crate::ui::nudge_caret`]. Applied here rather than after `field_frame` below, so the
+            // range it searches holds this field's shapes and not the frame's as well.
+            crate::ui::nudge_caret(
+                ui,
+                first_shape,
+                crate::ui::CARET_SHORTER,
+                crate::ui::CARET_LOWER,
             );
             field_frame(
                 ui,
