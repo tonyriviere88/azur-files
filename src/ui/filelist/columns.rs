@@ -16,6 +16,9 @@ pub(crate) const SORT_ARROW: f32 = 10.0 + space::S2;
 ///
 /// - **Status** is a glyph under its header, and only there at all in a synced folder — see
 ///   [`crate::fs::Dir::synced`], decided when the listing was read.
+/// - **Keywords** is only there where rows can have any — see [`crate::fs::Dir::keyed`] — and is
+///   measured from the longest keywords a row on show has, between [`KEYWORDS_MIN`] and
+///   [`KEYWORDS_MAX`]. One hash lookup per row, once per listing.
 ///
 /// - **Modified** is a fixed-width format, so one measurement of the template does.
 /// - **Size** is measured from the one value whose formatted text is longest, found
@@ -46,7 +49,9 @@ pub(crate) fn measure_columns(ui: &Ui, t: &Theme, tab: &mut Tab, scratch: &mut S
 
     let mut size_width: f32 = 0.0;
     let mut type_width: f32 = 0.0;
+    let mut keywords_width: f32 = 0.0;
     let synced = tab.dir.as_ref().is_some_and(|dir| dir.synced);
+    let keyed = tab.dir.as_ref().is_some_and(|dir| dir.keyed());
 
     if let Some(dir) = tab.dir.clone() {
         // Size: the longest formatted string, found without formatting them all.
@@ -100,10 +105,31 @@ pub(crate) fn measure_columns(ui: &Ui, t: &Theme, tab: &mut Tab, scratch: &mut S
             }
             seen.push(key);
         }
+
+        // Keywords: the longest set on show, by bytes, and then measured once — the same shortcut
+        // Size takes.
+        if keyed {
+            let store = crate::fs::keywords::read();
+            let longest = tab
+                .order
+                .iter()
+                .filter_map(|&i| store.get(dir.key(i as usize)?))
+                .max_by_key(|text| text.len());
+            if let Some(text) = longest {
+                keywords_width = measure(text);
+            }
+        }
     }
 
     let date_width = measure(fmt::DATE_TEMPLATE);
 
+    tab.widths[Column::Keywords.index()] = if keyed {
+        (keywords_width.max(header_of(Column::Keywords)) + CELL_PAD * 2.0)
+            .clamp(KEYWORDS_MIN, KEYWORDS_MAX)
+            .ceil()
+    } else {
+        0.0
+    };
     tab.widths[Column::Status.index()] = if synced {
         (header_of(Column::Status).max(GLYPH) + CELL_PAD * 2.0).ceil()
     } else {
@@ -118,11 +144,18 @@ pub(crate) fn measure_columns(ui: &Ui, t: &Theme, tab: &mut Tab, scratch: &mut S
     tab.widths_measured = true;
 }
 
+/// The least the Keywords column is fitted to: room to aim at, in a folder where nothing has any yet
+/// — an empty cell is the one place a first keyword can be typed into.
+pub(crate) const KEYWORDS_MIN: f32 = 120.0;
+/// And the most. Keywords are a list, and a list that took half the pane would be taking it from
+/// the names; the rest is elided, and the tooltip has it whole.
+pub(crate) const KEYWORDS_MAX: f32 = 260.0;
+
 /// Widths for this frame: the fitted columns as stored, and whatever is left
 /// for Name.
 ///
 /// When the pane is too narrow for all of them, the fitted columns give way —
-/// Type first, then Modified, then Status — because a name you cannot read is worse
+/// Type first, then Modified, then Keywords, then Status — because a name you cannot read is worse
 /// than a date you cannot see.
 pub(crate) fn resolved_widths(tab: &Tab, total: f32) -> [f32; Column::COUNT] {
     let mut widths = tab.widths;
@@ -131,7 +164,13 @@ pub(crate) fn resolved_widths(tab: &Tab, total: f32) -> [f32; Column::COUNT] {
 
     let mut spare = total - fitted(&widths);
     if spare < NAME_MIN {
-        for column in [Column::Type, Column::Modified, Column::Status, Column::Size] {
+        for column in [
+            Column::Type,
+            Column::Modified,
+            Column::Keywords,
+            Column::Status,
+            Column::Size,
+        ] {
             if spare >= NAME_MIN {
                 break;
             }
@@ -223,7 +262,7 @@ pub(crate) fn header_strip(
         }
 
         // The grip on this column's right edge. Not on Name, whose width is whatever
-        // the other three leave behind.
+        // the others leave behind.
         if index > 0 {
             let grip = Rect::from_min_max(
                 pos2(cell.right() - GRIP, rect.top()),

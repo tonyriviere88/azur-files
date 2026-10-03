@@ -396,3 +396,82 @@ fn scan_speed() {
 
     crate::sandbox::remove(&root);
 }
+
+// ---------------------------------------------------------------------------
+// File IDs
+// ---------------------------------------------------------------------------
+
+/// **The whole reason the directory is read with IDs**: keywords are kept under one, and a rename
+/// is exactly the thing they have to survive. Two files are two IDs, too.
+#[test]
+#[cfg(windows)]
+fn a_file_keeps_its_id_through_a_rename() {
+    let root = crate::sandbox::fresh("file-ids");
+    std::fs::write(root.join("before.txt"), b"x").expect("fixture");
+    std::fs::write(root.join("other.txt"), b"y").expect("fixture");
+    let key_of = |dir: &Dir, name: &str| {
+        let i = (0..dir.len()).find(|&i| dir.name(i) == name).expect("listed");
+        dir.key(i)
+    };
+
+    let dir = scan(&root);
+    assert!(dir.keyed(), "the sandbox is on NTFS, so its listing has IDs");
+    let before = key_of(&dir, "before.txt").expect("an ID");
+    assert_ne!(Some(before), key_of(&dir, "other.txt"), "two files are two IDs");
+
+    std::fs::rename(root.join("before.txt"), root.join("after.txt")).expect("rename");
+    let dir = scan(&root);
+    assert_eq!(key_of(&dir, "after.txt"), Some(before), "the renamed file is the same file");
+
+    crate::sandbox::remove(&root);
+}
+
+/// The ID read and the find API describe every entry the same way, because the rest of the program
+/// was written against the find API's answer: the same names, in the same order, with the same
+/// sizes, times and flags.
+#[test]
+#[cfg(windows)]
+fn both_ways_of_reading_a_directory_agree() {
+    let path = sources();
+    let ids = scan(&path);
+    let find = win::scan_find(&path, Instant::now());
+    assert!(ids.keyed(), "this repository is on NTFS");
+    assert!(!find.keyed(), "the find API has no IDs to give");
+    let row = |dir: &Dir, i: usize| {
+        let e = dir.entries[i];
+        (dir.name(i).to_owned(), e.size, e.modified, e.flags)
+    };
+    let all = |dir: &Dir| (0..dir.len()).map(|i| row(dir, i)).collect::<Vec<_>>();
+    assert_eq!(all(&ids), all(&find));
+}
+
+/// A flattened listing carries the IDs of what it walked, so a file's keywords are the same in
+/// a flatten as in its own folder.
+#[test]
+#[cfg(windows)]
+fn a_flattened_listing_keeps_the_ids_it_walked() {
+    let root = crate::sandbox::fresh("flat-ids");
+    std::fs::create_dir_all(root.join("sub")).expect("fixture");
+    std::fs::write(root.join("sub").join("deep.txt"), b"x").expect("fixture");
+
+    let own = scan(&root.join("sub"));
+    let flat = walk(&root, FLATTEN_BUDGET, FLATTEN_PATIENCE, 1);
+    let at = |dir: &Dir, name: &str| (0..dir.len()).find(|&i| dir.name(i) == name).expect("listed");
+    assert!(own.key(at(&own, "deep.txt")).is_some());
+    assert_eq!(flat.key(at(&flat, r"sub\deep.txt")), own.key(at(&own, "deep.txt")));
+
+    crate::sandbox::remove(&root);
+}
+
+/// A drive's root is opened with its backslash — without one, `\?\D:` names the *volume*, and the
+/// read would quietly fall back to having no IDs. Read-only: the root of the drive the sandbox is on.
+#[test]
+#[cfg(windows)]
+fn a_drive_root_is_read_with_ids() {
+    let sandbox = crate::sandbox::root();
+    let root: PathBuf = sandbox.components().take(2).collect();
+    assert!(root.to_string_lossy().ends_with(":\\"), "{}", root.display());
+    let dir = scan(&root);
+    assert!(dir.error.is_none(), "{:?}", dir.error);
+    assert!(dir.keyed(), "{} came back without IDs", root.display());
+}

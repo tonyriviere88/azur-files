@@ -668,6 +668,12 @@ fn flag(value: bool) -> u8 {
 
 /// Where the settings live.
 fn file() -> Option<PathBuf> {
+    profile_file("config.ini")
+}
+
+/// A file in the settings folder, beside `config.ini` — which is where [`crate::fs::keywords`] keeps
+/// its store, under the same `YAFE_PROFILE` rule.
+pub(crate) fn profile_file(file: &str) -> Option<PathBuf> {
     // A folder with spaces in it is the Windows convention and a nuisance to type
     // everywhere else, so the two platforms get the two spellings of the same name.
     let name = if cfg!(windows) {
@@ -675,7 +681,7 @@ fn file() -> Option<PathBuf> {
     } else {
         "azur-files"
     };
-    base_dir().map(|base| base.join(name).join("config.ini"))
+    base_dir().map(|base| base.join(name).join(file))
 }
 
 /// Where per-user settings go on this platform.

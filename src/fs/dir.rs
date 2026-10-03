@@ -178,6 +178,16 @@ pub struct Dir {
     /// of `path` — the drives under "This PC". Empty for a real directory, where
     /// [`Dir::target`] joins the name onto the path instead.
     targets: Vec<PathBuf>,
+    /// Each entry's file ID, in lockstep with `entries` — or empty, for a listing that has none.
+    ///
+    /// **Beside the records rather than in them**, because an [`Entry`] is 32 bytes on purpose and a
+    /// 128-bit ID would make it 48: every sort and filter pass would stream half as many entries per
+    /// cache line to carry a number only one column reads. Here it is 16 bytes a row that nothing
+    /// touches unless a row is drawn or sorted by its keywords. See [`crate::fs::keywords`].
+    ids: Vec<u128>,
+    /// The serial of the volume the IDs are good on, and `Some` only where they are good at all:
+    /// NTFS and ReFS. See [`Dir::key`].
+    pub volume: Option<u64>,
     pub dir_count: u32,
     pub file_count: u32,
     /// Summed size of the files (not the directories, whose `size` is noise).
@@ -304,6 +314,27 @@ impl Dir {
             .map(PathBuf::as_path)
     }
 
+    /// Which file entry `i` is, wherever it goes on its volume — the key its keywords are kept
+    /// under. `None` where this listing has no stable IDs: a FAT drive, an archive, the bin, This PC.
+    #[inline]
+    pub fn key(&self, i: usize) -> Option<crate::fs::keywords::FileKey> {
+        let volume = self.volume?;
+        let id = *self.ids.get(i)?;
+        (id != 0).then_some(crate::fs::keywords::FileKey { volume, id })
+    }
+
+    /// Entry `i`'s raw file ID, `0` for none — for a walk copying rows from one listing into another.
+    #[inline]
+    pub(crate) fn id(&self, i: usize) -> u128 {
+        self.ids.get(i).copied().unwrap_or(0)
+    }
+
+    /// Whether rows here can carry keywords at all, and so whether the column is drawn.
+    #[inline]
+    pub fn keyed(&self) -> bool {
+        self.volume.is_some() && !self.ids.is_empty()
+    }
+
     #[inline]
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -322,6 +353,8 @@ impl Dir {
             names: String::new(),
             entries: Vec::new(),
             targets: Vec::new(),
+            ids: Vec::new(),
+            volume: None,
             dir_count: 0,
             file_count: 0,
             total_size: 0,
@@ -350,6 +383,8 @@ pub struct DirBuilder {
     names: String,
     entries: Vec<Entry>,
     targets: Vec<PathBuf>,
+    ids: Vec<u128>,
+    volume: Option<u64>,
     dir_count: u32,
     file_count: u32,
     total_size: u64,
@@ -366,11 +401,35 @@ impl DirBuilder {
             names: String::with_capacity(8 * 1024),
             entries: Vec::with_capacity(256),
             targets: Vec::new(),
+            ids: Vec::new(),
+            volume: None,
             dir_count: 0,
             file_count: 0,
             total_size: 0,
             synced: false,
         }
+    }
+
+    /// Say which volume the IDs handed to [`DirBuilder::identify`] are good on. Left unsaid, they
+    /// are thrown away by [`DirBuilder::finish`]: an ID with no volume is not a key.
+    pub fn on_volume(&mut self, volume: Option<u64>) {
+        self.volume = volume;
+    }
+
+    /// Which volume that is, for a walk that has to know whether a listing it copies from is on the
+    /// same one.
+    pub fn volume(&self) -> Option<u64> {
+        self.volume
+    }
+
+    /// Give the entry just pushed its file ID.
+    ///
+    /// `ids` is kept in lockstep with `entries`, so a builder that has pushed entries without one
+    /// pads with zero — which [`Dir::key`] reads as none.
+    pub fn identify(&mut self, id: u128) {
+        let Some(last) = self.entries.len().checked_sub(1) else { return };
+        self.ids.resize(last, 0);
+        self.ids.push(id);
     }
 
     /// Reserve for a known entry count, when the caller has one.
@@ -506,11 +565,19 @@ impl DirBuilder {
         self.names.shrink_to_fit();
         self.entries.shrink_to_fit();
         self.targets.shrink_to_fit();
+        if self.volume.is_none() {
+            self.ids = Vec::new();
+        } else if !self.ids.is_empty() {
+            self.ids.resize(self.entries.len(), 0);
+        }
+        self.ids.shrink_to_fit();
         Dir {
             path: self.path,
             names: self.names,
             entries: self.entries,
             targets: self.targets,
+            ids: self.ids,
+            volume: self.volume,
             dir_count: self.dir_count,
             file_count: self.file_count,
             total_size: self.total_size,

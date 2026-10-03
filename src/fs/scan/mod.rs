@@ -292,6 +292,13 @@ fn walk(root: &Path, budget: usize, patience: std::time::Duration, hands: usize)
                 failed = Some(dir);
                 break 'walk;
             }
+            // The root's volume is the walk's: a mount point is a reparse point and is never
+            // descended into, so everything under it is on the same one — and a listing that says
+            // otherwise has its IDs left behind rather than filed under the wrong serial.
+            if dir.path == root {
+                builder.on_volume(dir.volume);
+            }
+            let same_volume = dir.volume.is_some() && dir.volume == builder.volume();
             for i in 0..dir.len() {
                 if builder.len() >= budget {
                     truncated = true;
@@ -305,6 +312,9 @@ fn walk(root: &Path, budget: usize, patience: std::time::Duration, hands: usize)
                 }
                 relative.push_str(dir.name(i));
                 builder.push(&relative, entry.size, entry.modified, entry.flags);
+                if same_volume {
+                    builder.identify(dir.id(i));
+                }
                 if descends(entry.flags) {
                     pending.push_back((dir.target(i), relative.clone()));
                 }

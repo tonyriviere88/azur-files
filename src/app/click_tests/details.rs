@@ -303,7 +303,10 @@ fn a_row_says_what_it_is_when_the_pointer_rests_on_it() {
     );
     h.settle();
 
-    let over = h.row_center(0, 0);
+    // On the name. Not the middle of the row, which is the Keywords cell: that one holds the row's
+    // tooltip back, because resting there is how the cell is made into a field — see
+    // `ui::filelist::keywords`.
+    let over = pos2(h.pane_rect(0).left() + 120.0, h.row_center(0, 0).y);
     // egui holds a tooltip back for `interaction.tooltip_delay` *and* until the pointer has come
     // to rest, so this moves once and then waits.
     h.frame(vec![Event::PointerMoved(over)]);
@@ -743,5 +746,50 @@ fn a_row_found_by_typing_is_not_left_on_the_edge() {
     assert!(
         rows_top + row * at as f32 - tab.scroll_y >= rows_top,
         "and the row itself is not off the top"
+    );
+}
+
+/// **A click on a Keywords cell is a click on the row until the pointer has rested there.** Then the
+/// same click opens the field on it, and `Escape` takes the field away with nothing kept.
+///
+/// See `ui::filelist::keywords` for why: the column is a quarter of every row, and a listing where a
+/// quarter of each row opened a text field would be one where selecting a file was a matter of aim.
+#[test]
+fn a_keywords_cell_edits_only_once_the_pointer_has_rested_on_it() {
+    let mut h = Harness::new();
+    let keywords = crate::fs::Column::Keywords.index();
+    assert!(
+        h.tab(0).widths[keywords] > 0.0,
+        "the repository is on NTFS, so its listing has the column"
+    );
+    let header = Id::new(("th", h.app.panes[0].id, keywords));
+    let pane = h.pane_rect(0);
+    let y = h.header_y(0);
+    let left = (0..pane.width() as i32)
+        .step_by(2)
+        .map(|dx| pane.left() + dx as f32)
+        .find(|&x| h.hovers(header, pos2(x, y)))
+        .expect("the Keywords header is on screen");
+    let cell = pos2(left + 16.0, h.row_center(0, 0).y);
+
+    h.wait();
+    let done = h.click_at(cell);
+    assert!(!done.contains(&"BeginKeywords"), "a click on arrival edited: {done:?}");
+    assert_eq!(h.tab(0).selected_count, 1, "and it has to select the row instead");
+    assert!(h.tab(0).keywords.is_none());
+
+    // The pointer stays where it is: resting on the cell, for longer than the arm.
+    h.wait();
+    let done = h.click_at(cell);
+    assert!(done.contains(&"BeginKeywords"), "a click on a rested cell has to edit: {done:?}");
+    h.frame(Vec::new());
+    assert!(h.tab(0).keywords.is_some(), "and the field is open");
+
+    h.chord(egui::Key::Escape, Modifiers::NONE);
+    h.frame(Vec::new());
+    assert!(h.tab(0).keywords.is_none(), "Escape takes the field away");
+    assert!(
+        !h.take_journal().contains(&"CommitKeywords"),
+        "and keeps nothing"
     );
 }

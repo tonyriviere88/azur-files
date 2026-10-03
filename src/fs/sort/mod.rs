@@ -16,7 +16,7 @@ use azur_egui_theme::filter::Query;
 
 use super::dir::Dir;
 
-/// The five columns of the details view, left to right.
+/// The six columns of the details view, left to right.
 ///
 /// The discriminants are spelled out because the view indexes its width array by
 /// them, and a column reordered here would otherwise silently resize the wrong one.
@@ -24,19 +24,24 @@ use super::dir::Dir;
 /// **Status is only there in a synced folder.** Its width is zero anywhere else — see
 /// `ui::filelist::measure_columns`, which decides it off [`Dir::synced`] — so every other
 /// folder looks exactly as it did before there was one.
+///
+/// **Keywords is only there where a row can have any** — a listing read with file IDs, which is NTFS
+/// and ReFS: see [`Dir::keyed`] and [`crate::fs::keywords`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(usize)]
 pub enum Column {
     Name = 0,
-    Status = 1,
-    Size = 2,
-    Type = 3,
-    Modified = 4,
+    Keywords = 1,
+    Status = 2,
+    Size = 3,
+    Type = 4,
+    Modified = 5,
 }
 
 impl Column {
-    pub const ALL: [Column; 5] = [
+    pub const ALL: [Column; 6] = [
         Self::Name,
+        Self::Keywords,
         Self::Status,
         Self::Size,
         Self::Type,
@@ -54,6 +59,7 @@ impl Column {
     pub fn header(self) -> &'static str {
         match self {
             Self::Name => "Name",
+            Self::Keywords => "Keywords",
             Self::Status => "Status",
             Self::Size => "Size",
             Self::Type => "Type",
@@ -81,7 +87,7 @@ impl Column {
     /// is biggest" or "what did I just touch", so those start descending — which
     /// is Explorer's behaviour too.
     pub fn starts_ascending(self) -> bool {
-        matches!(self, Self::Name | Self::Type | Self::Status)
+        matches!(self, Self::Name | Self::Keywords | Self::Type | Self::Status)
     }
 }
 
@@ -370,11 +376,9 @@ pub fn build_tree_order(
     // The Type column's ranks, over the whole listing and once. Per sibling group they would be
     // a `Vec` the length of the listing for every folder in it — see [`compare`], which takes
     // them for this reason.
-    let ranks = if column == Column::Type {
+    let ranks = {
         let all: Vec<u32> = (0..dir.len() as u32).collect();
-        type_ranks(dir, &all)
-    } else {
-        Vec::new()
+        ranks_for(dir, &all, column)
     };
     // The Size column's keys arrive already resolved over the whole listing, so unlike `ranks` there
     // is nothing to build here. Note what they mean in a tree: each folder's own children are mixed
@@ -462,13 +466,9 @@ pub fn sort_order(
     sizes: Option<&[u64]>,
 ) {
     // Type sorts on the label the column shows, which is a lookup per row rather than a
-    // field — so the lookups happen once, up front, and become an integer per entry.
-    // Empty for every other column, and never indexed by one. See [`type_ranks`].
-    let ranks = if column == Column::Type {
-        type_ranks(dir, order)
-    } else {
-        Vec::new()
-    };
+    // field — so the lookups happen once, up front, and become an integer per entry. Keywords
+    // the same, for the same reason. Empty for every other column, and never indexed by one.
+    let ranks = ranks_for(dir, order, column);
     // `sort_unstable_by` because the comparator is a total order down to the name,
     // so stability would only cost time.
     order.sort_unstable_by(|&a, &b| compare(dir, &ranks, sizes, column, ascending, a, b));
@@ -480,7 +480,7 @@ pub fn sort_order(
 /// group of its own and needs the same answer — the two orders differ in *what* is compared
 /// against what, never in how.
 ///
-/// `ranks` is [`type_ranks`]' answer, and empty for every column but Type. It is passed in
+/// `ranks` is [`ranks_for`]' answer, and empty for every column but Type and Keywords. It is passed in
 /// rather than built here for the reason the tree needs it: one `Vec` the size of the listing
 /// per sibling group would be the listing's length squared.
 ///
@@ -529,7 +529,7 @@ fn compare(
         // Size column may as well fall through to the name.
         Column::Size if ea.is_dir() => Ordering::Equal,
         Column::Size => ea.size.cmp(&eb.size),
-        Column::Type => ranks[a as usize].cmp(&ranks[b as usize]),
+        Column::Type | Column::Keywords => ranks[a as usize].cmp(&ranks[b as usize]),
         Column::Modified => ea.modified.cmp(&eb.modified),
         // What the attributes say, which is every file's answer. A folder's comes from the shell a
         // moment later and the order is not rebuilt for it, so within the folder block this falls
@@ -563,6 +563,45 @@ fn compare(
         }
         other => other,
     }
+}
+
+/// The ranks a column sorts on, for the two whose key is not a field of the entry. Empty for the
+/// rest, which [`compare`] never indexes it for.
+fn ranks_for(dir: &Dir, order: &[u32], column: Column) -> Vec<u32> {
+    match column {
+        Column::Type => type_ranks(dir, order),
+        Column::Keywords => keyword_ranks(dir, order),
+        _ => Vec::new(),
+    }
+}
+
+/// A rank per entry for the Keywords column: its keywords' place among the distinct sets of keywords
+/// in the listing, in the column's own order, and **every row with none after every row with some**
+/// on the way up — the rule the Status column keeps, so a click on the header gathers the tagged
+/// files together at the top.
+///
+/// The store is asked once per row, up front, under one read lock; [`type_ranks`] gives the reason
+/// the comparator is left comparing integers. Folders are ranked as well: unlike a type, a folder
+/// can have keywords, and they sort among themselves inside the folders-first block.
+fn keyword_ranks(dir: &Dir, order: &[u32]) -> Vec<u32> {
+    let mut ranks = vec![u32::MAX; dir.len()];
+    if !dir.keyed() {
+        return ranks;
+    }
+    let store = super::keywords::read();
+    let mut tagged: Vec<(u32, &str)> = order
+        .iter()
+        .filter_map(|&i| Some((i, store.get(dir.key(i as usize)?)?)))
+        .collect();
+    tagged.sort_unstable_by(|a, b| natural_cmp(a.1, b.1));
+    let mut rank = 0u32;
+    for at in 0..tagged.len() {
+        if at > 0 && tagged[at].1 != tagged[at - 1].1 {
+            rank += 1;
+        }
+        ranks[tagged[at].0 as usize] = rank;
+    }
+    ranks
 }
 
 /// A rank per entry for the Type column, so that ordering by rank orders by the label

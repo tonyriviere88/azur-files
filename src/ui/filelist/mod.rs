@@ -45,6 +45,7 @@ use crate::ui::{
 mod band;
 mod chain;
 mod columns;
+mod keywords;
 mod rename;
 mod rows;
 mod status;
@@ -58,6 +59,7 @@ mod tests;
 pub(crate) use band::*;
 pub(crate) use chain::*;
 pub(crate) use columns::*;
+pub(crate) use keywords::*;
 pub(crate) use rename::*;
 pub(crate) use rows::*;
 pub(crate) use status::*;

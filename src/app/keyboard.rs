@@ -153,10 +153,13 @@ impl App {
         //
         // Read here rather than where it is used, because the video's keys are asked the same
         // question first.
-        let renaming = self
-            .panes
-            .iter()
-            .any(|p| p.tabs.iter().any(|t| t.renaming.is_some()));
+        // Keywords count: they are a field over a row exactly as a rename is, and re-reading the folder
+        // under one is the same edit thrown away.
+        let renaming = self.panes.iter().any(|p| {
+            p.tabs
+                .iter()
+                .any(|t| t.renaming.is_some() || t.keywords.is_some())
+        });
         // A menu on screen owns the keyboard: its own arrows and Enter are handled where
         // it is drawn, and the listing must not move underneath it at the same time.
         let typing =

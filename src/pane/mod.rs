@@ -656,6 +656,26 @@ pub struct Tab {
     pub renaming: Option<(usize, String)>,
     /// Whether the rename field still needs the caret put in it.
     pub rename_fresh: bool,
+    /// A row's keywords being edited in place: which entry, which file, and the text so far.
+    ///
+    /// **The file's key as well as the entry**, and the key is what the edit is committed to. An
+    /// entry index is only good until the folder is read again, and the watcher re-reads it whenever
+    /// anything is written there — so the index is the row the field is *drawn* on, and moved when
+    /// a new listing lands, while the key says which file the typing is about whatever happens to
+    /// the rows. See [`crate::fs::keywords`].
+    pub keywords: Option<(usize, crate::fs::keywords::FileKey, String)>,
+    /// Whether the keywords field still needs the caret put in it.
+    pub keywords_fresh: bool,
+    /// Which row's Keywords cell the pointer is resting on, and since when — in
+    /// [`egui::InputState::time`].
+    ///
+    /// **What makes the cell clickable, after [`crate::ui::filelist::KEYWORDS_ARM`].** A click that
+    /// lands on a cell straight away is a click on the row, as everywhere else in it: the cell is a
+    /// quarter of the row's width, and a listing where one column in four opened a text field under
+    /// a click meant to select a file would be a listing nobody could click in. Resting on it is the
+    /// deliberate gesture, and the cell says when it has become one. By entry index, and dropped as
+    /// soon as the pointer leaves the cell.
+    pub keywords_hover: Option<(usize, f64)>,
     /// What was selected when the listing was dropped for a refresh, to be selected again when
     /// the new one lands.
     ///
@@ -702,9 +722,9 @@ pub struct Tab {
 }
 
 /// Widths for the fitted columns before anything has been measured. Only
-/// visible for the frame between a listing arriving and being drawn — and Status is
-/// nothing until then, so an unsynced folder never shows a blank one for that frame.
-const DEFAULT_WIDTHS: [f32; Column::COUNT] = [240.0, 0.0, 88.0, 130.0, 132.0];
+/// visible for the frame between a listing arriving and being drawn — and Keywords and Status
+/// are nothing until then, so a folder that has neither never shows a blank one for that frame.
+const DEFAULT_WIDTHS: [f32; Column::COUNT] = [240.0, 0.0, 0.0, 88.0, 130.0, 132.0];
 
 /// What a folder diff's tab is called until both halves have landed and it can name them.
 pub const DIFF_TITLE: &str = "Folder diff";
@@ -857,6 +877,9 @@ impl Tab {
             band: None,
             renaming: None,
             rename_fresh: false,
+            keywords: None,
+            keywords_fresh: false,
+            keywords_hover: None,
             preview: crate::ui::preview::Preview::default(),
             diff: None,
         }

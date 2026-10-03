@@ -691,6 +691,48 @@ impl App {
                     p.tab_mut().renaming = None;
                 }
             }
+            Action::BeginKeywords { pane, entry } => {
+                if let Some(p) = self.pane_mut(pane) {
+                    p.tab_mut().begin_keywords(entry);
+                }
+            }
+            Action::CommitKeywords { pane, text } => {
+                let Some(p) = self.pane_mut(pane) else { return };
+                let tab = p.tab_mut();
+                let Some((entry, key, _)) = tab.keywords.take() else {
+                    return;
+                };
+                // Where the file is now, for the store's own record of it — see
+                // [`crate::fs::keywords`]. The key is what is kept; the path is for a person.
+                let path = tab
+                    .dir
+                    .as_ref()
+                    .filter(|dir| dir.key(entry) == Some(key))
+                    .map(|dir| dir.target(entry))
+                    .unwrap_or_default();
+                if !fs::keywords::set(key, &text, &path) {
+                    return;
+                }
+                // Every listing on show whose order is *made of* keywords is now out of date, in any
+                // pane — the same file can be on show in two. The others only draw them, and draw
+                // them from the store next frame. The column is re-fitted where it is on show, so a
+                // longer set is not elided by a width chosen before it existed.
+                for pane in &mut self.panes {
+                    for tab in &mut pane.tabs {
+                        if tab.dir.as_ref().is_some_and(|dir| dir.volume == Some(key.volume)) {
+                            tab.widths_measured = false;
+                            if tab.sort_by == crate::fs::Column::Keywords {
+                                tab.rebuild_order();
+                            }
+                        }
+                    }
+                }
+            }
+            Action::CancelKeywords(pane) => {
+                if let Some(p) = self.pane_mut(pane) {
+                    p.tab_mut().keywords = None;
+                }
+            }
             Action::NewFolder(pane) => {
                 let owner = self.owner;
                 let Some(parent) = self.pane_mut(pane).map(|p| p.tab().path.clone()) else {

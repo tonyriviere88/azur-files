@@ -104,6 +104,18 @@ impl Tab {
             }
         }
 
+        // The keywords field, put back on whichever row its file is now — found by the file's key,
+        // which a rename does not change. Gone means gone, as for the rename field above.
+        self.keywords_hover = None;
+        if let Some((was, key, text)) = self.keywords.take() {
+            if let Some(dir) = self.dir.clone() {
+                if let Some(entry) = (0..dir.len()).find(|&i| dir.key(i) == Some(key)) {
+                    self.keywords_fresh |= entry != was;
+                    self.keywords = Some((entry, key, text));
+                }
+            }
+        }
+
         // Whatever was selected and is still there. Anything that has gone -- moved, renamed,
         // deleted -- simply is not selected any more, which is the only sensible answer.
         if !held.is_empty() {

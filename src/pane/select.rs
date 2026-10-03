@@ -168,6 +168,31 @@ impl Tab {
         self.rename_fresh = true;
     }
 
+    /// Begin editing entry `entry`'s keywords, seeded with the ones it has. Refused for a row with
+    /// no stable identity to keep them under — see [`crate::fs::Dir::key`].
+    pub fn begin_keywords(&mut self, entry: usize) {
+        let Some(key) = self.dir.as_ref().and_then(|dir| dir.key(entry)) else {
+            return;
+        };
+        let text = crate::fs::keywords::read()
+            .get(key)
+            .map(str::to_owned)
+            .unwrap_or_default();
+        // One field at a time: the rename field and this both want the keyboard.
+        self.renaming = None;
+        self.keywords = Some((entry, key, text));
+        self.keywords_fresh = true;
+        self.keywords_hover = None;
+    }
+
+    /// The keywords being edited, if this row is the one being edited.
+    pub fn keywords_text(&mut self, entry: usize) -> Option<&mut String> {
+        match &mut self.keywords {
+            Some((at, _, text)) if *at == entry => Some(text),
+            _ => None,
+        }
+    }
+
     /// The name being edited, if this row is the one being renamed.
     pub fn rename_text(&mut self, entry: usize) -> Option<&mut String> {
         match &mut self.renaming {

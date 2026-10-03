@@ -452,6 +452,14 @@ pub(crate) fn rows(
         let pressed_row = press.and_then(row_at);
 
         let edges = column_x(visible, widths);
+        // A column's cell on a row: its edges less the padding either side, on the line `row` is.
+        let cell_of = |column: Column, row: Rect| {
+            let at = column.index();
+            Rect::from_min_max(
+                pos2(edges[at] + CELL_PAD, row.top()),
+                pos2(edges[at + 1] - CELL_PAD, row.bottom()),
+            )
+        };
         let name_font = t.fonts.body.clone();
         let meta_font = t.fonts.caption.clone();
 
@@ -515,6 +523,50 @@ pub(crate) fn rows(
         // buffer down the whole loop, so a tree of chains allocates once for the frame rather than
         // once a row. Left holding whatever the last row put in it, like `scratch`.
         let mut chain_text = String::new();
+
+        // ---- Which Keywords cell the pointer is resting on, and whether for long enough ----
+        //
+        // See [`super::keywords`] for why a cell has to be rested on before a click edits it. Worked
+        // out before the rows are drawn, because the armed cell draws differently. Nothing rests on a
+        // cell while another field has the keyboard or a band is being dragged, and a row with no
+        // file ID has nowhere to keep keywords, so it never arms.
+        let keywords_col = Column::Keywords.index();
+        let keywords_x = edges[keywords_col]..=edges[keywords_col + 1];
+        let now = ui.input(|i| i.time);
+        let resting = hovered_row
+            .filter(|_| {
+                widths[keywords_col] > 0.0
+                    && tab.renaming.is_none()
+                    && tab.keywords.is_none()
+                    && tab.band.is_none()
+            })
+            .filter(|_| response.hover_pos().is_some_and(|at| keywords_x.contains(&at.x)))
+            .and_then(|position| tab.entry_at(position))
+            .filter(|&entry| dir.key(entry).is_some());
+        match (resting, tab.keywords_hover) {
+            (Some(entry), Some((was, _))) if was == entry => {}
+            (Some(entry), _) => tab.keywords_hover = Some((entry, now)),
+            (None, _) => tab.keywords_hover = None,
+        }
+        let armed = tab.keywords_hover.and_then(|(entry, since)| {
+            let waited = now - since;
+            if waited >= KEYWORDS_ARM {
+                return Some(entry);
+            }
+            // Nothing else will bring the frame that arms it if the pointer is held still.
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_secs_f64(KEYWORDS_ARM - waited));
+            None
+        });
+        if armed.is_some() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::Text);
+        }
+        // The row being edited, where its cell is, and its row — drawn after the loop, like the
+        // rename field.
+        let mut keywords_editing: Option<(usize, Rect, Rect)> = None;
+        // One read of the store for every row on screen, let go before anything after the loop can
+        // want it again.
+        let store = crate::fs::keywords::read();
 
         for position in range.clone() {
             let entry_index = tab.order[position] as usize;
@@ -792,7 +844,7 @@ pub(crate) fn rows(
             }
 
             let name_left = glyph_x + GLYPH + space::S3;
-            let name_right = edges[1] - CELL_PAD;
+            let name_right = edges[Column::Name.index() + 1] - CELL_PAD;
             // A folder row is somewhere files can be dropped. Recorded for every visible one,
             // because that is what makes dragging onto a folder mean "into that folder" rather
             // than "into the folder I am looking at".
@@ -870,6 +922,42 @@ pub(crate) fn rows(
                 );
             }
 
+            // ---- Keywords ----
+            //
+            // Only a listing read with file IDs has the column at all — see [`crate::fs::Dir::keyed`].
+            // In the metadata ink, like the Size beside it; the field's outline once the pointer has
+            // rested on it.
+            if widths[keywords_col] > 0.0 {
+                let cell = cell_of(Column::Keywords, meta_row);
+                if matches!(tab.keywords, Some((at, ..)) if at == entry_index) {
+                    keywords_editing = Some((entry_index, cell, row));
+                } else {
+                    let armed_here = armed == Some(entry_index);
+                    if armed_here {
+                        armed_box(ui.painter(), t, keywords_box(cell, row));
+                    }
+                    let text = dir.key(entry_index).and_then(|key| store.get(key));
+                    let shown = match text {
+                        // The row's metadata ink, which is what Size, Type and Modified are drawn
+                        // in: dimmed on a hidden or cut row, stepped back in a folder diff.
+                        Some(text) => Some((text, meta_color)),
+                        None if armed_here => Some((KEYWORDS_HINT, t.text.tertiary)),
+                        None => None,
+                    };
+                    if let Some((shown, color)) = shown {
+                        let galley =
+                            truncated(ui.painter(), shown, meta_font.clone(), color, cell.width());
+                        if inked && text.is_some() {
+                            ink.push(Rect::from_min_max(
+                                pos2(cell.left(), row.top()),
+                                pos2((cell.left() + galley.size().x).min(cell.right()), row.bottom()),
+                            ));
+                        }
+                        text_left(ui.painter(), cell, galley);
+                    }
+                }
+            }
+
             // ---- Status ----
             //
             // Only a synced folder has the column at all, so every other listing skips this on the
@@ -879,7 +967,8 @@ pub(crate) fn rows(
                 // No fitting against the cell: the column is never narrower than the 48 a drag
                 // stops at, which is room for the glyph and its padding either side.
                 if let Some(state) = tab.sync_of(entry_index) {
-                    let glyph = icon_rect(meta_row, edges[1] + CELL_PAD, GLYPH);
+                    let glyph =
+                        icon_rect(meta_row, edges[Column::Status.index()] + CELL_PAD, GLYPH);
                     sync_marks.push((glyph, state, under, dim));
                     if inked {
                         ink.push(Rect::from_x_y_ranges(glyph.x_range(), row.y_range()));
@@ -895,10 +984,7 @@ pub(crate) fn rows(
             // blank cell a folder has always had. See [`crate::sizes`].
             if widths[Column::Size.index()] > 0.0 {
                 if let Some(bytes) = tab.size_shown(entry_index) {
-                    let cell = Rect::from_min_max(
-                        pos2(edges[2] + CELL_PAD, meta_row.top()),
-                        pos2(edges[3] - CELL_PAD, meta_row.bottom()),
-                    );
+                    let cell = cell_of(Column::Size, meta_row);
                     // Under the text rather than behind it, and on `row` rather than the cell: the
                     // bar belongs to the row's own bottom edge, in the slack a caption line leaves
                     // below itself. See [`SHARE_DROP`], which is that measurement.
@@ -938,10 +1024,7 @@ pub(crate) fn rows(
             if widths[Column::Type.index()] > 0.0 {
                 scratch.clear();
                 fmt::type_label(dir.ext(entry_index), entry.is_dir(), scratch);
-                let cell = Rect::from_min_max(
-                    pos2(edges[3] + CELL_PAD, meta_row.top()),
-                    pos2(edges[4] - CELL_PAD, meta_row.bottom()),
-                );
+                let cell = cell_of(Column::Type, meta_row);
                 let galley = truncated(
                     ui.painter(),
                     scratch,
@@ -964,10 +1047,7 @@ pub(crate) fn rows(
             if widths[Column::Modified.index()] > 0.0 {
                 scratch.clear();
                 fmt::modified(entry.modified, zone, scratch);
-                let cell = Rect::from_min_max(
-                    pos2(edges[4] + CELL_PAD, meta_row.top()),
-                    pos2(edges[5] - CELL_PAD, meta_row.bottom()),
-                );
+                let cell = cell_of(Column::Modified, meta_row);
                 let galley = truncated(
                     ui.painter(),
                     scratch,
@@ -984,6 +1064,8 @@ pub(crate) fn rows(
                 text_left(ui.painter(), cell, galley);
             }
         }
+
+        drop(store);
 
         // Every visible row's icon, in one run — see where `deferred` is declared.
         if !deferred.is_empty() {
@@ -1011,6 +1093,9 @@ pub(crate) fn rows(
         if let Some((entry_index, left, right, text_row)) = renaming {
             rename_field(ui, t, pane, tab, entry_index, left, right, text_row, out);
         }
+        if let Some((entry_index, cell, row)) = keywords_editing {
+            keywords_field(ui, t, pane, tab, entry_index, cell, row, out);
+        }
 
         // ---- What the row is, in words -------------------------------------
         //
@@ -1026,6 +1111,8 @@ pub(crate) fn rows(
         // row — see the `ui.interact` above. Anchored to that response the way a button's tooltip is,
         // it would come up below the last row on screen, forty rows from the one it is about.
         let busy = tab.renaming.is_some()
+            || tab.keywords.is_some()
+            || resting.is_some()
             || tab.band.is_some()
             || ui.input(|i| i.pointer.any_down() || i.pointer.any_released());
         if let Some(position) = hovered_row.filter(|_| !busy) {
@@ -1038,7 +1125,7 @@ pub(crate) fn rows(
 
         // ---- Clicks --------------------------------------------------------
         let modifiers = ui.input(|i| i.modifiers);
-        if tab.renaming.is_some() {
+        if tab.renaming.is_some() || tab.keywords.is_some() {
             // The field has the keyboard and the pointer; a click that lands outside it
             // is handled by the field losing focus, not by moving the selection.
             return;
@@ -1066,6 +1153,22 @@ pub(crate) fn rows(
                 // The keyboard has already been claimed by the `Focus` above, which every click in
                 // the listing pushes — a twisty is still a click in this pane.
                 out.push(Action::ToggleCollapsed { pane, position });
+                return;
+            }
+        }
+
+        // ---- An armed Keywords cell --------------------------------------------
+        //
+        // A plain click on a cell the pointer has rested on edits it, and selects the row it is in —
+        // the file whose keywords are being typed is the file in hand. Any other click there, or a
+        // click before the cell has armed, is a click on the row. See [`super::keywords`].
+        //
+        // `armed` is only ever the entry under the pointer, in its Keywords cell, on this frame — it
+        // is worked out from `resting` above — so there is nothing left here to test about where.
+        if response.clicked() && !modifiers.command && !modifiers.shift {
+            if let (Some(entry), Some(position)) = (armed, hovered_row) {
+                tab.select_only(position);
+                out.push(Action::BeginKeywords { pane, entry });
                 return;
             }
         }
@@ -1404,6 +1507,14 @@ pub(crate) fn row_tooltip(
         if !target.arguments.is_empty() {
             about.push(("Arguments", target.arguments.clone()));
         }
+    }
+
+    // The keywords whole, which the column elides at its width.
+    if let Some(text) = dir
+        .key(entry_index)
+        .and_then(|key| crate::fs::keywords::read().get(key).map(str::to_owned))
+    {
+        about.push(("Keywords", text));
     }
 
     scratch.clear();

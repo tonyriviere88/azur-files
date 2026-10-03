@@ -109,6 +109,44 @@ fn by(dir: &Dir, column: Column, ascending: bool) -> Vec<String> {
         .collect()
 }
 
+/// Keywords sort by what the column shows, with the rows that have none gathered after the rest —
+/// and folders still first, since they can have keywords too.
+///
+/// On a volume serial no disk has, because the store is the window's one and every test in the
+/// process shares it.
+#[test]
+fn keywords_sort_by_what_the_column_shows() {
+    use crate::fs::keywords::{self, FileKey};
+    let volume = 0x7e57_5047_0000_0001;
+    let mut builder = DirBuilder::new(r"D:\tagged");
+    for (id, (name, flags)) in [
+        ("a.txt", 0),
+        ("b.txt", 0),
+        ("c.txt", 0),
+        ("d.txt", 0),
+        ("folder", FLAG_DIR),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        builder.push(name, 0, 0, flags);
+        builder.identify(id as u128 + 1);
+    }
+    builder.on_volume(Some(volume));
+    let dir = builder.finish(0);
+    let key = |id| FileKey { volume, id };
+    keywords::set(key(3), "alpha", std::path::Path::new(r"D:\tagged\c.txt"));
+    keywords::set(key(2), "beta", std::path::Path::new(r"D:\tagged\b.txt"));
+    keywords::set(key(5), "zulu", std::path::Path::new(r"D:\tagged\folder"));
+
+    assert_eq!(
+        by(&dir, Column::Keywords, true),
+        ["folder", "c.txt", "b.txt", "a.txt", "d.txt"],
+        "tagged in keyword order, then the untagged by name"
+    );
+    assert_eq!(by(&dir, Column::Keywords, false)[0], "folder", "folders lead either way");
+}
+
 #[test]
 fn type_sorts_by_the_label_the_column_shows() {
     // Not by extension: `cpp` < `exe`, but "Application" < "C++ source". Sorting on

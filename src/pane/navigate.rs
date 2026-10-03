@@ -174,6 +174,8 @@ impl Tab {
         self.scroll_to = Some(0.0);
         self.band = None;
         self.renaming = None;
+        self.keywords = None;
+        self.keywords_hover = None;
         self.keep_selected.clear();
         // A snapshot of somewhere else says nothing about what is new here.
         self.name_the_new = None;
@@ -218,6 +220,8 @@ impl Tab {
         self.cursor = None;
         self.anchor = None;
         self.renaming = None;
+        self.keywords = None;
+        self.keywords_hover = None;
         // For the same reason as the selection just above: a name is `file.txt` on one side of
         // this and `sub\file.txt` on the other, so nothing in the snapshot would match and every
         // row of the new listing would look new.

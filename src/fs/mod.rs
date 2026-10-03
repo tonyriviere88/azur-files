@@ -14,6 +14,7 @@
 //! | [`scan`] | reading a directory as fast as the platform allows |
 //! | [`sort`] | ordering and filtering, over indices rather than entries |
 //! | [`fmt`] | sizes, dates and type names, written into a reused buffer |
+//! | [`keywords`] | keywords on any file, kept beside the settings and keyed by file ID |
 //! | [`time`] | `FILETIME` to local civil time without a syscall per row |
 //! | [`drives`] | mounted volumes, and the synthetic "This PC" |
 //! | [`places`] | the shell's known folders |
@@ -23,6 +24,7 @@
 pub mod dir;
 pub mod drives;
 pub mod fmt;
+pub mod keywords;
 pub mod places;
 pub mod recycle;
 pub mod scan;

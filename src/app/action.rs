@@ -187,6 +187,13 @@ pub enum Action {
     /// Finish a rename, or do nothing if the name is unchanged or empty.
     CommitRename { pane: PaneId, name: String },
     CancelRename(PaneId),
+    /// Start editing a row's keywords — a click on its Keywords cell once the pointer has rested
+    /// there. By entry index, which is the row the field opens on; the file it is about is taken
+    /// from the listing at that moment. See [`crate::ui::filelist::KEYWORDS_ARM`].
+    BeginKeywords { pane: PaneId, entry: usize },
+    /// Keep what was typed as that file's keywords. Empty takes them all away.
+    CommitKeywords { pane: PaneId, text: String },
+    CancelKeywords(PaneId),
     NewFolder(PaneId),
     /// Pick the selection up and hand it to OLE.
     DragOut { pane: PaneId, items: Vec<PathBuf> },
@@ -323,6 +330,9 @@ impl Action {
             Self::BeginRename(_) => "BeginRename",
             Self::CommitRename { .. } => "CommitRename",
             Self::CancelRename(_) => "CancelRename",
+            Self::BeginKeywords { .. } => "BeginKeywords",
+            Self::CommitKeywords { .. } => "CommitKeywords",
+            Self::CancelKeywords(_) => "CancelKeywords",
             Self::NewFolder(_) => "NewFolder",
             Self::ShellMenu { .. } => "ShellMenu",
             Self::DragOut { .. } => "DragOut",
