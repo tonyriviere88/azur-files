@@ -303,7 +303,7 @@ mod tests {
     /// Every branch of the classification, and no registry.
     #[test]
     fn what_a_registration_amounts_to() {
-        let ours = PathBuf::from(r"D:\Sources\azur\target\claude\debug\azur-file-explorer.exe");
+        let ours = PathBuf::from(r"D:\Sources\azur\target\claude\debug\azur-files.exe");
 
         assert_eq!(
             classify(None, &ours),
@@ -312,11 +312,11 @@ mod tests {
         );
 
         assert_eq!(
-            classify(Some(r#""D:\Sources\azur\target\claude\debug\azur-file-explorer.exe""#), &ours),
+            classify(Some(r#""D:\Sources\azur\target\claude\debug\azur-files.exe""#), &ours),
             State::Ours
         );
         assert_eq!(
-            classify(Some(r#""d:\sources\azur\target\claude\debug\AZUR-FILE-EXPLORER.EXE""#), &ours),
+            classify(Some(r#""d:\sources\azur\target\claude\debug\AZUR-FILES.EXE""#), &ours),
             State::Ours,
             "a drive letter's case is not a different program"
         );
@@ -333,7 +333,7 @@ mod tests {
 
         // A different build of this same program: `Other`, because the tick means *this* build, and
         // clicking it has to be able to move the registration here.
-        let elsewhere = r#""D:\Sources\azur\target\release\azur-file-explorer.exe""#;
+        let elsewhere = r#""D:\Sources\azur\target\release\azur-files.exe""#;
         assert_eq!(
             classify(Some(elsewhere), &ours),
             State::Other(elsewhere.to_owned()),
@@ -344,7 +344,7 @@ mod tests {
         let theirs = r#""C:\Program Files\GPSoftware\Directory Opus\dopus.exe""#;
         assert_eq!(classify(Some(theirs), &ours), State::Other(theirs.to_owned()));
 
-        assert!(classify(Some(r#""D:\Sources\azur\target\claude\debug\azur-file-explorer.exe""#), &ours).ours());
+        assert!(classify(Some(r#""D:\Sources\azur\target\claude\debug\azur-files.exe""#), &ours).ours());
         assert!(!classify(None, &ours).ours());
     }
 
@@ -354,12 +354,12 @@ mod tests {
     /// registered path is supposed to be there.
     #[test]
     fn whose_wreckage_a_dangling_registration_is() {
-        let ours = PathBuf::from(r"D:\Programs\Azur\azur-file-explorer.exe");
+        let ours = PathBuf::from(r"D:\Programs\Azur\azur-files.exe");
         let gone = |_: &Path| false;
         let there = |_: &Path| true;
 
         // The case this exists for: a build registered out of `target\`, then cleaned away.
-        let stale = r#""D:\Sources\azur\target\claude\debug\azur-file-explorer.exe""#;
+        let stale = r#""D:\Sources\azur\target\claude\debug\azur-files.exe""#;
         assert!(
             dangling_ours(stale, &ours, gone),
             "our own executable name at a path that is gone is ours to re-point"
@@ -371,7 +371,7 @@ mod tests {
 
         // Case matters in a file name here for the same reason it does in `classify`.
         assert!(dangling_ours(
-            r#""D:\Sources\azur\target\debug\AZUR-FILE-EXPLORER.EXE""#,
+            r#""D:\Sources\azur\target\debug\AZUR-FILES.EXE""#,
             &ours,
             gone
         ));
@@ -411,7 +411,7 @@ mod tests {
     /// the measurement, including the two neutralisations that do not work.
     ///
     /// ```text
-    /// cargo test --bin azur-file-explorer claiming_win_e -- --ignored --nocapture
+    /// cargo test --bin azur-files claiming_win_e -- --ignored --nocapture
     /// ```
     #[test]
     #[ignore = "writes to HKEY_CURRENT_USER; run explicitly"]
@@ -458,7 +458,7 @@ mod tests {
     /// changing the developer's own desktop.
     ///
     /// ```text
-    /// cargo test --bin azur-file-explorer win_e_on_this_machine -- --ignored --nocapture
+    /// cargo test --bin azur-files win_e_on_this_machine -- --ignored --nocapture
     /// ```
     #[test]
     #[ignore = "diagnostic; run explicitly"]

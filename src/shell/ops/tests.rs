@@ -328,11 +328,15 @@ fn the_sink_reports_what_the_shell_actually_did() {
 ///
 /// ```text
 /// ucrtbase!wcslen+0x5f                                    rdx=0
-/// azur_file_explorer+0x2fc534
-/// azur_file_explorer+0xd7b21
+/// azur_files+0x2fc534
+/// azur_files+0xd7b21
 /// windows_storage!CFileOperation::_NotifyPostCopyItemCallback+0x40
 /// windows_storage!CFileOperation::NotifyPostCopyItem+0x90
 /// ```
+///
+/// The two offsets into this crate are from the build that faulted and mean nothing in any
+/// other; what the trace is here for is the shape — the shell calling in, and `wcslen` at the
+/// bottom of it.
 ///
 /// So this is the shape of that callback, made directly rather than by asking the shell for a
 /// conflict nobody can answer without a mouse. A null `Ref` is what the shell passes for an absent

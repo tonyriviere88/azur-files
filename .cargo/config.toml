@@ -16,7 +16,7 @@
 # `cargo claude-*` — the agent's build, kept out of the way of mine.
 #
 # `target/debug` and `target/release` are mine. Something that relinks
-# `azur-file-explorer.exe` behind my back invalidates the instance I have running, and I have
+# `azur-files.exe` behind my back invalidates the instance I have running, and I have
 # one running most of the time — Windows locks the running image, so the build fails and
 # leaves the *old* exe behind, which is the worst of both outcomes. So the agent builds into
 # `target/claude/` instead: inside `target/` rather than in a temp directory, so that it survives
@@ -26,7 +26,7 @@
 # 0.8s for a no-op build and 4.7s for a one-file edit.
 #
 #   cargo claude-clippy            everything, and it reports rustc's errors too
-#   cargo claude-build             -> target/claude/debug/azur-file-explorer.exe
+#   cargo claude-build             -> target/claude/debug/azur-files.exe
 #   cargo claude-test <filter>     same directory, so it shares the compiled dependencies
 #   cargo claude-run
 #

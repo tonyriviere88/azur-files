@@ -14,6 +14,16 @@
 /// bar's ladder from.
 const ICON: &str = "assets/app-icon/app.ico";
 
+/// What Windows calls the program where it reads the executable rather than the window:
+/// Properties → Details, and the Task Manager's process list.
+///
+/// The same string as `brand::NAME`, and it has to be written again rather than read from
+/// there, because a build script is compiled before the crate it builds and cannot see into
+/// it. Left to itself `winresource` fills these from `CARGO_PKG_NAME` and
+/// `CARGO_PKG_DESCRIPTION` — `azur-files`, which is the executable's name and not the
+/// program's, and a sentence too long for the column it lands in.
+const NAME: &str = "Azur Files";
+
 fn main() {
     println!("cargo:rerun-if-changed={ICON}");
     println!("cargo:rerun-if-changed=build.rs");
@@ -25,7 +35,12 @@ fn main() {
         println!("cargo:warning={ICON} is missing; see assets/app-icon/README.md to rebuild it");
         return;
     }
-    if let Err(e) = winresource::WindowsResource::new().set_icon(ICON).compile() {
+    let resource = winresource::WindowsResource::new()
+        .set_icon(ICON)
+        .set("ProductName", NAME)
+        .set("FileDescription", NAME)
+        .compile();
+    if let Err(e) = resource {
         println!("cargo:warning=could not embed the icon ({e}); the executable will use the generic one");
     }
 }

@@ -168,7 +168,7 @@ mod tests {
     /// a folder of yours opened as a grid — or did not.
     ///
     /// ```text
-    /// cargo test --bin azur-file-explorer providers_on_this_machine -- --ignored --nocapture
+    /// cargo test --bin azur-files providers_on_this_machine -- --ignored --nocapture
     /// ```
     #[test]
     #[ignore = "diagnostic; run explicitly"]

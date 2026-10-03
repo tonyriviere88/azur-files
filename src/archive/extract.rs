@@ -259,7 +259,7 @@ pub fn temp_root() -> PathBuf {
     #[cfg(not(test))]
     {
         std::env::temp_dir()
-            .join("azur-file-explorer")
+            .join("azur-files")
             .join(format!("archives-{}", std::process::id()))
     }
 }

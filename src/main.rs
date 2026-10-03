@@ -1,4 +1,4 @@
-//! Azur File Explorer — a file manager that stays out of the way.
+//! Azur Files — a file manager that stays out of the way.
 //!
 //! Tabs in the title bar, above the pane they belong to, a breadcrumb that behaves like
 //! Explorer's, a details view that does not care how big the folder is, and panes you

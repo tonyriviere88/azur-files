@@ -228,7 +228,7 @@ fn dir() -> Option<PathBuf> {
     if cfg!(test) {
         return None;
     }
-    let name = if cfg!(windows) { crate::brand::NAME } else { "azur-file-explorer" };
+    let name = if cfg!(windows) { crate::brand::NAME } else { "azur-files" };
     crate::config::base_dir().map(|base| base.join(name).join("cwd"))
 }
 

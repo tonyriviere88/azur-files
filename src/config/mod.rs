@@ -256,11 +256,11 @@ impl Default for Config {
 impl Config {
     /// Read the settings, falling back to the defaults for anything missing.
     pub fn load() -> Self {
-        let text = file()
-            .and_then(|path| std::fs::read_to_string(path).ok())
-            // Nothing under the current name: either a first run or a rename, and the two
-            // are told apart by whether the old file is there. See [`previous_file`].
-            .or_else(|| previous_file().and_then(|path| std::fs::read_to_string(path).ok()));
+        // One place, and no fallback: [`file`] is where the settings are, and nothing there is
+        // a first run. A folder left behind by a build that called itself something else is not
+        // read — moving it is a rename somebody does once, and looking for it on every launch
+        // would be two reads and a name to carry for ever.
+        let text = file().and_then(|path| std::fs::read_to_string(path).ok());
         match text {
             Some(text) => Self::parse(&text),
             None => Self::default(),
@@ -659,19 +659,9 @@ fn file() -> Option<PathBuf> {
     let name = if cfg!(windows) {
         crate::brand::NAME
     } else {
-        "azur-file-explorer"
+        "azur-files"
     };
     base_dir().map(|base| base.join(name).join("config.ini"))
-}
-
-/// What the settings folder was called before the program had a name.
-///
-/// Read only when there is nothing under the current name, and never written: a user who
-/// had bookmarks, open tabs and a window size should not lose them to a rename, and the
-/// first save afterwards puts them in the new place. One migration, nothing remembered,
-/// and it can go once nobody is coming from that version.
-fn previous_file() -> Option<PathBuf> {
-    base_dir().map(|base| base.join("yet-another-file-explorer").join("config.ini"))
 }
 
 /// Where per-user settings go on this platform.

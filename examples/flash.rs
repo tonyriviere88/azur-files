@@ -51,7 +51,7 @@ fn main() {
             .count();
         if hwnd.is_invalid() {
             // SAFETY: a lookup by title; the handle is only read.
-            hwnd = unsafe { FindWindowW(None, w!("Azur File Explorer")) }.unwrap_or_default();
+            hwnd = unsafe { FindWindowW(None, w!("Azur Files")) }.unwrap_or_default();
         }
         let mut state = "no window".to_owned();
         if !hwnd.is_invalid() {

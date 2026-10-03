@@ -40,7 +40,7 @@
 //! would vanish into a light bar without it.
 
 /// What the window is called.
-pub const NAME: &str = "Azur File Explorer";
+pub const NAME: &str = "Azur Files";
 
 /// The sizes the mark is rasterised at for use *inside* the window, smallest first.
 ///
