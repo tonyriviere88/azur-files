@@ -5,6 +5,18 @@
 
 use super::*;
 
+/// Whether a Windows key is held.
+///
+/// `false` off Windows, and that is the honest answer rather than a gap: all three shortcuts it
+/// gates are about a Win32 window's own geometry. See `win::super_down` for why the platform is asked
+/// at all — egui does not carry the modifier — and for which combinations the shell keeps.
+fn super_down() -> bool {
+    #[cfg(windows)]
+    return crate::win::super_down();
+    #[cfg(not(windows))]
+    false
+}
+
 impl App {
     /// Space and the arrows, for the video that has the keyboard.
     ///
@@ -80,6 +92,58 @@ impl App {
         }
     }
 
+    /// The three window shortcuts that carry the Windows key: `Ctrl+Win+Up`, `Down` and `Left`.
+    ///
+    /// **Before the fields and the menus**, and unlike everything else in [`App::keyboard`] they are
+    /// not stood down by a focused text field: none of the three is a thing a field could mean, and a
+    /// window that could not be resized because the filter box had the caret would be a window with a
+    /// mode nobody asked for. They are still *consumed*, because two of them are arrow keys and the
+    /// listing moves its cursor on those — see the walk further down.
+    ///
+    /// # Why the modifier is read off the keyboard
+    ///
+    /// `egui::Modifiers` has no Windows key in it — `egui-winit` drops winit's `SUPER` — so it is
+    /// sampled from the platform on the frame the arrow arrives. See `win::super_down`.
+    ///
+    /// # `Ctrl+Win+Left` mostly does not arrive at all
+    ///
+    /// `Ctrl+Win+Up` and `Ctrl+Win+Down` are keystrokes like any other. **`Ctrl+Win+Left` is Windows'
+    /// own "previous virtual desktop"**, claimed by the shell before any window is offered it: there is
+    /// no press to read, so there is nothing here that can make it work. A `WH_KEYBOARD_LL` hook to
+    /// take the chord out of the chain first was written, tried, and did not deliver it either — see
+    /// `win::super_down`, which records that so the next person does not write it again.
+    ///
+    /// It stays bound because it costs a line and a machine with virtual desktops switched off does
+    /// deliver it. **`Ctrl+B` is the panel's shortcut**, read with the ordinary ones further down: it
+    /// is the sidebar key in every editor on the machine, and nothing here wanted `B`.
+    fn window_keys(&mut self, ctx: &egui::Context) {
+        use egui::Key as K;
+
+        // The cheap question first, and the reason is that the expensive one is a syscall: nothing
+        // here can be true without Ctrl and an arrow, and asking the platform about the Windows key
+        // on every frame of a scroll would be a syscall per frame for nothing.
+        let arrow = ctx.input(|i| {
+            i.modifiers.command.then(|| {
+                [K::ArrowUp, K::ArrowDown, K::ArrowLeft]
+                    .into_iter()
+                    .find(|&key| i.key_pressed(key))
+            })
+        });
+        let Some(arrow) = arrow.flatten() else { return };
+        if !super_down() {
+            return;
+        }
+
+        self.actions.push(match arrow {
+            K::ArrowUp => Action::Window(WindowAction::SpanScreens),
+            K::ArrowDown => Action::Window(WindowAction::ResetSize),
+            _ => Action::ToggleSidebar,
+        });
+        // So the listing does not also see it. `Modifiers::COMMAND` and not the modifiers as they
+        // arrived, because the Windows key is not among them — it is not a thing egui can match on.
+        ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, arrow));
+    }
+
     pub(super) fn keyboard(&mut self, ctx: &egui::Context) {
         use egui::Key as K;
 
@@ -123,6 +187,11 @@ impl App {
             }
             return;
         }
+
+        // **The window's own three, above the fields and the menus** — and below the fullscreen
+        // return above, deliberately: resizing the window under a video that is filling the screen is
+        // not something either gesture means. See [`App::window_keys`].
+        self.window_keys(ctx);
 
         if typing {
             // **`Ctrl+E` and `Ctrl+P` still get through.** Both are questions about the folder you
@@ -233,6 +302,13 @@ impl App {
             // No pane, unlike its neighbours: the window's preference, and every pane follows.
             if m.command && i.key_pressed(K::H) {
                 push(Action::ToggleHidden);
+            }
+            // The panel down the left, which is the window's preference for the same reason. **The one
+            // that works**: `Ctrl+Win+Left` is what was asked for and the shell takes it for switching
+            // virtual desktop, so this is the binding beside it — `Ctrl+B` is the sidebar key in every
+            // editor on the machine, and nothing here wanted `B`. See [`App::window_keys`].
+            if m.command && i.key_pressed(K::B) {
+                push(Action::ToggleSidebar);
             }
             if m.command && i.key_pressed(K::E) {
                 push(Action::ToggleFlat(pane));
@@ -473,14 +549,31 @@ impl App {
                 // letters typed earlier in this same frame count too, which is why `word` is
                 // tracked through the loop rather than asked once.
                 //
-                // **The press, and not only the character**: a held key repeats its text but is
-                // pressed once, so `key_pressed` is what keeps a thumb resting on the bar from
-                // flapping the panel open and shut at the machine's repeat rate. A held space goes
-                // on typing spaces, which is what it has always done. Bare only — a modified space
-                // stays the letter it was, which is nothing this listing can find and so nothing
-                // that happens.
+                // **The press, and not only the character**: a held space goes on typing spaces,
+                // which is what it has always done, and only the first of them is the panel.
+                //
+                // **Read off the events rather than through `key_pressed`**, which is not the same
+                // question however much it looks like it: `InputState::num_presses` counts
+                // key-*repeat* events too — its own documentation says so — so a thumb resting on the
+                // bar reads as one press per repeat and flapped the panel open and shut at the
+                // machine's repeat rate. `repeat: false` is the discriminator, and it is the only
+                // thing that distinguishes the two.
+                //
+                // Bare only — a modified space stays the letter it was, which is nothing this listing
+                // can find and so nothing that happens.
                 if !i.modifiers.command && !i.modifiers.alt {
-                    let space = i.modifiers.is_none() && i.key_pressed(K::Space);
+                    let space = i.modifiers.is_none()
+                        && i.events.iter().any(|event| {
+                            matches!(
+                                event,
+                                egui::Event::Key {
+                                    key: K::Space,
+                                    pressed: true,
+                                    repeat: false,
+                                    ..
+                                }
+                            )
+                        });
                     let mut word = tab.typing_a_name(i.time);
                     for event in &i.events {
                         if let egui::Event::Text(text) = event {

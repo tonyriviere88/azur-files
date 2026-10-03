@@ -154,6 +154,43 @@ impl Owner {
     }
 }
 
+/// A GUID nothing has used before, in the form everything writes it in.
+///
+/// `Ctrl+G` in a rename field, which is the only caller: a name that has to be unique and mean
+/// nothing is a thing developers type several times a day, and typing one by hand is not something
+/// anybody does correctly.
+///
+/// **`CoCreateGuid` rather than arithmetic of this program's own**, which is what puts it in this
+/// module: it is the platform's own version 4 generator, seeded by the platform's own entropy, and it
+/// is the same call every tool on the machine that offers this makes. Writing a v4 by hand would mean
+/// a random source, and a random source chosen for a keyboard shortcut is a dependency and a decision
+/// about entropy that this has no business making.
+///
+/// Lowercase, hyphenated, and **no braces**: the form a source file, a config and a database column
+/// want. Windows' own tools write `{...}` because a registry key needs the delimiters, which a
+/// filename does not — and a name with braces in it is a name that has to be quoted in every shell
+/// it is ever passed to.
+///
+/// `None` where there is no such call to make, which is the same answer [`over_network`] gives and
+/// means the same thing: the shortcut inserts nothing rather than inventing something.
+pub fn new_guid() -> Option<String> {
+    #[cfg(windows)]
+    {
+        use windows::Win32::System::Com::CoCreateGuid;
+
+        // SAFETY: fills in one `GUID` of the size the signature declares. Documented as callable
+        // from any thread, and it is called from the one that has an apartment anyway.
+        let guid = unsafe { CoCreateGuid() }.ok()?;
+        let [a, b, c, d, e, f, g, h] = guid.data4;
+        Some(format!(
+            "{:08x}-{:04x}-{:04x}-{a:02x}{b:02x}-{c:02x}{d:02x}{e:02x}{f:02x}{g:02x}{h:02x}",
+            guid.data1, guid.data2, guid.data3
+        ))
+    }
+    #[cfg(not(windows))]
+    None
+}
+
 /// Whether reading this path means going over a network.
 ///
 /// True for a UNC path, and for a drive letter that is a mapped share. Used by [`menu`] to

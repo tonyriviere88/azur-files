@@ -299,6 +299,8 @@ pub fn title_bar(
     strips: &[(PaneId, Rect)],
     focused: PaneId,
     maximized: bool,
+    // Whether the panel down the left is showing, for the entry in the menu under the mark.
+    sidebar: bool,
     drag: &Option<TabDrag>,
     icons_cache: &mut crate::shell::icons::Icons,
     out: &mut Vec<Action>,
@@ -348,7 +350,7 @@ pub fn title_bar(
         Rect::from_center_size(mark.center(), vec2(16.0, 16.0)),
         t.accent.default,
     );
-    app_menu(ui, &mark_response, t.dark, out);
+    app_menu(ui, &mark_response, t.dark, sidebar, out);
     x = mark.right() + space::S2;
 
     // ---- Window buttons, from the right ---------------------------------
@@ -790,7 +792,13 @@ fn paint_tab(
 
 /// The application menu: the handful of settings that belong to the window rather
 /// than to a pane.
-fn app_menu(ui: &mut Ui, trigger: &egui::Response, dark: bool, out: &mut Vec<Action>) {
+fn app_menu(
+    ui: &mut Ui,
+    trigger: &egui::Response,
+    dark: bool,
+    sidebar: bool,
+    out: &mut Vec<Action>,
+) {
     use azur_egui_theme::components::{Menu, MenuItem};
 
     Menu::new(trigger).min_width(220.0).show(ui.ctx(), |ui| {
@@ -813,6 +821,28 @@ fn app_menu(ui: &mut Ui, trigger: &egui::Response, dark: bool, out: &mut Vec<Act
             .clicked()
         {
             out.push(Action::SetTheme { dark: false });
+        }
+        azur_egui_theme::components::menu_divider(ui);
+        // The panel down the left, which is the one piece of furniture in this window with no switch
+        // of its own anywhere on screen — there is nowhere to put one that is not inside the thing
+        // being hidden. Ticked rather than named twice: one entry that says whether the panel is
+        // showing, like the two themes above it, rather than a `Show` and a `Hide` that are never both
+        // true.
+        //
+        // **`Ctrl+B` and not the `Ctrl+Win+←` this was first bound to**, because that combination is
+        // Windows' own "previous virtual desktop" and never reaches this program at all — a menu that
+        // printed a shortcut which does nothing is worse than one that printed none. Both are read; see
+        // [`crate::app::App::window_keys`].
+        if ui
+            .add(
+                MenuItem::new("Left panel")
+                    .shortcut("Ctrl+B")
+                    .selected(sidebar)
+                    .icon(&icons::split_side),
+            )
+            .clicked()
+        {
+            out.push(Action::ToggleSidebar);
         }
         azur_egui_theme::components::menu_divider(ui);
         if ui
@@ -844,7 +874,19 @@ fn app_menu(ui: &mut Ui, trigger: &egui::Response, dark: bool, out: &mut Vec<Act
         azur_egui_theme::components::menu_divider(ui);
         if ui
             .add(
-                MenuItem::new("Reset window size").icon(&azur_icons::window_restore),
+                MenuItem::new("Across every screen")
+                    .shortcut("Ctrl+Win+↑")
+                    .icon(&azur_icons::window_maximize),
+            )
+            .clicked()
+        {
+            out.push(Action::Window(WindowAction::SpanScreens));
+        }
+        if ui
+            .add(
+                MenuItem::new("Reset window size")
+                    .shortcut("Ctrl+Win+↓")
+                    .icon(&azur_icons::window_restore),
             )
             .clicked()
         {

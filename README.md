@@ -249,6 +249,31 @@ marks that never overlap — there is no point in a pane asking for two things a
 - Closing a pane's last tab collapses the split. The last tab of the last pane closes
   the window.
 
+**Three panes across are thirds, and they go back to halves when one closes.** Which sounds like
+nothing to arrange and is the one piece of arithmetic in the dock: the layout is a binary tree, so
+splitting divides the *node* the tab landed on and knows nothing about the one above it. Three panes
+came out `[1/2, 1/4, 1/4]` — a pane, and then two panes half its size — and closing the third of three
+left `[1/3, 2/3]`.
+
+So after either gesture the **run** that changed is evened out. A run is what reads as a row or a
+column: the chain of splits that divide the same axis, reachable from each other without passing
+through a split of the other one. Each node of it gets `slots(first) / slots(node)`, which is what
+makes it right for a run of either shape rather than only the right-leaning one that a sequence of
+splits happens to build — `h(A, h(B, C))` comes out `1/3` then `1/2`, and `h(h(A, B), C)` comes out
+`2/3` then `1/2`, and both are three equal columns.
+
+Only the run that changed, found by walking down to the pane that arrived or to the one next door to
+the pane that went. A split of the *other* axis counts as one slot of the run, whatever is inside it,
+and is left alone: a column standing in a row was divided by hand, and adding a column beside it is
+not a gesture about it. That is also why a column losing half of itself moves nothing — the row still
+has the same number of columns in it, so no run is a slot short, and the pane that was sharing the
+column simply inherits what the column had.
+
+The evened ratios are not held to the clamp a divider drag is (`0.12`…`0.88`): the first of nine equal
+panes gets `1/9`, which is narrower than any drag and still a share whose edge you can find. The
+settings file therefore reads a tree back at a wider floor than the drag's, or a window left with nine
+columns would have reopened with every divider slightly out of place.
+
 Without touching the mouse: `Ctrl+\` splits the current folder to the right, and the
 app menu (the mark at the top left) and every folder's context menu both offer
 "open in a pane to the right / below".
@@ -537,6 +562,51 @@ does not fit is the tail, truncated at the right-hand edge.
 Drives, bookmarks, places and network locations, each group collapsible and remembered. Network is
 last because it is the only one of the four whose contents this machine may know nothing about, and
 a panel is scanned from the top.
+
+**`Ctrl+B` puts the whole panel away**, and the entry in the menu under the mark is the other way —
+which is where it has to be, because there is nowhere to put a switch for hiding the panel that is not
+inside the panel. With it off the panes have the window's whole width, and the seam goes with it: a
+one-point line down the left of a window with nothing to the left of it is a line dividing a thing from
+no thing. The splitter goes too, or there would be four points of window that set a resize cursor and
+dragged nothing. Whether the panel is showing is its own setting rather than a width of zero, so
+bringing it back finds the width it was dragged to.
+
+`Ctrl+Win+←` is bound to the same thing and **Windows will not deliver it**: it is the shell's own
+"previous virtual desktop", claimed before any application is offered the keystroke, so there is no
+press for a window to read. A `WH_KEYBOARD_LL` hook to take the chord out of the chain before the shell
+resolved it — the only place a window can reach it at all — was written, tried, and **did not deliver
+it either**, so it is not in the program: a desktop-wide keyboard hook means every keystroke on the
+machine passing through a file manager, and one that does not even produce the shortcut is all cost and
+no shortcut. The binding stays because it costs a line and a machine with virtual desktops switched off
+does deliver it. `Ctrl+B` is the one to reach for, and it is what every editor on the machine uses for
+the same panel.
+
+### The window across every screen
+
+`Ctrl+Win+↑` spreads the window over **all** the monitors, and `Ctrl+Win+↓` puts it back to its default
+size. Both are in the menu under the mark as well.
+
+The platform has no command for the first of them, because its own maximise is one monitor by
+definition — so the window is moved directly, the same way [a video filling the
+screen](#video-played-rather-than-pictured) is and for the same reason: `WS_MAXIMIZE` comes off first,
+or Windows clamps the window to the work area of the one monitor it thinks it is maximised on and the
+span stops at that monitor's edge. One `SetWindowPos` after that, which does not animate — a window
+crossing three monitors through the platform's maximise animation is a second of nothing happening.
+
+**Which rectangle, given that a window is one and a desktop of several monitors is not.** Both obvious
+bounding boxes are wrong. The union of the *monitors* covers the taskbar, which is the one thing this
+was asked not to do. The union of the *work areas* covers it too whenever the taskbar is not on the
+outermost monitor: a taskbar along the bottom of the primary screen shortens that monitor's work area,
+but a second monitor's reaches its own bottom edge and the union takes the larger of the two. So the box
+is the union of the monitors, pulled in at each edge by whatever the monitors *on that edge* reserve —
+four independent questions, so a taskbar down the left of one screen has nothing to say about the
+bottom. What it costs is a band of desktop left showing along the bottom of the screens that have no
+taskbar, which is the price of a window being a rectangle and cheaper than a window with a strip of
+itself underneath the taskbar.
+
+It is deliberately **not** a maximised window: the style bit stays off, so it is an ordinary window that
+happens to be the size of the desktop — which is what lets `Ctrl+Win+↓` put it back with nothing more
+than a resize, and what makes the size something the settings file can remember like any other.
 
 ### The volumes that have no drive letter
 
@@ -1632,6 +1702,30 @@ same move in reverse, through `open_maximized`'s own recipe when the window was 
 arrives as `SIZE_MAXIMIZED` and winit learns the state it is in. It is topmost while it fills the
 screen, because Windows hiding the taskbar for a fullscreen window is a heuristic rather than a
 promise, and the failure is the taskbar sitting exactly where the controls are.
+
+**And it goes one pixel past the monitor on every side**, which is about a hairline along the top edge
+that nothing in this program drew. Two things put a line there and both had to go. Windows 11 draws a
+one-pixel border outside the client area of every top-level window — `DWMWA_BORDER_COLOR` set to
+`DWMWA_COLOR_NONE` is how a window declines it, and `DWMWA_WINDOW_CORNER_PREFERENCE` is the same story
+an attribute along, four notches of desktop showing through the corners of a film. The line that
+*survived* that is the sizing edge of `WS_THICKFRAME`, which winit keeps on an undecorated window
+because it is what makes the window resizable at all: Windows draws that edge however little else of
+the frame is left, and a window merely *placed* at the monitor's rectangle keeps it inside the screen
+where a maximised window would have pushed it off. So the rectangle is grown by a pixel and the frame
+lands where the monitor is not. It costs a pixel off each edge of a picture that is letterboxed inside
+the black anyway, and it beats taking `WS_THICKFRAME` off and putting it back — a style change winit
+recomputes from its own bookkeeping the next time it is asked for anything.
+
+**The controls get out of the way, and take the pointer with them.** Three seconds without the mouse
+moving and the strip is not drawn and the cursor over the picture is hidden; the next movement anywhere
+over the window brings both back. What the strip does *not* give back is its thirty points — the
+picture is laid out at the same rect either way, because a picture that grew whenever a hand left the
+mouse would rescale the frame, reallocate its texture and jump, five seconds after you stopped touching
+anything. So the band simply shows the ground. The cursor is only hidden while the pointer is over the
+picture, since there is one cursor for the window and a paused clip in a panel is no reason to take the
+mouse away from the listing beside it. A pointer that has never moved at all — a `--shot` run, which
+has none — counts as moving rather than as resting, or every screenshot of the player would be a
+screenshot with no controls in it.
 
 ### Its keyboard, and the click that has to wait
 
@@ -3136,6 +3230,24 @@ back as `archive.tar`, because only the last extension is one. A folder keeps it
 selected even with a dot in it. Counted in characters rather than bytes, or the caret lands
 mid-glyph on `réunion.txt`.
 
+**`Ctrl+G` types a fresh GUID**, over whatever is selected — so pressed straight after `F2`, where
+what is selected is the stem, `report.docx` becomes `f81d4fae-…-….docx` and the extension is left
+alone. Which is the gesture: a name that has to be unique and say nothing. Lowercase, hyphenated and
+**no braces** — Windows' own tools write `{…}` because a registry key needs the delimiters, and a
+filename with braces in it is a name that has to be quoted in every shell it is passed to.
+
+It is `CoCreateGuid` rather than arithmetic of this program's own: the platform's version 4 generator,
+seeded by the platform's entropy, and the same call every tool on the machine that offers this makes.
+Writing a v4 by hand would mean picking a random source, which is a dependency and a decision about
+entropy that a keyboard shortcut has no business making.
+
+Inserting it is two halves, and the second is the one that is easy to leave out. Changing the `String`
+behind a `TextEdit` is not editing it — the caret and the selection live in egui's memory, keyed by the
+field's id — so a text that has grown by 36 characters under a selection that still names the old ones
+leaves the next keystroke deleting a stretch of the GUID that was just inserted. And egui counts the
+caret in **characters** while `String` is indexed in **bytes**: `Résumé.pdf` is nine characters and
+eleven, and `replace_range` on a boundary inside a character does not misplace the insertion, it panics.
+
 **The row being renamed wears no selection.** A selected row’s fill and accent bar sit right
 behind the field competing for the same edge, so the one row you are actually looking at reads
 worst. Explorer drops the highlight while renaming too. The field has **no accent ring** either,
@@ -3861,12 +3973,15 @@ A pipe is not a terminal and every program can tell:
 | `F5`, `Ctrl+R` | refresh |
 | `Ctrl+A` | select all |
 | `Ctrl+H` | show hidden files — every pane, and remembered between sessions |
+| `Ctrl+B` | show or hide the panel down the left — also in the menu under the mark, and remembered between sessions |
+| `Ctrl+Win+↑` / `Ctrl+Win+↓` | spread the window across every screen, taskbar excepted / back to its default size |
 | `Ctrl+D` | bookmark this folder |
 | `Ctrl+P` | preview the selection — works from inside the filter box, like `Ctrl+E` |
 | `Space` | the same, from the listing — unless a name is being typed, or a video has the keys |
 | `Ctrl+X` / `Ctrl+C` / `Ctrl+V` | cut / copy / paste |
 | `Delete` / `Shift+Delete` | recycle / delete permanently |
 | `F2` | rename |
+| `Ctrl+G` | while renaming: type a fresh GUID over what is selected — so pressed straight after `F2` it replaces the name and leaves the extension |
 | `Ctrl+Shift+N` | new folder |
 | `Ctrl+Shift+C` | copy the selected paths as text, one per line — with whichever slash the path field writes, and also in the context menu as `Copy path(s)` |
 | `Ctrl+²` | show or hide this pane's console — also the switch at the left of [the status line](#the-status-line) |

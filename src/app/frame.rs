@@ -23,7 +23,14 @@ impl App {
             );
             self.installed = true;
         }
-        self.maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+        // **Not while a video is filling the screen**, which is the same argument the size below
+        // makes: filling it means the maximise bit comes off the window — see `win::fill_screen` —
+        // so a window that was maximised reports itself restored for as long as the video is up.
+        // Believing that loses the state to go back to, and a session left maximised and closed from
+        // fullscreen reopened as a small window in a corner.
+        if self.fullscreen_video.is_none() {
+            self.maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
+        }
         self.close_on_blur(&ctx);
         // Keep painting while the window is being restored, resized or rescaled, so the
         // compositor never has to stretch a frame that was drawn for a different shape.
@@ -221,6 +228,7 @@ impl App {
             &plan.in_bar,
             self.focused,
             self.maximized,
+            self.sidebar_shown,
             &self.drag,
             &mut self.icons,
             &mut self.actions,
@@ -314,7 +322,7 @@ impl App {
     /// own. Returns where every pane's tabs go, with the panes already reduced by the room
     /// their strip bands take.
     pub(super) fn plan_layout(&mut self, body: Rect, bar: Rect) -> chrome::StripPlan {
-        let (_, panes_area) = Self::split_body(body, self.sidebar_width);
+        let (_, panes_area) = Self::split_body(body, self.sidebar_width, self.sidebar_shown);
         self.layout
             .layout(panes_area, &mut self.pane_rects, &mut self.splitters);
         self.pane_order = self.pane_rects.iter().map(|(id, _)| *id).collect();
@@ -329,8 +337,17 @@ impl App {
     /// and made it read as a tray of cards.
     ///
     /// [`crate::ui::SEAM`] between the two, and that is the only division in here.
-    pub(super) fn split_body(body: Rect, sidebar_width: f32) -> (Rect, Rect) {
+    ///
+    /// **With the panel hidden the seam goes too**, and the panes have the body whole: a one-point
+    /// line down the left of a window with nothing to the left of it is a line dividing a thing from
+    /// no thing. `Rect::NOTHING` for the sidebar then, which is what every caller tests rather than a
+    /// second return value — a rect with no area is already the answer to "is there a panel", and it
+    /// draws, hit-tests and clips as nothing wherever one is handed on by mistake.
+    pub(super) fn split_body(body: Rect, sidebar_width: f32, shown: bool) -> (Rect, Rect) {
         let inner = body;
+        if !shown {
+            return (Rect::NOTHING, inner);
+        }
         let width = sidebar_width.clamp(140.0, (inner.width() - 240.0).max(140.0));
         let sidebar = Rect::from_min_max(inner.min, pos2(inner.left() + width, inner.bottom()));
         let panes_area =
@@ -345,7 +362,7 @@ impl App {
         }
 
         let inner = full;
-        let (sidebar, panes_area) = Self::split_body(full, self.sidebar_width);
+        let (sidebar, panes_area) = Self::split_body(full, self.sidebar_width, self.sidebar_shown);
 
         // ---- What shows through the seams ---------------------------------
         //
@@ -365,77 +382,89 @@ impl App {
         //
         // `background-layer-alt`, not `self.surface`'s `background-layer`: the sidebar reads
         // as the same surface as the title bar and the status bar, not as a pane.
-        ui.painter()
-            .rect_filled(sidebar, egui::CornerRadius::ZERO, t.bg.layer_alt);
-        {
-            let mut child = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(sidebar)
-                    .layout(egui::Layout::top_down(egui::Align::Min)),
-            );
-            child.set_clip_rect(sidebar.intersect(ui.clip_rect()));
-            let current = self
-                .panes
-                .iter()
-                .find(|p| p.id == self.focused)
-                .map(|p| p.tab().path.clone())
-                .unwrap_or_default();
-            let mut marks = sidebar::Marks {
-                list: &self.bookmarks,
-                editing: &mut self.bookmark_edit,
-                rows: &mut self.bookmark_rows,
-                // A drag from outside is over the window, so the `+` stands down — see
-                // [`sidebar::Marks::dragging`]. Read from the hover the OLE callbacks
-                // publish, which is the only thing that knows a drag is in flight at all.
-                dragging: self.drop_hover.is_some(),
-            };
-            self.bookmarks_rect = sidebar::show(
-                &mut child,
-                t,
-                self.volumes.all(),
-                self.volumes.shares(),
-                self.volumes.servers(),
-                self.volumes.found(),
-                self.volumes.finding(),
-                &mut marks,
-                &self.places,
-                &current,
-                self.focused,
-                &mut self.sections,
-                &mut self.icons,
-                &mut self.scratch,
-                &mut self.actions,
-            );
-            // A drag hovering over Bookmarks. Same highlight the listing gets, so pinning
-            // reads as a drop rather than as nothing happening — and drawn here, after the
-            // rows, for the same reason it is in the pane.
-            if let Some(area) = self.bookmarks_preview(ui.ctx().pixels_per_point()) {
-                crate::ui::drop_target(child.painter(), area, t);
+        //
+        // **All of it is behind the switch**, the splitter below included: a grip beside a panel that
+        // is not there would be four points of window that set a resize cursor and dragged nothing.
+        // The two rects a drag is tested against are cleared for the same reason — see
+        // [`App::bookmarks_preview`], which would otherwise go on offering a drop onto a group nobody
+        // can see.
+        if !self.sidebar_shown {
+            self.bookmarks_rect = None;
+            self.bookmark_rows.clear();
+        } else {
+            ui.painter()
+                .rect_filled(sidebar, egui::CornerRadius::ZERO, t.bg.layer_alt);
+            {
+                let mut child = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(sidebar)
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                );
+                child.set_clip_rect(sidebar.intersect(ui.clip_rect()));
+                let current = self
+                    .panes
+                    .iter()
+                    .find(|p| p.id == self.focused)
+                    .map(|p| p.tab().path.clone())
+                    .unwrap_or_default();
+                let mut marks = sidebar::Marks {
+                    list: &self.bookmarks,
+                    editing: &mut self.bookmark_edit,
+                    rows: &mut self.bookmark_rows,
+                    // A drag from outside is over the window, so the `+` stands down — see
+                    // [`sidebar::Marks::dragging`]. Read from the hover the OLE callbacks
+                    // publish, which is the only thing that knows a drag is in flight at all.
+                    dragging: self.drop_hover.is_some(),
+                };
+                self.bookmarks_rect = sidebar::show(
+                    &mut child,
+                    t,
+                    self.volumes.all(),
+                    self.volumes.shares(),
+                    self.volumes.servers(),
+                    self.volumes.found(),
+                    self.volumes.finding(),
+                    &mut marks,
+                    &self.places,
+                    &current,
+                    self.focused,
+                    &mut self.sections,
+                    &mut self.icons,
+                    &mut self.scratch,
+                    &mut self.actions,
+                );
+                // A drag hovering over Bookmarks. Same highlight the listing gets, so pinning
+                // reads as a drop rather than as nothing happening — and drawn here, after the
+                // rows, for the same reason it is in the pane.
+                if let Some(area) = self.bookmarks_preview(ui.ctx().pixels_per_point()) {
+                    crate::ui::drop_target(child.painter(), area, t);
+                }
             }
-        }
 
-        // ---- The splitter beside it ---------------------------------------
-        let grip = Rect::from_min_max(
-            pos2(sidebar.right() - 3.0, inner.top()),
-            pos2(panes_area.left() + 3.0, inner.bottom()),
-        );
-        let response = ui.interact(
-            grip,
-            egui::Id::new("sidebar-grip"),
-            egui::Sense::click_and_drag(),
-        );
-        if response.hovered() || response.dragged() {
-            ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-        }
-        if response.dragged() {
-            self.sidebar_width = (self.sidebar_width + response.drag_delta().x).clamp(140.0, 520.0);
-            self.config_dirty = true;
-        }
-        // Double-clicking a splitter puts it back where it started, which is the same gesture
-        // the column edges in the listing already answer to.
-        if response.double_clicked() {
-            self.sidebar_width = crate::config::SIDEBAR_WIDTH;
-            self.config_dirty = true;
+            // ---- The splitter beside it -----------------------------------
+            let grip = Rect::from_min_max(
+                pos2(sidebar.right() - 3.0, inner.top()),
+                pos2(panes_area.left() + 3.0, inner.bottom()),
+            );
+            let response = ui.interact(
+                grip,
+                egui::Id::new("sidebar-grip"),
+                egui::Sense::click_and_drag(),
+            );
+            if response.hovered() || response.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            }
+            if response.dragged() {
+                self.sidebar_width =
+                    (self.sidebar_width + response.drag_delta().x).clamp(140.0, 520.0);
+                self.config_dirty = true;
+            }
+            // Double-clicking a splitter puts it back where it started, which is the same gesture
+            // the column edges in the listing already answer to.
+            if response.double_clicked() {
+                self.sidebar_width = crate::config::SIDEBAR_WIDTH;
+                self.config_dirty = true;
+            }
         }
 
         // ---- The panes ----------------------------------------------------

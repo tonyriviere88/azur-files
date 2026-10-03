@@ -33,6 +33,14 @@ const TRACK_MIN: f32 = 48.0;
 /// the video has got to when nothing is near it — which is most of the time.
 const KNOB: f32 = 5.0;
 
+/// How long the pointer has to hold still before the controls and the cursor go.
+///
+/// Three seconds. It was five, which is what most players use, and in front of a film that is long
+/// enough to notice the strip still sitting there — the point of it going is that it goes without being
+/// waited for. Still far longer than any pause while somebody is aiming at the scrubber, since aiming
+/// at something *is* moving the pointer.
+const REST: f32 = 3.0;
+
 /// The same player over the whole window: nothing else is drawn, and nothing else can be reached.
 ///
 /// **The only difference from [`show`] is the rect and the ground.** Which is the point of it being
@@ -106,6 +114,33 @@ fn canvas(
         None => canvas,
     };
 
+    // **The pointer has stopped moving, so the controls get out of the way** — and the room the strip
+    // was in is *not* given back to the picture. `screen` above is the same rect either way, which is
+    // the whole reason this is a separate question from `bar`: a picture that grew by thirty points
+    // whenever a hand left the mouse would rescale the frame, reallocate the texture and jump — five
+    // seconds after you stopped touching anything. So the picture stays where it is and the strip
+    // simply is not there; what shows in its place is the ground, painted below across the whole
+    // canvas rather than only over the picture.
+    //
+    // Read off the window rather than off this canvas: it is the pointer that has stopped, and the
+    // pointer belongs to the window. So moving the mouse anywhere over it brings the controls back,
+    // which is what makes them findable — a rule that only counted movement over the video would need
+    // you to already know where the video was.
+    //
+    // **`is_finite` is the guard for a pointer that has never moved at all**, which egui reports as an
+    // infinite rest. That is a window nobody has touched: `--shot --preview` has no pointer, and a
+    // capture of a player with no controls in it would be a screenshot of the wrong thing.
+    let resting = ui.input(|i| i.pointer.time_since_last_movement());
+    let hidden = resting.is_finite() && resting >= REST;
+    // And the frame that would notice. This program is idle in front of a paused video, so without
+    // this the controls would go the next time something else asked for a repaint — which may be
+    // never. Booked only while there is something to wait for.
+    if !hidden && resting.is_finite() {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_secs_f32(REST - resting));
+    }
+    let bar = bar.filter(|_| !hidden);
+
     // **Before anything is drawn**, so the frame this fetches is the frame painted below. It also
     // has to happen even when there is nothing to show yet: the engine's own news — the metadata,
     // a failure — arrives through the same call.
@@ -123,9 +158,13 @@ fn canvas(
     // Filling a monitor it is **black**, because there the argument runs out — a panel belongs to the
     // window around it and there is no window around this, and every player ever written puts black
     // beside a film.
+    // Across the **whole** canvas, the strip's band included, and not only behind the picture. The
+    // strip paints its own surface over the bottom of it where there is one; where there is not — a
+    // panel too short for it, or a pointer that has come to rest — this is what stands in its place,
+    // and without it those thirty points would be whatever the pane last drew there.
     let ground = if filling { Color32::BLACK } else { t.bg.canvas };
     ui.painter()
-        .rect_filled(screen, CornerRadius::ZERO, ground);
+        .rect_filled(canvas, CornerRadius::ZERO, ground);
 
     if let Some(why) = player.failed() {
         // The engine's complaint, in the middle, exactly where a decoder's would go. No strip: there
@@ -188,7 +227,18 @@ fn canvas(
         ui.ctx()
             .request_repaint_after(std::time::Duration::from_secs_f64(left));
     }
-    if response.hovered() {
+    // **And the pointer itself goes, but only where it is over the picture.**
+    //
+    // `set_cursor_icon` is the *window's* cursor and there is one of those, so a rule that hid it
+    // whenever any player had come to rest would take the cursor away from somebody reading a file
+    // listing with a paused clip in the panel beside it. Over the picture it is the right thing and
+    // it is what a player does; anywhere else it would be a program that had lost the mouse.
+    //
+    // Filling the screen there is nowhere else to be, so `contains_pointer` answers the same
+    // question — the canvas is the window.
+    if hidden && response.contains_pointer() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::None);
+    } else if response.hovered() {
         ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
     }
 

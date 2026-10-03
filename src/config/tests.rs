@@ -23,6 +23,8 @@ fn the_window_comes_back_the_way_it_was_left() {
         window: Some([1380.0, 840.0]),
         position: Some([-1920.0, -8.0]),
         sidebar_width: 260.0,
+        // Away from its default, which is the panel showing.
+        sidebar_shown: false,
         dark: false,
         preview: crate::ui::preview::Layout {
             at: crate::ui::preview::Where::Bottom,
@@ -60,6 +62,10 @@ fn the_window_comes_back_the_way_it_was_left() {
     assert_eq!(back.layout, saved.layout);
     assert_eq!(back.focus, 1);
     assert_eq!(back.sidebar_width, 260.0);
+    // Whether the panel is on screen at all, which is remembered beside how wide it is — and its own
+    // key rather than a width of zero, so bringing it back finds the width it was dragged to.
+    assert!(!back.sidebar_shown);
+    assert_eq!(back.sidebar_width, saved.sidebar_width);
     assert!(!back.dark);
     // The preview panel's four preferences. Worth pinning together with the window's shape,
     // because they are the same kind of thing — how the window comes back — and because a
@@ -93,6 +99,10 @@ fn the_window_comes_back_the_way_it_was_left() {
     // turned it off, has to come back off.
     assert!(!back.regroup);
     assert!(older.regroup, "on by default");
+    // The panel down the left is a third of those, and it is the one where getting the default wrong
+    // would be worst: a file written by a build that predates the key has no line for it, and a
+    // window that opened with no way to reach a drive or a bookmark would read as broken.
+    assert!(older.sidebar_shown, "on by default");
     // And **nothing at all about rows or tiles**, which is the one listing setting this file
     // deliberately does not carry: a tab always opens in the details view. A `view=` key written
     // by hand is ignored, and one appearing here again would mean the argument on

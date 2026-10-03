@@ -133,10 +133,24 @@ fn the_preview_panel_takes_room_from_the_listing_and_its_close_button_gives_it_b
             }
         }
         // And it is showing the walk rather than the word `Reading…`.
+        //
+        // **Named modules, not one particular module.** This looked for the words `API set`, which is a
+        // row the walk only draws for an api-set import — and *which* imports are in the first ten rows
+        // is the order the linker wrote this test binary's import table in. A panel along the bottom of
+        // a pane holds about nine rows against the side panel's twenty-five, so adding a Win32 call
+        // anywhere in this crate could push that row out of view and fail a test about something else
+        // entirely. Which it did. What the assertion is for is that the walk *finished*: rows naming
+        // real modules, and not the word it says while it is still reading.
         let texts: Vec<String> = h.texts().into_iter().map(|(_, text)| text).collect();
         assert!(
-            texts.iter().any(|text| text.contains("API set")),
-            "{at:?}: the panel is not showing a finished walk: {texts:?}"
+            texts
+                .iter()
+                .any(|text| text.to_ascii_lowercase().ends_with(".dll")),
+            "{at:?}: the panel names no imported module: {texts:?}"
+        );
+        assert!(
+            !texts.iter().any(|text| text.contains("Reading")),
+            "{at:?}: the panel is still reading"
         );
 
         // **A row folds when it is clicked.** Worth driving for real rather than through the
@@ -799,38 +813,70 @@ fn space_opens_the_preview_panel_unless_a_name_is_being_typed() {
     h.frame(Vec::new());
 
     // A space arrives as a key *and* as a character, which is what `egui-winit` sends for it.
-    let bar = |h: &mut Harness, repeat: bool| {
-        h.take_journal();
-        h.frame(vec![
-            Event::Key {
-                key: egui::Key::Space,
-                physical_key: None,
-                pressed: true,
-                repeat,
-                modifiers: Modifiers::NONE,
-            },
-            Event::Text(" ".to_owned()),
-        ]);
+    //
+    // **And the bar is let go of**, which is the half a harness has to be told about and the half this
+    // test was missing. **egui decides for itself whether a press is a repeat** — `repeat =
+    // !first_press`, against the keys it has down, in `InputState::begin_pass` — so the flag a caller
+    // passes is not the flag the application reads. A test that pressed the bar and never released it
+    // had every tap after the first *become* a repeat, which is a keyboard nobody has, and it is what
+    // made the held case below pass against a program that flapped the panel at the repeat rate.
+    fn space(h: &mut Harness, pressed: bool) {
+        let key = |pressed, repeat| Event::Key {
+            key: egui::Key::Space,
+            physical_key: None,
+            pressed,
+            repeat,
+            modifiers: Modifiers::NONE,
+        };
+        h.frame(if pressed {
+            vec![key(true, false), Event::Text(" ".to_owned())]
+        } else {
+            vec![key(false, false)]
+        });
         h.frame(Vec::new());
+    }
+    // One tap of the bar — down, up — and what it asked for.
+    let tap = |h: &mut Harness| {
+        h.take_journal();
+        space(h, true);
+        space(h, false);
         h.take_journal()
     };
 
     assert!(!h.app.panes[1].tab().preview.open);
-    assert_eq!(bar(&mut h, false), vec!["TogglePreview"]);
+    assert_eq!(tap(&mut h), vec!["TogglePreview"]);
     assert!(h.app.panes[1].tab().preview.open, "it did not open");
     // And only in the pane the keyboard is in, exactly as `Ctrl+P`.
     assert!(
         !h.app.panes[0].tab().preview.open,
         "it opened in the other pane as well"
     );
-    assert_eq!(bar(&mut h, false), vec!["TogglePreview"]);
+    assert_eq!(tap(&mut h), vec!["TogglePreview"]);
     assert!(!h.app.panes[1].tab().preview.open, "it did not shut again");
 
-    // Held down: the same character, no press, and so no toggle.
-    assert!(
-        bar(&mut h, true).is_empty(),
-        "a held space toggled the panel"
+    // **Held down**: the bar goes down once and stays down, so the first press is a press and every
+    // one after it is a repeat — the same character over again, and no new press. Only the first is
+    // the panel, or a thumb resting on the bar would flap it at the machine's repeat rate.
+    h.take_journal();
+    space(&mut h, true);
+    assert_eq!(
+        h.take_journal(),
+        vec!["TogglePreview"],
+        "the press that starts a hold is still a press"
     );
+    space(&mut h, true);
+    let held = h.take_journal();
+    assert!(
+        held.is_empty(),
+        "a held space toggled the panel, got {held:?}"
+    );
+    assert!(h.app.panes[1].tab().preview.open, "the hold shut it again");
+    space(&mut h, false);
+    // Back to shut, so what follows is about the space rather than about which way the panel was left.
+    // The wait is not decoration: every repeat above **typed a space**, which is a letter of a name and
+    // puts a word in flight — so without it this tap would be the next case rather than this one.
+    h.wait();
+    assert_eq!(tap(&mut h), vec!["TogglePreview"]);
     assert!(!h.app.panes[1].tab().preview.open);
 
     // And with a word in flight the space belongs to the word. The letter goes to the type-ahead
@@ -839,7 +885,7 @@ fn space_opens_the_preview_panel_unless_a_name_is_being_typed() {
     h.wait();
     h.frame(vec![Event::Text("a".to_owned())]);
     assert!(
-        bar(&mut h, false).is_empty(),
+        tap(&mut h).is_empty(),
         "the space in a name opened the panel"
     );
     assert!(!h.app.panes[1].tab().preview.open);

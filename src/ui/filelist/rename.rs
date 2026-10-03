@@ -176,6 +176,25 @@ pub(crate) fn rename_field(
         tab.rename_fresh = false;
     }
 
+    // **`Ctrl+G` types a fresh GUID**, at the caret and over whatever is selected — so pressed on the
+    // frame a rename opens, where what is selected is the stem, `report.pdf` becomes
+    // `f81d4fae-…-….pdf` and the extension is left alone. Which is the gesture: a name that has to be
+    // unique and say nothing.
+    //
+    // Read *after* the field has been drawn, like Enter and Escape below, and consumed so that a
+    // future `Ctrl+G` elsewhere in the window cannot also fire off the same keystroke. Only while the
+    // field has the keyboard: this function is drawn for one row at a time, but the guard is what
+    // makes that a property of the code rather than of the caller.
+    if response.has_focus()
+        && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::G))
+    {
+        if let Some(guid) = crate::shell::new_guid() {
+            if let Some(text) = tab.rename_text(entry) {
+                type_into(ui.ctx(), id, text, &guid);
+            }
+        }
+    }
+
     let (enter, escape) = ui.input(|i| {
         (
             i.key_pressed(egui::Key::Enter),
@@ -192,4 +211,53 @@ pub(crate) fn rename_field(
     } else if enter || response.lost_focus() {
         out.push(Action::CommitRename { pane, name });
     }
+}
+
+/// Put `typed` into the field as though it had been typed: over the selection, and the caret after it.
+///
+/// **Both halves, and the second is the one that is easy to leave out.** Changing the `String` behind
+/// a `TextEdit` is not editing it — the caret and the selection live in egui's memory, keyed by the
+/// field's id, and a text that has grown by 36 characters under a selection that still names the old
+/// ones leaves the next keystroke deleting a stretch of the GUID that was just inserted. So the range
+/// is read from that state, the text is spliced, and a bare caret past the insertion is written back.
+///
+/// A cursor with nothing stored is the end of the text, which is where a field the keyboard has only
+/// just reached has its caret.
+///
+/// # Characters and bytes
+///
+/// egui counts the caret in **characters** and `String` is indexed in **bytes**, and a name on a
+/// Windows disk is frequently not ASCII — `Résumé.pdf` is nine characters and eleven bytes. Getting
+/// that wrong does not merely misplace the insertion: `replace_range` on a boundary inside a character
+/// panics. Hence the conversion, and hence its falling back to the end of the string rather than
+/// indexing past it — the stored range describes the text as it was last laid out, which is one frame
+/// old.
+fn type_into(ctx: &egui::Context, id: Id, text: &mut String, typed: &str) {
+    use egui::text::{CCursor, CCursorRange};
+
+    let Some(mut state) = egui::TextEdit::load_state(ctx, id) else {
+        return;
+    };
+    let counted = text.chars().count();
+    let range = state
+        .cursor
+        .char_range()
+        .unwrap_or_else(|| CCursorRange::one(CCursor::new(counted)));
+    // `CharIndex` is a newtype over the count, unwrapped here so the rest of this is arithmetic.
+    let (one, two) = (range.primary.index.0, range.secondary.index.0);
+    let (from, to) = (one.min(two).min(counted), one.max(two).min(counted));
+    // Characters to bytes. `char_indices().nth` rather than arithmetic, because that is the only
+    // thing that is right for every string.
+    let byte = |chars: usize| {
+        text.char_indices()
+            .nth(chars)
+            .map_or(text.len(), |(at, _)| at)
+    };
+    text.replace_range(byte(from)..byte(to), typed);
+    state
+        .cursor
+        .set_char_range(Some(CCursorRange::one(CCursor::new(
+            from + typed.chars().count(),
+        ))));
+    state.store(ctx, id);
 }

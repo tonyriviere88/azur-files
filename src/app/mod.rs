@@ -283,6 +283,13 @@ pub struct App {
     bookmarks: crate::ui::sidebar::Bookmarks,
     sections: Sections,
     sidebar_width: f32,
+    /// Whether the panel down the left is on screen at all.
+    ///
+    /// The window's preference — there is one panel, so there is one answer — and remembered, like
+    /// the width beside it. See [`Action::ToggleSidebar`]. Its own flag rather than a width of zero
+    /// because the two are different questions: hiding the panel and bringing it back has to find the
+    /// width it was dragged to, which a zero would have thrown away.
+    sidebar_shown: bool,
 
     maximized: bool,
     /// Whose video is filling the screen, if one is.
@@ -513,6 +520,7 @@ impl App {
             bookmarks: config.bookmarks.clone(),
             sections: config.sections,
             sidebar_width: config.sidebar_width,
+            sidebar_shown: config.sidebar_shown,
             preview: config.preview,
             console_share: config.console_share,
             console_shell: config.console_shell,
@@ -565,6 +573,7 @@ impl App {
         let mut config = Config {
             bookmarks: self.bookmarks.clone(),
             sidebar_width: self.sidebar_width,
+            sidebar_shown: self.sidebar_shown,
             preview: self.preview,
             console_share: self.console_share,
             console_shell: self.console_shell,

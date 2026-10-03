@@ -38,6 +38,19 @@ pub enum Node {
     },
 }
 
+/// What a removal left behind for the caller to finish.
+///
+/// A run of same-way splits that has lost a pane has to be evened out at its *top*, and a node has no
+/// way of knowing whether it is the top: that depends on its parent's axis. So the axis is carried
+/// back up the recursion and the first node that does not divide it is the one that acts. See
+/// [`Node::remove_at`].
+enum Removed {
+    /// A pane went and the run dividing this axis is still waiting to be evened out.
+    Run(bool),
+    /// A pane went and its run has been dealt with, or there was none left to deal with.
+    Done,
+}
+
 /// A draggable divider, resolved for one frame.
 pub struct Splitter {
     /// The grab area, which is wider than the visible gap.
@@ -148,7 +161,22 @@ impl Node {
     }
 
     /// Split the pane holding `target`, putting `added` on `side` of it.
+    ///
+    /// **And then even the run out**, which is the whole of what makes a third pane a third of the
+    /// window rather than a quarter of it. A binary tree splits one node at a time, so splitting the
+    /// right-hand half of a divided window gave `[1/2, 1/4, 1/4]` — three panes, two of them half
+    /// the size of the first, because each split only ever halved the space it was handed. See
+    /// [`Node::even_run`], which is where the arithmetic that fixes it is written down.
     pub fn split(&mut self, target: PaneId, side: Side, added: PaneId) -> bool {
+        if !self.split_at(target, side, added) {
+            return false;
+        }
+        self.even_run(added, side.is_horizontal());
+        true
+    }
+
+    /// The split itself: the tree walk, without the evening out.
+    fn split_at(&mut self, target: PaneId, side: Side, added: PaneId) -> bool {
         match self {
             Self::Leaf(id) if *id == target => {
                 let existing = Self::Leaf(*id);
@@ -168,19 +196,151 @@ impl Node {
             }
             Self::Leaf(_) => false,
             Self::Split { first, second, .. } => {
-                first.split(target, side, added) || second.split(target, side, added)
+                first.split_at(target, side, added) || second.split_at(target, side, added)
             }
         }
     }
 
-    /// Take a pane out, collapsing the split it was half of.
+    /// Give every pane in one run of same-way splits the same share of it.
+    ///
+    /// **A run is what reads as a row or a column**: the maximal chain of splits that divide the
+    /// same axis, reachable from each other without passing through a split of the other axis. Three
+    /// panes side by side are `h(0, h(1, 2))` — two nodes, one run — and what somebody who has just
+    /// dragged a third tab to an edge means by it is three columns of equal width. What the tree
+    /// gives without this is `[1/2, 1/4, 1/4]`, because `Node::split_at` halves the *node* it lands
+    /// on and knows nothing about the one above it.
+    ///
+    /// The share is `slots(first) / slots(node)`, applied at every node of the run — which is what
+    /// makes it right for a run of either shape rather than only for the right-leaning one a
+    /// sequence of splits happens to build: `h(h(0, 1), 2)` comes out `2/3` at the root and `1/2`
+    /// inside it, the same three columns.
+    ///
+    /// **Only the run the new pane joined**, found by walking down to it: a horizontal run nested
+    /// inside some other column has nothing to do with this split, and evening it out would move
+    /// dividers somebody had placed by hand in a part of the window they were not touching. A split
+    /// of the *other* axis is therefore where the walk stops looking and starts recursing —
+    /// [`Node::slots`] counts such a child as one slot, whatever is inside it.
+    fn even_run(&mut self, pane: PaneId, horizontal: bool) {
+        if !self.holds(pane) {
+            return;
+        }
+        // The top of the run: the first node on the way down that divides the axis this split did.
+        if matches!(self, Self::Split { horizontal: h, .. } if *h == horizontal) {
+            self.even(horizontal);
+            return;
+        }
+        if let Self::Split { first, second, .. } = self {
+            first.even_run(pane, horizontal);
+            second.even_run(pane, horizontal);
+        }
+    }
+
+    /// How many panes a subtree contributes to a run of `horizontal` splits.
+    ///
+    /// One for anything that is not a split of that axis — a pane, or a whole column standing in a
+    /// row — because that is exactly what such a subtree is to the run: one slot, of whatever it
+    /// contains.
+    fn slots(&self, horizontal: bool) -> usize {
+        match self {
+            Self::Split {
+                horizontal: h,
+                first,
+                second,
+                ..
+            } if *h == horizontal => first.slots(horizontal) + second.slots(horizontal),
+            _ => 1,
+        }
+    }
+
+    /// The evening out itself, from the top of a run downwards.
+    ///
+    /// Not clamped to [`RATIO_MIN`]: those two are what a *drag* is held to, and an even share of
+    /// nine panes is narrower than a drag would ever produce while still being a share nobody has to
+    /// find the edge of — every divider is where the arithmetic says it is. [`HELD_MIN`] is what the
+    /// settings file will read such a tree back at.
+    fn even(&mut self, horizontal: bool) {
+        let Self::Split {
+            horizontal: h,
+            ratio,
+            first,
+            second,
+        } = self
+        else {
+            return;
+        };
+        // Reached by recursing into a child that turned out to divide the other axis, which is where
+        // this run ends: that subtree keeps its own dividers.
+        if *h != horizontal {
+            return;
+        }
+        let mine = first.slots(horizontal);
+        let theirs = second.slots(horizontal);
+        *ratio = mine as f32 / (mine + theirs) as f32;
+        first.even(horizontal);
+        second.even(horizontal);
+    }
+
+    /// Whether `pane` is somewhere in this subtree.
+    fn holds(&self, pane: PaneId) -> bool {
+        match self {
+            Self::Leaf(id) => *id == pane,
+            Self::Split { first, second, .. } => first.holds(pane) || second.holds(pane),
+        }
+    }
+
+    /// Take a pane out, collapsing the split it was half of — and even up what is left.
     ///
     /// Returns `false` when `pane` is the root — the caller has to decide what an
     /// empty window means, and here it means the last pane cannot be closed.
+    ///
+    /// **The evening out is the other half of [`Node::split`]'s**, and it is the same claim from the
+    /// other end: three columns that lose one are two columns, and two columns are halves. Without it
+    /// the shares left behind are whatever the arithmetic of three was — closing the third of three
+    /// left `[1/3, 2/3]`, so a window came back from a close lopsided in a way no gesture had asked
+    /// for.
+    ///
+    /// Only the run that lost a slot — see [`Node::remove_at`], where working out *which* one that is
+    /// turns out to be the whole of the problem. So a *column* disappearing out of a row leaves the
+    /// row's own dividers alone: no run of the row's is a slot short, and the pane that was sharing the
+    /// column simply inherits what the column had.
     pub fn remove(&mut self, pane: PaneId) -> bool {
-        let Self::Split { first, second, .. } = self else {
-            return false;
+        match self.remove_at(pane) {
+            None => false,
+            // The run reaches the root, so the root is the top of it — and after a removal *at* the
+            // root the root is the promoted subtree, which is the rest of the run when the split that
+            // collapsed was part of a longer one. `even` answers both by no-opping on a node that
+            // divides the other axis.
+            Some(Removed::Run(axis)) => {
+                self.even(axis);
+                true
+            }
+            Some(Removed::Done) => true,
+        }
+    }
+
+    /// The removal itself, reporting whether a run is still waiting to be evened out.
+    ///
+    /// **The awkward part is knowing which run lost a pane**, and it is not "the run the surviving
+    /// neighbour is in": a split that collapses entirely — `h(C, D)` losing `D` — takes its whole run
+    /// with it when it was the only node of one, and the run above *that* has exactly as many slots as
+    /// it had before. Evening from the neighbour downwards would find the row the vanished column stood
+    /// in and level dividers somebody had placed by hand in a part of the window nothing happened to.
+    ///
+    /// So the axis is carried back up instead. Every node it passes through that divides the same axis
+    /// is part of the same run and passes it on; the first node that divides the *other* axis is
+    /// standing above the top of the run, and evens it in the child it came from. A run that reaches
+    /// the root is [`Node::remove`]'s to even, which is the only reason this is two functions.
+    fn remove_at(&mut self, pane: PaneId) -> Option<Removed> {
+        let Self::Split {
+            horizontal,
+            first,
+            second,
+            ..
+        } = self
+        else {
+            return None;
         };
+        let horizontal = *horizontal;
 
         for which in [0, 1] {
             let child = if which == 0 { &**first } else { &**second };
@@ -189,10 +349,26 @@ impl Node {
                 let sibling = if which == 0 { second } else { first };
                 let promoted = std::mem::replace(&mut **sibling, Self::Leaf(pane));
                 *self = promoted;
-                return true;
+                return Some(Removed::Run(horizontal));
             }
         }
-        first.remove(pane) || second.remove(pane)
+
+        // Deeper — and **which child** it happened in matters, because a run that ends here is one
+        // this node has to even inside that child.
+        let (below, child) = match first.remove_at(pane) {
+            Some(below) => (below, &mut **first),
+            None => (second.remove_at(pane)?, &mut **second),
+        };
+        Some(match below {
+            // The run carries on through this node, so this node is not the top of it.
+            Removed::Run(axis) if axis == horizontal => Removed::Run(axis),
+            // It stopped below: `child` is the top of whatever is left of it.
+            Removed::Run(axis) => {
+                child.even(axis);
+                Removed::Done
+            }
+            Removed::Done => Removed::Done,
+        })
     }
 
     /// Every pane, in layout order.
@@ -326,7 +502,7 @@ impl Node {
 
             Some(Node::Split {
                 horizontal,
-                ratio: ratio.clamp(RATIO_MIN, RATIO_MAX),
+                ratio: ratio.clamp(HELD_MIN, HELD_MAX),
                 first: Box::new(first),
                 second: Box::new(second),
             })
@@ -345,13 +521,25 @@ impl Node {
     }
 }
 
-/// The narrowest share a split will give a pane, and its mirror.
+/// The narrowest share a splitter *drag* will give a pane, and its mirror.
 ///
-/// What a splitter drag clamps to, and so what [`Node::decode`] accepts: a ratio outside
-/// this is one no gesture in this window can produce, and a pane at 0.02 of the window is a
-/// pane you cannot find the edge of again.
+/// A pane at 0.02 of the window is a pane you cannot find the edge of again, so the gesture that
+/// could produce one is held here.
 pub const RATIO_MIN: f32 = 0.12;
 pub const RATIO_MAX: f32 = 0.88;
+
+/// The narrowest share the tree will *hold*, and its mirror — which is not the same question.
+///
+/// What [`Node::decode`] accepts, and it has to be wider than the drag's clamp because [`Node::even`]
+/// produces ratios a drag never would: the first of `n` equal panes gets `1/n`, and the settings file
+/// allows two dozen of them. Clamped to the drag's floor, a window left with nine columns would have
+/// reopened with the first of them a point wider than the rest and every divider after it out of
+/// place — the layout arriving *slightly* wrong, which is worse than either extreme.
+///
+/// It is still a floor rather than nothing, because this is also what a hand-edited file is held to:
+/// `1/32` is narrower than any arrangement this window can build and wide enough to grab.
+pub const HELD_MIN: f32 = 1.0 / 32.0;
+pub const HELD_MAX: f32 = 1.0 - HELD_MIN;
 
 /// The air between the middle mark and the four around it, as a share of one mark's side.
 ///

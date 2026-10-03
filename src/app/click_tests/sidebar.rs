@@ -919,3 +919,61 @@ fn the_bookmarks_group_shows_a_drop_target() {
     h.app.drop_hover = None;
     assert_eq!(h.app.bookmarks_preview(scale), None);
 }
+
+/// **The panel goes away and the panes have the window.**
+///
+/// The whole of the feature is [`App::split_body`] answering a different question, so what is worth
+/// pinning is that the answer reaches the screen: the panes are laid out at the rects the frame drew
+/// them at, and with the panel off the leftmost of them has to start at the window's own edge — no
+/// panel, and no seam either, because a line dividing a thing from no thing is a line about nothing.
+///
+/// And the splitter goes with it. A grip beside a panel that is not there would be four points of
+/// window that set a resize cursor and dragged nothing, which is the kind of thing that survives a
+/// review because it is invisible.
+#[test]
+fn hiding_the_left_panel_gives_the_panes_the_whole_window() {
+    let mut h = Harness::new();
+    h.settle();
+
+    let body_left = h.pane_rect(0).left();
+    assert!(
+        body_left > 100.0,
+        "the panes start at {body_left} with the panel showing, so this test proves nothing"
+    );
+    // Where the grip is while there is one, found by the pointer rather than by arithmetic.
+    let grip = h
+        .find(
+            Id::new("sidebar-grip"),
+            h.app.sidebar_width,
+            (crate::ui::chrome::HEIGHT as i32 + 40)..400,
+        )
+        .expect("the sidebar splitter is not reachable by the pointer");
+
+    h.app.perform(&h.ctx.clone(), Action::ToggleSidebar);
+    h.settle();
+
+    assert_eq!(
+        h.pane_rect(0).left(),
+        0.0,
+        "with the panel hidden the panes have to reach the window's edge"
+    );
+    assert!(
+        !h.hovers(Id::new("sidebar-grip"), grip),
+        "the splitter is still taking the pointer where the panel used to be"
+    );
+    // Nothing of the panel is drawn either — its own group headings are the cheapest proof, since
+    // they are text and there is nowhere else in the window that says `Drives`.
+    let texts: Vec<String> = h.texts().into_iter().map(|(_, text)| text).collect();
+    assert!(
+        !texts.iter().any(|text| text == "Drives"),
+        "the panel is hidden and still drawing itself: {texts:?}"
+    );
+
+    // And back, at the width it had: the flag is a separate thing from the width for exactly this
+    // reason — hiding the panel must not be a way of forgetting how wide somebody made it.
+    let width = h.app.sidebar_width;
+    h.app.perform(&h.ctx.clone(), Action::ToggleSidebar);
+    h.settle();
+    assert_eq!(h.pane_rect(0).left(), body_left);
+    assert_eq!(h.app.sidebar_width, width);
+}

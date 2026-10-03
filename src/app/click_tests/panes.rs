@@ -442,13 +442,14 @@ fn the_panels_are_square_and_a_single_line_apart() {
 
     let seam = crate::ui::seam(&h.app.theme);
     let layer = h.app.theme.bg.layer;
+    let alt = h.app.theme.bg.layer_alt;
 
     // ---- The gaps, from the layout ------------------------------------
     let body = Rect::from_min_max(
         pos2(0.0, crate::ui::chrome::bar_rect(Rect::from_min_size(Pos2::ZERO, h.size)).bottom()),
         Pos2::ZERO + h.size,
     );
-    let (sidebar, panes_area) = App::split_body(body, h.app.sidebar_width);
+    let (sidebar, panes_area) = App::split_body(body, h.app.sidebar_width, h.app.sidebar_shown);
     assert_eq!(
         panes_area.left() - sidebar.right(),
         crate::ui::SEAM,
@@ -474,7 +475,11 @@ fn the_panels_are_square_and_a_single_line_apart() {
     let (corner, fill) = h
         .fill_at(sidebar)
         .expect("nothing was painted at the sidebar's rect");
-    assert_eq!(fill, layer, "the sidebar is not `background-layer`");
+    // **`background-layer-alt`, and not the `background-layer` the panes get.** The sidebar reads as
+    // the same surface as the title bar and the status bar rather than as a pane — see `App::body`,
+    // which says so where it paints it. This assertion said `layer` for as long as that was true and
+    // went on saying it afterwards, which is a test asserting the colour the window used to be.
+    assert_eq!(fill, alt, "the sidebar is not `background-layer-alt`");
     assert_eq!(corner, egui::CornerRadius::ZERO, "the sidebar has rounded corners");
 
     for rect in &rects {

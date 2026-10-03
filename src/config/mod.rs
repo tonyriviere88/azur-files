@@ -87,6 +87,13 @@ pub struct Config {
     /// Which pane had the keyboard, as a position in [`Self::panes`].
     pub focus: usize,
     pub sidebar_width: f32,
+    /// Whether the panel down the left is on screen.
+    ///
+    /// **On**, and read as "anything but 0" for that reason: the panel is how you get to a drive or a
+    /// bookmark, so a settings file written before this key existed has to come back with it showing.
+    /// Off, the panes have the whole width, which is what somebody working in two of them side by
+    /// side on a laptop is after. See [`crate::app::Action::ToggleSidebar`].
+    pub sidebar_shown: bool,
     /// Where every pane's preview panel goes, and how much of the pane it takes.
     ///
     /// A preference rather than per-folder state, which is why it is here and the *open* flag is
@@ -209,6 +216,7 @@ impl Default for Config {
             layout: None,
             focus: 0,
             sidebar_width: SIDEBAR_WIDTH,
+            sidebar_shown: true,
             preview: crate::ui::preview::Layout::default(),
             console_share: crate::ui::console::SHARE,
             console_shell: crate::console::Kind::default(),
@@ -361,6 +369,9 @@ impl Config {
                         config.sidebar_width = width.clamp(140.0, 520.0);
                     }
                 }
+                // "Anything but 0", like `regroup` above: the panel showing is the default, so a file
+                // written before this key existed has no line for it and that default has to stand.
+                "sidebar" => config.sidebar_shown = value != "0",
                 "sections" => {
                     // Read by position with a default per field rather than on an exact count,
                     // so a file written before the Network group existed keeps the three
@@ -448,6 +459,7 @@ impl Config {
     pub(crate) fn to_text(&self) -> String {
         let mut text = format!("# {}\n", crate::brand::NAME);
         text.push_str(&format!("sidebar_width={:.0}\n", self.sidebar_width));
+        text.push_str(&format!("sidebar={}\n", flag(self.sidebar_shown)));
         // The preview panel: where it goes and how much room it takes, as a word and a number,
         // since neither means much without the other.
         text.push_str(&format!(

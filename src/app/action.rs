@@ -11,8 +11,16 @@ use super::*;
 pub enum WindowAction {
     Minimize,
     ToggleMaximize,
+    /// Spread the window across **every** monitor, leaving the taskbar showing. `Ctrl+Win+Up`.
+    ///
+    /// Not the platform's maximise, which is one monitor by definition — see `win::span_screens`,
+    /// where the rectangle is worked out and where what it does about the taskbar is argued. The
+    /// window is left an ordinary restored window that happens to be the size of the desktop, which
+    /// is what lets [`Self::ResetSize`] put it back with nothing more than a resize.
+    SpanScreens,
     /// Back to [`crate::config::WINDOW_SIZE`] — the way out of a window dragged to a shape you
-    /// did not mean, and the counterpart of double-clicking the sidebar splitter.
+    /// did not mean, the way back from [`Self::SpanScreens`], and the counterpart of double-clicking
+    /// the sidebar splitter. `Ctrl+Win+Down`.
     ResetSize,
     Close,
     Drag,
@@ -117,6 +125,13 @@ pub enum Action {
     TogglePreview(PaneId),
     /// Show or hide this pane's console.
     ToggleConsole(PaneId),
+    /// Show or hide the panel down the left: the drives, the bookmarks and the places.
+    ///
+    /// The window's preference, like [`Self::ToggleHidden`] and unlike its neighbours here — there is
+    /// one of it, whichever pane has the keyboard, because there is one of the panel. In the
+    /// application menu under the mark, and on `Ctrl+Win+Left`. Written to the settings file: a
+    /// window somebody wants the whole width of is a window they want the whole width of tomorrow.
+    ToggleSidebar,
     /// Shut it — the panel's own close button.
     ClosePreview(PaneId),
     /// Let the video this pane is previewing fill the screen, or give the window back.
@@ -264,6 +279,7 @@ impl Action {
             Self::ToggleCollapsed { .. } => "ToggleCollapsed",
             Self::TogglePreview(_) => "TogglePreview",
             Self::ToggleConsole(_) => "ToggleConsole",
+            Self::ToggleSidebar => "ToggleSidebar",
             Self::ClosePreview(_) => "ClosePreview",
             Self::ToggleVideoFullscreen(_) => "ToggleVideoFullscreen",
             Self::RememberLayout => "RememberLayout",

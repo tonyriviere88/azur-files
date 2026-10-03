@@ -490,6 +490,13 @@ impl App {
                 }
                 self.config_dirty = true;
             }
+            // The panel down the left, for the whole window. Nothing to undo and nothing to tell:
+            // where the panes go is worked out from this every frame — see [`App::split_body`] — so
+            // the next frame is the whole of the change.
+            Action::ToggleSidebar => {
+                self.sidebar_shown = !self.sidebar_shown;
+                self.config_dirty = true;
+            }
             Action::RememberLayout => self.config_dirty = true,
 
             Action::Cut(pane) => self.put_on_clipboard(pane, true),
@@ -767,6 +774,22 @@ impl App {
                     WindowAction::Minimize => ctx.send_viewport_cmd(Cmd::Minimized(true)),
                     WindowAction::ToggleMaximize => {
                         ctx.send_viewport_cmd(Cmd::Maximized(!self.maximized));
+                    }
+                    // Every monitor at once, which the platform has no command for: its maximise is
+                    // one monitor by definition. So the window is moved directly, the same way and
+                    // for the same reasons a video filling the screen is — see `win::span_screens`.
+                    //
+                    // The flag is set from here rather than left to the frame that observes the new
+                    // shape, for the reason `ResetSize` below gives: a window closed in between would
+                    // write the wrong one.
+                    WindowAction::SpanScreens => {
+                        if self.span_screens() {
+                            self.maximized = false;
+                            self.config_dirty = true;
+                            // The window is about to change shape underneath a program that is idle
+                            // between events, and the frame that notices is this one's successor.
+                            ctx.request_repaint();
+                        }
                     }
                     WindowAction::ResetSize => {
                         let [w, h] = crate::config::WINDOW_SIZE;

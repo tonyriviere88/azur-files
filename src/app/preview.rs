@@ -190,6 +190,19 @@ impl App {
         let _ = on;
     }
 
+    /// Spread the window across every monitor. Answers whether it did.
+    ///
+    /// Beside [`Self::fill_screen`] because it is the same kind of thing said to the same layer, and
+    /// off Windows it is the same kind of nothing: the rectangle is a union of monitor work areas in
+    /// physical pixels, which is a question no portable layer here can ask. Answering `false` is what
+    /// keeps the caller from recording a shape the window was never given.
+    pub(super) fn span_screens(&self) -> bool {
+        #[cfg(windows)]
+        return crate::win::span_screens(self.owner);
+        #[cfg(not(windows))]
+        false
+    }
+
     /// Whether a video is filling the screen. For the tests; the frame reads the field.
     #[cfg(test)]
     pub fn fullscreen_for_tests(&self) -> bool {
