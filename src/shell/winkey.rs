@@ -16,7 +16,7 @@
 //! - **Opening a folder** — `ShellExecute` on a directory, a folder shortcut, a path typed into the
 //!   Run box. These resolve through the `Folder` and `Directory` classes, and claiming *those*
 //!   would put this program in front of every folder every program on the machine opens, including
-//!   the virtual ones it cannot draw — This PC, Control Panel, the Recycle Bin, a search result.
+//!   the virtual ones it cannot draw — Control Panel, a library, a search result.
 //!   Not claimed.
 //! - **"Show in folder"** from a browser's download list, an installer, an editor. Not claimable at
 //!   all, and worth knowing rather than discovering: those callers either go through

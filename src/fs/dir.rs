@@ -203,6 +203,13 @@ pub struct Dir {
     /// the details view shows a Status column. Decided while the entries were pushed, so asking costs
     /// nothing per frame. See [`Sync`].
     pub synced: bool,
+    /// This is the Recycle Bin: each name is the path an item was deleted from, each target the
+    /// `$R…` file the bin holds it as, and `modified` is when it was deleted. See
+    /// [`crate::fs::recycle`], which sets it, for what that changes about a row.
+    ///
+    /// A field rather than a question of [`Dir::path`] because the sort, the header and the icon of
+    /// every row on screen ask it, and a bool is what that should cost.
+    pub recycled: bool,
     /// How long the scan took. Shown in the status bar, which is the only honest
     /// way to claim the word "fast".
     pub scan_micros: u64,
@@ -283,7 +290,14 @@ impl Dir {
     /// when a row's icon has to be asked about by path rather than by type: a volume's icon
     /// is its own, and joining `Windows (C:)` onto an empty path names nothing at all, which
     /// is why those rows drew the generic folder.
+    ///
+    /// **Not for the Recycle Bin**, whose rows do have targets elsewhere but are files like any
+    /// other: their icon is their type's, and a bin of thousands asking the shell per path would be
+    /// thousands of questions for the answer the extension already gives.
     pub fn explicit_target(&self, i: usize) -> Option<&Path> {
+        if self.recycled {
+            return None;
+        }
         self.targets
             .get(i)
             .filter(|target| !target.as_os_str().is_empty())
@@ -315,6 +329,7 @@ impl Dir {
             credentials: false,
             truncated: false,
             synced: false,
+            recycled: false,
             scan_micros: 0,
         }
     }
@@ -465,6 +480,16 @@ impl DirBuilder {
         self.targets.push(target);
     }
 
+    /// Push an item of the Recycle Bin: named by the path it was deleted from, leading to the file
+    /// the bin holds it as, and dated when it went. See [`crate::fs::recycle`].
+    pub fn push_held(&mut self, original: &str, held: PathBuf, size: u64, deleted: u64, flags: u16) {
+        while self.targets.len() < self.entries.len() {
+            self.targets.push(PathBuf::new());
+        }
+        self.push(original, size, deleted, flags);
+        self.targets.push(held);
+    }
+
     /// Hand the arenas over as a finished listing, sized to what they hold.
     ///
     /// The reservations in [`DirBuilder::new`] and [`DirBuilder::reserve`] are exactly right
@@ -493,6 +518,7 @@ impl DirBuilder {
             credentials: false,
             truncated: false,
             synced: self.synced,
+            recycled: false,
             scan_micros,
         }
     }
@@ -511,10 +537,14 @@ fn leaf_of(name: &str) -> &str {
 /// The display name of a folder, for a tab title or a breadcrumb segment.
 ///
 /// A drive root has no file name of its own, so `C:\` would come back empty from
-/// [`Path::file_name`]; this gives `C:` instead. An empty path is "This PC".
+/// [`Path::file_name`]; this gives `C:` instead. An empty path is "This PC", and
+/// [`crate::fs::recycle::LOCATION`] is the Recycle Bin.
 pub fn display_name(path: &Path) -> String {
     if path.as_os_str().is_empty() {
         return "This PC".to_owned();
+    }
+    if crate::fs::recycle::is_bin(path) {
+        return "Recycle Bin".to_owned();
     }
     if let Some(name) = path.file_name() {
         return name.to_string_lossy().into_owned();

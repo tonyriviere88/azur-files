@@ -67,10 +67,16 @@ pub use win::{expose_placeholders, silence_device_dialogs};
 /// - **A path with an archive in it** — `D:\dl\pkg.tar.gz\src` — is read out of the archive. See
 ///   [`crate::archive`], and note that the same "only ever on a worker" argument is what lets that
 ///   one inflate a tarball to answer.
+///
+/// And a fourth that is not a directory either: **the Recycle Bin**, which is read out of every
+/// volume's `$Recycle.Bin`. See [`super::recycle`].
 pub fn scan(path: &Path) -> Dir {
     let started = Instant::now();
     if path.as_os_str().is_empty() {
         return super::drives::this_pc(started);
+    }
+    if super::recycle::is_bin(path) {
+        return super::recycle::listing(started);
     }
     if let Some(server) = super::drives::unc_server(path) {
         return super::drives::server_dir(&server, path, started);
@@ -221,6 +227,12 @@ pub fn scan_deep(root: &Path, budget: usize, patience: std::time::Duration) -> D
     // back the shares, exactly as it gives back the volumes for This PC.
     if let Some(server) = super::drives::unc_server(root) {
         return super::drives::server_dir(&server, root, started);
+    }
+    // The bin has no tree to walk: its rows are items from all over the machine, each already
+    // carrying the whole path it came from. The button is refused there, and this is the answer
+    // for anything that asks regardless.
+    if super::recycle::is_bin(root) {
+        return super::recycle::listing(started);
     }
     // An archive's [`crate::archive::Index`] is *already* the flattened form — every entry with its
     // full interior path — so this is the one place where flattening is cheaper than listing a

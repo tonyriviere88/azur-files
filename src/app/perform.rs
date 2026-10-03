@@ -299,8 +299,9 @@ impl App {
                 let tab = p.tab_mut();
                 // Refused on This PC as well as drawn disabled there — see `filelist::status_line`
                 // for why there is nothing to count — for the reason `Tab::toggle_flat` refuses: a
-                // latched button over a listing that did not change.
-                if tab.path.as_os_str().is_empty() {
+                // latched button over a listing that did not change. The Recycle Bin's items each
+                // carry the size they were deleted at, which is the figure the bin has.
+                if fs::is_synthetic(&tab.path) {
                     return;
                 }
                 let on = !tab.sizes.on;
@@ -582,6 +583,16 @@ impl App {
                     self.notice = Some("Nothing selected".to_owned());
                     return;
                 }
+                // **In the Recycle Bin, Delete is the bin's own Delete**, which is permanent — with
+                // or without Shift, as in Explorer, since there is nowhere further for it to go. Not
+                // a job: the rows are `$R…` files, and `IFileOperation` on one would remove it and
+                // leave the `$I…` that describes it. The bin's verb removes both, and asks first.
+                // It goes the way a menu entry would, on the modal thread, and the watcher on the
+                // bin's folders is what brings the listing up to date. See [`crate::fs::recycle`].
+                if items.iter().all(|item| fs::recycle::is_held(item)) {
+                    self.bin_verb(items, "delete");
+                    return;
+                }
                 // No confirmation of our own: the shell asks, and being asked twice
                 // about the same thing is how a prompt becomes something people click
                 // through without reading.
@@ -632,6 +643,16 @@ impl App {
                     self.report("Files inside an archive cannot be renamed".to_owned());
                     return;
                 }
+                // Nor in the bin: the name on the row is the one it will get back, and renaming the
+                // `$R…` file under it would break the pair the bin restores from. See
+                // [`crate::fs::recycle`].
+                let binned = self
+                    .pane_mut(pane)
+                    .is_some_and(|p| fs::recycle::is_bin(&p.tab().path));
+                if binned {
+                    self.report(fs::recycle::RESTORE_FIRST.to_owned());
+                    return;
+                }
                 if let Some(p) = self.pane_mut(pane) {
                     p.tab_mut().begin_rename();
                 }
@@ -675,8 +696,11 @@ impl App {
                 let Some(parent) = self.pane_mut(pane).map(|p| p.tab().path.clone()) else {
                     return;
                 };
-                if parent.as_os_str().is_empty() {
-                    self.notice = Some("This PC is not a folder to create in".to_owned());
+                if fs::is_synthetic(&parent) {
+                    self.notice = Some(format!(
+                        "{} is not a folder to create in",
+                        fs::display_name(&parent)
+                    ));
                     return;
                 }
                 // The shell picks a free name from this one, so "New folder (2)" and the
@@ -706,6 +730,13 @@ impl App {
                 self.ops.start(job, self.owner, ctx);
             }
             Action::DragOut { pane, items } => {
+                // Out of the bin, the only thing a drag could carry is the `$R…` file, and wherever
+                // it landed would take the file and leave its entry behind. See
+                // [`crate::shell::ops::Job::bin_refusal`], which is the same rule for a paste.
+                if items.iter().any(|item| fs::recycle::is_held(item)) {
+                    self.report(fs::recycle::RESTORE_FIRST.to_owned());
+                    return;
+                }
                 // **A selection inside an archive drags out like any other**, and nothing here has to
                 // know that. `CF_HDROP` cannot carry a path that names no file, so the drag source
                 // offers Windows' virtual-file formats instead and decompresses at the drop rather
@@ -748,6 +779,12 @@ impl App {
             // there are no bytes behind its path until something decompresses them. That is a
             // thread's work, so it goes to one, and the answer comes back around to this same arm
             // with a real path. See [`App::open_from_archive`].
+            // **A file in the Recycle Bin is not opened**, which is Explorer's rule too: a double click
+            // there shows the item's Properties — where it came from, when it went — through the
+            // bin's own verb. Opening the `$R…` file would hand a deleted program to `ShellExecute`,
+            // and *run* it. A deleted folder never gets here: the listing knows it is a directory
+            // and sends a `Navigate`, which is how you look inside one before putting it back.
+            Action::Open(path) if fs::recycle::is_held(&path) => self.bin_verb(vec![path], "properties"),
             Action::Open(path) => match crate::archive::split(&path) {
                 Some(inside) if inside.is_root() => {
                     let pane = self.focused;
@@ -796,6 +833,9 @@ impl App {
             // terminal beside it is the nearest true answer to what was asked — and better than a
             // greyed-out entry, because it is the thing the user would have picked next anyway.
             Action::Reveal(path) => fs::shell::reveal(&nearest_real(&path)),
+            Action::OpenTerminal(path) if fs::is_synthetic(&path) => {
+                self.report(format!("{} is not a folder a terminal can start in", fs::display_name(&path)));
+            }
             Action::OpenTerminal(path) => fs::shell::open_terminal(&nearest_real(&path)),
             // The paths as text, one per line — `Ctrl+Shift+C`, and the context menu's
             // `Copy path(s)`, which is this same action so that the two cannot drift.
@@ -959,7 +999,28 @@ impl App {
 /// Open terminal. Neither can be answered about a path inside an archive, because there is no such
 /// file and no such directory, and both have a sensible true answer one level out: the archive is a
 /// real file in a real folder. See the arms that use it.
+impl App {
+    /// Run one of the Recycle Bin's own verbs on items it holds, the way a menu entry would be run:
+    /// on the modal thread, against the menu the bin gives for them. See
+    /// [`crate::shell::ops::bin::held_menu`], and [`crate::fs::recycle`] for why its items are
+    /// never handed to anything else.
+    fn bin_verb(&mut self, items: Vec<std::path::PathBuf>, verb: &str) {
+        self.modal.send(crate::shell::Request::Invoke {
+            parent: fs::recycle::location(),
+            items,
+            command: crate::shell::menu::Command::verb_only(verb),
+            depth: crate::shell::menu::Depth::Full,
+            owner: self.owner,
+        });
+    }
+}
+
 fn nearest_real(path: &std::path::Path) -> std::path::PathBuf {
+    // An item in the bin is revealed in the bin: `explorer /select,` on the `$R…` file would open
+    // the raw `$Recycle.Bin` folder, mangled names and all.
+    if fs::recycle::is_held(path) {
+        return fs::recycle::location();
+    }
     // Confirmed rather than guessed from the extension, or a real folder named `stuff.zip` would
     // have Reveal point Explorer at the folder instead of at the file inside it that was asked for.
     match crate::archive::inside_archive(path) {

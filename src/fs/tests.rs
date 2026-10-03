@@ -276,6 +276,115 @@ fn resolve_understands_this_pc_and_bare_drives() {
     );
 }
 
+/// **The names Explorer's bar takes that are not paths**, each to where Explorer would go.
+///
+/// Every spelling of a variable's name is the one variable, since Windows' environment has no case
+/// — the bar was never the place `%appdata%` failed, and this holds it there. The rest are the
+/// shell's: a known folder by `shell:` name, with a path below it; the bin and This PC by any of
+/// their names; somewhere only Explorer can show; and a place by the name the sidebar gives it.
+#[test]
+#[cfg(windows)]
+fn the_bar_takes_the_names_explorer_takes() {
+    let appdata = PathBuf::from(std::env::var_os("APPDATA").expect("set on every Windows"));
+    for typed in ["%APPDATA%", "%appdata%", "%AppData%\\"] {
+        let resolved = resolve_input(typed);
+        assert!(
+            matches!(&resolved, Some(Typed::Folder(path)) if path.starts_with(&appdata)),
+            "{typed} resolved to {resolved:?}"
+        );
+    }
+    let local = PathBuf::from(std::env::var_os("LOCALAPPDATA").expect("set on every Windows"));
+    assert_eq!(
+        typed_folder("%localappdata%\\Te"),
+        Some(local.join("Te")),
+        "the completion expands the same way"
+    );
+
+    // A known folder by the shell's own name, and a path below it.
+    let startup = match resolve_input("shell:AppData") {
+        Some(Typed::Folder(path)) => path,
+        other => panic!("shell:AppData resolved to {other:?}"),
+    };
+    assert_eq!(startup, appdata, "shell:AppData is %APPDATA%");
+    assert_eq!(
+        typed_folder("shell:AppData\\Microsoft"),
+        Some(appdata.join("Microsoft")),
+        "a path below a shell name"
+    );
+    assert_eq!(
+        typed_folder("shell:appdata\\"),
+        Some(PathBuf::from(format!("{}\\", appdata.display()))),
+        "and the trailing separator the completion reads as `offer what is in here`"
+    );
+
+    // The bin and This PC, by every name for each.
+    let bin = recycle::location();
+    for typed in [
+        "Recycle Bin",
+        "recycle bin",
+        "shell:RecycleBinFolder",
+        "::{645FF040-5081-101B-9F08-00AA002F954E}",
+        r"C:\$Recycle.Bin",
+    ] {
+        assert_eq!(resolve_input(typed), Some(Typed::Folder(bin.clone())), "{typed}");
+    }
+    for typed in ["shell:MyComputerFolder", "::{20D04FE0-3AEA-1069-A2D8-08002B30309D}"] {
+        assert_eq!(resolve_input(typed), Some(Typed::Folder(PathBuf::new())), "{typed}");
+    }
+
+    // Only Explorer can show Control Panel.
+    assert_eq!(
+        resolve_input("shell:ControlPanelFolder"),
+        Some(Typed::Elsewhere(PathBuf::from("shell:ControlPanelFolder")))
+    );
+    // A name the shell has never heard of is a path that is not there.
+    assert_eq!(resolve_input("shell:NoSuchFolderAnywhere"), None);
+
+    // A place by the name the sidebar shows it under.
+    let downloads = places::standard()
+        .into_iter()
+        .find(|place| place.label == "Downloads")
+        .map(|place| place.path);
+    if let Some(downloads) = downloads {
+        assert_eq!(resolve_input("downloads"), Some(Typed::Folder(downloads)));
+    }
+}
+
+/// A `file:` URL is a path in every sense but its spelling.
+#[test]
+fn a_file_url_is_the_path_it_names() {
+    let dir = crate::sandbox::dir("file-url");
+    let spaced = dir.join("with space é");
+    std::fs::create_dir_all(&spaced).expect("create");
+    let text = spaced.to_string_lossy().replace('\\', "/");
+    let url = format!(
+        "file:///{}",
+        text.replace(' ', "%20").replace('é', "%C3%A9")
+    );
+    assert_eq!(resolve_input(&url), Some(Typed::Folder(spaced.clone())), "{url}");
+    assert_eq!(
+        typed_folder("file://server/share/x"),
+        Some(PathBuf::from(r"\\server\share\x")),
+        "a host is a UNC path"
+    );
+}
+
+/// The bin sits one level below This PC: that is its breadcrumb, and where Up goes.
+#[test]
+fn the_bin_is_one_level_below_this_pc() {
+    let bin = recycle::location();
+    assert_eq!(parent_of(&bin), Some(PathBuf::new()));
+    assert_eq!(
+        breadcrumb_segments(&bin),
+        vec![
+            ("This PC".to_owned(), PathBuf::new()),
+            ("Recycle Bin".to_owned(), bin.clone())
+        ]
+    );
+    assert!(is_synthetic(&bin) && is_synthetic(Path::new("")));
+    assert!(!is_synthetic(Path::new(r"C:\")));
+}
+
 /// **The names a rename box has to refuse, and the one it must not.**
 ///
 /// The separator is the reason this exists: the field had no validation whatsoever, so `F2` and

@@ -105,14 +105,22 @@ impl Watch {
     /// set. An archive being *rewritten* is worth noticing and is caught elsewhere — see
     /// [`crate::archive::inside_archive`], whose cache entries carry the size and timestamp they
     /// were read at.
+    ///
+    /// **The Recycle Bin is watched through the folders it is made of** — each volume's
+    /// `$Recycle.Bin\<SID>` that the last listing read — so that a file deleted from Explorer, a
+    /// terminal or another pane appears in a bin that is on screen. [`Watch::changed`] reports a
+    /// change to any of them as the bin itself, which is the path the pane showing it is at.
     pub fn keep(&mut self, folders: &[PathBuf]) {
         let mut wanted: Vec<PathBuf> = folders
             .iter()
-            .filter(|path| {
-                !path.as_os_str().is_empty() && !crate::archive::is_virtual_location(path)
-            })
+            .filter(|path| !crate::fs::is_synthetic(path))
+            .filter(|path| !crate::archive::is_virtual_location(path))
             .cloned()
             .collect();
+        // Once however many panes show the bin, since the answer is the same for all of them.
+        if folders.iter().any(|path| crate::fs::recycle::is_bin(path)) {
+            wanted.extend(crate::fs::recycle::folders());
+        }
         wanted.sort();
         wanted.dedup();
         if wanted == self.mine {
@@ -132,6 +140,9 @@ impl Watch {
     pub fn changed(&mut self, now: f64) -> Vec<PathBuf> {
         if let Ok(mut shared) = self.shared.lock() {
             for path in shared.changed.drain(..) {
+                // One of the folders the bin is made of, which is the bin to anybody looking at
+                // it. See [`Watch::keep`].
+                let path = crate::fs::recycle::canonical(path);
                 // First notification of a burst starts the clock; the rest ride along with it.
                 self.pending.entry(path).or_insert(now + SETTLE);
             }
@@ -257,6 +268,27 @@ mod tests {
             vec![root],
             "an archive cannot be handed to ReadDirectoryChangesW"
         );
+    }
+
+    /// The bin is watched as the folders it is read from, and a change to one of them is the bin.
+    #[test]
+    fn the_bin_is_watched_through_its_folders() {
+        let ctx = egui::Context::default();
+        let mut watch = Watch::new(&ctx);
+        let bin = crate::fs::recycle::location();
+        watch.keep(std::slice::from_ref(&bin));
+        assert_eq!(
+            watch.mine,
+            crate::fs::recycle::folders(),
+            "the bin itself is not a directory to open"
+        );
+
+        let held = PathBuf::from(r"D:\$Recycle.Bin\S-1-5-21-1-2-3-1001");
+        if let Ok(mut shared) = watch.shared.lock() {
+            shared.changed.push(held);
+        }
+        watch.changed(0.0);
+        assert_eq!(watch.changed(SETTLE + 0.001), vec![bin], "reported as the bin");
     }
 
     /// Two panes on one folder ask for it once.

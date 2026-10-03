@@ -49,6 +49,10 @@ pub struct PathComplete {
     pub(crate) pane: Option<PaneId>,
     /// The text the offers were worked out from. Anything else in the field means they are stale.
     pub(crate) typed: String,
+    /// The folder [`Self::typed`] names, worked out when the text changed and not on every frame:
+    /// a `shell:` name is resolved by the shell, which is several COM calls — cheap once per
+    /// keystroke, and not something to repeat sixty times a second while the field sits there.
+    pub(crate) folder: Option<PathBuf>,
     /// The folder already asked of the loader, so one it cannot read is asked for once.
     ///
     /// A failed read is deliberately not cached — see [`crate::loader::Loader`], and it is the
@@ -97,6 +101,7 @@ impl PathComplete {
         if opened || text != self.typed {
             self.pane = Some(pane);
             self.typed = text.to_owned();
+            self.folder = fs::typed_folder(split_typed(text).0);
             self.hot = None;
             self.ready = false;
             // **Nothing is offered for a path that has only been shown.** `Ctrl+L` fills the
@@ -107,8 +112,8 @@ impl PathComplete {
             self.hidden = opened;
         }
 
-        let (prefix, leaf) = split_typed(text);
-        let folder = fs::typed_folder(prefix);
+        let (_, leaf) = split_typed(text);
+        let folder = self.folder.clone();
         // Asked once per folder, and once only for one that cannot be read. See `asked`.
         if self.asked != folder {
             self.asked = folder.clone();
@@ -140,7 +145,10 @@ impl PathComplete {
                 let Some(dir) = loader.cached(folder) else {
                     return;
                 };
-                for i in 0..dir.len() {
+                // Nothing below the bin can be typed: its rows are named by where they came from,
+                // and `shell:RecycleBinFolder\C:\Users\…` is not a path.
+                let rows = if dir.recycled { 0 } else { dir.len() };
+                for i in 0..rows {
                     let entry = &dir.entries[i];
                     // Folders only. The field takes a file too — `Enter` on one opens it — but a
                     // completion that offered every file in `C:\Windows` would bury the four
@@ -608,6 +616,9 @@ pub(crate) fn edit_field(
         match fs::resolve_input(&tab.edit_text) {
             Some(fs::Typed::File(path)) => out.push(Action::Open(path)),
             Some(fs::Typed::Folder(path)) => out.push(Action::Navigate { pane, path }),
+            // Control Panel and the like: somewhere only Explorer can draw, so Explorer is asked
+            // to — `Reveal` is what opens a shell name there. See [`fs::shell::reveal`].
+            Some(fs::Typed::Elsewhere(name)) => out.push(Action::Reveal(name)),
             // Nothing there. Leave the text as typed so it can be corrected. **Never a UNC path**,
             // which is handed on whether it answered or not — see [`fs::resolve_input`].
             None => tab.editing_path = true,

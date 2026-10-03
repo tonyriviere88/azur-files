@@ -43,7 +43,7 @@ impl App {
             // answer, arrived at confidently — which is worse than none.
             if tab.git_asked
                 || tab.dir.is_none()
-                || tab.path.as_os_str().is_empty()
+                || crate::fs::is_synthetic(&tab.path)
                 || crate::archive::is_virtual_location(&tab.path)
             {
                 continue;

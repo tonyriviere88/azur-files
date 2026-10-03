@@ -36,6 +36,14 @@ impl App {
             self.notice = Some("Nothing selected".to_owned());
             return;
         }
+        // **Nor out of the Recycle Bin**, where what a row names is the `$R…` file the bin holds.
+        // A copy of it would be a copy under that name; a cut, pasted, would move it and leave its
+        // entry in the bin describing nothing. Restoring is the way out — see
+        // [`crate::fs::recycle`].
+        if paths.iter().any(|path| fs::recycle::is_held(path)) {
+            self.notice = Some(fs::recycle::RESTORE_FIRST.to_owned());
+            return;
+        }
         // **Inside an archive there is nothing yet to put on a clipboard.** A `CF_HDROP` is a list of
         // file names, and `D:\dl\pkg.zip\src\main.rs` is not one — pasting it anywhere would fail in
         // whichever program tried. So a copy becomes an extraction first, and the clipboard is
@@ -85,8 +93,14 @@ impl App {
         use crate::shell::clipboard::{self, Effect};
         use crate::shell::ops::Job;
 
-        if into.as_os_str().is_empty() {
-            self.notice = Some("This PC is not a folder to paste into".to_owned());
+        // **Nor is the Recycle Bin**, though a drop onto it is a delete: Explorer offers no Paste
+        // there either, and a paste that quietly deleted what was on the clipboard would be the one
+        // gesture in this program that loses a copy by making one.
+        if fs::is_synthetic(&into) {
+            self.notice = Some(format!(
+                "{} is not a folder to paste into",
+                fs::display_name(&into)
+            ));
             return;
         }
         let Some(pasteable) = clipboard::get() else {
@@ -506,6 +520,28 @@ impl App {
             crate::shell::dnd::Onto::Folder(into) => into,
         };
         if into.as_os_str().is_empty() {
+            return;
+        }
+        // **A drop onto the Recycle Bin is a delete**, whichever button carried it and whatever the
+        // cursor said — which is what dropping onto Explorer's bin has always been. To the bin, and
+        // so undone by Ctrl+Z like any other. Nothing already in the bin is re-recycled: that is a
+        // drag from one bin pane to another, and it means nothing.
+        if fs::recycle::is_bin(&into) {
+            let items: Vec<PathBuf> = dropped
+                .items
+                .into_iter()
+                .filter(|item| !fs::recycle::is_held(item))
+                .collect();
+            if !items.is_empty() {
+                self.ops.start(
+                    Job::Delete {
+                        items,
+                        to_bin: true,
+                    },
+                    self.owner,
+                    ctx,
+                );
+            }
             return;
         }
 

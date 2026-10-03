@@ -177,7 +177,9 @@ impl CrumbMenu {
             if !entry.is_dir() || entry.is_hidden() {
                 continue;
             }
-            items.push((dir.name(i).to_owned(), dir.target(i)));
+            // The folder's own name, which is its name everywhere but the Recycle Bin — where a
+            // row is named by the path it came from. See [`crate::fs::recycle`].
+            items.push((dir.leaf(i).to_owned(), dir.target(i)));
         }
         items.sort_by(|a, b| fs::sort::natural_cmp(&a.0, &b.0));
         // A menu is for picking one of a few; past this it is a listing, and the
@@ -584,8 +586,9 @@ pub fn show(
             // setting one right click away, and a tooltip that changed its wording underneath a
             // button that behaves the same either way would read as two different buttons.
             "Flatten this folder's whole tree (Ctrl+E)",
-            // Nothing to flatten on This PC, whose rows are drives — see `Tab::toggle_flat`.
-            !tab.path.as_os_str().is_empty(),
+            // Nothing to flatten on This PC, whose rows are drives, or in the Recycle Bin, whose
+            // rows already carry the whole path they came from — see `Tab::toggle_flat`.
+            !crate::fs::is_synthetic(&tab.path),
             tab.flat,
             surface,
         );
@@ -722,8 +725,10 @@ pub(crate) fn active_index(crumbs: &[(String, PathBuf)], path: &Path) -> usize {
 /// With the separator the field is set to write, which is the whole of what `Use / in path` does to
 /// a field that is opening — see [`with_separator`], and [`slash_menu`] for where it is ticked.
 pub fn start_editing(tab: &mut Tab, slashes: bool) {
-    tab.edit_text = if tab.path.as_os_str().is_empty() {
-        "This PC".to_owned()
+    // The two places that are not paths open under the names the field takes back. See
+    // [`crate::fs::resolve_input`].
+    tab.edit_text = if crate::fs::is_synthetic(&tab.path) {
+        crate::fs::display_name(&tab.path)
     } else {
         with_separator(&tab.path.to_string_lossy(), slashes)
     };

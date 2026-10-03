@@ -47,6 +47,59 @@ pub(super) fn known_folders() -> Vec<(Option<PathBuf>, &'static str, PlaceIcon)>
     ]
 }
 
+/// What the shell makes of one of its own names — `shell:Downloads`, `::{…}`. See [`ShellPlace`].
+///
+/// `SHCreateItemFromParsingName` is the parser the Run box and Explorer's bar use, so every name
+/// either of those takes is taken here, including the localised and per-user ones nobody could
+/// keep a table of. Asked on the UI thread, when a path is typed or passed in: a known folder is
+/// a registry lookup and a CLSID a class lookup, and neither goes near a disk or a network.
+///
+/// `None` for a name the shell does not know, which leaves the text to be treated as a path — and
+/// a path starting `shell:` names nothing, so it is then reported as not found.
+#[cfg(windows)]
+pub fn shell_place(name: &str) -> Option<ShellPlace> {
+    use windows::core::PCWSTR;
+    use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
+    use windows::Win32::UI::Shell::{
+        IShellItem, SHCreateItemFromParsingName, SHGetKnownFolderItem, FOLDERID_ComputerFolder,
+        FOLDERID_RecycleBinFolder, KF_FLAG_DEFAULT, SICHINT_CANONICAL, SIGDN_FILESYSPATH,
+    };
+
+    let wide = crate::shell::wide(std::path::Path::new(name));
+    // SAFETY: `wide` is null-terminated and outlives every call that reads it; the display name is
+    // read through `name_of`, which frees it. The apartment is joined for the length of this call
+    // and left again — `S_FALSE` on a thread already in one, which is the UI thread's case, still
+    // counts and is still balanced.
+    unsafe {
+        let joined = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
+        let answer = (|| {
+            let item: IShellItem = SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None).ok()?;
+            let is = |folder: &windows::core::GUID| {
+                SHGetKnownFolderItem::<IShellItem>(folder, KF_FLAG_DEFAULT, None)
+                    .ok()
+                    .and_then(|known| item.Compare(&known, SICHINT_CANONICAL.0 as u32).ok())
+                    == Some(0)
+            };
+            if is(&FOLDERID_RecycleBinFolder) {
+                return Some(ShellPlace::RecycleBin);
+            }
+            if is(&FOLDERID_ComputerFolder) {
+                return Some(ShellPlace::ThisPc);
+            }
+            Some(
+                match crate::shell::ops::bin::name_of(&item, SIGDN_FILESYSPATH) {
+                    Some(path) if !path.as_os_str().is_empty() => ShellPlace::Folder(path),
+                    _ => ShellPlace::Elsewhere,
+                },
+            )
+        })();
+        if joined {
+            CoUninitialize();
+        }
+        answer
+    }
+}
+
 /// Resolve one `FOLDERID_*`.
 #[cfg(windows)]
 pub(super) fn known_folder(id: &windows_sys::core::GUID) -> Option<PathBuf> {

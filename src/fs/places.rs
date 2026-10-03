@@ -12,6 +12,8 @@ use std::path::PathBuf;
 mod win;
 #[cfg(windows)]
 use win::{known_folder, known_folders};
+#[cfg(windows)]
+pub use win::shell_place;
 
 use crate::fs::fmt::Kind;
 
@@ -37,14 +39,6 @@ pub struct Place {
     /// Where it goes. Empty means the synthetic "This PC".
     pub path: PathBuf,
     pub icon: PlaceIcon,
-    /// Hand this to the shell instead of listing it ourselves.
-    ///
-    /// The Recycle Bin is not a directory — it is a shell namespace extension
-    /// stitched together from a per-volume `$Recycle.Bin\<SID>` plus an index of
-    /// original paths. Enumerating it with `FindFirstFile` shows the mangled
-    /// `$R…` names and no way to restore anything, so this row opens the real
-    /// thing rather than lying about it.
-    pub shell_only: bool,
 }
 
 /// The standard places, in the order the sidebar shows them.
@@ -56,7 +50,6 @@ pub fn standard() -> Vec<Place> {
         label: "This PC".to_owned(),
         path: PathBuf::new(),
         icon: PlaceIcon::ThisPc,
-        shell_only: false,
     }];
 
     for (folder, label, icon) in known_folders() {
@@ -65,18 +58,61 @@ pub fn standard() -> Vec<Place> {
                 label: label.to_owned(),
                 path,
                 icon,
-                shell_only: false,
             });
         }
     }
 
+    // Listed here like any other place — see [`crate::fs::recycle`] for how, and for why it used to
+    // open Explorer instead.
     places.push(Place {
         label: "Recycle Bin".to_owned(),
-        path: PathBuf::from("shell:RecycleBinFolder"),
+        path: crate::fs::recycle::location(),
         icon: PlaceIcon::Trash,
-        shell_only: true,
     });
     places
+}
+
+/// The place a name on its own means, the way Explorer's address bar reads one: `Downloads`,
+/// `desktop`, `Recycle Bin`.
+///
+/// Only a bare name, never anything with a separator or a colon in it — those are paths, and a
+/// path is the disk's to answer. Case-insensitive, and against the labels the sidebar shows, so
+/// what can be typed is what can be read off the left of the window.
+pub fn named(text: &str) -> Option<PathBuf> {
+    if text.contains(['\\', '/', ':', '%', '~']) {
+        return None;
+    }
+    // Resolved once, as [`crate::app`] resolves its own copy: the known folders do not move while
+    // the program runs, and this is asked on every Enter in the path bar.
+    static PLACES: std::sync::OnceLock<Vec<Place>> = std::sync::OnceLock::new();
+    PLACES
+        .get_or_init(standard)
+        .iter()
+        .find(|place| place.label.eq_ignore_ascii_case(text))
+        .map(|place| place.path.clone())
+}
+
+/// What one of the shell's own names for a place turns out to be.
+///
+/// The names in question are the ones the Run box and Explorer's bar take — `shell:Downloads`,
+/// `shell:AppData`, `shell:Startup`, `shell:SendTo`, `::{20D04FE0-…}` — and they come in three
+/// kinds, which is why this is not simply a path:
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ShellPlace {
+    /// A folder on disk, which is nearly all of them.
+    Folder(PathBuf),
+    /// This PC, which this program shows as the empty path.
+    ThisPc,
+    /// The Recycle Bin, which this program shows at [`crate::fs::recycle::LOCATION`].
+    RecycleBin,
+    /// Somewhere that is only the shell's to show — Control Panel, Network, a library. Handed to
+    /// Explorer, since there is nothing here that could draw it.
+    Elsewhere,
+}
+
+#[cfg(not(windows))]
+pub fn shell_place(_name: &str) -> Option<ShellPlace> {
+    None
 }
 
 #[cfg(not(windows))]

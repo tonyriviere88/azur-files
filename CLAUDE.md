@@ -174,9 +174,12 @@ Each looks like a bug or an oversight and is a measured decision:
   `multisampling: 0` and `dithering: false` at [main.rs:361-368](src/main.rs#L361-L368)
   are deliberate — egui already antialiases by feathering, and dithering adds noise to
   anything sampled from the glyph atlas.
-- **The Recycle Bin opens in Explorer.** It is a namespace extension over a per-volume
-  `$Recycle.Bin\<SID>` plus an index, not a directory; enumerating it shows mangled `$R…`
-  names and no way to restore anything.
+- **The Recycle Bin is listed here, by reading every `$I…` file** ([`fs::recycle`](src/fs/recycle.rs)),
+  at `shell:RecycleBinFolder`. A row's name is its original path and its target the `$R…` file.
+  Never hand a `$R…` path to `IFileOperation`, the clipboard or a drag — moving one orphans its
+  `$I…`. Restore, Delete and Empty are the bin's own verbs, from the menu the *bin* gives for its
+  items (`shell::ops::bin::held_menu`); `recycle::is_held` and `Job::bin_refusal` are the guards,
+  and `Modal::send` refuses any bin verb under `cfg(test)`.
 - **Collation is code-point order beyond ASCII.** Digits sort as numbers and case is
   ignored. Doing it properly needs ICU and the sort would stop being free.
 - **A reparse point is listed but never followed.**

@@ -17,12 +17,14 @@
 //! | [`time`] | `FILETIME` to local civil time without a syscall per row |
 //! | [`drives`] | mounted volumes, and the synthetic "This PC" |
 //! | [`places`] | the shell's known folders |
+//! | [`recycle`] | the Recycle Bin, read as a listing |
 //! | [`shell`] | handing a path back to the operating system |
 
 pub mod dir;
 pub mod drives;
 pub mod fmt;
 pub mod places;
+pub mod recycle;
 pub mod scan;
 pub mod shell;
 pub mod sort;
@@ -53,6 +55,11 @@ use std::path::{Path, PathBuf};
 pub fn parent_of(path: &Path) -> Option<PathBuf> {
     if path.as_os_str().is_empty() {
         return None;
+    }
+    // Explorer puts the bin on the desktop, beside This PC rather than inside it. This program has
+    // no desktop level, and This PC is where every other walk up ends.
+    if recycle::is_bin(path) {
+        return Some(PathBuf::new());
     }
     // A machine. Above it is only the list of machines, which is This PC.
     if drives::unc_server(path).is_some() {
@@ -106,6 +113,30 @@ pub fn is_unc(path: &Path) -> bool {
     path.to_string_lossy().starts_with(r"\\")
 }
 
+/// Whether some text is one of the shell's own names rather than a path: `shell:Downloads`,
+/// `shell:RecycleBinFolder`, `::{20D04FE0-…}`.
+///
+/// Case-insensitive, because the shell reads them that way — `Shell:AppData` is `shell:AppData` to
+/// the Run box, and a test that only knew the lower-case spelling handed the other one to Explorer
+/// as a file to select. One function for every place that has to tell the two apart: resolving what
+/// was typed, revealing it, and asking for its icon.
+pub fn is_shell_name(text: &str) -> bool {
+    text.get(..6)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("shell:"))
+        || text.starts_with("::{")
+}
+
+/// Whether a pane at this path is showing a listing this program **assembles** rather than a
+/// directory it reads: This PC, or the Recycle Bin.
+///
+/// The question behind every "there is no folder here" refusal — nothing can be created, pasted or
+/// measured in either, nothing flattened, watched, asked of git or opened in a terminal — and the
+/// reason it is one function: those checks were written against This PC alone, as an empty path,
+/// and a second synthetic listing spelled at each of them is a second list to keep in step.
+pub fn is_synthetic(path: &Path) -> bool {
+    path.as_os_str().is_empty() || recycle::is_bin(path)
+}
+
 /// What a typed path turned out to name.
 ///
 /// Two things happen to a path out of the bar — a folder is opened in the pane and a file is opened
@@ -120,11 +151,25 @@ pub enum Typed {
     Folder(PathBuf),
     /// A file, to be opened with whatever opens it.
     File(PathBuf),
+    /// Somewhere only the shell can show — `shell:ControlPanelFolder`, `::{…}` for Network. Handed
+    /// to Explorer, as the text that named it. See [`places::ShellPlace::Elsewhere`].
+    Elsewhere(PathBuf),
 }
 
 /// Resolve what the user typed in the breadcrumb into somewhere to go.
 ///
-/// Expands `%VARS%` and `~`, accepts either slash, and tolerates a trailing one.
+/// Expands `%VARS%` and `~`, accepts either slash, and tolerates a trailing one — and takes the
+/// names Explorer's own bar takes, which are not paths at all:
+///
+/// | typed | goes to |
+/// | --- | --- |
+/// | `%AppData%`, `%localappdata%\Temp`, `~\src` | the folder, expanded — any case, since Windows' variables have none |
+/// | `Downloads`, `recycle bin`, `This PC` | the place the sidebar shows under that name. See [`places::named`] |
+/// | `shell:Downloads`, `shell:startup\sub`, `::{…}` | what the shell says the name is. See [`places::shell_place`] |
+/// | `shell:RecycleBinFolder`, `D:\$Recycle.Bin` | the Recycle Bin, listed here. See [`recycle::canonical`] |
+/// | `shell:ControlPanelFolder` | Explorer, since only it can show that — [`Typed::Elsewhere`] |
+/// | `file:///C:/My%20Files` | `C:\My Files`, as pasted out of a browser |
+///
 /// `None` means there is nothing there and nothing to do, and the caller leaves the text in the
 /// field to be corrected.
 ///
@@ -149,11 +194,16 @@ pub fn resolve_input(text: &str) -> Option<Typed> {
     if text.is_empty() {
         return None;
     }
-    if text.eq_ignore_ascii_case("this pc") {
-        return Some(Typed::Folder(PathBuf::new()));
+    // A place by name. This PC is one of them, and so is the Recycle Bin.
+    if let Some(place) = places::named(text) {
+        return Some(Typed::Folder(place));
     }
 
-    let expanded = expand(text);
+    let expanded = match resolve_names(text) {
+        Expanded::Path(expanded) => expanded,
+        Expanded::ThisPc => return Some(Typed::Folder(PathBuf::new())),
+        Expanded::Elsewhere => return Some(Typed::Elsewhere(PathBuf::from(text))),
+    };
 
     // A drive letter on its own means its root: `D:` is where `D:\` is.
     if expanded.len() == 2 && expanded.as_bytes()[1] == b':' {
@@ -162,7 +212,11 @@ pub fn resolve_input(text: &str) -> Option<Typed> {
 
     // Normalised *before* anything is asked about it, so the UNC test below sees `\\server`
     // whichever slash was typed — `//server/share` names the same place.
-    let path = normalize(&PathBuf::from(&expanded));
+    let path = recycle::canonical(normalize(&PathBuf::from(&expanded)));
+    // Not a directory, and not a question for the disk.
+    if recycle::is_bin(&path) {
+        return Some(Typed::Folder(path));
+    }
 
     // **One `metadata`, where this used to be `is_dir` and then `is_file`.** Those are two stats of
     // the same path, on the UI thread, inside a frame — and each of them throws the error away,
@@ -197,10 +251,116 @@ pub fn typed_folder(prefix: &str) -> Option<PathBuf> {
     if prefix.is_empty() {
         return None;
     }
-    Some(normalize(Path::new(&expand(prefix))))
+    Some(match resolve_names(prefix) {
+        Expanded::Path(expanded) => recycle::canonical(normalize(Path::new(&expanded))),
+        Expanded::ThisPc => PathBuf::new(),
+        // Nothing this program can list; handed on as typed, where the loader will say so.
+        Expanded::Elsewhere => PathBuf::from(prefix),
+    })
+}
+
+/// A path from outside this program — `--open=` — resolved the way the path bar resolves one, and
+/// **without asking the disk**, since it is read before there is a window to wait in.
+///
+/// `%VARS%`, `~`, `shell:` names, `file:` URLs and either slash, as [`typed_folder`] takes them. A
+/// name only the shell can show has nowhere to go in a pane, and comes back as typed.
+pub fn from_outside(text: &str) -> PathBuf {
+    if let Some(place) = places::named(text.trim()) {
+        return place;
+    }
+    typed_folder(text).unwrap_or_default()
+}
+
+/// What [`resolve_names`] made of some text.
+enum Expanded {
+    /// A path, with its variables and names written out.
+    Path(String),
+    /// A shell name for This PC, which is the empty path — and so not something a string of path
+    /// text can carry, since an empty one is also "nothing typed yet".
+    ThisPc,
+    /// A shell name for somewhere that is not a folder. See [`Typed::Elsewhere`].
+    Elsewhere,
+}
+
+/// `%APPDATA%`-style variables, a leading `~`, a leading `shell:` name and a `file:` URL.
+///
+/// A `shell:` name is resolved as the first component only — `shell:Downloads\sub\deeper` is the
+/// Downloads folder with `sub\deeper` joined on — which is how the Run box reads one too, and what
+/// lets the path bar's completion carry on typing below one.
+fn resolve_names(text: &str) -> Expanded {
+    if let Some(path) = from_file_url(text) {
+        return Expanded::Path(path);
+    }
+    if is_shell_name(text) {
+        let cut = text.find(['\\', '/']).unwrap_or(text.len());
+        let (name, rest) = text.split_at(cut);
+        match places::shell_place(name) {
+            Some(places::ShellPlace::Folder(folder)) => {
+                let mut out = folder.to_string_lossy().into_owned();
+                let rest = rest.trim_start_matches(['\\', '/']);
+                if !rest.is_empty() {
+                    if !out.ends_with('\\') {
+                        out.push('\\');
+                    }
+                    out.push_str(rest);
+                } else if rest.len() < text.len() - cut {
+                    // A trailing separator, kept: the completion reads it as "offer what is in here".
+                    out.push('\\');
+                }
+                return Expanded::Path(out);
+            }
+            Some(places::ShellPlace::RecycleBin) => {
+                return Expanded::Path(recycle::LOCATION.to_owned());
+            }
+            Some(places::ShellPlace::ThisPc) => return Expanded::ThisPc,
+            Some(places::ShellPlace::Elsewhere) => return Expanded::Elsewhere,
+            // Not a name the shell knows. Left as it is, so it fails as a path would.
+            None => {}
+        }
+    }
+    Expanded::Path(expand(text))
+}
+
+/// `file:///C:/My%20Files/a.txt` as `C:/My Files/a.txt`, and `file://server/share` as
+/// `//server/share` — the slashes are [`normalize`]'s to turn round.
+///
+/// What a browser's address bar, a Markdown link or an editor's "copy as URL" hands over, and a
+/// path in every sense but its spelling. Percent-escapes are decoded as UTF-8, which is what a URL
+/// is; one that is not valid UTF-8 is left as it was rather than guessed at.
+fn from_file_url(text: &str) -> Option<String> {
+    let rest = text
+        .get(..5)
+        .filter(|scheme| scheme.eq_ignore_ascii_case("file:"))
+        .map(|_| &text[5..])?;
+    let rest = rest.strip_prefix("//").unwrap_or(rest);
+    // `file:///C:/x` has an empty host and a path beginning `/C:`; `file://server/share` has one.
+    let path = match rest.strip_prefix('/') {
+        Some(local) => local.to_owned(),
+        None => format!("//{rest}"),
+    };
+    let bytes = path.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut at = 0;
+    while at < bytes.len() {
+        let hex = |b: u8| (b as char).to_digit(16);
+        match (bytes[at], bytes.get(at + 1).copied().and_then(hex), bytes.get(at + 2).copied().and_then(hex)) {
+            (b'%', Some(high), Some(low)) => {
+                decoded.push((high * 16 + low) as u8);
+                at += 3;
+            }
+            (byte, _, _) => {
+                decoded.push(byte);
+                at += 1;
+            }
+        }
+    }
+    Some(String::from_utf8(decoded).unwrap_or(path))
 }
 
 /// `%APPDATA%`-style variables and a leading `~`.
+///
+/// The names are Windows', so they have no case: `%appdata%`, `%AppData%` and `%APPDATA%` are
+/// one variable, which is what `std::env::var_os` asks the environment block for.
 fn expand(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
 
@@ -255,6 +415,12 @@ fn expand(text: &str) -> String {
 pub fn breadcrumb_segments(path: &Path) -> Vec<(String, PathBuf)> {
     let mut out = vec![("This PC".to_owned(), PathBuf::new())];
     if path.as_os_str().is_empty() {
+        return out;
+    }
+    // One level below This PC, as [`parent_of`] has it — and not a path to walk, since its one
+    // component is a name the disk has never heard of.
+    if recycle::is_bin(path) {
+        out.push((display_name(path), path.to_path_buf()));
         return out;
     }
 

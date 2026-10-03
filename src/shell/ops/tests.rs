@@ -498,6 +498,46 @@ fn a_recycled_file_comes_back_from_the_bin() {
         );
     }
 
+    // **While they are in there, the bin as this program lists it.** Each is a row named by the
+    // path it came from and leading to the `$R…` file the shell said it is held as — the two things
+    // [`crate::fs::recycle`] reads out of the `$I…` beside it — and the menu for that row is the
+    // bin's own, with Restore and a permanent Delete on it. Read, never invoked: the restore below
+    // is what takes them out again.
+    let bin = crate::fs::recycle::listing(std::time::Instant::now());
+    assert!(bin.recycled);
+    for item in &outcome.recycled {
+        let held = item.bin.as_ref().expect("the sink named the file in the bin");
+        // Compared the way Windows compares paths: the volume's folder is `$RECYCLE.BIN` on NTFS
+        // and whatever the formatter wrote elsewhere.
+        let fold = |path: &Path| path.to_string_lossy().to_lowercase();
+        let row = (0..bin.len())
+            .find(|&i| fold(&bin.target(i)) == fold(held))
+            .unwrap_or_else(|| {
+                panic!(
+                    "{} is not in the listing of the bin, which holds {:?}",
+                    held.display(),
+                    (0..bin.len()).map(|i| bin.target(i)).collect::<Vec<_>>()
+                )
+            });
+        assert_eq!(
+            Path::new(bin.name(row)),
+            item.from.as_path(),
+            "the row is not named by where it came from"
+        );
+        assert!(crate::fs::recycle::is_held(held));
+    }
+    let held = outcome.recycled[0].bin.clone().expect("named above");
+    let verbs = crate::shell::menu::tests::verbs_of(
+        &crate::fs::recycle::location(),
+        std::slice::from_ref(&held),
+    );
+    for wanted in ["undelete", "delete"] {
+        assert!(
+            verbs.iter().any(|(verb, _)| verb.eq_ignore_ascii_case(wanted)),
+            "the menu for an item in the bin has no {wanted}: {verbs:?}"
+        );
+    }
+
     // The second route: the same items, with what the shell said about the bin thrown away, so
     // `bin::find` has to identify them by where they came from. Restored in one job with the
     // first, which is also what proves a mixed batch works.

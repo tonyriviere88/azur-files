@@ -177,6 +177,7 @@ fn sample() -> PathComplete {
     PathComplete {
         pane: None,
         typed: r"C:\Users\to".to_owned(),
+        folder: None,
         asked: None,
         ready: true,
         offers: vec![

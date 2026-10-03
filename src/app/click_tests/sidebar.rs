@@ -15,6 +15,34 @@ fn a_sidebar_place_navigates() {
     );
 }
 
+/// **The Recycle Bin opens here**, as a listing, and not in Explorer — which is what this row did
+/// for as long as the bin could not be read. See [`crate::fs::recycle`].
+///
+/// Only navigated to, never acted on: the listing that lands is the user's real bin, read and not
+/// touched, and [`crate::shell::Modal::send`] refuses any verb aimed at it from a test.
+#[test]
+fn the_recycle_bin_row_opens_the_bin_here() {
+    let mut h = Harness::new();
+    let at = h
+        .find(Id::new(("place", "Recycle Bin")), crate::ui::GUTTER + 80.0, 30..760)
+        .expect("the Recycle Bin row is not reachable by the pointer");
+    let done = h.click_at(at);
+    assert!(
+        done.contains(&"Navigate") && !done.contains(&"Reveal"),
+        "the Recycle Bin row did not navigate this pane, got {done:?}"
+    );
+    let focused = h.app.focused;
+    let tab = h
+        .app
+        .panes
+        .iter()
+        .find(|pane| pane.id == focused)
+        .expect("a focused pane")
+        .tab();
+    assert_eq!(tab.path, crate::fs::recycle::location());
+    assert_eq!(tab.title, "Recycle Bin");
+}
+
 #[test]
 fn a_sidebar_group_header_folds_it() {
     let mut h = Harness::new();

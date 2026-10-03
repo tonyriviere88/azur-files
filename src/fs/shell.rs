@@ -38,7 +38,7 @@ pub fn reveal(path: &Path) {
         let text = path.to_string_lossy();
         // `shell:` monikers and `::{GUID}` paths are not files, so `/select,`
         // would be nonsense — open them directly.
-        if text.starts_with("shell:") || text.starts_with("::{") {
+        if super::is_shell_name(&text) {
             let mut args = OsString::from("\"");
             args.push(path.as_os_str());
             args.push("\"");

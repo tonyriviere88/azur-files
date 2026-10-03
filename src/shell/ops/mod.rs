@@ -55,7 +55,7 @@ mod win;
 /// the other half of the same story and neither reads without the other.
 #[cfg(windows)]
 #[path = "../../windows/bin.rs"]
-mod bin;
+pub(crate) mod bin;
 #[cfg(windows)]
 pub(crate) use win::run;
 // Reached by the tests next door and in [`super::clipboard`], which check what the shell
@@ -301,8 +301,7 @@ impl Job {
                 .flatten()
                 .map(Path::to_path_buf)
                 .collect(),
-            // Where each one is going. Nothing has to be re-read on the way out, because the
-            // Recycle Bin is not somewhere this program shows.
+            // Where each one is going. The bin it came out of is [`Self::changes_the_bin`]'s.
             Self::Restore { items } => items
                 .iter()
                 .filter_map(|item| item.from.parent().map(Path::to_path_buf))
@@ -314,6 +313,20 @@ impl Job {
         touched.sort();
         touched.dedup();
         touched
+    }
+
+    /// Whether this job puts something into the Recycle Bin or takes something out, so a pane
+    /// showing the bin has to be re-read once it is done.
+    ///
+    /// Beside [`Self::touches`] rather than in it, because the bin is not a folder: `touches` is also
+    /// every path a test's job is held to the sandbox by, and [`crate::fs::recycle::LOCATION`] is a
+    /// shell name that no sandbox contains. The watcher on the bin's own folders would usually
+    /// notice anyway — this is for the volume whose folder the delete has only just created.
+    pub fn changes_the_bin(&self) -> bool {
+        matches!(
+            self,
+            Self::Delete { to_bin: true, .. } | Self::Restore { .. }
+        )
     }
 
     /// Every path this job acts **on**: the items, and both ends of an undo pair.
@@ -377,7 +390,7 @@ impl Job {
             Self::Rename { item, .. } => vec![item.as_path()],
             Self::PutBack { items } => items.iter().map(|(from, _)| from.as_path()).collect(),
             // A copy and a shortcut add something and take nothing, a new folder takes nothing, and
-            // a restore's source is the Recycle Bin — which is not a path this program shows.
+            // a restore's source is an item in the Recycle Bin, which is never an archive's index.
             Self::Copy { .. }
             | Self::Link { .. }
             | Self::NewFolder { .. }
@@ -406,6 +419,34 @@ impl Job {
             .map(|into| Refused::Destination(into.to_path_buf()))
     }
 
+    /// The Recycle Bin path that stops this job reaching the shell, if there is one.
+    ///
+    /// The same two questions as [`Self::archive_refusal`], asked of the bin. **An item the bin
+    /// holds** — a `$R…` file — is a real file, so `IFileOperation` would take it and do exactly
+    /// what it was told: move it out and leave its `$I…` behind, rename it out of its pair, or
+    /// recycle it a second time. Every one of those corrupts the bin. The bin's own verbs are the
+    /// only ones that act on its items correctly, and those are not jobs — see
+    /// [`crate::fs::recycle`]. **The bin as a destination** is not a folder: what dropping onto it
+    /// means is a delete, and [`crate::app::App::land`] asks for one before anything gets here.
+    ///
+    /// [`Self::Restore`] is the one job whose paths may be held items, since taking one out of the
+    /// bin is the point of it — and it goes through `undelete` rather than `IFileOperation`.
+    pub(crate) fn bin_refusal(&self) -> Option<Refused> {
+        if matches!(self, Self::Restore { .. }) {
+            return None;
+        }
+        if self
+            .sources()
+            .into_iter()
+            .any(crate::fs::recycle::is_held)
+        {
+            return Some(Refused::Held);
+        }
+        self.destination()
+            .filter(|folder| crate::fs::is_synthetic(folder))
+            .map(|into| Refused::NotAFolder(into.to_path_buf()))
+    }
+
     /// Every path this job could write to, for the sandbox guard in [`Operations::start_then`].
     ///
     /// The folders from [`Self::touches`] are not enough: a delete names the items, and it is
@@ -429,6 +470,10 @@ pub(crate) enum Refused {
     Item(PathBuf),
     /// A destination that this program only reads, so there is nothing to write into.
     Destination(PathBuf),
+    /// An item the Recycle Bin holds. See [`Job::bin_refusal`].
+    Held,
+    /// This PC or the Recycle Bin, as somewhere to write into.
+    NotAFolder(PathBuf),
 }
 
 impl Refused {
@@ -447,6 +492,11 @@ impl Refused {
             Self::Destination(path) => {
                 let what = crate::fs::display_name(path);
                 format!("Nothing can be written into {what}: this program only reads archives.")
+            }
+            Self::Held => crate::fs::recycle::RESTORE_FIRST.to_owned(),
+            Self::NotAFolder(path) => {
+                let what = crate::fs::display_name(path);
+                format!("{what} is not a folder to put anything in")
             }
         }
     }
@@ -538,7 +588,7 @@ impl Operations {
         // through the same channel a failure comes back on, so the words reach the status line by
         // the route that was already built for them — and with `job: None`, so a refusal cannot be
         // offered to `Ctrl+Z` as something to undo.
-        if let Some(refused) = job.archive_refusal() {
+        if let Some(refused) = job.archive_refusal().or_else(|| job.bin_refusal()) {
             let _ = tx.send(Done {
                 job: None,
                 touched,

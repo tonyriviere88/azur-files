@@ -58,7 +58,7 @@ pub(crate) fn index_of_place(path: &Path) -> Option<i32> {
     let text = path.to_string_lossy();
     let moniker = if path.as_os_str().is_empty() {
         Some(std::borrow::Cow::Borrowed("shell:MyComputerFolder"))
-    } else if text.starts_with("shell:") || text.starts_with("::{") {
+    } else if crate::fs::is_shell_name(&text) {
         Some(text.clone())
     } else {
         None

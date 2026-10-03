@@ -218,7 +218,11 @@ impl Open {
         let entries = crate::shell::menu::regroup(self.raw.clone(), &self.handlers, moves);
         // An empty selection is the folder's *background* menu, and that is the one menu the shell
         // hands over with a gap in it — no Paste. See `crate::shell::menu::Own::Paste`.
-        let entries = if self.items.is_empty() {
+        //
+        // Not in the Recycle Bin, where there is no gap: nothing is pasted into it, in Explorer or
+        // here — see `App::paste_into_folder` — and a Paste that could never be enabled is an entry
+        // saying something false about the folder.
+        let entries = if self.items.is_empty() && !crate::fs::recycle::is_bin(&self.folder) {
             crate::shell::menu::with_our_paste(entries, self.can_paste)
         } else {
             entries

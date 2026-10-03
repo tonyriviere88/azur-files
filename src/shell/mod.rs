@@ -413,6 +413,18 @@ impl Modal {
         if self.busy {
             return false;
         }
+        // **Never the user's Recycle Bin from a test.** Its items are real deletions in
+        // `$RECYCLE.BIN`, which no sandbox contains, and the verbs on them — Delete, Empty — are
+        // permanent. [`ops::FOR_REAL`] is the same rule for `IFileOperation`; this is the one route
+        // to a shell verb that does not pass through it, and a pane showing the bin sends its
+        // Delete this way. See [`crate::fs::recycle`].
+        #[cfg(test)]
+        {
+            let Request::Invoke { parent, .. } = &request;
+            if crate::fs::recycle::is_bin(parent) {
+                return false;
+            }
+        }
         if self.tx.send(request).is_ok() {
             self.busy = true;
             return true;

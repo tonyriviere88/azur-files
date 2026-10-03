@@ -237,30 +237,25 @@ pub fn show(
                         shell,
                         &mut queue,
                         &place.label,
-                        !place.shell_only && place.path == current,
+                        place.path == current,
                         Id::new(("place", &place.label)),
                         Sense::click(),
                         false,
                         false,
                     );
-                    if place.shell_only {
-                        // Not a directory this program can list — hand it over.
-                        if response.clicked() {
-                            out.push(Action::Reveal(place.path.clone()));
+                    // The Recycle Bin too, which used to be handed to Explorer — see
+                    // [`crate::fs::recycle`] for how it is listed here now.
+                    navigate_on(&response, focused, &place.path, out);
+                    ContextMenu::new(&response).show(ui.ctx(), |ui| {
+                        menu_targets(ui, focused, &place.path, out);
+                        azur_egui_theme::components::menu_divider(ui);
+                        if ui
+                            .add(MenuItem::new("Add to bookmarks").icon(&icons::star))
+                            .clicked()
+                        {
+                            out.push(Action::AddBookmark(place.path.clone()));
                         }
-                    } else {
-                        navigate_on(&response, focused, &place.path, out);
-                        ContextMenu::new(&response).show(ui.ctx(), |ui| {
-                            menu_targets(ui, focused, &place.path, out);
-                            azur_egui_theme::components::menu_divider(ui);
-                            if ui
-                                .add(MenuItem::new("Add to bookmarks").icon(&icons::star))
-                                .clicked()
-                            {
-                                out.push(Action::AddBookmark(place.path.clone()));
-                            }
-                        });
-                    }
+                    });
                 }
             }
 

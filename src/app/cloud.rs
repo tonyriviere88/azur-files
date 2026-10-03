@@ -12,7 +12,11 @@ impl App {
         for pane in &mut self.panes {
             let tab = pane.tab_mut();
             let Some(dir) = tab.dir.as_ref() else { continue };
-            if tab.cloud_asked || !dir.synced || crate::archive::is_virtual_location(&tab.path) {
+            if tab.cloud_asked
+                || !dir.synced
+                || crate::fs::is_synthetic(&tab.path)
+                || crate::archive::is_virtual_location(&tab.path)
+            {
                 continue;
             }
             tab.cloud_asked = true;

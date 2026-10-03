@@ -95,48 +95,11 @@ const UNDELETE_WIDE: &[u16] = &[
 /// worth putting back.
 #[cfg(windows)]
 pub(crate) fn restore(items: &[Recycled], owner: Owner) -> Option<String> {
-    use windows::Win32::UI::Shell::{SHBindToParent, SHGetIDListFromObject};
-
-    // SAFETY: every ID list taken from the shell here is owned by an `Ids`, which frees it; each
-    // child list points into one of those and is used only while it is alive. Nothing is retained
-    // past the return.
+    // SAFETY: see `menu_of`; the menu it hands back is an ordinary reference-counted interface.
     unsafe {
-        let found = find(items);
-        if found.is_empty() {
-            return Some("Those items are no longer in the Recycle Bin".to_owned());
-        }
-
-        // Each item's own absolute ID list, kept alive for as long as the children point into it.
-        let lists: Vec<Ids> = found
-            .iter()
-            .filter_map(|item| SHGetIDListFromObject(item).ok().map(Ids))
-            .filter(|list| !list.0.is_null())
-            .collect();
-        let Some(first) = lists.first() else {
-            return Some("Could not name those items to the shell".to_owned());
-        };
-
-        // The bin as an `IShellFolder`, taken from an item's own parent. Which is the point:
-        // these came out of the bin's enumeration, so their parent *is* the bin — where the same
-        // call on the `$R…` file's list gave the file system folder, and a menu with no
-        // `undelete` on it.
-        let mut child: *mut ITEMIDLIST = std::ptr::null_mut();
-        let Ok(bin) = SHBindToParent::<IShellFolder>(first.0, Some(&mut child)) else {
-            return Some("Could not open the Recycle Bin".to_owned());
-        };
-        let mut children: Vec<*const ITEMIDLIST> = vec![child as *const ITEMIDLIST];
-        for list in lists.iter().skip(1) {
-            let mut child: *mut ITEMIDLIST = std::ptr::null_mut();
-            if SHBindToParent::<IShellFolder>(list.0, Some(&mut child)).is_ok()
-                && !child.is_null()
-            {
-                children.push(child as *const ITEMIDLIST);
-            }
-        }
-
-        let menu: IContextMenu = match bin.GetUIObjectOf(HWND::default(), &children, None) {
+        let menu = match menu_of(items) {
             Ok(menu) => menu,
-            Err(e) => return friendly(&e),
+            Err(why) => return why,
         };
         // **Queried before invoking, and the menu kept alive across the invoke.** Both halves are
         // load-bearing, and the second was learned the hard way: this destroyed the `HMENU` first
@@ -183,6 +146,81 @@ pub(crate) fn restore(items: &[Recycled], owner: Owner) -> Option<String> {
             Err(e) => friendly(&e),
         }
     }
+}
+
+/// The context menu the Recycle Bin gives for these of its items — **Restore**, Cut, Delete,
+/// Properties — which is the same menu Explorer shows on a selection in the bin.
+///
+/// What the restore above is invoked against, and what [`crate::shell::menu`] shows when a
+/// selection in a bin listing is right-clicked: see [`held_menu`]. `Err` carries the sentence for
+/// the status line, or `None` inside it for a failure the shell has already put into words.
+///
+/// # Safety
+///
+/// COM must be initialised on the calling thread. Every ID list taken from the shell here is owned
+/// by an `Ids`, which frees it; each child list points into one of those and is used only while it
+/// is alive, and `GetUIObjectOf` copies what it keeps.
+#[cfg(windows)]
+unsafe fn menu_of(items: &[Recycled]) -> Result<IContextMenu, Option<String>> {
+    use windows::Win32::UI::Shell::{SHBindToParent, SHGetIDListFromObject};
+
+    let found = find(items);
+    if found.is_empty() {
+        return Err(Some("Those items are no longer in the Recycle Bin".to_owned()));
+    }
+
+    // Each item's own absolute ID list, kept alive for as long as the children point into it.
+    let lists: Vec<Ids> = found
+        .iter()
+        .filter_map(|item| SHGetIDListFromObject(item).ok().map(Ids))
+        .filter(|list| !list.0.is_null())
+        .collect();
+    let Some(first) = lists.first() else {
+        return Err(Some("Could not name those items to the shell".to_owned()));
+    };
+
+    // The bin as an `IShellFolder`, taken from an item's own parent. Which is the point:
+    // these came out of the bin's enumeration, so their parent *is* the bin — where the same
+    // call on the `$R…` file's list gave the file system folder, and a menu with no
+    // `undelete` on it.
+    let mut child: *mut ITEMIDLIST = std::ptr::null_mut();
+    let Ok(bin) = SHBindToParent::<IShellFolder>(first.0, Some(&mut child)) else {
+        return Err(Some("Could not open the Recycle Bin".to_owned()));
+    };
+    let mut children: Vec<*const ITEMIDLIST> = vec![child as *const ITEMIDLIST];
+    for list in lists.iter().skip(1) {
+        let mut child: *mut ITEMIDLIST = std::ptr::null_mut();
+        if SHBindToParent::<IShellFolder>(list.0, Some(&mut child)).is_ok() && !child.is_null() {
+            children.push(child as *const ITEMIDLIST);
+        }
+    }
+
+    bin.GetUIObjectOf(HWND::default(), &children, None)
+        .map_err(|e| friendly(&e))
+}
+
+/// The menu for a selection in a bin listing, whose rows target the `$R…` files the bin holds.
+///
+/// What the context menu is built from when a pane showing the bin is right-clicked, and what a
+/// command chosen from it is invoked against — see `crate::shell::menu::win::context_of`. Built
+/// from the bin's *own* items and never from the `$R…` paths, for the reason this module's header
+/// measured: a `$R…` file's own menu is a file's, with Delete meaning "recycle this" and no Restore
+/// on it at all.
+///
+/// # Safety
+///
+/// COM must be initialised on the calling thread.
+#[cfg(windows)]
+pub(crate) unsafe fn held_menu(held: &[PathBuf]) -> Option<IContextMenu> {
+    let items: Vec<Recycled> = held
+        .iter()
+        .map(|path| Recycled {
+            // Only consulted when `bin` is not set, which it always is here.
+            from: path.clone(),
+            bin: Some(path.clone()),
+        })
+        .collect();
+    menu_of(&items).ok()
 }
 
 /// The bin's own item for each of these, skipping any that is no longer there.
@@ -295,8 +333,11 @@ fn came_from(was: &Path, folder: &Path, wanted: &Path) -> bool {
 }
 
 /// One of an item's names, freed on the way out.
+///
+/// `pub(crate)` for `crate::fs::places`, which reads a `shell:` name's folder the same way and
+/// needs the same guard.
 #[cfg(windows)]
-unsafe fn name_of(
+pub(crate) unsafe fn name_of(
     item: &IShellItem,
     which: windows::Win32::UI::Shell::SIGDN,
 ) -> Option<PathBuf> {

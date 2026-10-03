@@ -227,6 +227,21 @@ pub enum Command {
 }
 
 impl Command {
+    /// A shell command named by its verb alone, for a gesture that asks for one without a menu
+    /// having been read — Delete in the Recycle Bin, say.
+    ///
+    /// Nothing to fall back on, deliberately: an id no menu hands out and a label no entry can
+    /// have, a NUL, so that [`win::invoke`]'s fallback by id or by label matches nothing, and a
+    /// refused verb runs nothing in its place.
+    pub fn verb_only(verb: &str) -> Self {
+        Self::Shell {
+            verb: Some(verb.to_owned()),
+            id: u32::MAX,
+            path: Vec::new(),
+            label: "\0".to_owned(),
+        }
+    }
+
     /// Whether this is one of the shell's New entries, which answers by *creating something*.
     ///
     /// Recognised by verb, because the verbs are the shell's own and are the same on every
@@ -825,10 +840,23 @@ pub fn regroup(entries: Vec<Entry>, handlers: &Handlers, moved: &Moves) -> Vec<E
     // Which run held the default is noted before it is taken, because it is the one thing that lets
     // a mixed run be named honestly: that run is the pile of applications registered against this
     // file type. See [`name_of`].
-    let default_run = runs
+    //
+    // **Properties is never the row lifted to the top, even when it is the default** — which it is
+    // on an item in the Recycle Bin, where a double click shows the sheet. It has a place of its own
+    // at the bottom, and [`with_our_copy_paths`] hangs `Copy path(s)` off it: lifted, it took that
+    // entry to the top with it and left Restore, Cut and Delete below both. With Properties as the
+    // default nothing else is lifted either, since nothing else is what a double click does; the
+    // bin's Restore then leads the menu as the first of its runs, which is the shell's own order.
+    let lifted = |entry: &Entry| entry.default && !entry.is(PROPERTIES);
+    let default_is_properties = runs
         .iter()
-        .position(|run| run.iter().any(|entry| entry.default));
-    let default = take_where(&mut runs, |entry| entry.default).or_else(|| {
+        .flatten()
+        .any(|entry| entry.default && entry.is(PROPERTIES));
+    let default_run = runs.iter().position(|run| run.iter().any(lifted));
+    let default = take_where(&mut runs, lifted).or_else(|| {
+        if default_is_properties {
+            return None;
+        }
         // A menu the shell marked nothing default in — a multiple selection, usually. The first
         // command is what Explorer shows first and what this program showed before it banded
         // anything, so it is the honest stand-in.
@@ -838,7 +866,7 @@ pub fn regroup(entries: Vec<Entry>, handlers: &Handlers, moved: &Moves) -> Vec<E
         // unmarked, the top row of a multiple selection's menu offered a right click that recorded a
         // preference and changed nothing — because this `take_where` runs before any of
         // [`Moves`] is consulted, so the entry is lifted either way. See [`Entry::default`].
-        take_where(&mut runs, |entry| entry.verb().is_some()).map(|entry| Entry {
+        take_where(&mut runs, |entry| entry.verb().is_some() && !entry.is(PROPERTIES)).map(|entry| Entry {
             default: true,
             ..entry
         })
@@ -1583,4 +1611,4 @@ pub fn invoke(
 mod win;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

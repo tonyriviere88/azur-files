@@ -259,7 +259,7 @@ pub(crate) fn status_line(
         // is worth a tooltip on its own — a folder's byte count with nothing to compare it against is
         // a figure to do arithmetic on.
         "Measure each folder, and bar the share of what is on show (Ctrl+2)",
-        !tab.path.as_os_str().is_empty(),
+        !crate::fs::is_synthetic(&tab.path),
         tab.sizes.on,
         t.surfaces.status,
     )

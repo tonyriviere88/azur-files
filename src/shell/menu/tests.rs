@@ -130,7 +130,7 @@ fn scratch(name: &str) -> (PathBuf, PathBuf, PathBuf) {
 /// anything — see [`Command::creates_an_item`] — so these tests match on the verb and carry
 /// the label only to put in a failure message somebody has to read.
 #[cfg(windows)]
-fn verbs_of(parent: &Path, items: &[PathBuf]) -> Vec<(String, String)> {
+pub(crate) fn verbs_of(parent: &Path, items: &[PathBuf]) -> Vec<(String, String)> {
     let Some((_live, entries)) = super::win::Live::open(parent, items, Depth::Full) else {
         return Vec::new();
     };
@@ -1467,6 +1467,36 @@ fn a_real_shaped_menu() -> Vec<Entry> {
 /// run 3 on this machine — and the whole point of banding is that it does not sit there any more.
 /// It is also the entry that was hardest to find: a submenu row's verb was being read and thrown
 /// away, so for a while this could not be written at all. See [`Entry::verb`].
+/// **An item in the Recycle Bin gets the same bands as a file anywhere else**: its actions first,
+/// then `Copy path(s)` and Properties at the bottom.
+///
+/// The menu below is the one the bin hands over for one of its items, where the shell marks
+/// **Properties** as the default — a double click in the bin shows the sheet. Lifted to the top as
+/// a default is, it took `Copy path(s)` with it, and Restore, Cut and Delete came out below both.
+#[test]
+fn a_recycled_item_keeps_properties_at_the_bottom() {
+    let bin_item = vec![
+        cmd("Restaurer", "undelete"),
+        Entry::separator(),
+        cmd("Couper", "cut"),
+        Entry::separator(),
+        cmd("Supprimer", "delete"),
+        Entry::separator(),
+        default_cmd("Propriétés", "properties"),
+    ];
+    let out = super::with_our_copy_paths(regroup(bin_item, &Handlers::new(), &Moves::default()));
+    let shape = shape(&out);
+    assert_eq!(
+        shape,
+        vec!["Restaurer", "--", "[tiles]Couper|Supprimer", "Copy path(s)", "Propriétés"],
+        "the bin's actions have to lead the menu, as a file's do"
+    );
+    assert!(
+        out.last().is_some_and(|entry| entry.default),
+        "Properties is still the default, and still drawn as one"
+    );
+}
+
 #[test]
 fn the_bands_come_out_in_order_with_open_with_hoisted() {
     let out = regroup(a_real_shaped_menu(), &Handlers::new(), &Moves::default());
@@ -2284,4 +2314,24 @@ fn submenus_are_populated_rather_than_left_empty() {
     }
 
     crate::sandbox::remove(&dir);
+}
+
+/// **The Recycle Bin's background menu is the bin's own**, from nothing more than its location.
+///
+/// A pane showing the bin is at `shell:RecycleBinFolder` — see [`crate::fs::recycle`] — and its
+/// background menu is built by parsing that and asking the folder for its view object, exactly as
+/// any folder's is. What that has to give is the entry Explorer puts there, **Empty Recycle Bin**,
+/// since this program has no entry of its own for it. Read and never invoked: nothing here asks the
+/// bin to do anything, so it is safe against the user's real one.
+#[test]
+#[cfg(windows)]
+fn the_bin_s_background_menu_can_empty_it() {
+    let _serialised = crate::shell::serialised();
+    crate::shell::init();
+    let verbs = verbs_of(&crate::fs::recycle::location(), &[]);
+    println!("the bin's background menu: {verbs:?}");
+    assert!(
+        verbs.iter().any(|(verb, _)| verb.eq_ignore_ascii_case("empty")),
+        "no Empty Recycle Bin on the bin's background menu: {verbs:?}"
+    );
 }

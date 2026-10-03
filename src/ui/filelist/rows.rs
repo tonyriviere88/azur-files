@@ -701,7 +701,9 @@ pub(crate) fn rows(
                     let own = if !entry.is_dir() && Icons::is_per_file(ext) {
                         match tab.file_icons.get(entry_index).copied() {
                             Some(shell_icons::UNASKED) => {
-                                let path = dir.path.join(dir.name(entry_index));
+                                // The target and not a join, which is the same path everywhere
+                                // but the Recycle Bin — where it is the file the bin holds.
+                                let path = dir.target(entry_index);
                                 if icons_cache.request_file(
                                     tab.view,
                                     entry_index as u32,
@@ -1400,7 +1402,11 @@ pub(crate) fn row_tooltip(
     }
     scratch.clear();
     fmt::modified(entry.modified, zone, scratch);
-    about.push(("Modified", scratch.clone()));
+    about.push((Column::Modified.header_over(Some(dir)), scratch.clone()));
+    // And where it came from, which the row shows dimmed and a tooltip can say in full.
+    if dir.recycled {
+        about.push(("Original location", dir.within(entry_index).to_owned()));
+    }
 
     // And what git says, which the row itself can only say with a badge.
     if let Some(state) = tab

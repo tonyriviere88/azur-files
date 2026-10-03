@@ -79,7 +79,21 @@ fn pidl_of(path: &Path) -> Option<Pidl> {
 /// And what it carries but will not *run* is Properties, which belongs to that same view and
 /// answers `S_OK` without showing anything when it is asked from anywhere else. That one is
 /// invoked against the folder-as-an-item menu above instead — see [`as_an_item`].
+///
+/// # And the Recycle Bin, whose rows are not what they point at
+///
+/// A selection in a bin listing is `$R…` files, and their own menu is a file's — Open, Delete as
+/// "recycle this", no Restore. So a selection of held items gets the menu the *bin* gives for them
+/// instead, which is Explorer's: Restore, Cut, Delete as "permanently", Properties. See
+/// [`crate::shell::ops::bin::held_menu`]. The bin's background needs nothing of its own:
+/// `shell:RecycleBinFolder` parses, and its view object is the menu with **Empty Recycle Bin** on it.
 unsafe fn context_of(parent: &Path, items: &[PathBuf]) -> Option<IContextMenu> {
+    if !items.is_empty()
+        && crate::fs::recycle::is_bin(parent)
+        && items.iter().all(|item| crate::fs::recycle::is_held(item))
+    {
+        return crate::shell::ops::bin::held_menu(items);
+    }
     if items.is_empty() {
         let pidl = pidl_of(parent)?;
         // Bound from the desktop, because what is wanted is the folder itself as an
@@ -1486,9 +1500,13 @@ unsafe fn run(
     // `D:\Sources\Été`, and UTF-8 bytes are *not* one. A null there says "no directory",
     // which is what this passed for every path until now; the wrong directory would be new
     // and worse.
+    // **And not when there is no directory at all** — the Recycle Bin, whose parent is a shell name.
+    // A verb handed `shell:RecycleBinFolder` as its working directory is being told something
+    // false, and `null` is the honest "none", which is what `restore` in the bin module passes.
+    let real = !crate::fs::is_synthetic(parent);
     let dir_wide = crate::shell::wide(parent);
     let dir_text = parent.to_string_lossy().replace('/', "\\");
-    let dir_bytes: Option<Vec<u8>> = dir_text.is_ascii().then(|| {
+    let dir_bytes: Option<Vec<u8>> = (real && dir_text.is_ascii()).then(|| {
         dir_text
             .clone()
             .into_bytes()
@@ -1520,7 +1538,11 @@ unsafe fn run(
             Some(bytes) => PCSTR(bytes.as_ptr()),
             None => PCSTR::null(),
         },
-        lpDirectoryW: PCWSTR(dir_wide.as_ptr()),
+        lpDirectoryW: if real {
+            PCWSTR(dir_wide.as_ptr())
+        } else {
+            PCWSTR::null()
+        },
         nShow: SW_SHOWNORMAL.0,
         ..Default::default()
     };

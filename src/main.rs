@@ -207,7 +207,9 @@ fn main() -> eframe::Result {
     // screenshots rather than capturing them by hand.
     for arg in std::env::args().skip(1) {
         if let Some(path) = arg.strip_prefix("--open=") {
-            open.push(fs::normalize(std::path::Path::new(path)));
+            // Resolved as the path bar resolves one — `%AppData%`, `shell:Downloads`, the Recycle
+            // Bin — since a shortcut or a Git Bash prompt hands the text over unexpanded.
+            open.push(fs::from_outside(path));
         } else if let Some(path) = arg.strip_prefix("--shot=") {
             shot = Some(Shot {
                 path: std::path::PathBuf::from(path),

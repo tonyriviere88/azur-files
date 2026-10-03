@@ -61,6 +61,15 @@ impl Column {
         }
     }
 
+    /// The header over a listing, which says something different for one column in the Recycle
+    /// Bin: there the date is when the item was deleted. See [`super::recycle`].
+    pub fn header_over(self, dir: Option<&super::Dir>) -> &'static str {
+        match self {
+            Self::Modified if dir.is_some_and(|dir| dir.recycled) => "Deleted",
+            _ => self.header(),
+        }
+    }
+
     /// Right-aligned, because the digits should line up.
     pub fn numeric(self) -> bool {
         matches!(self, Self::Size)
@@ -535,7 +544,15 @@ fn compare(
 
     match primary {
         Ordering::Equal => {
-            let names = natural_cmp(dir.name(a as usize), dir.name(b as usize));
+            // In the Recycle Bin a name is the whole path an item came from, and sorting on that
+            // is sorting by folder. What the Name column means there is the name — so that first,
+            // and the path only between two items that had the same one.
+            let names = if dir.recycled {
+                natural_cmp(dir.leaf(a as usize), dir.leaf(b as usize))
+                    .then_with(|| natural_cmp(dir.name(a as usize), dir.name(b as usize)))
+            } else {
+                natural_cmp(dir.name(a as usize), dir.name(b as usize))
+            };
             // The tie-break follows the same direction, so reversing the sort
             // reverses the whole listing rather than scrambling each group.
             if ascending {

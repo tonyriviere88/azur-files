@@ -5,7 +5,9 @@ use super::*;
 impl Tab {
     /// Go somewhere, recording it in the history.
     pub fn navigate(&mut self, path: impl Into<PathBuf>) {
-        let path = path.into();
+        // Every spelling of the Recycle Bin is one place, before it is compared with anything —
+        // see [`crate::fs::recycle::canonical`].
+        let path = crate::fs::recycle::canonical(path.into());
         if path == self.path {
             return;
         }
@@ -58,6 +60,9 @@ impl Tab {
 
     /// Point the tab at a path without touching the history.
     pub(crate) fn go_to(&mut self, path: PathBuf) {
+        // Here as well as in `navigate`, for a history or a saved tab written before the bin had a
+        // location of its own.
+        let path = crate::fs::recycle::canonical(path);
         // The one place [`Tab::trail`] is decided, because this is the one place the path
         // changes — `navigate`, `go_back`, `go_forward` and `go_up` all come through here.
         //
@@ -190,8 +195,9 @@ impl Tab {
         // "This PC" is not a folder and has no tree: its rows are volumes, each of which is a
         // place to flatten of its own. There is nothing for the button to do here, so it is
         // drawn disabled and this refuses — rather than latching over a listing that would not
-        // have changed.
-        if self.path.as_os_str().is_empty() {
+        // have changed. The Recycle Bin is the same: its rows are items from all over the
+        // machine, and none of them is a tree to walk.
+        if crate::fs::is_synthetic(&self.path) {
             return;
         }
         // A folder diff is always a tree. See [`Tab::diff`].

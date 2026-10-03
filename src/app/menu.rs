@@ -48,7 +48,8 @@ impl App {
 
         // Two folders selected, which is what `Folder diff` is offered on. Asked of the listing and not
         // of the disk: the selection is rows of it, and each row already says whether it is a folder.
-        let diffable = items.len() == 2 && {
+        // Not in the bin, whose folders are held as `$R…` and would be compared under those names.
+        let diffable = items.len() == 2 && !fs::is_synthetic(&folder) && {
             let tab = p.tab();
             tab.dir.as_ref().is_some_and(|dir| {
                 let folders: Vec<PathBuf> = tab
@@ -216,8 +217,11 @@ impl App {
                     // and `has_files` takes it, which is once per menu and not once per
                     // rearrangement. Only for a background menu, which is the only one that gets a
                     // Paste of ours.
-                    let can_paste =
-                        asking.items.is_empty() && crate::shell::clipboard::has_files();
+                    // Not in the Recycle Bin, which is not a folder to paste into — see
+                    // [`App::paste_into_folder`], which would only say so.
+                    let can_paste = asking.items.is_empty()
+                        && !fs::is_synthetic(&asking.folder)
+                        && crate::shell::clipboard::has_files();
                     self.menu = Some(
                         crate::ui::menu::Open::new(
                             asking.pane,
@@ -461,6 +465,13 @@ impl App {
             // [`App::put_these_on_clipboard`]. Empty is the background menu, which has neither
             // entry on it; the guard is here so that a shell that grew one would fall through to
             // it rather than quietly clearing the clipboard.
+            // **Except in the Recycle Bin**, where the bin's own Cut is the right one: it puts the
+            // bin's items on the clipboard in the bin's own terms, and a paste of that in Explorer
+            // takes them out of the bin properly. This program's clipboard would carry the `$R…`
+            // files, which is exactly what [`App::put_these_on_clipboard`] refuses.
+            "cut" | "copy" if menu.items.iter().any(|item| fs::recycle::is_held(item)) => {
+                Vec::new()
+            }
             "cut" if !menu.items.is_empty() => vec![Action::CutItems(menu.items.clone())],
             "copy" if !menu.items.is_empty() => vec![Action::CopyItems(menu.items.clone())],
             // The one verb here that the shell would not merely do *differently* — it would do

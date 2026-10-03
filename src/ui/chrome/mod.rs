@@ -495,7 +495,7 @@ pub fn tab_strip(
             t,
             rect,
             &tab.title,
-            tab.path.as_os_str().is_empty(),
+            &tab.path,
             tab.dir.is_none(),
             active,
             focused,
@@ -585,7 +585,8 @@ fn paint_tab(
     t: &Theme,
     rect: Rect,
     title: &str,
-    is_this_pc: bool,
+    // Where the tab is, for the painted glyph when the shell has no icon for it yet.
+    path: &std::path::Path,
     loading: bool,
     active: bool,
     pane_focused: bool,
@@ -698,8 +699,13 @@ fn paint_tab(
             );
         }
         None => {
-            let glyph: azur_icons::Icon<'_> = if is_this_pc {
+            // This PC and the bin are places rather than folders, and are drawn in the text's
+            // colour rather than the folder's.
+            let place = crate::fs::is_synthetic(path);
+            let glyph: azur_icons::Icon<'_> = if path.as_os_str().is_empty() {
                 &icons::this_pc
+            } else if place {
+                &icons::trash
             } else if active {
                 &icons::folder_open
             } else {
@@ -710,7 +716,7 @@ fn paint_tab(
                 box_rect,
                 if loading {
                     t.text.disabled
-                } else if is_this_pc {
+                } else if place {
                     text_color
                 } else {
                     t.folder

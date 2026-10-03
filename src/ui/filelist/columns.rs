@@ -31,10 +31,11 @@ pub(crate) fn measure_columns(ui: &Ui, t: &Theme, tab: &mut Tab, scratch: &mut S
             .x
     };
     // A header can be wider than everything under it.
+    let over = tab.dir.clone();
     let header_of = |column: Column| {
         ui.painter()
             .layout_no_wrap(
-                column.header().to_owned(),
+                column.header_over(over.as_deref()).to_owned(),
                 t.fonts.body_strong.clone(),
                 Color32::PLACEHOLDER,
             )
@@ -195,7 +196,7 @@ pub(crate) fn header_strip(
         );
         let galley = truncated(
             ui.painter(),
-            column.header(),
+            column.header_over(tab.dir.as_deref()),
             t.fonts.body_strong.clone(),
             color,
             (inner.width() - arrow).max(0.0),

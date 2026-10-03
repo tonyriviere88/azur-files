@@ -374,7 +374,7 @@ impl Session {
             job,
             gone: false,
             blocks: Vec::new(),
-            cwd: (!dir.as_os_str().is_empty()).then(|| dir.to_path_buf()),
+            cwd: (!crate::fs::is_synthetic(dir)).then(|| dir.to_path_buf()),
             home: dir.to_path_buf(),
             next_id: 1,
             partial: [String::new(), String::new()],
@@ -445,7 +445,7 @@ impl Session {
             return;
         }
         let moved = dir
-            .filter(|dir| !dir.as_os_str().is_empty() && Some(*dir) != self.cwd.as_deref())
+            .filter(|dir| !crate::fs::is_synthetic(dir) && Some(*dir) != self.cwd.as_deref())
             .map(|dir| self.kind.cd(dir));
         self.dispatch_or_refuse(moved, command.to_owned());
     }
@@ -1067,7 +1067,7 @@ pub fn in_terminal(kind: Kind, dir: &Path, command: &str) -> Result<(), String> 
     // **A `;` is Windows Terminal's own argument separator**, for splitting a window into panes — so a
     // command with one in it would be cut in half at it and half of it run somewhere unexpected.
     // Those go the other way rather than being launched wrong.
-    if !command.contains(';') && !dir.as_os_str().is_empty() {
+    if !command.contains(';') && !crate::fs::is_synthetic(dir) {
         if let Some(wt) = which("wt.exe") {
             let mut launch = Command::new(wt);
             launch.arg("-d").arg(dir).arg(&program).args(&args);
@@ -1081,7 +1081,7 @@ pub fn in_terminal(kind: Kind, dir: &Path, command: &str) -> Result<(), String> 
     // than relying on what an absent flag falls back to.
     let mut launch = Command::new(&program);
     launch.args(&args);
-    if !dir.as_os_str().is_empty() {
+    if !crate::fs::is_synthetic(dir) {
         launch.current_dir(dir);
     }
     crate::shell::new_console(&mut launch);
@@ -1127,7 +1127,7 @@ fn spawn(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    if !dir.as_os_str().is_empty() {
+    if !crate::fs::is_synthetic(dir) {
         command.current_dir(dir);
     }
     // Everything that stops a program waiting for a terminal it has not got.

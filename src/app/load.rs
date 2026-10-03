@@ -115,8 +115,8 @@ impl App {
 
         for tab in self.panes.iter_mut().flat_map(|pane| pane.tabs.iter_mut()) {
             // This PC has nothing to count — see `filelist::status_line`, where the button that says
-            // so is drawn disabled. The same answer from the other end.
-            if tab.path.as_os_str().is_empty() {
+            // so is drawn disabled. The same answer from the other end. Nor has the Recycle Bin.
+            if crate::fs::is_synthetic(&tab.path) {
                 continue;
             }
             match tab.wanted_sizes() {
@@ -407,7 +407,14 @@ impl App {
                     }
                 }
             }
-            for path in &done.touched {
+            // The bin as well, when the job went into it or came out of it. See
+            // [`crate::shell::ops::Job::changes_the_bin`] for why it is not among `touched`.
+            let bin = done
+                .job
+                .as_ref()
+                .is_some_and(crate::shell::ops::Job::changes_the_bin)
+                .then(crate::fs::recycle::location);
+            for path in done.touched.iter().chain(&bin) {
                 self.loader.invalidate(path);
             }
             // **An archive that has just been deleted, moved or renamed is not one any more**, its
@@ -427,7 +434,7 @@ impl App {
             // alone, which is the point of tracking this by path.
             for pane in &mut self.panes {
                 for tab in &mut pane.tabs {
-                    if done.touched.contains(&tab.path) {
+                    if done.touched.contains(&tab.path) || bin.as_ref() == Some(&tab.path) {
                         tab.refresh();
                     }
                 }
