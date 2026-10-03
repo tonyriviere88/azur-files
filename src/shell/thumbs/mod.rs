@@ -12,7 +12,8 @@
 //!    programs.
 //! 2. **It answers for everything, not just the formats linked in.** RAW files from a camera, HEIC
 //!    from a phone, PSDs, PDFs, `.mp4` — every one of those has a thumbnail provider registered by
-//!    whatever produced it, and none of them is a codec this program would be right to embed.
+//!    whatever produced it, and none of them is a codec this program would be right to embed. *Nearly*
+//!    everything, and where it is not the tile is drawn here instead — see the two exceptions below.
 //! 3. **A file with no thumbnail still needs a picture**, and the same call gives it: the shell
 //!    falls back to the file's icon at the size asked for, which is the *large* icon — a 96-point
 //!    tile drawn from the 16-point image list behind the details view would be a blur. One call
@@ -88,6 +89,30 @@
 //! variant of the kind that enum argues against, and a policy for re-opening once the shell's cache is
 //! warm and the same call costs 1.8 ms. It would also show a file's *icon* where a local decoder shows
 //! the drawing, which is a worse tile. Worth writing when a second format needs it, not before.
+//!
+//! # The second exception: a format Windows has no codec for at all
+//!
+//! `.svg` is the case where the shell's answer is too *slow*. The other one is where there is no answer
+//! to be had: **a `.tga` has no thumbnail provider on a stock Windows**, so `GetImage` falls back to the
+//! file's icon, and a folder of textures is a grid of identical blank document glyphs. Which is the
+//! report this was written for. It is not one format — `.hdr`, `.ppm`, `.qoi`, `.ff` and `.cur` are in
+//! the same position — and all of them are formats the preview panel *already decodes*, one pane over,
+//! for the file the keyboard is on.
+//!
+//! So [`raster`] draws those here, with the panel's own decoder at [`CELL`], and [`DECODED_HERE`] is
+//! the list. Both exceptions are then the same shape and worth stating as one rule: **the shell is
+//! asked unless this program already has the decoder and the shell has nothing to bring** — either
+//! because a browser engine is not a codec, or because there is no codec at all. Everything else, which
+//! is every format anybody has a folder of, goes to the shell exactly as the three reasons above say.
+//!
+//! ## Why not everything `image` can read
+//!
+//! Because point 1 above is still true of the formats WIC covers, and it is the strongest argument in
+//! this module: the shell has already decoded that `.png`, Explorer's cache has it, and it comes back
+//! in 1.8 ms. Decoding it again here would cost more, hold a second copy of a cache that is already
+//! there, and start a discussion about which decoder is right about a colour profile. See
+//! [`DECODED_HERE`] for what the line is drawn on and for why it is a list rather than a question asked
+//! of the registry.
 //!
 //! # A page at a time, and why it is not one texture
 //!
@@ -943,15 +968,15 @@ impl Thumbs {
 
 /// One file's picture: this program's own decoder where it has a better one, and the shell otherwise.
 ///
-/// The one place the "ask the shell for everything" rule in the module header is broken, and only for
-/// `.svg` — where the registered provider is a browser engine and costs 1.2 s a file. See the header
-/// for the measurement and for what the local rasteriser gives up.
+/// The two places the "ask the shell for everything" rule in the module header is broken — [`vector`],
+/// where the registered provider is a browser engine, and [`raster`], where there is no provider at all.
+/// See the header for both.
 ///
 /// Everything else goes straight through, including formats `image` could have decoded: a `.png` costs
 /// the shell 12.95 ms cold and nothing warm, the cache is shared with Explorer, and re-implementing
 /// that would buy nothing and lose the RAW files and the `.mp4`s.
 fn draw(path: &Path) -> Got {
-    if let Some(image) = vector(path) {
+    if let Some(image) = vector(path).or_else(|| raster(path)) {
         return Got::Picture(image);
     }
     picture(path)
@@ -995,6 +1020,57 @@ fn vector(path: &Path) -> Option<ColorImage> {
     }
     let image = crate::preview::vector_art(path, CELL as u32).ok()?.pixels;
     image.pixels.iter().any(|pixel| pixel.a() > 0).then_some(image)
+}
+
+/// Every raster format the preview panel decodes that **Windows ships no codec for**, so a tile of one
+/// has never had a picture to show.
+///
+/// The list is short because it is the leftovers, and every other name in [`crate::preview`]'s
+/// `PICTURES` is deliberately absent: WIC covers PNG, JPEG, GIF, BMP, DIB, ICO, TIFF, WebP, HEIF and —
+/// since Windows 8 — DDS, so those keep the shell's answer and the cache it is shared with Explorer
+/// through. What is left is the formats that arrive with a toolchain rather than with a camera or a
+/// browser, and a folder of them is a folder of *identical blank document icons* — which is the report
+/// this exists to answer, `.tga` being the one it arrived about.
+///
+/// | | what has them |
+/// | --- | --- |
+/// | `tga` | textures, and anything that has been through a 3D or games toolchain |
+/// | `hdr` | Radiance environment maps, from the same folders |
+/// | `pbm` `pgm` `ppm` | what a scientific or Unix tool writes when it wants no dependencies |
+/// | `qoi` `ff` | recent lossless formats nobody has a provider for |
+/// | `cur` | a cursor, which Windows draws everywhere except on a tile of one |
+///
+/// # Why a list and not `shell::providers`
+///
+/// The runtime question — *does this machine have a provider for this type?* — is already asked and
+/// cached one module over, and asking it here was the first design. It is the wrong one twice over:
+///
+/// - **The answer is a fact about the machine, so nothing about a tile could be tested.** "Does a
+///   `.tga` show its picture" would have no answer to assert, which is exactly why the
+///   `providers_on_this_machine` test in that module prints its findings rather than asserting them.
+/// - **The registry is not the question either.** `.qoi` on the machine this was written on comes back
+///   *registered*, by something an unrelated installer left behind; `.dds` comes back registered
+///   through `PerceivedType=image` whether or not WIC can read the particular file. A registration is
+///   not a codec.
+///
+/// So this is a claim about **Windows**, which is a stable thing, rather than about the machine, which
+/// is not. Where a machine does have a provider for one of these — a `.tga` extension somebody
+/// installed — the tile is drawn here instead, and that is the same trade `.svg` makes: a tile that
+/// agrees with the panel beside it, in-process, with no COM and no stranger's DLL.
+const DECODED_HERE: [&str; 8] = ["tga", "hdr", "pbm", "pgm", "ppm", "qoi", "ff", "cur"];
+
+/// One of [`DECODED_HERE`] decoded at [`CELL`], or `None` for everything the shell should be asked
+/// about — which is nearly every file.
+///
+/// The panel's own decoder at a tile's size, so the two cannot disagree about what a file looks like.
+/// A file that will not decode — truncated, or a variant of the format the codec refuses — is a `None`
+/// and goes to the shell like any other, and gets the file's icon from it as it always did.
+fn raster(path: &Path) -> Option<ColorImage> {
+    let ext = path.extension()?.to_str()?;
+    if !DECODED_HERE.iter().any(|known| ext.eq_ignore_ascii_case(known)) {
+        return None;
+    }
+    Some(crate::preview::raster_art(path, CELL as u32).ok()?.pixels)
 }
 
 // ---------------------------------------------------------------------------

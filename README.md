@@ -1403,6 +1403,11 @@ Every raster format `image` implements in pure Rust — PNG, JPEG, GIF, BMP, ICO
 DDS, HDR, QOI, the Netpbm family — plus **SVG**, rasterised by `resvg`. No C library appears
 anywhere in that list, which is the whole reason for those two crates rather than bindings.
 
+A `.cur` is on it too, and it is the one name that has to be *told* what it is: a cursor is an icon
+carrying a hotspot where an icon carries its colour planes, which `image`'s ICO decoder reads past
+happily — but `cur` is in neither of `image`'s tables, not by extension and not by magic, so a preview
+of one used to be a complaint about the extension instead of a picture of a pointer.
+
 **Alpha shows as alpha**, on a checkerboard. Which two greys the board uses was picked by
 measurement rather than by eye: `background-canvas` against `background-control` is 11.5 ΔL* apart
 in the dark theme and **3.6** in the light one, where the board all but disappeared and with it the
@@ -2157,6 +2162,16 @@ in this binary:
 3. **A file with no thumbnail still needs a picture**, and the same call gives it: the file's *large*
    icon at the size asked for. A tile drawn from the 16-point image list behind the details view would
    be a blur. One call covers both halves of a folder, which is what makes the grid one code path.
+
+**Two exceptions, and the rule they share.** `.svg` is not asked about, because the provider people
+actually have for it is PowerToys, which stands up a WebView2 per file for a flat 1.2 s — measured over
+1,233 drawings, 26 minutes cold against `resvg`'s 389 ms. Neither are `.tga`, `.hdr`, `.ppm`, `.pgm`,
+`.pbm`, `.qoi`, `.ff` and `.cur`, because Windows ships no codec for any of them: `GetImage` has nothing
+to extract and hands back the file's icon, so a folder of textures came up as a grid of identical blank
+document glyphs — while the panel beside it decoded the file the keyboard was on perfectly well. So the
+rule is *the shell is asked unless this program already has the decoder and the shell has nothing to
+bring*, and both exceptions are the preview panel's own decoder at a tile's 96 pixels. Every format WIC
+covers still goes to the shell, cache and all, which is what reason 1 is worth.
 
 What it costs is a shell call **per file** rather than the per-*type* answer
 [the row icons](#why-it-is-fast) are built around. It is affordable here

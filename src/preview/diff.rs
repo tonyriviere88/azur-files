@@ -59,9 +59,9 @@ pub(super) fn against_head(path: &Path) -> Payload {
     let Some(bytes) = crate::git::blob(path) else {
         return Payload::Picture(now);
     };
-    // The same name, so the same question about vector art: a blob has no extension of its own.
-    let vector = picture::is_vector(path);
-    let Ok(before) = picture::decode(&bytes, vector) else {
+    // The working file's name goes with the bytes, because a blob has none of its own — and both
+    // questions the decoder asks of a name, vector art and `.cur`, are questions about this file.
+    let Ok(before) = picture::decode(&bytes, path) else {
         return Payload::Picture(now);
     };
     difference(before, *now)

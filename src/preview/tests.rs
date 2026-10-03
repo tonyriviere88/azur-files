@@ -390,6 +390,55 @@ fn a_picture_keeps_its_alpha_and_is_bounded() {
     }
 }
 
+/// **A `.cur` decodes, and its name is the whole reason it can.**
+///
+/// A cursor is an icon whose directory entries carry a hotspot where an icon's carry the colour planes
+/// and the bit depth — which `image`'s ICO decoder reads past, so the pixels come out — but `cur` is in
+/// neither of `image`'s tables: not in the extension list, and its magic is `00 00 02 00` where an
+/// icon's is `00 00 01 00`. So the format has to be *named*, and until it was, the preview of the one
+/// name in [`PICTURES`] nothing could recognise was a library's complaint about the extension.
+///
+/// The fixture is an icon with the two bytes that say "cursor" changed and a hotspot written into the
+/// entry, which is what a `.cur` is. Written here rather than checked in, like the pictures above.
+#[test]
+fn a_cursor_decodes_because_the_name_says_what_it_is() {
+    let path = scratch("pointer.cur");
+    let mut art = image::RgbaImage::new(8, 8);
+    art.put_pixel(0, 0, image::Rgba([255, 0, 0, 255]));
+    art.put_pixel(7, 7, image::Rgba([0, 0, 255, 255]));
+    let icon = scratch("pointer.ico");
+    art.save(&icon).expect("an ICO in the temp folder");
+
+    let mut bytes = std::fs::read(&icon).expect("what was just written");
+    // `ICONDIR`: two reserved bytes, then the type — 1 for an icon and 2 for a cursor.
+    bytes[2..4].copy_from_slice(&2u16.to_le_bytes());
+    // And in the one directory entry that follows it, the hotspot: four bytes at offset 10 that an
+    // icon spends on its colour planes and bit depth. A cursor points from somewhere.
+    bytes[10..12].copy_from_slice(&3u16.to_le_bytes());
+    bytes[12..14].copy_from_slice(&4u16.to_le_bytes());
+    std::fs::write(&path, &bytes).expect("a cursor in the temp folder");
+
+    let Payload::Picture(picture) = read(&Ask::One(path.clone(), Kind::Picture)) else {
+        panic!("a .cur did not come back as a picture — the format was not named");
+    };
+    assert_eq!(picture.pixels.size, [8, 8]);
+    assert_eq!(picture.pixels.pixels[0], egui::Color32::from_rgb(255, 0, 0));
+    assert_eq!(picture.pixels.pixels[63], egui::Color32::from_rgb(0, 0, 255));
+
+    // **The bytes still win.** A name is consulted only where the sniff came back with nothing, so a
+    // `.cur` that is really a PNG opens as the PNG it is rather than being forced into the ICO decoder.
+    let lying = scratch("actually-a-png.cur");
+    art.save_with_format(&lying, image::ImageFormat::Png).expect("a PNG under a cursor's name");
+    assert!(
+        matches!(read(&Ask::One(lying.clone(), Kind::Picture)), Payload::Picture(_)),
+        "the name overruled the contents"
+    );
+
+    for path in [path, icon, lying] {
+        crate::sandbox::remove_file(&path);
+    }
+}
+
 /// SVG is rasterised, and its alpha comes through premultiplied the way egui wants it.
 #[test]
 fn vector_art_is_rasterised_to_fit() {

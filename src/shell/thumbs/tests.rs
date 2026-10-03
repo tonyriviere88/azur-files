@@ -424,6 +424,74 @@ fn an_svg_is_drawn_here_and_not_by_the_shell() {
     );
 }
 
+/// **A `.tga` is decoded here, because there is no picture of one to be had from the shell.**
+///
+/// The report this is the fix for: a folder of textures *opens as tiles* — `fs::fmt` calls a `.tga` an
+/// image, so [`crate::pane::AutoTiles`] switches the view — and every tile in it is the same blank
+/// document glyph. Windows ships no TGA codec, so `GetImage` has nothing to extract and gives the file's
+/// icon instead, which for a type nothing at all is registered against is the generic one. Measured on
+/// the machine this was written on, `.tga`, `.hdr`, `.pbm`, `.pgm`, `.ppm`, `.ff` and `.cur` all come
+/// back from the registry with no provider of any kind.
+///
+/// Proved **by pixel identity with [`raster`]**, exactly as the `.svg` test above is and for a sharper
+/// reason: here the shell answers with a *picture* either way — the icon is a picture — so a tile
+/// arriving proves nothing about which decoder drew it. Pixels that are what `image` produced could not
+/// have come from the shell.
+///
+/// No [`one_at_a_time`] and no [`crate::shell::init`]: if this passes, nothing in it reached the shell.
+#[test]
+fn a_tga_is_decoded_here_because_the_shell_has_nothing() {
+    let dir = crate::sandbox::fresh("thumbs-tga");
+    let path = dir.join("texture.tga");
+    // 128 × 64, so the cap assertion below is a scale *down* to the cell and the aspect has somewhere
+    // to go wrong. Two colours rather than one, because a Targa is written bottom-up and an RLE run of
+    // a single colour would round-trip whichever way up it went.
+    let mut art = image::RgbaImage::from_pixel(128, 64, image::Rgba([200, 30, 40, 255]));
+    for x in 0..128 {
+        for y in 0..2 {
+            art.put_pixel(x, y, image::Rgba([20, 60, 220, 255]));
+        }
+    }
+    art.save(&path).expect("a Targa in the sandbox");
+
+    let ours = raster(&path).expect("image decodes what it just wrote");
+    // Fit inside the cell on the file's own aspect — 128 × 64 asked for at 96 is 96 × 48 — and not the
+    // panel's 2048 cap, which would be the whole picture memcpy'd into a 96-pixel cell.
+    assert_eq!(ours.size, [CELL, CELL / 2], "the aspect or the cap is wrong");
+    // Red where the fill is, and blue along the top — where the band was written, and a Targa is
+    // stored bottom-up. Wrong-way-up or BGR-for-RGB and this is the assertion that says so rather
+    // than a tile that merely looks a bit odd. Loosely, on which channel wins: the band is two rows
+    // of sixty-four and the scale down to the cell averages some of the fill into it.
+    let at = |x: usize, y: usize| ours.pixels[y * ours.size[0] + x];
+    assert_eq!(at(48, 24), egui::Color32::from_rgb(200, 30, 40), "the fill");
+    let top = at(48, 0);
+    assert!(
+        top.b() > top.r(),
+        "the top row came back {top:?} — the channels or the rows are the other way round"
+    );
+    let bottom = at(48, ours.size[1] - 1);
+    assert!(bottom.r() > bottom.b(), "the picture is upside down: {bottom:?}");
+
+    let Got::Picture(got) = draw(&path) else {
+        panic!("the .tga was not drawn at all");
+    };
+    assert_eq!(got, ours, "the tile is the shell's answer, which for a .tga is the generic icon");
+
+    // **And the line the list draws**: a format WIC has is left to the shell, whatever `image` could
+    // have done with it. The whole argument in the module header rests on this staying true.
+    let png = dir.join("photo.png");
+    art.save(&png).expect("a PNG in the sandbox");
+    assert!(
+        raster(&png).is_none(),
+        "a .png was decoded here, so the shell's cache — shared with Explorer — is being ignored"
+    );
+    // A file that will not decode goes to the shell too, rather than becoming a blank tile.
+    let broken = dir.join("truncated.tga");
+    std::fs::write(&broken, b"\0\0\x02").expect("a file");
+    assert!(raster(&broken).is_none());
+    assert!(raster(&dir.join("gone.tga")).is_none(), "a missing file");
+}
+
 /// A drawing that rasterises to nothing is handed to the shell after all.
 ///
 /// `usvg` here is built without text support, so an SVG whose whole content is `<text>` parses

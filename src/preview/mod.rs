@@ -62,11 +62,12 @@ pub use diff::Diff;
 pub use picture::Picture;
 pub use search::{hits, Search};
 pub use text::Text;
-// And the two [`crate::shell::thumbs`] needs, for the one file type it draws itself instead of
+// And the three [`crate::shell::thumbs`] needs, for the file types it draws itself instead of
 // handing to the shell — see that module's header. Named here for the reason just above: which file
-// the SVG decoder lives in is this module's business, and these were the first two names in the
-// program to reach past this line for it.
+// each decoder lives in is this module's business, and these were the first names in the program to
+// reach past this line for one.
 pub(crate) use picture::is_vector;
+pub(crate) use picture::raster as raster_art;
 pub(crate) use vector::art as vector_art;
 
 /// What a file will be shown as.
@@ -98,6 +99,10 @@ pub enum Kind {
 /// `image`'s pure-Rust codecs plus `resvg`'s, and nothing that would need a C library. `svgz` is
 /// not here: it is gzip, `resvg`'s decompression is behind the feature this build leaves off, and
 /// a compressed SVG is rare enough not to be worth a second decompressor.
+///
+/// Every name here decodes, which is not the same as every name being one `image` recognises: a `.cur`
+/// is decoded by the ICO codec under a name and a magic number neither of `image`'s tables knows. See
+/// [`picture::named`], which is what makes that true and what any further such name belongs in.
 const PICTURES: [&str; 21] = [
     "png", "jpg", "jpeg", "jfif", "gif", "bmp", "dib", "ico", "cur", "tif", "tiff", "webp", "svg",
     "tga", "dds", "hdr", "qoi", "ff", "pbm", "pgm", "ppm",
