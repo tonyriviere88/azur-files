@@ -2060,7 +2060,7 @@ files. So the bottom is measured from the rows: the fade goes out exactly as the
 
 ![The context menu](docs/menu.png)
 
-Two things the drawing has to get right, because they are what a hosted `HMENU` would
+Four things the drawing has to get right, because they are what a hosted `HMENU` would
 have got for free:
 
 - **The size is computed before anything is drawn**, from the design system's own row
@@ -2068,6 +2068,20 @@ have got for free:
   menu that learned its height a frame late would appear in the wrong place and then jump.
   A level taller than the window is capped and scrolls, so the last entry of a machine
   with a dozen shell extensions installed is still reachable.
+- **Properties is pinned below the scroll**, with the divider above it, so it is the last
+  thing on the menu whatever the scroll is doing. It is where a shell menu ends and it is
+  what people go to the bottom of one *for* — which on a machine with a dozen extensions
+  installed is the entry with the furthest to scroll to. Recognised by its `properties`
+  verb rather than its label, since `Propriétés` is one localisation out of many. Nothing
+  is *moved*: the pinned part is a suffix of the entries in the order the shell gave them,
+  so anything an extension put below Properties is pinned with it. Showing the menu in an
+  order Explorer does not would be worse than a menu that scrolls.
+- **Every level opens at its first entry.** A `ScrollArea` keeps its offset in `egui`'s
+  memory under an id that outlives the menu, so a right click, a scroll to the bottom and
+  a dismissal left the *next* menu opening halfway down itself. A level is put back to the
+  top on the frame it appears and left alone after that — per level rather than per menu,
+  because sibling submenus share one scroll id and a long `Open with` was lending its
+  offset to a short `Send to`.
 - **It does not fade in.** An `egui::Area` fades over a tenth of a second by default,
   which is right for a tooltip that appeared on its own and wrong for a menu that was
   asked for and is already being read.

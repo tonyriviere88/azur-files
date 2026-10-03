@@ -24,6 +24,16 @@
 //! [`Open::fills`], and the level appears when the answer does. See
 //! [`crate::shell::menu`].
 //!
+//! # A level that scrolls, and the part of it that does not
+//!
+//! A machine with a dozen shell extensions installed has a menu taller than the window, so
+//! each level's rows go in a scroll area — without which the entries past the edge would
+//! simply be unreachable. Two things follow from that, and both are decided here rather than
+//! left to `egui`: `Properties` is drawn *below* the scrolling part so it is always the last
+//! thing on the menu (see [`pinned_from`]), and a level goes back to the top on the frame it
+//! appears rather than inheriting whatever the last menu was left scrolled to (see
+//! [`Open::shown`]).
+//!
 //! # Nothing here reflows
 //!
 //! The shell's half of the menu takes between a sixth of a second and most of a second to
@@ -69,11 +79,26 @@ pub struct Open {
     textures: HashMap<Vec<usize>, TextureHandle>,
     /// Set on the frame it opens, so the click that opened it does not also close it.
     fresh: bool,
+    /// The levels that were on screen last frame, by path.
+    ///
+    /// What it is for is the scroll offset. A `ScrollArea` keeps its offset in `egui`'s memory
+    /// under an id that outlives the menu, so a right click, a scroll to the bottom and a
+    /// dismissal left the *next* menu opening halfway down itself — showing `Properties` where
+    /// its first entry should be. A level absent from this set is a level appearing this frame,
+    /// and it is put back to the top. Everything after that frame is the user's own scrolling
+    /// and is left alone.
+    ///
+    /// Per level rather than per menu, because sibling submenus share one scroll id: hovering a
+    /// long `Open with` and then a short `Send to` inherited the first one's offset.
+    shown: std::collections::HashSet<Vec<usize>>,
     /// What the root level actually took on screen, last frame.
     ///
     /// Kept because it is the one thing worth asserting about a menu that lays itself out
     /// by arithmetic: it has to come out the size it said it would. See the test.
     pub drawn: Vec2,
+    /// And what its rows were scrolled by, for the same reason: a menu opens at its first
+    /// entry, and the only way to know it did is to look. See the test.
+    pub scrolled: f32,
 }
 
 impl Open {
@@ -100,7 +125,9 @@ impl Open {
             asked: std::collections::HashSet::new(),
             textures: HashMap::new(),
             fresh: true,
+            shown: std::collections::HashSet::new(),
             drawn: Vec2::ZERO,
+            scrolled: 0.0,
         }
     }
 
@@ -199,6 +226,62 @@ fn separator_height() -> f32 {
     azur_egui_theme::components::menu_divider_height()
 }
 
+/// What a run of entries takes, rows and dividers alike.
+///
+/// The one place the two heights are added up, so [`measure`] and the split between the
+/// scrolling part of a level and its pinned tail cannot disagree about what a level is worth.
+fn stack_height(entries: &[Entry]) -> f32 {
+    entries
+        .iter()
+        .map(|entry| {
+            if matches!(entry.kind, Kind::Separator) {
+                separator_height()
+            } else {
+                row_height()
+            }
+        })
+        .sum()
+}
+
+/// Where a level's pinned tail starts: the first entry drawn *below* the scroll area rather
+/// than inside it. `entries.len()` when there is nothing to pin, which is every submenu and
+/// every menu of this program's own entries.
+///
+/// **Properties is the one entry that has to be reachable without scrolling.** It is where a
+/// shell menu ends, it is what people go to the bottom of one *for*, and on a machine with a
+/// dozen extensions installed the bottom of the menu is past the edge of the window — so the
+/// entry with the furthest to scroll to is the one most often wanted. Pinned, it is always the
+/// last thing on the menu whatever the scroll is doing above it.
+///
+/// **Recognised by verb, not by label.** `properties` is the shell's own name for the command
+/// and is the same on every Windows; `Propriétés` is one localisation out of many, and a menu
+/// that only pinned it in English would be a menu that behaved differently per machine.
+///
+/// **Nothing is moved.** The tail is a suffix of the entries in the order the shell gave them,
+/// so if an extension has put something below Properties it is pinned too. Lifting Properties
+/// out of the middle and re-hanging it at the bottom would show the menu in an order Explorer
+/// does not, which is worse than a menu that scrolls.
+///
+/// The divider above it comes with it. It belongs to Properties rather than to whatever is
+/// above — left in the scrolling part it would slide away and leave a pinned row sitting under
+/// the last of the entries with no rule between them.
+fn pinned_from(entries: &[Entry]) -> usize {
+    let properties = entries.iter().rposition(|entry| match &entry.kind {
+        Kind::Command(Command::Shell { verb: Some(verb), .. }) => {
+            verb.eq_ignore_ascii_case("properties")
+        }
+        _ => false,
+    });
+    let Some(index) = properties else {
+        return entries.len();
+    };
+    if index > 0 && matches!(entries[index - 1].kind, Kind::Separator) {
+        index - 1
+    } else {
+        index
+    }
+}
+
 /// Draw the menu and every open submenu.
 pub fn show(ui: &mut Ui, t: &Theme, menu: &mut Open) -> Outcome {
     let ctx = ui.ctx().clone();
@@ -225,6 +308,9 @@ pub fn show(ui: &mut Ui, t: &Theme, menu: &mut Open) -> Outcome {
     // Levels are drawn root-first, each anchored to the item that opened it.
     let depth = menu.open.len();
     let mut anchor = Rect::from_min_size(menu.at, Vec2::ZERO);
+    // The levels this pass puts on screen, which becomes `Open::shown` at the end of it — so a
+    // level that was not there last frame is one appearing now, and gets its scroll reset.
+    let mut on_screen: Vec<Vec<usize>> = Vec::new();
     for level_depth in 0..=depth {
         let path: Vec<usize> = menu.open[..level_depth].to_vec();
         let Some(entries) = menu.level(&path).cloned() else {
@@ -238,6 +324,11 @@ pub fn show(ui: &mut Ui, t: &Theme, menu: &mut Open) -> Outcome {
 
         let size = measure(&ctx, t, &entries, screen);
         let origin = place(anchor, size, screen, level_depth == 0);
+        let appearing = !menu.shown.contains(&path);
+        on_screen.push(path.clone());
+        // Where the scrolling part of this level ends and its pinned tail begins.
+        let pin = pinned_from(&entries);
+        let pinned_height = stack_height(&entries[pin..]);
 
         let response = egui::Area::new(Id::new(("shell-menu", level_depth)))
             .order(Order::Foreground)
@@ -280,31 +371,64 @@ pub fn show(ui: &mut Ui, t: &Theme, menu: &mut Open) -> Outcome {
                         // 600-point window, and the entries past the edge would simply be
                         // unreachable. `auto_shrink` vertically, so a short menu is still
                         // its own height rather than the whole screen.
-                        let drawn = egui::ScrollArea::vertical()
+                        //
+                        // Everything but the pinned tail, which is drawn under it and keeps
+                        // its own height out of what the scrolling part may take — so the
+                        // two together come to the height that was measured and the menu is
+                        // still the size its position was computed from.
+                        let mut area = egui::ScrollArea::vertical()
                             .id_salt(("shell-menu-rows", level_depth))
-                            .max_height(inner.y)
-                            .auto_shrink([false, true])
+                            .max_height((inner.y - pinned_height).max(row_height()))
+                            .auto_shrink([false, true]);
+                        // Back to the top on the frame this level appears, and never
+                        // afterwards: past that it is the user's own scrolling. See
+                        // [`Open::shown`].
+                        if appearing {
+                            area = area.vertical_scroll_offset(0.0);
+                        }
+                        let scrolling = area
                             .show(&mut rows, |ui| {
                                 draw_level(
                                     ui,
                                     t,
                                     menu,
                                     &path,
-                                    &entries,
+                                    Run {
+                                        entries: &entries[..pin],
+                                        first: 0,
+                                        scrolls: true,
+                                    },
                                     &mut chosen,
                                     &mut wants_open,
                                 )
-                            })
-                            .inner;
+                            });
+                        let mut drawn = scrolling.inner;
+                        // And the tail, in the same column and outside the scroll area, so
+                        // it stays put whatever is happening above it.
+                        drawn.extend(draw_level(
+                            &mut rows,
+                            t,
+                            menu,
+                            &path,
+                            Run {
+                                entries: &entries[pin..],
+                                first: pin,
+                                scrolls: false,
+                            },
+                            &mut chosen,
+                            &mut wants_open,
+                        ));
                         // What the child used, so the frame wraps the rows rather than
                         // collapsing to nothing behind them.
                         ui.advance_cursor_after_rect(rows.min_rect());
-                        drawn
+                        (drawn, scrolling.state.offset.y)
                     })
                     .inner
             });
+        let (rects, offset) = response.inner;
         if level_depth == 0 {
             menu.drawn = response.response.rect.size();
+            menu.scrolled = offset;
         }
         if response.response.contains_pointer() {
             hovered_any = true;
@@ -313,13 +437,16 @@ pub fn show(ui: &mut Ui, t: &Theme, menu: &mut Open) -> Outcome {
         // The next level hangs off whichever item is open at this one.
         if level_depth < depth {
             let index = menu.open[level_depth];
-            anchor = response
-                .inner
+            anchor = rects
                 .get(&index)
                 .copied()
                 .unwrap_or(response.response.rect);
         }
     }
+    // What is on screen now, so the next frame can tell an appearing level from one that has
+    // been there and been scrolled. Set here rather than at the top: `keyboard` returns before
+    // anything is drawn, and a frame that drew no levels must not be read as all of them closing.
+    menu.shown = on_screen.into_iter().collect();
 
     if let Some(command) = chosen {
         return Outcome::Chose(command);
@@ -344,19 +471,34 @@ pub fn show(ui: &mut Ui, t: &Theme, menu: &mut Open) -> Outcome {
     Outcome::Open
 }
 
-/// One level's rows. Returns where each row ended up, so a submenu can be anchored.
+/// One of the two runs a level is drawn in — the part that scrolls, and the pinned tail under
+/// it. See [`pinned_from`].
+///
+/// `first` is the index `entries` starts at in the whole level, and it is the reason this is a
+/// struct rather than a slice: every path the menu is keyed by is an index into the *level*, so
+/// without it the second run would put the keyboard cursor, the icon textures and the submenu
+/// anchors on the wrong entries.
+struct Run<'a> {
+    entries: &'a [Entry],
+    first: usize,
+    scrolls: bool,
+}
+
+/// A run of one level's rows. Returns where each row ended up, so a submenu can be anchored.
 fn draw_level(
     ui: &mut Ui,
     t: &Theme,
     menu: &Open,
     path: &[usize],
-    entries: &[Entry],
+    run: Run<'_>,
     chosen: &mut Option<Command>,
     wants_open: &mut Option<Vec<usize>>,
 ) -> HashMap<usize, Rect> {
+    let Run { entries, first, scrolls } = run;
     let mut rects = HashMap::new();
 
-    for (index, entry) in entries.iter().enumerate() {
+    for (offset, entry) in entries.iter().enumerate() {
+        let index = first + offset;
         if matches!(entry.kind, Kind::Separator) {
             menu_divider(ui);
             continue;
@@ -406,9 +548,11 @@ fn draw_level(
 
         let response = ui.add_enabled(entry.enabled, item);
         rects.insert(index, response.rect);
-        if highlighted {
+        if highlighted && scrolls {
             // The arrow keys can walk past the bottom of a scrolled level, and a cursor
-            // you cannot see is a cursor you have lost.
+            // you cannot see is a cursor you have lost. Only asked for inside the scroll
+            // area: a pinned row is on screen already, and a scroll target set outside one
+            // is a target the next scroll area in the frame would take instead.
             response.scroll_to_me(None);
         }
 
@@ -499,17 +643,7 @@ fn measure(ctx: &egui::Context, t: &Theme, entries: &[Entry], screen: Rect) -> V
     // entry exactly its galley width leaves it a fraction short, and it ellipsizes.
     let width = (width + space::S2 * 2.0).ceil().clamp(MIN, MAX);
 
-    let height: f32 = entries
-        .iter()
-        .map(|entry| {
-            if matches!(entry.kind, Kind::Separator) {
-                separator_height()
-            } else {
-                row_height()
-            }
-        })
-        .sum();
-    let height = (height + space::S2 * 2.0).min(screen.height() - space::S3 * 2.0);
+    let height = (stack_height(entries) + space::S2 * 2.0).min(screen.height() - space::S3 * 2.0);
     vec2(width, height)
 }
 
@@ -696,6 +830,26 @@ mod tests {
         }
     }
 
+    /// A shell entry under a canonical verb, which is how Properties is picked out.
+    fn verb(label: &str, verb: &str) -> Entry {
+        Entry {
+            kind: Kind::Command(Command::Shell {
+                verb: Some(verb.to_owned()),
+                id: 0,
+                path: Vec::new(),
+                label: label.to_owned(),
+            }),
+            ..entry(label)
+        }
+    }
+
+    fn divider() -> Entry {
+        Entry {
+            kind: Kind::Separator,
+            ..entry("")
+        }
+    }
+
     /// A submenu row as the shell hands it over: known to be one, not yet asked about.
     fn unfilled(label: &str, source: u32) -> Entry {
         Entry {
@@ -873,6 +1027,154 @@ mod tests {
             open.drawn.y
         );
         assert!(open.drawn.y <= screen.height(), "and it stays on screen");
+    }
+
+    /// What comes out of the scroll area and what stays under it.
+    #[test]
+    fn properties_and_the_divider_above_it_are_pinned_out_of_the_scrolling_part() {
+        // A menu of this program's own entries has no Properties in it and nothing to pin,
+        // and neither does any submenu.
+        assert_eq!(
+            pinned_from(&[entry("Copy here"), entry("Move here")]),
+            2,
+            "nothing was pinned, so the whole level scrolls"
+        );
+
+        // The shell's own menu. The divider comes with it: it belongs to the row below rather
+        // than to whatever is above, and left behind it would scroll away from what it separates.
+        let shell = vec![
+            entry("Ouvrir"),
+            entry("Renommer"),
+            divider(),
+            verb("Propriétés", "properties"),
+        ];
+        assert_eq!(pinned_from(&shell), 2);
+
+        // Recognised by **verb** and not by label, which is why neither label here is the
+        // English one: `properties` is the shell's own name for it on every Windows.
+        assert_eq!(pinned_from(&[entry("Öffnen"), verb("Eigenschaften", "Properties")]), 1);
+
+        // Without a divider it is the row on its own.
+        assert_eq!(pinned_from(&[entry("Open"), verb("Properties", "properties")]), 1);
+
+        // And anything an extension has put *below* it is pinned too, rather than Properties
+        // being lifted out of the middle and re-hung at the bottom — the menu keeps the order
+        // the shell gave it.
+        let after = vec![
+            entry("Open"),
+            divider(),
+            verb("Properties", "properties"),
+            entry("Scan with something"),
+        ];
+        assert_eq!(pinned_from(&after), 1);
+    }
+
+    #[test]
+    fn a_capped_menu_keeps_its_pinned_tail_and_still_comes_out_the_size_it_measured() {
+        // The split has to add up. The scroll area is handed the level's height *less* the
+        // pinned tail's, so the two together are what `measure` said and the position computed
+        // from it is still right. A tail left undrawn, or a height charged twice, is what this
+        // catches — `drawn` is the rect the frame actually wrapped around the rows.
+        let mut entries: Vec<Entry> = (0..14).map(|i| entry(&format!("entry {i}"))).collect();
+        entries.push(divider());
+        entries.push(verb("Propriétés", "properties"));
+        let mut open = menu(entries);
+
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(400.0, 200.0));
+        let ctx = pass(&mut open, screen, 4);
+
+        let expected = measure(&ctx, &Theme::dark(), &open.entries, screen);
+        assert!(
+            expected.y < stack_height(&open.entries),
+            "sixteen entries should not fit a 200-point window, or this proves nothing"
+        );
+        assert!(
+            (open.drawn.y - expected.y).abs() <= 2.0,
+            "measured {} and drew {}",
+            expected.y,
+            open.drawn.y
+        );
+
+        // And the scrolling part really is short of its own content, which is the situation
+        // the pinned rows exist to escape: they are reachable while it is not.
+        let pin = pinned_from(&open.entries);
+        let scrollable = expected.y - space::S2 * 2.0 - stack_height(&open.entries[pin..]);
+        assert!(
+            scrollable < stack_height(&open.entries[..pin]),
+            "the entries above Properties fit after all"
+        );
+    }
+
+    /// A menu opens at its first entry, however the last one was left.
+    ///
+    /// The reported bug: a `ScrollArea` keeps its offset in egui's memory under an id that
+    /// outlives the menu, so right-clicking a file, scrolling to the bottom of a long shell
+    /// menu and dismissing it left the *next* menu opening halfway down itself. Two `Open`s on
+    /// one `Context`, which is what a second right click is.
+    #[test]
+    fn a_reopened_menu_starts_at_the_top() {
+        let screen = Rect::from_min_size(Pos2::ZERO, vec2(400.0, 200.0));
+        let ctx = egui::Context::default();
+        let theme = Theme::dark();
+        let mut base = egui::RawInput {
+            screen_rect: Some(screen),
+            ..Default::default()
+        };
+        base.viewports.entry(egui::ViewportId::ROOT).or_default().inner_rect = Some(screen);
+
+        let run = |open: &mut Open, events: Vec<egui::Event>| {
+            let mut input = base.clone();
+            input.events = events;
+            let _ = ctx.run_ui(input, |ctx| {
+                egui::CentralPanel::default().show(ctx, |ui| {
+                    let _ = show(ui, &theme, open);
+                });
+            });
+        };
+        // A scroll, with the pointer over the middle of where the menu lands, and then the
+        // pointer parked off it. Both halves matter: egui hands a wheel event to a scroll area
+        // over several frames rather than one, so the frames after it are what finish the
+        // scroll — and they have to happen while the *first* menu is the one under the pointer,
+        // or the tail of the gesture lands on the second one and this tests nothing.
+        let scroll = |open: &mut Open| {
+            run(
+                open,
+                vec![
+                    egui::Event::PointerMoved(pos2(150.0, 120.0)),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: vec2(0.0, -200.0),
+                        phase: egui::TouchPhase::Move,
+                        modifiers: egui::Modifiers::NONE,
+                    },
+                ],
+            );
+            run(open, vec![egui::Event::PointerMoved(pos2(390.0, 195.0))]);
+            for _ in 0..30 {
+                run(open, Vec::new());
+            }
+        };
+        let long = || (0..16).map(|i| entry(&format!("entry {i}"))).collect::<Vec<_>>();
+
+        let mut first = menu(long());
+        for _ in 0..3 {
+            run(&mut first, Vec::new());
+        }
+        scroll(&mut first);
+        assert!(
+            first.scrolled > 0.0,
+            "the wheel did not scroll the menu, so nothing below this proves anything"
+        );
+
+        // The same window, a new menu: at the top, not where the last one was left.
+        let mut again = menu(long());
+        run(&mut again, Vec::new());
+        assert_eq!(again.scrolled, 0.0, "it reopened part way down itself");
+
+        // And the reset is once, on the frame it appears — a version that put the offset back
+        // every frame would be a menu that cannot be scrolled at all.
+        scroll(&mut again);
+        assert!(again.scrolled > 0.0, "the reset kept firing and pinned it to the top");
     }
 
     #[test]
