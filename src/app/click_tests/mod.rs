@@ -81,12 +81,22 @@ impl Harness {
     /// One pane per requested count, all showing directories that exist and have
     /// something in them to click on.
     fn with_panes(count: usize) -> Self {
+        let here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        Self::opening(
+            (0..count)
+                .map(|i| if i == 0 { here.clone() } else { here.join("src") })
+                .collect(),
+        )
+    }
+
+    /// One pane per folder given, for a test about *which* folder a pane is showing.
+    ///
+    /// The same folder twice, most of all: two panes on one folder are two listings of the same
+    /// names with separate selections, and anything a listing marks by name rather than by pane
+    /// gets them both.
+    fn opening(open: Vec<PathBuf>) -> Self {
         let ctx = egui::Context::default();
         azur_egui_theme::fonts::install(&ctx);
-        let here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let open: Vec<PathBuf> = (0..count)
-            .map(|i| if i == 0 { here.clone() } else { here.join("src") })
-            .collect();
         let mut app = App::opening(&ctx, Config::default(), open, Side::Right);
         app.journal = Some(Vec::new());
 
@@ -200,7 +210,6 @@ impl Harness {
     /// [`Self::rects`] for the things painted as strokes rather than as shapes. A dashed outline
     /// is a run of these — one segment per dash — which is why a test asks for the union of the
     /// ones inside a rect rather than for a single line.
-    #[allow(dead_code)]
     fn segments(&self) -> Vec<([Pos2; 2], egui::Color32)> {
         fn walk(shape: &egui::Shape, into: &mut Vec<([Pos2; 2], egui::Color32)>) {
             match shape {

@@ -305,9 +305,17 @@ fn a_group_is_its_own_drop_zone_rows_and_all() {
             .resolve(physical(at))
             .unwrap_or_else(|| panic!("no zone at {at:?}"));
         assert_eq!(
-            resolved,
+            resolved.onto,
             Onto::BookmarkGroup(0),
             "{at:?} in the group resolved to {resolved:?}"
+        );
+        // And it carries the group's own name, which is the far end of what the pointer is told:
+        // *Pin src to New group*. The callbacks cannot go and look it up — see
+        // `crate::shell::dnd::Region` — so a zone published without it is a silent tooltip.
+        assert_eq!(
+            resolved.name,
+            crate::ui::sidebar::bookmarks::NEW_GROUP,
+            "the group's zone has to name the group"
         );
         // And the highlight is the whole group, wherever in it the pointer is — a picture of
         // what is being joined rather than of the row it was aimed at.
@@ -317,12 +325,19 @@ fn a_group_is_its_own_drop_zone_rows_and_all() {
 
     // The heading above it is still the section's own zone, which pins at the end.
     let section = h.app.bookmarks_rect.expect("the section is on screen");
+    let heading = h
+        .app
+        .drops
+        .resolve(physical(pos2(section.center().x, section.top() + 2.0)));
     assert_eq!(
-        h.app
-            .drops
-            .resolve(physical(pos2(section.center().x, section.top() + 2.0))),
-        Some(Onto::Bookmarks),
+        heading.as_ref().map(|region| &region.onto),
+        Some(&Onto::Bookmarks),
         "away from a group, a drop still means the list itself"
+    );
+    assert_eq!(
+        heading.map(|region| region.name),
+        Some("Bookmarks".to_owned()),
+        "the section's zone is named after the section, for *Pin src to Bookmarks*"
     );
 }
 

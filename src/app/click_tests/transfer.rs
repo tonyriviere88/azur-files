@@ -352,22 +352,23 @@ fn the_clipboard_events_map_to_the_right_actions() {
     );
 }
 
-/// A right drag asks even inside the folder the files are already in.
+/// A right drag — or a copy — can land in the folder the files are already in.
 ///
-/// A left drag there means "move this to where it already is", which is nothing, and dropping
-/// a folder into itself is nothing whatever the button. But right-dragging a file onto its own
-/// folder is how Explorer is asked for a copy of it, and filtering that out before the question
-/// was asked meant a right drag inside a folder did nothing at all -- which is the most obvious
-/// way anybody would try the gesture.
+/// A move there means "put this where it already is", which is nothing, and the pointer says so by
+/// saying nothing: see [`crate::shell::dnd::does_nothing`]. A **copy** there is `one - Copy.txt`,
+/// and a right drag is a question that has not been answered yet — so both of those keep what they
+/// are carrying, which is what `keep` is. Filtering them out before the question was asked meant a
+/// right drag inside a folder did nothing at all — the most obvious way anybody would try the
+/// gesture.
 #[test]
 fn a_right_drag_can_land_in_the_folder_it_started_in() {
     let here = std::path::PathBuf::from(r"C:\Temp");
     let file = here.join("one.txt");
     let elsewhere = std::path::PathBuf::from(r"C:\Other\two.txt");
 
-    // A left drag inside the same folder has nothing to do.
+    // A move inside the same folder has nothing to do.
     assert!(App::droppable(vec![file.clone()], &here, false).is_empty());
-    // The same drag with the right button is a question worth asking.
+    // The same drag as a copy, or with the right button, is a gesture with an answer.
     assert_eq!(
         App::droppable(vec![file.clone()], &here, true),
         vec![file.clone()]
@@ -375,6 +376,16 @@ fn a_right_drag_can_land_in_the_folder_it_started_in() {
     // A folder dropped into itself is nothing either way.
     assert!(App::droppable(vec![here.clone()], &here, true).is_empty());
     assert!(App::droppable(vec![here.clone()], &here, false).is_empty());
+    // And so is a folder dropped into something *inside* it. The pointer refuses that drag whole —
+    // see `crate::shell::dnd::refuses` — so what is left here is the drag that named its files only
+    // as it landed, and there the folder is dropped and everything else still goes.
+    let inside = here.join("sub").join("deeper");
+    assert!(App::droppable(vec![here.clone()], &inside, true).is_empty());
+    assert_eq!(
+        App::droppable(vec![here.clone(), elsewhere.clone()], &inside, false),
+        vec![elsewhere.clone()],
+        "the folder cannot go inside itself and the file from elsewhere still can"
+    );
     // And anything from somewhere else is fine with either button.
     assert_eq!(
         App::droppable(vec![elsewhere.clone()], &here, false),
@@ -452,6 +463,286 @@ fn the_drop_highlight_marks_the_row_and_not_the_pane() {
     assert_eq!(h.app.preview_rect_for_tests(pane, scale), None);
 }
 
+/// **The drag says what it is about to do, beside the pointer.**
+///
+/// The highlight above says *where* a drop would land; this is the other half — *what* it would do
+/// when it lands there. *Copy 4 items into src* rather than a cursor with a `+` on it, which over a
+/// listing full of folders leaves the interesting half of the question unanswered.
+///
+/// Driven through the shared block rather than by setting the field, because that is the whole
+/// path: the OLE callbacks decide the sentence — see [`crate::shell::dnd::Shared::telling`] — and
+/// the frame loop has to pick it up and put it on screen. Setting `drop_telling` directly would
+/// test the drawing and skip the wiring, and it is the wiring that has a frame in the middle of
+/// it. Which pieces of it are drawn in the accent is `ui::tests`' half of the claim.
+#[test]
+#[cfg(windows)]
+fn a_drag_says_what_the_drop_would_do() {
+    let mut h = Harness::new();
+    h.settle();
+    let screen = Rect::from_min_size(Pos2::ZERO, h.size);
+    let scale = h.ctx.pixels_per_point();
+    let physical = |at: Pos2| ((at.x * scale) as i32, (at.y * scale) as i32);
+
+    let rows = h.app.panes[0].drop_rows.clone();
+    let (row, _) = rows
+        .iter()
+        .find(|(_, path)| path.file_name().is_some_and(|n| n == "src"))
+        .expect("`src` should be one of the folder rows");
+    let at = row.center();
+
+    let told = crate::shell::dnd::Told {
+        doing: crate::shell::dnd::Doing::Copy,
+        refused: None,
+        source: Some("4 items".to_owned()),
+        target: "src".to_owned(),
+    };
+    h.app.drops.hover(Some(physical(at)));
+    h.app.drops.tell(Some(told.clone()));
+    h.frame(Vec::new());
+    assert_eq!(
+        h.app.drop_telling.as_ref(),
+        Some(&told),
+        "the frame loop did not pick the sentence up, so nothing would be drawn"
+    );
+
+    let (saying, rect) = h
+        .app
+        .drag_saying_for_tests(&h.ctx, screen)
+        .expect("a drag with something to say has to say it");
+    assert_eq!(saying, "Copy 4 items into src");
+    // Below and right of the hotspot: the arrow's own ink hangs that way, so anything closer is
+    // drawn underneath the cursor.
+    assert!(
+        rect.left() > at.x && rect.top() > at.y,
+        "the words are under the pointer at {at:?} rather than clear of it: {rect:?}"
+    );
+    assert!(
+        screen.contains_rect(rect),
+        "{rect:?} is outside the window {screen:?}"
+    );
+
+    // In the bottom right corner there is no room below and to the right, and a tooltip drawn off
+    // the window is a tooltip nobody reads. It goes back inside instead.
+    h.app.drops.hover(Some(physical(screen.max - vec2(2.0, 2.0))));
+    h.frame(Vec::new());
+    let (_, corner) = h
+        .app
+        .drag_saying_for_tests(&h.ctx, screen)
+        .expect("still a drag, still something to say");
+    assert!(
+        screen.contains_rect(corner),
+        "in the corner the words ran off the window: {corner:?} in {screen:?}"
+    );
+
+    // And with nothing to promise — over something that takes no drop — nothing is drawn.
+    h.app.drops.tell(None);
+    h.frame(Vec::new());
+    assert!(
+        h.app.drag_saying_for_tests(&h.ctx, screen).is_none(),
+        "words were drawn for a drop with nothing to say"
+    );
+}
+
+/// **A refused drop still says what it would have done, and the destination stops promising it.**
+///
+/// The two halves of signing one: the sentence turns into *Cannot copy …* and wears a mark —
+/// `ui::tests::a_refused_drop_wears_a_mark_and_an_allowed_one_does_not` is that half — and the
+/// accent wash over the folder underneath **goes away**. A place lighting up to accept a drop it is
+/// refusing is worse than one that says nothing at all, and it is the half that breaks quietly: the
+/// highlight is worked out from the pointer's position and the zone's rectangle, neither of which
+/// knows anything about a refusal.
+#[test]
+#[cfg(windows)]
+fn a_refused_drop_stops_the_destination_promising_it() {
+    let mut h = Harness::new();
+    h.settle();
+    let pane = h.app.panes[0].id;
+    let scale = h.ctx.pixels_per_point();
+
+    let rows = h.app.panes[0].drop_rows.clone();
+    let (row, folder) = rows
+        .iter()
+        .find(|(_, path)| path.file_name().is_some_and(|n| n == "src"))
+        .expect("`src` should be one of the folder rows");
+    let at = row.center();
+    h.app
+        .drops
+        .hover(Some(((at.x * scale) as i32, (at.y * scale) as i32)));
+
+    // Allowed: the row is the highlight, which is what `the_drop_highlight_marks_the_row_and_not`
+    // `_the_pane` covers in full.
+    let told = |refused: Option<crate::shell::dnd::Refused>| crate::shell::dnd::Told {
+        doing: crate::shell::dnd::Doing::Move,
+        refused,
+        source: Some(crate::fs::display_name(folder)),
+        target: "main".to_owned(),
+    };
+    h.app.drops.tell(Some(told(None)));
+    h.frame(Vec::new());
+    assert_eq!(
+        h.app.preview_rect_for_tests(pane, scale),
+        Some(*row),
+        "an allowed drop has to light the row it would land in"
+    );
+
+    // Refused: the words change, say which refusal it is, and the highlight goes.
+    h.app
+        .drops
+        .tell(Some(told(Some(crate::shell::dnd::Refused::Inside))));
+    h.frame(Vec::new());
+    let (saying, _) = h
+        .app
+        .drag_saying_for_tests(&h.ctx, Rect::from_min_size(Pos2::ZERO, h.size))
+        .expect("a refusal is still something to say");
+    assert_eq!(saying, "Cannot move src into main, which is inside it");
+    assert_eq!(
+        h.app.preview_rect_for_tests(pane, scale),
+        None,
+        "the folder is still promising a drop it will not take"
+    );
+    // The sidebar's own highlight answers the same way, and from the same flag.
+    assert_eq!(h.app.bookmarks_preview(scale), None);
+}
+
+/// **A drag changes nothing about how the rows it picked up are drawn.**
+///
+/// The gesture is drawn *at the pointer* — the stack of icons above it, the sentence below, the
+/// destination lit up under it — and the listing is left exactly as it was. A row's style says
+/// what the row **is**: selected, hidden, waiting on a paste. Being in the air for a second is not
+/// one of those, and the pointer is where the eye already is.
+///
+/// **Two panes on the same folder is the case that settles it.** They are two listings of the same
+/// names with separate selections, so a mark matched by name — the only thing a listing has, since
+/// it holds names and not paths — lights up rows in a pane that has selected nothing. Which is
+/// what this asserts by comparing the whole frame: not "no dashes" but *nothing at all* different,
+/// so no treatment of a dragged row can creep back in under a different colour.
+#[test]
+fn a_drag_leaves_the_rows_it_picked_up_alone() {
+    let here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut h = Harness::opening(vec![here.clone(), here]);
+    h.settle();
+    let pane = h.app.panes[0].id;
+
+    // The first row of the first pane, picked up. Its name is in the second pane's listing too.
+    h.app.panes[0].tab_mut().select_only(0);
+    let items = h.app.panes[0].tab().selection_paths();
+    assert_eq!(items.len(), 1, "one row selected, one path to drag");
+
+    // Every shell icon landed and the window genuinely idle first, because what is compared below
+    // is whole frames: an icon arriving replaces a row's painted glyph with an atlas quad, and that
+    // is the one other thing that redraws a listing while nothing at all is happening.
+    let _ = h.pictures_once_settled();
+
+    // Then two frames of the same window, because the claim is that a frame with a drag in it is
+    // identical to one without — which says nothing unless two frames without one are.
+    h.frame(Vec::new());
+    let look = |h: &Harness| (h.rects(), h.segments());
+    let before = look(&h);
+    h.frame(Vec::new());
+    assert_eq!(look(&h), before, "the window is not still between frames");
+
+    // And with the drag this window started in the air, both listings are drawn the same way.
+    let (drag, _finish) = crate::shell::dnd::Drag::pretend();
+    h.app.file_drag = Some(super::super::Dragging::new(pane, items, drag));
+    h.frame(Vec::new());
+    assert_eq!(
+        look(&h),
+        before,
+        "a drag in flight redrew the listing it came out of"
+    );
+}
+
+/// **The pane a drag started in is published, and a hushed drop is not drawn.**
+///
+/// The two halves this side owns of the rule in [`crate::shell::dnd::Shared::silent`] — a folder
+/// over its own row in its own pane is refused without a word said about it. In between them sits
+/// the drop target, which decides it: only the callbacks know where the pointer is at the moment it
+/// matters, and only the drag *source* can hold the cursor back. So what is asserted here is that
+/// the pane goes out and that the answer comes back and is obeyed;
+/// `crate::shell::dnd::tests::the_pane_a_drag_came_out_of_hears_nothing_about_it` drives the
+/// deciding through the real `IDropTarget`.
+#[test]
+#[cfg(windows)]
+fn the_pane_a_drag_started_in_goes_out_and_a_hushed_drop_is_not_drawn() {
+    let mut h = Harness::with_panes(2);
+    h.settle();
+    let screen = Rect::from_min_size(Pos2::ZERO, h.size);
+    let scale = h.ctx.pixels_per_point();
+    let (from, other) = (h.app.panes[0].id, h.app.panes[1].id);
+    assert_ne!(from, other, "two panes to drag between");
+    let physical = |at: Pos2| ((at.x * scale) as i32, (at.y * scale) as i32);
+    let middle_of = |h: &Harness, pane: usize| h.app.panes[pane].rect.center();
+
+    // ---- Nothing in flight: there is no pane to hush anything in ----
+    let (here, there) = (middle_of(&h, 0), middle_of(&h, 1));
+    h.frame(Vec::new());
+    assert!(
+        !h.app.drops.started_in(physical(here)),
+        "a window with no drag of its own in it published a pane for one"
+    );
+
+    // ---- A folder picked up in the first pane ----
+    let folder = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let (drag, _finish) = crate::shell::dnd::Drag::pretend();
+    h.app.file_drag = Some(super::super::Dragging::new(from, vec![folder], drag));
+    h.frame(Vec::new());
+    assert!(
+        h.app.drops.started_in(physical(here)),
+        "the pane the drag came out of was not published, so nothing can be hushed"
+    );
+    assert!(
+        !h.app.drops.started_in(physical(there)),
+        "the other pane is inside the published one, which would hush the whole window"
+    );
+
+    // ---- And the answer that comes back is obeyed ----
+    h.app.drops.hover(Some(physical(here)));
+    h.app.drops.tell(Some(crate::shell::dnd::Told {
+        doing: crate::shell::dnd::Doing::Move,
+        refused: Some(crate::shell::dnd::Refused::Itself),
+        source: Some("src".to_owned()),
+        target: "src".to_owned(),
+    }));
+    h.app.drops.be_silent(true);
+    h.frame(Vec::new());
+    assert!(
+        h.app.drag_saying_for_tests(&h.ctx, screen).is_none(),
+        "a hushed drop still put its sentence on screen"
+    );
+    // The refusal itself is untouched by the hush: the row must not light up promising a drop it
+    // will not take.
+    assert_eq!(h.app.preview_rect_for_tests(from, scale), None);
+
+    h.app.drops.be_silent(false);
+    h.frame(Vec::new());
+    let (saying, _) = h
+        .app
+        .drag_saying_for_tests(&h.ctx, screen)
+        .expect("a refusal worth saying is drawn");
+    assert_eq!(saying, "Cannot move src into itself");
+
+    // ---- And a hush with nothing to say still puts nothing on screen ----
+    //
+    // The other case of [`crate::shell::dnd::Shared::silent`]: a move into the folder the items are
+    // already in is refused with no sentence at all — see
+    // `crate::shell::dnd::tests::a_drop_that_would_do_nothing_is_not_offered` — so the highlight
+    // has to stand down from the hush itself rather than from a reason it can read.
+    h.app.drops.tell(None);
+    h.frame(Vec::new());
+    assert!(
+        h.app.preview_rect_for_tests(from, scale).is_some(),
+        "a drag over a folder that would take it has to promise the drop"
+    );
+    h.app.drops.be_silent(true);
+    h.frame(Vec::new());
+    assert_eq!(
+        h.app.preview_rect_for_tests(from, scale),
+        None,
+        "a folder lit up for a drop that would do nothing"
+    );
+    assert!(h.app.drag_saying_for_tests(&h.ctx, screen).is_none());
+}
+
 /// A drag in flight keeps asking for frames, and ends by re-reading what a move emptied.
 ///
 /// This is the whole reason the drag runs on a thread of its own. While one is running the
@@ -471,7 +762,7 @@ fn a_drag_in_flight_keeps_the_window_painting() {
     assert!(h.quiesce(), "the window should settle into asking for nothing");
 
     let (drag, finish) = crate::shell::dnd::Drag::pretend();
-    h.app.file_drag = Some((pane, drag));
+    h.app.file_drag = Some(super::super::Dragging::new(pane, Vec::new(), drag));
 
     for _ in 0..3 {
         h.frame(Vec::new());
@@ -523,7 +814,7 @@ fn a_second_drag_still_picks_the_files_up() {
         // The drag a real window would have started, and its end. This is the only step
         // the platform does for us and the harness cannot.
         let (drag, finish) = crate::shell::dnd::Drag::pretend();
-        h.app.file_drag = Some((pane, drag));
+        h.app.file_drag = Some(super::super::Dragging::new(pane, Vec::new(), drag));
         finish.send(None).unwrap();
         h.frame(Vec::new());
         h.wait();
@@ -637,9 +928,16 @@ fn a_folder_row_is_its_own_drop_target() {
     );
     let resolved = h.app.drops.resolve(at).expect("a zone under the row");
     assert_eq!(
-        resolved,
+        resolved.onto,
         Onto::Folder(folder.clone()),
         "the row resolved to {resolved:?} rather than to the folder it shows"
+    );
+    // And it is named, because the same zone answers what the pointer is *told* the drop will do
+    // — *Copy to src* — and the callbacks have no way to work a name out for themselves. See
+    // `crate::shell::dnd::Region`.
+    assert_eq!(
+        resolved.name, "src",
+        "the row's zone has to name the folder the row is showing"
     );
 
     // And the pane's own folder is still the target away from any row: the status line at the
@@ -655,12 +953,16 @@ fn a_folder_row_is_its_own_drop_target() {
             ((below + 2.0) * scale) as i32,
         );
         let resolved = h.app.drops.resolve(at).expect("the pane's own zone");
+        let showing = h.app.pane_mut(pane).expect("the pane").tab().path.clone();
         assert_eq!(
-            resolved,
-            Onto::Folder(
-                h.app.pane_mut(pane).expect("the pane").tab().path.clone()
-            ),
+            resolved.onto,
+            Onto::Folder(showing.clone()),
             "away from a row, a drop belongs to the folder being shown"
+        );
+        assert_eq!(
+            resolved.name,
+            crate::fs::display_name(&showing),
+            "the pane's own zone is named after the folder it is showing"
         );
     }
 }

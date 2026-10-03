@@ -106,6 +106,7 @@ pub fn show(
     // The shell's thumbnails, for the tiles. Handed in whichever view is showing, because the
     // switch is on the status line and the next frame may be the other one.
     thumbs: &mut crate::shell::thumbs::Thumbs,
+    // The paths a cut is waiting on a paste for, which every listing draws faded.
     cut: &[std::path::PathBuf],
     status: Option<&str>,
     // Whether this pane's console is open, for the switch at the left of the status line.
@@ -240,7 +241,8 @@ pub fn show(
         );
     } else if tiles {
         crate::ui::grid::show(
-            ui, t, zone, body, pane, tab, focused, icons_cache, thumbs, cut, out, &mut outcome,
+            ui, t, zone, body, pane, tab, focused, icons_cache, thumbs, cut, out,
+            &mut outcome,
         );
         listed = true;
     } else {

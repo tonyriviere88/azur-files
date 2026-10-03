@@ -94,14 +94,14 @@ impl App {
     /// repaint is asked for unconditionally for the length of the drag, which is the one case
     /// in this program where painting is driven by a state rather than by an event.
     pub(super) fn pump_drag(&mut self, ctx: &egui::Context) {
-        let Some((pane, drag)) = &self.file_drag else {
+        let Some(dragging) = &self.file_drag else {
             return;
         };
-        let Some(effect) = drag.finished() else {
+        let Some(effect) = dragging.drag.finished() else {
             ctx.request_repaint();
             return;
         };
-        let pane = *pane;
+        let pane = dragging.pane;
         self.file_drag = None;
         self.release_buttons(ctx);
         // A move took files out of this folder, and OLE does not say which — so the folder
@@ -162,8 +162,13 @@ impl App {
     /// Published every frame because a pane can be split, resized or navigated between
     /// one drag and the next, and the OLE callbacks answer `DragOver` synchronously with
     /// no way to ask.
+    ///
+    /// Each region carries the destination's **name** as well as its rectangle, because the
+    /// callbacks also have to say what a drop there will do — *Copy one.txt into src*, *Pin src to
+    /// Work* — and neither the bookmark list nor a folder's display name is reachable from where
+    /// they run. See [`crate::shell::dnd::Region`].
     pub(super) fn publish_drop_targets(&self, ctx: &egui::Context) {
-        use crate::shell::dnd::{Onto, Targets};
+        use crate::shell::dnd::{Onto, Region, Targets};
 
         let scale = ctx.pixels_per_point();
         let physical = |rect: Rect| {
@@ -180,11 +185,19 @@ impl App {
             rect.width() >= 1.0 && rect.height() >= 1.0
         }
 
-        let mut zones = Vec::with_capacity(self.panes.len() + 1);
+        /// What the sidebar's own heading calls the section, which is what a drop onto it means
+        /// and so what the pointer has to be told it means.
+        const SECTION: &str = "Bookmarks";
+
+        let mut zones: Vec<Region> = Vec::with_capacity(self.panes.len() + 1);
         // The bookmarks group first, so it is *behind* the panes: they cannot overlap, and
         // if a future layout let them, dropping onto a listing should mean the listing.
         if let Some(rect) = self.bookmarks_rect {
-            zones.push((physical(rect), Onto::Bookmarks));
+            zones.push(Region {
+                rect: physical(rect),
+                onto: Onto::Bookmarks,
+                name: SECTION.to_owned(),
+            });
             // Then each group — its own row and the rows under it, since a group is one thing —
             // so a group wins over the section it is in. The same arrangement, and the same
             // reason, as a folder row winning over its listing below: dropping a folder on a
@@ -193,7 +206,17 @@ impl App {
             for (row, group) in &self.bookmark_rows {
                 let row = row.intersect(rect);
                 if usable(row) {
-                    zones.push((physical(row), Onto::BookmarkGroup(*group)));
+                    zones.push(Region {
+                        rect: physical(row),
+                        onto: Onto::BookmarkGroup(*group),
+                        // Its own name, so the tooltip names the box being joined. A row that
+                        // is somehow no longer a group falls back to the section, which is
+                        // where such a drop would land anyway.
+                        name: self
+                            .bookmarks
+                            .group(*group)
+                            .map_or_else(|| SECTION.to_owned(), |group| group.name.clone()),
+                    });
                 }
             }
         }
@@ -208,7 +231,11 @@ impl App {
             if folder.as_os_str().is_empty() || !usable(pane.drop_area) {
                 continue;
             }
-            zones.push((physical(pane.drop_area), Onto::Folder(folder)));
+            zones.push(Region {
+                rect: physical(pane.drop_area),
+                name: crate::fs::display_name(&folder),
+                onto: Onto::Folder(folder),
+            });
         }
         // The folder rows last, so they win: `Targets::at` takes the last match, and dropping
         // onto a folder has to mean *into that folder*. Dropping anywhere else in the listing
@@ -217,26 +244,51 @@ impl App {
             for (row, folder) in &pane.drop_rows {
                 let row = row.intersect(pane.drop_area);
                 if usable(row) {
-                    zones.push((physical(row), Onto::Folder(folder.clone())));
+                    zones.push(Region {
+                        rect: physical(row),
+                        // The leaf, which is the name the row itself is showing — so the
+                        // tooltip and the highlight are about the same thing.
+                        name: crate::fs::display_name(folder),
+                        onto: Onto::Folder(folder.clone()),
+                    });
                 }
             }
         }
-        self.drops.publish(Targets { zones });
+        // And where this window's own drag began, which is not a place anything can be dropped but
+        // is the one thing the pointer cannot work out for itself — see
+        // [`crate::shell::dnd::Targets::from`]. The whole pane and not the row: a folder is in one
+        // pane's listing, so being back in the pane the drag came from is what makes a refusal
+        // there unremarkable rather than wrong.
+        let from = self.file_drag.as_ref().and_then(|dragging| {
+            self.panes
+                .iter()
+                .find(|pane| pane.id == dragging.pane)
+                .map(|pane| physical(pane.rect))
+        });
+        self.drops.publish(Targets { zones, from });
     }
 
     /// Which of these items a drop into `into` can actually act on.
     ///
-    /// Dropping a folder into itself is meaningless whatever button carried it, and the shell would
-    /// refuse it noisily. A file dropped back into the folder it is already in is meaningless too
-    /// *for a left drag* — it is a move to where it already is — but not for a right one:
-    /// right-dragging a file onto its own folder is how Explorer is asked for a copy of it, and the
-    /// answer is `one - Copy.txt`. Filtering those out before the question was asked meant a right
-    /// drag inside a folder did nothing at all, which is the most obvious way to try the gesture.
-    pub(super) fn droppable(items: Vec<PathBuf>, into: &Path, asked: bool) -> Vec<PathBuf> {
+    /// A folder cannot go inside itself, and the shell would refuse it noisily — see
+    /// [`crate::shell::dnd::swallows`], which is the same test the pointer was answered with while
+    /// the drag was still moving. **A drag with one such folder in it is refused whole and does not
+    /// reach here at all**, so that filter is the guard for the one drag that can: a source that
+    /// renders its paths only when the drop is real gave the pointer nothing to refuse, and its
+    /// files arrive here for the first time — see [`crate::shell::dnd::refuses`].
+    ///
+    /// An item dropped back into the folder it is already in is meaningless *as a move* — it is a
+    /// move to where it already is, and the pointer says nothing about one at all: see
+    /// [`crate::shell::dnd::does_nothing`]. As a **copy** it is an ordinary gesture with an obvious
+    /// answer, `one - Copy.txt`, which is what `keep` is: true for a copy, and true for a right
+    /// drag, which has not said yet which of the two it is. Filtering those out before the question
+    /// was asked meant a right drag inside a folder did nothing at all, which is the most obvious
+    /// way anybody tries the gesture.
+    pub(super) fn droppable(items: Vec<PathBuf>, into: &Path, keep: bool) -> Vec<PathBuf> {
         items
             .into_iter()
-            .filter(|item| item != into)
-            .filter(|item| asked || item.parent() != Some(into))
+            .filter(|item| !crate::shell::dnd::swallows(item, into))
+            .filter(|item| keep || !crate::shell::dnd::already_in(item, into))
             .collect()
     }
 
@@ -253,6 +305,21 @@ impl App {
             self.drop_hover = hovering;
             ctx.request_repaint();
         }
+        // And what that drop would do, in words. Refreshed beside the hover because the two are
+        // halves of the same frame: the highlight says *where* and the sentence says *what*, and
+        // one of them arriving a frame after the other would have them briefly disagree.
+        let telling = self.drops.telling();
+        if telling != self.drop_telling {
+            self.drop_telling = telling;
+            ctx.request_repaint();
+        }
+        // And whether that sentence is one to keep to itself, which travels beside it for the
+        // reason it is written down beside it — see [`crate::shell::dnd::Shared::silent`].
+        let silent = self.drops.silent();
+        if silent != self.drop_silent {
+            self.drop_silent = silent;
+            ctx.request_repaint();
+        }
 
         for dropped in self.drops.take_drops() {
             // Where the drop actually landed, decided when the pointer was there rather than
@@ -260,8 +327,13 @@ impl App {
             // and so a drop onto a *folder row* went into the folder being shown instead of into
             // the folder it was dropped on — the one thing dragging onto a folder means.
             let into = match dropped.onto {
-                // Onto the sidebar: pin the folders and move nothing. Files are ignored rather
-                // than refused, so dragging a mixed selection over pins what can be pinned.
+                // Onto the sidebar: pin the folders and move nothing.
+                //
+                // **A drag with a file anywhere in it never gets here** — the pointer refuses it
+                // while the drag is still moving, and the drop is answered with no effect at all;
+                // see [`crate::shell::dnd::refuses`]. So `is_dir` is the guard for a drop whose
+                // items have changed under it since, and not the rule: the rule is that a selection
+                // is pinnable or it is refused, rather than half of it going in quietly.
                 crate::shell::dnd::Onto::Bookmarks => {
                     for item in dropped.items {
                         if item.is_dir() {
@@ -302,14 +374,13 @@ impl App {
             else {
                 continue;
             };
-            // Dropping a folder into itself is meaningless whatever button carried it, and the
-            // shell would refuse it noisily. A file dropped back into the folder it is already in
-            // is meaningless too *for a left drag* -- it is a move to where it already is -- but
-            // not for a right one: right-dragging a file onto its own folder is how Explorer is
-            // asked for a copy of it, and the answer is `one - Copy.txt`. Filtering those out
-            // before the question was asked meant a right drag inside a folder did nothing at
-            // all, which is the most obvious way to try the gesture.
-            let items = Self::droppable(dropped.items, &into, dropped.asked);
+            // Dropping a folder into itself is meaningless whatever button carried it, and a drag
+            // holding one was already refused while it was still moving -- so this is the drag that
+            // named its files only now. A *move* back into the folder the items are already in was
+            // refused while it moved too; a copy there is `one - Copy.txt` and a right drag is a
+            // question, so both of those keep everything they are carrying.
+            let keep = dropped.asked || dropped.effect == Effect::Copy;
+            let items = Self::droppable(dropped.items, &into, keep);
             if items.is_empty() {
                 continue;
             }

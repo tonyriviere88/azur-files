@@ -59,6 +59,54 @@ use git::GIT_WRITE_SETTLE;
 /// half-minute after it happened. Nobody reaches for it to go archaeology.
 const CLOSED_TABS: usize = 10;
 
+/// A drag this window started, and what the window has to know about it while it runs.
+///
+/// The handle is the OLE drag itself — see [`crate::shell::dnd::Drag`], which is off on a thread of
+/// its own. The rest is what the window draws the gesture from while it runs, and none of it can be
+/// worked out again later: the **pane** so a move can re-read the folder the files left, the
+/// **items** because the drag is drawn at both ends — the ghost under the pointer is these files,
+/// and so are the rows marked as the place they came from — and the [`Dragging::ghost`] it is drawn
+/// from.
+struct Dragging {
+    pane: PaneId,
+    /// What was picked up, in the order the listing had them.
+    items: Vec<PathBuf>,
+    /// What the ghost under the pointer is made of: the type of each of the first few items, as
+    /// `(extension, is a folder)`.
+    ///
+    /// Settled when the drag starts rather than looked up while it runs, because `is_dir` is a
+    /// syscall and the ghost is redrawn on every frame of the gesture. The *type* rather than the
+    /// item, deliberately: [`crate::shell::icons::Icons`] holds one entry per type and a dozen or
+    /// so per-path entries for the sidebar's places — asking it per dragged path would put an entry
+    /// in that map for every file anybody ever drags.
+    ghost: Vec<(String, bool)>,
+    drag: crate::shell::dnd::Drag,
+}
+
+impl Dragging {
+    /// Pick these items up, and settle what the ghost under the pointer is made of.
+    fn new(pane: PaneId, items: Vec<PathBuf>, drag: crate::shell::dnd::Drag) -> Self {
+        let ghost = items
+            .iter()
+            .take(crate::ui::GHOST_STACK)
+            .map(|path| {
+                let ext = path
+                    .extension()
+                    .and_then(|ext| ext.to_str())
+                    .unwrap_or_default()
+                    .to_owned();
+                (ext, path.is_dir())
+            })
+            .collect();
+        Self {
+            pane,
+            items,
+            ghost,
+            drag,
+        }
+    }
+}
+
 pub struct App {
     theme: Theme,
     /// Set once per theme change; installing a style every frame would throw away
@@ -172,6 +220,14 @@ pub struct App {
     notice: Option<String>,
     /// Where a drag from outside is hovering, in points, for the pane highlight.
     drop_hover: Option<(i32, i32)>,
+    /// What a drop where it is hovering would do, in words — see
+    /// [`crate::shell::dnd::Shared::telling`], which is where the sentence is decided, and
+    /// [`crate::shell::dnd::Told`] for why it arrives in pieces rather than as a string.
+    drop_telling: Option<crate::shell::dnd::Told>,
+    /// Whether that sentence is one to keep quiet about — see
+    /// [`crate::shell::dnd::Shared::silent`], where the one case is set out. Mirrored beside
+    /// [`App::drop_telling`] because the two are decided together and have to be drawn together.
+    drop_silent: bool,
     /// Whether the clipboard is offering files. Sampled once a frame rather than once
     /// per menu entry, since it is a syscall.
     clipboard_has_files: bool,
@@ -197,10 +253,9 @@ pub struct App {
     bookmark_rows: Vec<(Rect, usize)>,
     /// The bookmark list mid-gesture: a row being dragged, and a group being named.
     bookmark_edit: crate::ui::sidebar::Editing,
-    /// The OLE drag in flight, if there is one, and the pane the files were picked up in so
-    /// a move can re-read the folder they left. One at a time: the pointer is only holding
-    /// one thing, and a second drag would be following the same button as the first.
-    file_drag: Option<(PaneId, crate::shell::dnd::Drag)>,
+    /// The OLE drag in flight, if there is one. One at a time: the pointer is only holding one
+    /// thing, and a second drag would be following the same button as the first.
+    file_drag: Option<Dragging>,
 
     volumes: Volumes,
     places: Vec<Place>,
@@ -397,6 +452,8 @@ impl App {
             cut: Vec::new(),
             notice: None,
             drop_hover: None,
+            drop_telling: None,
+            drop_silent: false,
             clipboard_has_files: false,
             drops: crate::shell::dnd::Zone::new(),
             modal: crate::shell::Modal::new(ctx),

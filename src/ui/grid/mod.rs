@@ -669,11 +669,7 @@ pub fn show(
                 filelist::cursor_ring(ui.painter(), cell.hit.shrink(1.0), t.stroke.strong);
             }
 
-            let pending_cut = !cut.is_empty()
-                && cut
-                    .iter()
-                    .any(|p| p.file_name().is_some_and(|n| n == dir.name(entry_index)))
-                && cut.iter().any(|p| p.parent() == Some(dir.path.as_path()));
+            let pending_cut = crate::ui::is_cut(cut, &dir.path, dir.name(entry_index));
             let dim = entry.is_hidden() || pending_cut;
             let name_color = if dim { t.text.tertiary } else { t.text.primary };
             let kind = fmt::kind_of(dir.ext(entry_index), entry.is_dir());

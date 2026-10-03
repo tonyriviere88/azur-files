@@ -21,6 +21,7 @@ pub mod menu;
 pub mod preview;
 pub mod sidebar;
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use azur_egui_theme::icons::Icon;
@@ -494,6 +495,240 @@ pub fn drop_preview(painter: &Painter, rect: Rect, t: &Theme) {
     azur_egui_theme::desktop::drop_target(painter, rect, t)
 }
 
+/// Whether the entry called `name`, in `folder`, is waiting on a paste — and so is drawn faded.
+///
+/// By name and parent rather than by joining the two, because the listing has the name as a
+/// borrowed `&str` out of its arena and the folder once for the whole listing — so this asks the
+/// question without building a `PathBuf` per row per frame.
+///
+/// **Both halves have to hold of the same path.** Both views had a copy of this, and both asked
+/// `any(name matches)` and `any(parent matches)` as two separate questions — so a cut file called
+/// `a.txt` in one folder plus any cut file in *this* one dimmed a local `a.txt` that was never cut.
+/// One copy here, asked the once, is the fix.
+///
+/// **The rows a drag picked up are not marked at all**, which is a decision and not an omission: a
+/// row's style does not change for being in the air. The gesture is drawn under the pointer — see
+/// [`drag_ghost`] and [`drag_saying`] — where the pointer is looking, and the listing is left as it
+/// was. A mark on the row could not have been right anyway: two panes showing the same folder are
+/// two listings of the same names with *separate* selections, and matching by name marked the rows
+/// in both.
+pub fn is_cut(cut: &[PathBuf], folder: &Path, name: &str) -> bool {
+    cut.iter().any(|path| {
+        path.parent() == Some(folder) && path.file_name().is_some_and(|leaf| leaf == name)
+    })
+}
+
+/// How many icons the ghost draws, however many files the drag is carrying.
+///
+/// Three leans enough to read as a pile; a fourth is only more paper. The rest is the number in
+/// the corner — see [`drag_ghost`].
+pub const GHOST_STACK: usize = 3;
+
+/// The files a drag is carrying, drawn under the pointer: their icons, stacked.
+///
+/// **This is the drag image, and this program draws it rather than the shell.** Windows will build
+/// one — `IDragSourceHelper` off the data object's shell items, which is where Explorer's ghost
+/// comes from — and that route was built here and taken back out: see the module header of
+/// [`crate::shell::dnd`]. Drawing it costs one textured quad per icon out of the atlas the listing
+/// already fills.
+///
+/// **Above the pointer and centred on it**, which is the one position that does not fight the
+/// gesture: the row being aimed at is *under* the pointer, and a pile sitting on top of it hides
+/// the thing you are trying to hit. The sentence goes below instead — carrying above, consequence
+/// below, and the cursor between them. It is pushed back inside `bounds` at the top of the
+/// window, where there is nothing above the pointer to sit in.
+///
+/// `icons` are back-to-front, so the last one drawn is the one on top and the stack leans down and
+/// to the right the way a pile of paper does. The caller caps them at [`GHOST_STACK`] and never
+/// hands over none — a drag with no icon to draw draws no ghost at all. `count` is how many files
+/// there really are, which is the one thing a stack of three cannot say for itself.
+///
+/// Returns the rectangle the stack filled, so a test can find it.
+pub fn drag_ghost(
+    painter: &Painter,
+    t: &Theme,
+    at: egui::Pos2,
+    bounds: Rect,
+    icons: &[(egui::TextureId, Rect)],
+    count: usize,
+) -> Rect {
+    /// How far each icon behind the top one peeks out, down and to the right.
+    const LEAN: f32 = 6.0;
+    /// The ghost's icons, a size up from a row's: it is the one thing the pointer is carrying, and
+    /// at row size it reads as a row that came loose.
+    const SIZE: f32 = 24.0;
+    /// The air between the bottom of the pile and the pointer's hotspot. Small: the pile is what
+    /// the pointer is *carrying*, and any further makes it a separate thing floating above.
+    const GAP: f32 = 4.0;
+
+    let size = vec2(SIZE, SIZE) + vec2(LEAN, LEAN) * icons.len().saturating_sub(1) as f32;
+    let wanted = pos2(at.x - size.x * 0.5, at.y - GAP - size.y);
+    let stack = Rect::from_min_size(
+        pos2(
+            wanted
+                .x
+                .min(bounds.right() - size.x - GUTTER)
+                .max(bounds.left() + GUTTER),
+            wanted.y.max(bounds.top() + GUTTER),
+        )
+        .round(),
+        size,
+    );
+    for (index, (texture, uv)) in icons.iter().enumerate() {
+        let corner = stack.min + vec2(LEAN, LEAN) * index as f32;
+        painter.image(
+            *texture,
+            Rect::from_min_size(corner, vec2(SIZE, SIZE)),
+            *uv,
+            // Translucent, because it is a thing in the air over the window rather than in it —
+            // and enough of it left to recognise the icon, which is the whole point of drawing
+            // the files' own.
+            Color32::from_white_alpha(210),
+        );
+    }
+    if count > 1 {
+        // How many, in a pill in the stack's far corner — the one furthest from the pointer, since
+        // the stack sits above it. Wholly *inside* the stack rather than hung off the corner: the
+        // corner nearest the cursor is where it used to be, and with the stack above the pointer
+        // that put a badge on the hotspot. It is the one fact the icons cannot carry between them,
+        // three of them standing for three files and for thirty.
+        let font = FontId::new(typography::SIZE_CAPTION, egui::FontFamily::Proportional);
+        let galley = painter.layout_no_wrap(count.to_string(), font, t.text.on_accent);
+        let padding = vec2(space::S2, 1.0);
+        let size = galley.size() + padding * 2.0;
+        let pill = Rect::from_min_size(pos2(stack.right() - size.x, stack.top()), size);
+        painter.rect_filled(pill, CornerRadius::same(radius::CIRCULAR), t.accent.default);
+        text_left(painter, pill.shrink2(padding), galley);
+    }
+    stack
+}
+
+/// What a drop would do, in words, beside the pointer: *Copy one.txt into docs*.
+///
+/// The sentence is decided in [`crate::shell::dnd`] — see [`crate::shell::dnd::Told`] — and arrives
+/// here in pieces, because **the two ends of it are drawn in the accent**: what is being carried
+/// and where it would land. `accent-mark` and not `accent-default`, which is the rung meant to be
+/// read *as ink on a surface* rather than to be a surface; the default one is a fill dark enough
+/// to carry white text and reads as a smudge at caption size.
+///
+/// One galley and not three, laid out from a job with a section each. Two reasons and both matter:
+/// the pieces are kerned and spaced as one line, and the frame can be measured before anything is
+/// drawn, which is what lets it be pushed back inside the window below.
+///
+/// **Drawn against a position rather than through egui's tooltip**, and that is forced: while an
+/// OLE drag is running the pointer belongs to the drag, so egui has no pointer to hang a tooltip
+/// off — the position comes from the drop target's callbacks, which is the same place the highlight
+/// comes from. The frame is `components::tooltip`'s: `background-layer-alt` inside `stroke-subtle`
+/// at `radius-small`, `space-2` by `space-3` of padding, caption type. It is laid out here because
+/// there is no `Response` to give the component.
+///
+/// **Every sentence wears a mark at its head** saying what the drop would do — see [`drag_sign`]
+/// for which mark and why the sentence is where they live. A refusal's is the one in a colour of
+/// its own, and the two names stay in the accent either way: the sentence is about the same pair of
+/// things whether or not it can happen.
+///
+/// `at` is the top left it wants, which the caller has already put clear of the pointer and of the
+/// ghost. It is then pushed back inside `bounds`, which against the window's bottom or right edge
+/// means level with the pointer rather than clear of it: a sentence under the cursor is still
+/// readable, and one drawn off the window is not there at all.
+///
+/// Returns the rectangle it used, so a test can find it.
+pub fn drag_saying(
+    painter: &Painter,
+    t: &Theme,
+    at: egui::Pos2,
+    bounds: Rect,
+    told: &crate::shell::dnd::Told,
+) -> Rect {
+    use azur_egui_theme::tokens::shadow;
+
+    let font = FontId::new(typography::SIZE_CAPTION, egui::FontFamily::Proportional);
+    let mut job = egui::text::LayoutJob::default();
+    for (text, blue) in told.runs() {
+        job.append(
+            text,
+            0.0,
+            egui::TextFormat::simple(
+                font.clone(),
+                if blue { t.accent.mark } else { t.text.primary },
+            ),
+        );
+    }
+    let galley = painter.layout_job(job);
+    let padding = vec2(space::S3, space::S2);
+    // Room at the head of it for the mark, and the air between the mark and the first word.
+    let sign = SIGN + space::S2;
+    let size = galley.size() + vec2(sign, 0.0) + padding * 2.0;
+
+    // `min` before `max`, so a window narrower than the sentence still shows its start rather than
+    // its end.
+    let at = pos2(
+        at.x.min(bounds.right() - size.x - GUTTER)
+            .max(bounds.left() + GUTTER),
+        at.y.min(bounds.bottom() - size.y - GUTTER)
+            .max(bounds.top() + GUTTER),
+    );
+    let rect = Rect::from_min_size(at.round(), size);
+
+    let radius = CornerRadius::same(radius::SMALL);
+    painter.add(shadow::S16.as_shape(rect, radius));
+    painter.rect_filled(rect, radius, t.bg.layer_alt);
+    painter.rect_stroke(
+        rect,
+        radius,
+        Stroke::new(1.0, t.stroke.subtle),
+        egui::StrokeKind::Inside,
+    );
+    let inner = rect.shrink2(padding);
+    let (glyph, ink) = drag_sign(told, t);
+    glyph(painter, icon_rect(inner, inner.left(), SIGN), ink);
+    text_left(
+        painter,
+        Rect::from_min_max(pos2(inner.left() + sign, inner.top()), inner.max),
+        galley,
+    );
+    rect
+}
+
+/// The mark's box in [`drag_saying`]: a caption line's own height, so the sign sits level with the
+/// words rather than standing over them.
+const SIGN: f32 = typography::LINE_CAPTION;
+
+/// The mark at the head of [`drag_saying`]'s sentence, and the ink to draw it in.
+///
+/// **What the drop would do, as a sign as well as in words**: a `+` for a copy, a forward arrow for
+/// a move, the bookmark star for a pin, and `icons::error` — an ✕ in a circle — for a drop that
+/// will not happen. The same pairing the platform puts on the cursor, moved to the head of the
+/// sentence, and that is the point of it: OLE's badge rides *under* the pointer while the words sit
+/// beside it, so the two are never read together. Here the sign and the sentence it belongs to are
+/// one thing.
+///
+/// **The refusal is the one with a colour of its own.** `status-danger` against the accent the
+/// other three wear, because it is the one that has to be seen before it is read; the rest are
+/// saying the same thing as the words next to them, in the same ink as the two names those words
+/// pick out.
+///
+/// The star and not a link arrow for a pin, though the effect reported to the pointer is
+/// `DROPEFFECT_LINK`: a star is what the path bar's bookmark button and every pinned row in the
+/// sidebar already are, and the sentence beside it says *Pin*. A shortcut arrow would be naming the
+/// mechanism instead of the gesture.
+fn drag_sign(
+    told: &crate::shell::dnd::Told,
+    t: &Theme,
+) -> (fn(&Painter, Rect, Color32), Color32) {
+    use crate::shell::dnd::Doing;
+
+    if told.refused.is_some() {
+        return (azur_egui_theme::icons::error, t.status.danger);
+    }
+    let glyph: fn(&Painter, Rect, Color32) = match told.doing {
+        Doing::Copy => crate::icons::plus,
+        Doing::Move => crate::icons::arrow_right,
+        Doing::Pin => crate::icons::star,
+    };
+    (glyph, t.accent.mark)
+}
+
 /// The grey a drop mark is filled with, over the opaque base it is laid on.
 ///
 /// `text-secondary`, translucent: a mid grey in *both* themes — light over the dark theme's
@@ -643,6 +878,293 @@ pub fn text_center(painter: &Painter, rect: Rect, font: FontId, color: Color32, 
 mod tests {
     use super::*;
     use azur_egui_theme::desktop;
+
+    /// **The ghost under the pointer draws one icon per file it is carrying, and says how many.**
+    ///
+    /// The drag image, which this program draws rather than the shell — see [`drag_ghost`], and
+    /// [`crate::shell::dnd`]'s module header for why the shell's own route was taken back out.
+    ///
+    /// Driven with stand-in textures rather than through the application, deliberately: the icons
+    /// come out of a shell atlas filled by a worker thread, so an end-to-end test would be
+    /// asserting on when a bitmap happened to arrive. What is worth pinning is the arithmetic —
+    /// one quad per icon, the stack leaning down and to the right, and the count drawn only when
+    /// there is more than one file.
+    #[test]
+    fn the_drag_ghost_draws_one_icon_each_and_counts_the_rest() {
+        let ctx = egui::Context::default();
+        azur_egui_theme::fonts::install(&ctx);
+        let t = Theme::dark();
+        // Not `TextureId::default()`, which is the font atlas: these have to look like image quads.
+        let icons: Vec<(egui::TextureId, Rect)> = (0..GHOST_STACK)
+            .map(|n| {
+                (
+                    egui::TextureId::Managed(1 + n as u64),
+                    Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+                )
+            })
+            .collect();
+
+        type Drawn = (usize, Vec<String>, Rect);
+        let at = pos2(100.0, 100.0);
+        let bounds = Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0));
+        let drawn = |count: usize, icons: &[(egui::TextureId, Rect)]| -> Drawn {
+            let mut quads = 0;
+            let mut texts = Vec::new();
+            let mut rect = Rect::NOTHING;
+            let _ = ctx.run_ui(Default::default(), |ui| {
+                let from = ui.painter().add(egui::Shape::Noop);
+                rect = drag_ghost(ui.painter(), &t, at, bounds, icons, count);
+                let layer = ui.layer_id();
+                ui.ctx().graphics_mut(|g| {
+                    for clipped in g.entry(layer).all_entries().skip(from.0) {
+                        match &clipped.shape {
+                            egui::Shape::Mesh(mesh)
+                                if mesh.texture_id != egui::TextureId::default() =>
+                            {
+                                quads += 1;
+                            }
+                            egui::Shape::Text(text) => texts.push(text.galley.text().to_owned()),
+                            _ => {}
+                        }
+                    }
+                });
+            });
+            (quads, texts, rect)
+        };
+
+        // Four files, three icons, and the number in the corner saying so.
+        let (quads, texts, ghost) = drawn(4, &icons);
+        assert_eq!(quads, GHOST_STACK, "one quad per icon in the stack");
+        // Above the pointer and over it, so the row being aimed at stays visible.
+        assert!(
+            ghost.bottom() < at.y,
+            "the pile is under the pointer at {at:?} rather than above it: {ghost:?}"
+        );
+        assert!(
+            ghost.left() < at.x && ghost.right() > at.x,
+            "the pile is not over the pointer: {ghost:?}"
+        );
+        assert!(
+            texts.contains(&"4".to_owned()),
+            "the ghost has to say how many files it is carrying, drew {texts:?}"
+        );
+
+        // One file: one icon, and no count — `1` beside a single icon says nothing.
+        let (quads, texts, one) = drawn(1, &icons[..1]);
+        assert_eq!(quads, 1);
+        assert!(texts.is_empty(), "a single file was counted: {texts:?}");
+        assert!(
+            one.width() < ghost.width(),
+            "one icon is not smaller than three: {one:?} against {ghost:?}"
+        );
+    }
+
+    /// **The two names in the drag's sentence are laid out in the accent, and the words are not.**
+    ///
+    /// [`crate::shell::dnd::Told::runs`] says which pieces are the blue ones; this is the other
+    /// half of that claim — that the colour reaches the galley. Asserted on the *sections of one
+    /// galley* rather than on three separate texts, because being one galley is itself the point:
+    /// the pieces have to be kerned and spaced as a single line and measured as one box.
+    #[test]
+    fn the_drag_sentence_puts_its_two_names_in_the_accent() {
+        use crate::shell::dnd::{Doing, Told};
+
+        let ctx = egui::Context::default();
+        azur_egui_theme::fonts::install(&ctx);
+        let t = Theme::dark();
+        let told = Told {
+            doing: Doing::Copy,
+            refused: None,
+            source: Some("one.txt".to_owned()),
+            target: "docs".to_owned(),
+        };
+
+        let mut sections: Vec<(String, Color32)> = Vec::new();
+        let bounds = Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0));
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            let from = ui.painter().add(egui::Shape::Noop);
+            drag_saying(ui.painter(), &t, pos2(100.0, 100.0), bounds, &told);
+            let layer = ui.layer_id();
+            ui.ctx().graphics_mut(|g| {
+                for clipped in g.entry(layer).all_entries().skip(from.0) {
+                    if let egui::Shape::Text(text) = &clipped.shape {
+                        let whole = text.galley.text();
+                        for section in &text.galley.job.sections {
+                            let range = section.byte_range.start.0..section.byte_range.end.0;
+                            sections.push((whole[range].to_owned(), section.format.color));
+                        }
+                    }
+                }
+            });
+        });
+
+        assert_eq!(
+            sections
+                .iter()
+                .map(|(text, _)| text.as_str())
+                .collect::<Vec<_>>(),
+            ["Copy ", "one.txt", " into ", "docs"],
+            "the sentence was not laid out in its pieces: {sections:?}"
+        );
+        for (text, colour) in &sections {
+            let wanted = if text == "one.txt" || text == "docs" {
+                t.accent.mark
+            } else {
+                t.text.primary
+            };
+            assert_eq!(
+                *colour, wanted,
+                "`{text}` is the wrong colour for its part of the sentence"
+            );
+        }
+    }
+
+    /// **Every sentence wears a mark, and a refused one wears the refusal's.**
+    ///
+    /// The mark is what makes the drop something you *see* rather than something you read — see
+    /// [`drag_sign`]. Both halves are asserted because both break quietly: a refusal drawn in the
+    /// accent reads as an ordinary drop, and a copy drawn in `status-danger` reads as a refused one.
+    ///
+    /// The ink is the claim rather than the shape. What each glyph looks like is `icons`' business and
+    /// a test that counted its segments would be pinning down a drawing; what matters here is that
+    /// the frame makes room for one, that it is drawn inside that room, and that the refusal is the
+    /// only one wearing the warning colour.
+    #[test]
+    fn every_sentence_wears_a_mark_and_a_refused_one_wears_the_refusal_s() {
+        use crate::shell::dnd::{Doing, Refused, Told};
+
+        let ctx = egui::Context::default();
+        azur_egui_theme::fonts::install(&ctx);
+        let t = Theme::dark();
+        let told = |doing: Doing, refused: Option<Refused>| Told {
+            doing,
+            refused,
+            source: Some("src".to_owned()),
+            target: "main".to_owned(),
+        };
+
+        /// Where the ink of one colour ended up, and the words beside it.
+        struct Drawn {
+            marks: Vec<Color32>,
+            ink: Rect,
+            words: String,
+            /// How far into the frame the first word starts, which is the room the mark was given.
+            indent: f32,
+            rect: Rect,
+        }
+        let drawn = |told: &Told| -> Drawn {
+            let mut marks = Vec::new();
+            let mut ink = Rect::NOTHING;
+            let mut words = String::new();
+            let mut text_x = 0.0;
+            let mut rect = Rect::NOTHING;
+            let bounds = Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0));
+            let _ = ctx.run_ui(Default::default(), |ui| {
+                let from = ui.painter().add(egui::Shape::Noop);
+                rect = drag_saying(ui.painter(), &t, pos2(100.0, 100.0), bounds, told);
+                let layer = ui.layer_id();
+                ui.ctx().graphics_mut(|g| {
+                    // Every glyph in `icons` is strokes, circles and filled polygons in the one
+                    // colour it was handed — so the mark is whatever is drawn in something other
+                    // than the frame's own greys, wherever the glyph puts it.
+                    for clipped in g.entry(layer).all_entries().skip(from.0) {
+                        let (colour, box_) = match &clipped.shape {
+                            egui::Shape::LineSegment { stroke, points } => (
+                                stroke.color,
+                                Rect::from_two_pos(points[0], points[1]),
+                            ),
+                            egui::Shape::Circle(circle) => {
+                                (circle.stroke.color, clipped.shape.visual_bounding_rect())
+                            }
+                            // A filled glyph carries its colour in the fill and an outlined one in
+                            // the stroke — the star is drawn both ways, so both are read.
+                            egui::Shape::Path(path) => {
+                                let ink = match (path.fill, &path.stroke.color) {
+                                    (fill, _) if fill.a() > 0 => fill,
+                                    (_, egui::epaint::ColorMode::Solid(colour)) => *colour,
+                                    _ => Color32::TRANSPARENT,
+                                };
+                                (ink, clipped.shape.visual_bounding_rect())
+                            }
+                            egui::Shape::Text(text) => {
+                                words = text.galley.text().to_owned();
+                                text_x = text.pos.x;
+                                continue;
+                            }
+                            _ => continue,
+                        };
+                        // A glyph drawn as a stroked outline leaves a `Path` with no fill; its ink
+                        // is in the segments beside it, so a transparent colour is not a mark.
+                        if colour.a() > 0 && colour != t.stroke.subtle && colour != t.bg.layer_alt {
+                            marks.push(colour);
+                            ink = ink.union(box_);
+                        }
+                    }
+                });
+            });
+            Drawn {
+                marks,
+                ink,
+                words,
+                indent: text_x - rect.left(),
+                rect,
+            }
+        };
+
+        // ---- A move: the arrow, in the accent, inside the room made for it ----
+        let moving = drawn(&told(Doing::Move, None));
+        assert_eq!(moving.words, "Move src into main");
+        assert!(
+            !moving.marks.is_empty(),
+            "an allowed drop is not marked at all"
+        );
+        for mark in &moving.marks {
+            assert_eq!(*mark, t.accent.mark, "the mark is not the accent's");
+        }
+        // At the head of the sentence: inside the frame, and to the left of the words.
+        assert!(
+            moving.rect.contains_rect(moving.ink),
+            "the mark is outside the frame: {:?} in {:?}",
+            moving.ink,
+            moving.rect
+        );
+        assert!(
+            moving.ink.right() <= moving.rect.left() + SIGN + space::S3 + space::S2,
+            "the mark is not at the head of the sentence: {:?} in {:?}",
+            moving.ink,
+            moving.rect
+        );
+
+        // ---- Copy and pin: their own signs, the same colour and the same box ----
+        for doing in [Doing::Copy, Doing::Pin] {
+            let other = drawn(&told(doing, None));
+            assert!(!other.marks.is_empty(), "{doing:?} is not marked");
+            for mark in &other.marks {
+                assert_eq!(*mark, t.accent.mark, "{doing:?}'s mark is not the accent's");
+            }
+            // The words start at the same place whichever sign is in front of them: the room is the
+            // mark's box and not the glyph's own ink, so three different shapes are one column.
+            assert_eq!(
+                other.indent, moving.indent,
+                "{doing:?} laid its sentence out around a different sized mark"
+            );
+        }
+
+        // ---- And a refusal: the warning colour, and the words that say so ----
+        let refused = drawn(&told(Doing::Move, Some(Refused::Inside)));
+        assert_eq!(refused.words, "Cannot move src into main, which is inside it");
+        assert!(
+            refused.marks.iter().all(|mark| *mark == t.status.danger),
+            "a refused drop is marked in {:?} rather than in the warning colour",
+            refused.marks
+        );
+        assert!(
+            !refused.marks.is_empty(),
+            "a refused drop is not marked at all"
+        );
+        // Room for the mark on the line rather than above it, whichever mark it is.
+        assert_eq!(refused.rect.height(), moving.rect.height());
+    }
 
     /// **The two columns line up, and the keys are the quiet half.**
     ///

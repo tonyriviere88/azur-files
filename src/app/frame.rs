@@ -216,6 +216,12 @@ impl App {
         // Over everything, and in the root `Ui` so its coordinates are the screen's.
         self.draw_menu(ui, &theme);
 
+        // The drag itself — the files under the pointer, and what letting go would do — over the
+        // highlight that says where. After the panes, because it is the one thing on screen that
+        // must not be behind them, and drawn from a *state* rather than from a hover because during
+        // a drag the pointer belongs to OLE and egui has none.
+        self.draw_the_drag(ui, &theme, screen);
+
         // Last, so they are on top of everything — though they are sized to sit in
         // canvas the panels do not reach, so there is nothing to be on top of.
         chrome::resize_borders(ui, self.maximized);

@@ -479,11 +479,7 @@ pub(crate) fn rows(
             // seeing that it *is* hidden is the point of showing it. A row waiting on a
             // paste is dimmed for a different reason — it is going somewhere — and
             // Explorer marks it the same way, so the two share the treatment.
-            let pending_cut = !cut.is_empty()
-                && cut
-                    .iter()
-                    .any(|p| p.file_name().is_some_and(|n| n == dir.name(entry_index)))
-                && cut.iter().any(|p| p.parent() == Some(dir.path.as_path()));
+            let pending_cut = crate::ui::is_cut(cut, &dir.path, dir.name(entry_index));
             let dim = entry.is_hidden() || pending_cut;
             let name_color = if dim { t.text.tertiary } else { t.text.primary };
             let meta_color = if dim { t.text.disabled } else { t.text.secondary };

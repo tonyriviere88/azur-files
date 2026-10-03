@@ -2,6 +2,11 @@
 //!
 //! The Windows half of [`crate::shell::dnd`], and the two interfaces this program *implements*
 //! rather than merely calls: `IDropSource` and `IDropTarget`.
+//!
+//! What the pointer is *told* is decided here too — [`Target_Impl::describe`], which turns the
+//! zone under the pointer and the effect it answered into a sentence — but nothing here draws it.
+//! The shell has a mechanism of its own for that, `CFSTR_DROPDESCRIPTION` on the data object, and
+//! this program deliberately does not use it: see the module header of [`super`].
 
 use super::*;
 use windows::core::{implement, Ref, BOOL, HRESULT};
@@ -24,8 +29,15 @@ const DRAGDROP_S_USEDEFAULTCURSORS: HRESULT = HRESULT(0x0004_0102u32 as i32);
 // ---- Dragging out --------------------------------------------------
 
 /// The source half of a drag: the two questions OLE asks while one is running.
+///
+/// It holds the block the *target* writes, which is the only state it has. Both halves of a drag
+/// inside this window run against the same one — the target on the UI thread, this on the drag's
+/// own — and the cursor is the one answer that needs both ends: what the drop would do is the
+/// target's, and setting the pointer is the source's. See [`Shared::silent`].
 #[implement(IDropSource)]
-struct Source;
+struct Source {
+    shared: Arc<Mutex<Shared>>,
+}
 
 impl IDropSource_Impl for Source_Impl {
     fn QueryContinueDrag(&self, escape: BOOL, keys: MODIFIERKEYS_FLAGS) -> HRESULT {
@@ -42,7 +54,29 @@ impl IDropSource_Impl for Source_Impl {
     }
 
     fn GiveFeedback(&self, _effect: DROPEFFECT) -> HRESULT {
-        // Let OLE show the standard copy, move and no-entry cursors rather than
+        // **The drops this window says nothing about** — a folder over its own row where it was
+        // picked up, and a move into the folder the items are already in; see [`Shared::silent`].
+        // The standard cursors have no way to say nothing. The effect for both is
+        // `DROPEFFECT_NONE`, so the set below would put a no-entry sign on the pointer, and that
+        // sign is exactly the feedback these must not have: one would mark the first inch of every
+        // drag of a folder as a mistake, and the other would make an empty gesture look like a
+        // forbidden one. So the plain arrow is set here instead and OLE is told to leave the cursor
+        // alone — which is what `S_OK` from this means.
+        //
+        // Set on every call rather than once, because OLE puts its own cursor back the moment the
+        // answer below is the one it gets, and this runs between one `DragOver` and the next.
+        if self.shared.lock().is_ok_and(|shared| shared.silent) {
+            use windows::Win32::UI::WindowsAndMessaging::{LoadCursorW, SetCursor, IDC_ARROW};
+
+            // SAFETY: a stock cursor, shared and never freed, set on the thread holding the drag.
+            unsafe {
+                if let Ok(arrow) = LoadCursorW(None, IDC_ARROW) {
+                    SetCursor(Some(arrow));
+                }
+            }
+            return S_OK;
+        }
+        // Otherwise let OLE show the standard copy, move and no-entry cursors rather than
         // inventing a set that would not match anything else on the desktop.
         DRAGDROP_S_USEDEFAULTCURSORS
     }
@@ -57,14 +91,14 @@ impl IDropSource_Impl for Source_Impl {
 /// held and end the drag before the pointer had moved. `AttachThreadInput` joins the two
 /// queues for the length of the drag, which is what makes the capture and the button state
 /// reachable from here. It is undone on the way out, including when the drag fails.
-pub fn drag_out(items: &[PathBuf], ui_thread: u32) -> Option<Effect> {
+pub fn drag_out(items: &[PathBuf], ui_thread: u32, shared: Arc<Mutex<Shared>>) -> Option<Effect> {
     use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 
     if items.is_empty() {
         return None;
     }
     let data = data_object(items)?;
-    let source: IDropSource = Source.into();
+    let source: IDropSource = Source { shared }.into();
 
     /// Undoes the attachment however this function leaves.
     struct Attached(u32, u32);
@@ -185,6 +219,32 @@ impl Target {
             wake,
         }
     }
+
+    /// The same target with a drag already in flight, for a test that needs one.
+    ///
+    /// [`Incoming`] is read by `DragEnter` out of a real `IDataObject`, and a test has none to
+    /// offer — the shell builds them. So the paths go straight in, and everything the callbacks
+    /// then do with them is the code under test: which effect comes out, which drops are refused,
+    /// and what the pointer is told. Without this, every callback test is a drag carrying nothing,
+    /// which is the one case that refuses nothing.
+    #[cfg(test)]
+    pub fn holding(
+        shared: Arc<Mutex<Shared>>,
+        wake: egui::Context,
+        items: Vec<PathBuf>,
+        all_folders: bool,
+    ) -> Self {
+        Self {
+            shared,
+            held: Mutex::new(Some(Incoming {
+                items,
+                temporary: false,
+                all_folders,
+            })),
+            hwnd: 0,
+            wake,
+        }
+    }
 }
 
 /// What a drag is carrying, as far as it can be known *while it is still moving* — read
@@ -209,13 +269,24 @@ struct Incoming {
     /// [`super::under_temp`]. Decided from the first path: a data object carrying files
     /// from two places at once is not a thing any source produces.
     temporary: bool,
+    /// Whether *every* one of them is a folder, which is what decides whether the sidebar will
+    /// take this drag at all — see [`super::refuses`].
+    ///
+    /// Asked here, once, for the reason everything else on this struct is: `is_dir` is a syscall,
+    /// and the question is asked again on every mouse move while the drag is over the sidebar.
+    all_folders: bool,
 }
 
 impl Incoming {
     fn read(data: Option<&IDataObject>) -> Self {
         let items = data.and_then(paths_of).unwrap_or_default();
         let temporary = items.first().is_some_and(|first| super::under_temp(first));
-        Self { items, temporary }
+        let all_folders = items.iter().all(|item| item.is_dir());
+        Self {
+            items,
+            temporary,
+            all_folders,
+        }
     }
 }
 
@@ -273,7 +344,8 @@ impl Target_Impl {
         (point.x, point.y)
     }
 
-    /// What this drag would do at a point, given the keys held and what the source allows.
+    /// What this drag would do at a point, given the keys held and what the source allows —
+    /// and, on the way, the sentence the pointer is given saying so.
     fn effect_at(
         &self,
         keys: MODIFIERKEYS_FLAGS,
@@ -294,7 +366,7 @@ impl Target_Impl {
         // waited on the next unrelated event, a mouse twitch over the window usually, which is
         // why it looked prompt rather than broken.
         self.wake.request_repaint();
-        let onto = {
+        let (region, started_in) = {
             let Ok(mut shared) = self.shared.lock() else {
                 return DROPEFFECT_NONE;
             };
@@ -303,9 +375,93 @@ impl Target_Impl {
             if keys.0 & MK_RBUTTON.0 != 0 {
                 shared.right_button = true;
             }
-            shared.targets.at(at).cloned()
+            // Both out of the same turn of the lock: the region says what is under the pointer and
+            // this says whether the pointer has left where it started, and the two are answered
+            // together below.
+            (
+                shared.targets.at(at).cloned(),
+                shared.targets.started_in(at),
+            )
         };
-        let target = match onto {
+        // What it *would* do, and then whether it may. The two are worked out separately because
+        // the sentence needs both: a refusal is drawn as the gesture it is refusing — *Cannot move
+        // src into main* — so the verb has to survive the answer coming out as nothing.
+        let would = self.wanted(keys, region.as_ref(), allowed);
+        let refused = self.refuses(region.as_ref());
+        // And whether there is anything here to do at all: a move into the folder the items are
+        // already in is not a drop that fails, it is a drop with nothing in it.
+        let nothing = self.does_nothing(region.as_ref(), keys, would);
+        // The two the pointer keeps to itself — see [`Shared::silent`]. The refusal stands in both;
+        // only the saying of it goes.
+        let silent = nothing || (refused == Some(Refused::Itself) && started_in);
+        // Then the words, in a turn of the lock of its own — the effect is worked out from the
+        // region and from `held`, and holding the shared block across that would stall the frame
+        // loop for no reason.
+        //
+        // A drop with nothing in it is described as *nowhere*: handing the sentence no region is
+        // what says there is nothing to promise, and it is also what stands the destination's
+        // highlight down, since the frame loop draws that from what it was told.
+        self.describe(
+            if nothing { None } else { region.as_ref() },
+            would,
+            refused,
+            silent,
+        );
+        if refused.is_some() || nothing {
+            DROPEFFECT_NONE
+        } else {
+            would
+        }
+    }
+
+    /// Whether the drop under the pointer would do nothing whatever — see [`super::does_nothing`],
+    /// which is the rule and is portable and tested on its own.
+    ///
+    /// The two halves that are not portable: which effect this gesture is asking for, which is what
+    /// makes the difference between a move that has nowhere to go and a copy that has an answer,
+    /// and whether the *right* button is carrying it — a right drag has not decided which it is
+    /// yet, and the menu it opens on drop is where it says so.
+    fn does_nothing(
+        &self,
+        region: Option<&Region>,
+        keys: MODIFIERKEYS_FLAGS,
+        would: DROPEFFECT,
+    ) -> bool {
+        let Some(region) = region else {
+            return false;
+        };
+        let moving = would.0 & DROPEFFECT_MOVE.0 != 0;
+        let asked = keys.0 & MK_RBUTTON.0 != 0;
+        self.held.lock().is_ok_and(|held| {
+            held.as_ref().is_some_and(|incoming| {
+                super::does_nothing(&region.onto, &incoming.items, moving, asked)
+            })
+        })
+    }
+
+    /// Why the drop under the pointer is one this program will not make, if it is.
+    ///
+    /// The rule is [`super::refuses`], which is portable and tested on its own; all this adds is
+    /// the drag's own list of paths, read when it arrived. A drag that has said nothing about what
+    /// it holds refuses nothing — see [`Incoming`].
+    fn refuses(&self, region: Option<&Region>) -> Option<Refused> {
+        let region = region?;
+        self.held.lock().ok().and_then(|held| {
+            held.as_ref().and_then(|incoming| {
+                super::refuses(&region.onto, &incoming.items, incoming.all_folders)
+            })
+        })
+    }
+
+    /// Which effect this drag asks for over a region, given the keys held and what the source
+    /// allows.
+    fn wanted(
+        &self,
+        keys: MODIFIERKEYS_FLAGS,
+        region: Option<&Region>,
+        allowed: DROPEFFECT,
+    ) -> DROPEFFECT {
+        let target = match region.map(|region| &region.onto) {
             Some(Onto::Folder(path)) => path,
             // Pinning moves nothing, so it answers `LINK` whatever is held down. It is
             // also the only honest answer: a copy cursor over the sidebar would be
@@ -337,11 +493,78 @@ impl Target_Impl {
         if temporary {
             return permitted(DROPEFFECT_COPY, allowed);
         }
-        let wanted = match super::default_effect(source.as_deref(), &target) {
+        let wanted = match super::default_effect(source.as_deref(), target) {
             Effect::Move => DROPEFFECT_MOVE,
             Effect::Copy => DROPEFFECT_COPY,
         };
         permitted(wanted, allowed)
+    }
+
+    /// Work out what to say this drop will do, and publish it for the frame loop to draw.
+    ///
+    /// The **destination decides the verb, not the effect**: a drop onto the sidebar pins whatever
+    /// it is handed, and a source that offers no `DROPEFFECT_LINK` has that answer degraded to a
+    /// copy on the way out — see [`permitted`] — so reading the verb back off the effect would
+    /// have the pointer promise a *copy into Bookmarks* for a gesture that copies nothing. Over a
+    /// folder the effect is exactly what decides it, because there the two really are the same
+    /// question.
+    ///
+    /// Over anything that would not take the drop there is nothing to say, which is the same thing
+    /// the effect coming out as `DROPEFFECT_NONE` already says. **A refusal is not that**: it is a
+    /// place that would have taken the drop and will not take *this* one, so `would` is the effect
+    /// it would have had and the sentence is drawn from that with `refused` on it.
+    ///
+    /// `silent` rides along because it is written into the same block in the same turn of the lock:
+    /// the sentence and whether to say it out loud are one decision as far as anything reading them
+    /// is concerned, and a frame that saw one without the other would draw a refusal for a gesture
+    /// the cursor was keeping quiet about. See [`Shared::silent`].
+    fn describe(
+        &self,
+        region: Option<&Region>,
+        would: DROPEFFECT,
+        refused: Option<Refused>,
+        silent: bool,
+    ) {
+        let doing = match region {
+            Some(region) if would != DROPEFFECT_NONE => match region.onto {
+                Onto::Bookmarks | Onto::BookmarkGroup(_) => Some(Doing::Pin),
+                Onto::Folder(_) if would.0 & DROPEFFECT_MOVE.0 != 0 => Some(Doing::Move),
+                Onto::Folder(_) => Some(Doing::Copy),
+            },
+            _ => None,
+        };
+        let told = match (doing, region) {
+            (Some(doing), Some(region)) => {
+                // What the drag is holding, from the paths read when it arrived — see [`Incoming`].
+                // The *drag's* list rather than the pane's selection, so this is right for a drag
+                // out of another window as well as for one out of this one; described inside the
+                // lock so the list is never copied to be counted.
+                //
+                // **A refusal names the one item it is about instead**, which for a single-file
+                // drag is the same string and for a mixed selection is the difference between an
+                // explanation and a sentence about nothing — see [`super::culprit`].
+                let source = self.held.lock().ok().and_then(|held| {
+                    let items = held.as_ref().map_or(&[][..], |incoming| &incoming.items);
+                    match (refused, &region.onto) {
+                        (Some(Refused::Itself | Refused::Inside), Onto::Folder(into)) => {
+                            super::culprit(items, into).map(crate::fs::display_name)
+                        }
+                        _ => super::carrying(items),
+                    }
+                });
+                Some(Told {
+                    doing,
+                    refused,
+                    source,
+                    target: region.name.clone(),
+                })
+            }
+            _ => None,
+        };
+        if let Ok(mut shared) = self.shared.lock() {
+            shared.telling = told;
+            shared.silent = silent;
+        }
     }
 }
 
@@ -388,6 +611,8 @@ impl IDropTarget_Impl for Target_Impl {
         if let Ok(mut shared) = self.shared.lock() {
             shared.hovering = None;
             shared.right_button = false;
+            shared.telling = None;
+            shared.silent = false;
         }
         // A highlight that is never taken down is worse than one that never appears: the drag has
         // left the window and the row it was over would go on claiming the drop.
@@ -443,12 +668,15 @@ impl IDropTarget_Impl for Target_Impl {
         // this lock would stall the window for exactly as long as the claim takes.
         let landing = self.shared.lock().ok().map(|mut shared| {
             shared.hovering = None;
-            let onto = shared.targets.at(at).cloned();
-            (onto, std::mem::take(&mut shared.right_button))
+            shared.telling = None;
+            shared.silent = false;
+            let region = shared.targets.at(at).cloned();
+            (region, std::mem::take(&mut shared.right_button))
         });
-        let Some((Some(onto), asked)) = landing else {
+        let Some((Some(region), asked)) = landing else {
             return Ok(());
         };
+        let onto = region.onto;
         if items.is_empty() || chosen == DROPEFFECT_NONE {
             return Ok(());
         }

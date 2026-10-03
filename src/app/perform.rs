@@ -552,8 +552,15 @@ impl App {
                 // the button it is following and a thread with no window has no gesture to
                 // follow. That last one is also what keeps the tests off the real pointer.
                 if self.file_drag.is_none() && self.owner.0 != 0 {
-                    self.file_drag =
-                        crate::shell::dnd::drag_out(items).map(|drag| (pane, drag));
+                    // Cloned because the window keeps its own list: the ghost under the pointer is
+                    // drawn from it for as long as the drag runs, and the copy handed to OLE belongs
+                    // to the drag's own thread.
+                    //
+                    // The drop target goes with it, because a drag inside this window has both ends
+                    // in it: the cursor is the source's to set and what it should be is the target's
+                    // to know. See [`crate::shell::dnd::Shared::silent`].
+                    self.file_drag = crate::shell::dnd::drag_out(items.clone(), &self.drops)
+                        .map(|drag| super::Dragging::new(pane, items, drag));
                 }
             }
             Action::ShellMenu {

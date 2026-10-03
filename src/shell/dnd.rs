@@ -39,6 +39,35 @@
 //! with one that is not among them is not a harmless liberty: `DROPEFFECT_MOVE` returned to a
 //! source is an *instruction* to delete what it handed over.
 //!
+//! # Saying what the drop will do
+//!
+//! A cursor with a `+` on it says a copy is coming and not where it is going, which over a
+//! listing full of folders is most of the question. So the drag says it in words — *Move one.txt
+//! into docs*, *Copy 4 items into src*, *Pin src to Bookmarks* — carries a stack of the icons it
+//! picked up, and lights up the place it would land in.
+//!
+//! **The sentence names both ends and picks them out in the accent**, which is why it travels as
+//! pieces rather than as a string: see [`Told`] for the shape and [`Told::runs`] for which pieces
+//! are the blue ones. `crate::ui::drag_saying` draws it just below the pointer, under the stack
+//! `crate::ui::drag_ghost` draws just above it, and `crate::ui::drop_target` is the mark on the
+//! destination. **The rows it came from are not marked** — a row's style does not change for being
+//! in the air; see `crate::ui::is_cut`, where that is written down beside the one mark a listing
+//! does put on a row it is about to lose.
+//!
+//! **All of it is drawn by this program, and that is a decision.** Windows has a mechanism of its
+//! own — a `CFSTR_DROPDESCRIPTION` written onto the data object, laid out by the shell inside a
+//! drag image the *source* has to have asked the drag-image manager for — and it was built here
+//! and taken back out again. It works for a drag out of Explorer and not for a drag this window
+//! starts: the manager will not draw text while OLE is drawing a cursor, and giving up the
+//! standard copy-and-move cursors to get it is the wrong trade. What was left was one gesture
+//! that looked two different ways depending on where the files came from, decided by a flag on
+//! somebody else's object. Drawing it here is fewer moving parts and the same picture every time.
+//!
+//! The destination's *name* still cannot be worked out in the callbacks: they run with the
+//! application out of reach, a group's name is only in the bookmark list, and a shell
+//! display-name lookup is not a thing to do on every mouse move. So it is published with the
+//! region it belongs to — see [`Region`].
+//!
 //! The callbacks arrive on the UI thread from inside winit's message pump, where the
 //! application state is not reachable — so they read and write a small shared block
 //! instead, which the frame loop publishes into and drains from. **And then ask for a frame**,
@@ -68,6 +97,300 @@ pub enum Onto {
     BookmarkGroup(usize),
 }
 
+/// What a drop is about to do, as the pointer is told it.
+///
+/// Not [`Effect`], which is the pair of things the *filesystem* can be asked for: pinning a folder
+/// in the sidebar copies nothing and moves nothing, and is still one of the three answers a drop
+/// here can have.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Doing {
+    Copy,
+    Move,
+    /// Pinning in the sidebar, which is what Explorer calls the same gesture onto Quick access.
+    Pin,
+}
+
+impl Doing {
+    /// The two plain stretches of the sentence: the verb, and the word joining the ends.
+    ///
+    /// *Copy `src` into `docs`* — the verb, what is being carried, the joining word, where it is
+    /// going. `into` for a folder, because that is what a copy or a move does to one; `to` for the
+    /// sidebar, because nothing goes *into* a bookmark. Those are the two idioms and not one rule
+    /// spelled two ways, which is why they sit beside the verb rather than being appended to it.
+    ///
+    /// `refused` negates the verb and leaves everything else alone — *Cannot move src into main* —
+    /// so a refusal reads as the same sentence about the same gesture. Written out rather than
+    /// built from the verb, because `Cannot ` plus a lowercased word is a rule that holds for
+    /// exactly these three and not for the next one.
+    ///
+    /// The sidebar's own refusal is a sentence of its own and does not come through here — see
+    /// [`Refused::AFile`] — so `Cannot pin ` is not reached today. It is written down anyway,
+    /// because this table is about how each verb negates and not about which refusals exist.
+    fn words(self, refused: bool) -> (&'static str, &'static str) {
+        let (yes, no, joining) = match self {
+            Self::Copy => ("Copy ", "Cannot copy ", " into "),
+            Self::Move => ("Move ", "Cannot move ", " into "),
+            Self::Pin => ("Pin ", "Cannot pin ", " to "),
+        };
+        (if refused { no } else { yes }, joining)
+    }
+}
+
+/// The sentence under the pointer, in the pieces it is drawn in.
+///
+/// Kept apart rather than joined into a string because **the two ends are drawn in the accent** —
+/// see [`Self::runs`]. A tooltip reading *Copy one.txt into docs* with the two names picked out is
+/// the same information as three plain words and a pair of quotes, and it is read at a glance
+/// instead of parsed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Told {
+    /// Which of the three it is, which decides the words either side of the two names.
+    pub doing: Doing,
+    /// Why this is a drop the program will not make, when it is one — see [`refuses`].
+    ///
+    /// The sentence then says so of the same gesture rather than describing a different one:
+    /// *Cannot move src into main, which is inside it*, with the mark that goes with it. Which is
+    /// the whole reason a refusal is carried *beside* the verb rather than as a fourth [`Doing`]:
+    /// what the pointer is refusing is exactly the thing it would otherwise have promised, and
+    /// saying it any other way loses that.
+    pub refused: Option<Refused>,
+    /// What is being carried: one item's name, or `4 items` — see [`carrying`].
+    ///
+    /// **Except in a refusal, where it is the one item being refused** — see [`culprit`]. The
+    /// sentence is then about that item and not about the load, because that item is the reason
+    /// there is a sentence at all.
+    ///
+    /// `None` when the drag will not say what it holds until it lands. That is a real case and not
+    /// a defence against one — a source is entitled to render nothing until the drop is real, which
+    /// is what an archiver does, so the sentence has to read without it. See `Incoming`.
+    pub source: Option<String>,
+    /// Where it would land: a folder's name, a group's, or the Bookmarks section's.
+    pub target: String,
+}
+
+impl Told {
+    /// The sentence as a run of pieces, each with whether it is one of the **blue** ones.
+    ///
+    /// Between two and five of them, which is the whole reason this is a `Vec` and not an array:
+    ///
+    /// | | |
+    /// | --- | --- |
+    /// | *Copy one.txt into docs* | the ordinary one |
+    /// | *Copy into docs* | a drag that has not said what it holds — see [`Self::source`] |
+    /// | *Cannot move src into itself* | [`Refused::Itself`]: the far end is a word, not a name |
+    /// | *Cannot move src into main, which is inside it* | [`Refused::Inside`]: with a reason |
+    /// | *Cannot pin a file* | [`Refused::AFile`], which names nothing at all |
+    pub fn runs(&self) -> Vec<(&str, bool)> {
+        // The one refusal with nothing to name, so nothing else about the gesture is drawn: a
+        // sentence naming the folder it was aimed at would read as though the folder were the
+        // problem. See [`Refused::AFile`].
+        if self.refused == Some(Refused::AFile) {
+            return vec![("Cannot pin a file", false)];
+        }
+        let (verb, joining) = self.doing.words(self.refused.is_some());
+        let mut runs = Vec::with_capacity(5);
+        match &self.source {
+            Some(source) => {
+                runs.push((verb, false));
+                runs.push((source.as_str(), true));
+            }
+            // Nothing to name at the near end, so the verb runs straight into the joining word:
+            // `Copy ` + ` into ` would read with two spaces in it.
+            None => runs.push((verb.trim_end(), false)),
+        }
+        runs.push((joining, false));
+        if self.refused == Some(Refused::Itself) {
+            // The destination *is* what is being dragged, so naming it twice would read as two
+            // folders that happen to share a name. A word instead, and not a blue one — there is
+            // one name in this sentence and it has already been said.
+            runs.push(("itself", false));
+        } else {
+            runs.push((self.target.as_str(), true));
+            if self.refused == Some(Refused::Inside) {
+                // Which is the whole difference from a refusal onto the folder itself, and not
+                // something the two names can say between them: `main` looks like an ordinary
+                // destination until you are told where it is.
+                runs.push((", which is inside it", false));
+            }
+        }
+        runs
+    }
+
+    /// The whole sentence as one string, which is what a test asserts on: the pieces are a
+    /// drawing decision, and what the reader ends up with is the words in order.
+    #[cfg(test)]
+    pub fn sentence(&self) -> String {
+        self.runs().into_iter().map(|(text, _)| text).collect()
+    }
+}
+
+/// A path with its case folded, for comparing two of them the way Windows compares them.
+///
+/// `Path`'s own comparisons are byte-wise: `C:\Src` and `c:\src` are one folder to the filesystem
+/// and two different paths to `Path::starts_with` and to `==`. Every comparison below goes
+/// through this — still *component*-wise afterwards, so `C:\src2` is not taken for something
+/// inside `C:\src`. The same pair of decisions [`under_temp`] makes, for the same reason.
+fn folded(path: &std::path::Path) -> PathBuf {
+    PathBuf::from(path.to_string_lossy().to_lowercase())
+}
+
+/// Whether `into` is `item` itself, or somewhere inside it.
+///
+/// The drop a folder cannot take. Dragging `src` onto `src\main` asks for a folder to be put inside
+/// itself, which is not a slow copy or a partial one — it is a copy with no end, and the shell
+/// refuses it with a dialog rather than a cursor. Onto *itself* is the same question with nothing
+/// to recurse through, and [`Refused`] keeps the two apart because they do not read the same way.
+pub fn swallows(item: &std::path::Path, into: &std::path::Path) -> bool {
+    folded(into).starts_with(folded(item))
+}
+
+/// Why a drop cannot happen.
+///
+/// Three of them, and each is a different sentence — which is the reason this is an enum and not a
+/// flag. *Cannot move src into itself* and *Cannot move src into main, which is inside it* are two
+/// different mistakes, and a reader told only that something is refused has to work out which one
+/// they made. See [`Told::runs`], where each becomes its words.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Refused {
+    /// The drag is carrying at least one file, and the sidebar is a list of *places*.
+    ///
+    /// The one refusal with nothing to name: which of the files is in the way does not matter, and
+    /// naming one of several would read as though the rest were fine.
+    AFile,
+    /// The destination is the folder being dragged.
+    Itself,
+    /// The destination is somewhere inside the folder being dragged.
+    Inside,
+}
+
+/// Why a drop of `items` onto `onto` cannot happen, if it cannot.
+///
+/// Both rules are about what the *destination* is rather than about which button or key the gesture
+/// is holding — so both are known while the drag is still moving, which is what lets the pointer be
+/// told before it lets go. See [`Told::refused`] for what the drag then says.
+///
+/// **Either rule refuses the whole selection over one item**, which is the same decision twice:
+/// half a gesture is worse than none. A drop that pinned the folders and quietly skipped the files,
+/// or moved four of five items and left the fifth where it was, is one the user has to go and check
+/// afterwards — and nothing on screen would have said which half happened.
+///
+/// - **The sidebar takes folders**, so a selection with a file anywhere in it is refused.
+///   `all_folders` is asked once when the drag arrives rather than here — `is_dir` is a syscall and
+///   this runs on every mouse move.
+/// - **A folder cannot take a drop of itself, or of anything it is inside** — see [`swallows`] — so
+///   a selection with one such folder in it is refused over that destination. Which item it is is
+///   [`culprit`], and it is the one the sentence names.
+///
+/// A drag that has not said what it holds refuses nothing. `items` is empty for a source that
+/// renders on demand — see `Incoming` — and a refusal invented for files nobody has named yet would
+/// be a no-entry sign over a drop that was going to work. `crate::app::App::droppable` is the guard
+/// for that one: it drops the same items again where the answer had to be given without them.
+pub fn refuses(onto: &Onto, items: &[PathBuf], all_folders: bool) -> Option<Refused> {
+    if items.is_empty() {
+        return None;
+    }
+    match onto {
+        Onto::Bookmarks | Onto::BookmarkGroup(_) => (!all_folders).then_some(Refused::AFile),
+        Onto::Folder(into) => {
+            let culprit = culprit(items, into)?;
+            // Which of the two it is, from the item [`culprit`] picked — which prefers the one that
+            // *is* the destination, so that this and the sentence agree about the same item.
+            let itself = folded(culprit) == folded(into);
+            Some(if itself { Refused::Itself } else { Refused::Inside })
+        }
+    }
+}
+
+/// Which dragged item a folder's refusal is about: the one the destination is itself, or is inside.
+///
+/// **The sentence names this item and not the drag**, because this is the one that cannot go
+/// where it is being taken. With one item in the air the two are the same string; with a folder and
+/// a file selected together, *Cannot move src into itself* is the explanation and *Cannot move 2
+/// items into itself* is a sentence about something nobody dragged.
+///
+/// The item that *is* the destination wins over one merely containing it, so that a selection
+/// holding both a folder and its parent reads as [`Refused::Itself`] and says so — the nearer of
+/// the two mistakes is the one being made.
+pub fn culprit<'a>(items: &'a [PathBuf], into: &std::path::Path) -> Option<&'a std::path::Path> {
+    let itself = items.iter().find(|item| folded(item) == folded(into));
+    itself
+        .or_else(|| items.iter().find(|item| swallows(item, into)))
+        .map(PathBuf::as_path)
+}
+
+/// Whether `item` already lives in `into` — the drop that has nowhere to take it.
+///
+/// Case-folded and by the parent, not by [`swallows`]: `C:\work\src` is *in* `C:\work` and is not
+/// inside itself. See [`does_nothing`], and `crate::app::App::droppable`, which acts on the same
+/// question once the drop has landed.
+pub fn already_in(item: &std::path::Path, into: &std::path::Path) -> bool {
+    item.parent()
+        .is_some_and(|parent| folded(parent) == folded(into))
+}
+
+/// Whether a drop of `items` onto `onto` would do nothing whatever.
+///
+/// **A move into the folder the items are already in.** There is no such thing: a move is a change
+/// of which folder holds a name, and this drop asks for the one it has. Nothing happens on the way
+/// past either — the drop is answered with no effect at all, so it is never delivered — and the
+/// pointer says nothing about it, which is the whole reason this is asked *while the drag is
+/// moving*. A promise of a move that will not happen is worse than silence, and a no-entry sign
+/// over your own folder is worse still: it reads as though something were wrong. See
+/// [`Shared::silent`].
+///
+/// **A copy there is a real gesture and is left alone**, which is why `moving` is a parameter
+/// rather than an assumption. Ctrl held over the folder a file is already in is how Explorer is
+/// asked for `one - Copy.txt`, and so is a right drag — which has not decided yet what it is, so
+/// `asked` keeps its feedback too and the menu on drop says what the options are.
+///
+/// Every item, not any: a selection with one file from elsewhere in it has something to do, and
+/// doing it is not "nothing" merely because the rest of the selection is already home.
+pub fn does_nothing(onto: &Onto, items: &[PathBuf], moving: bool, asked: bool) -> bool {
+    if items.is_empty() || !moving || asked {
+        return false;
+    }
+    match onto {
+        Onto::Folder(into) => items.iter().all(|item| already_in(item, into)),
+        // Pinning is not a move and never was: it copies nothing, so there is nothing for it to do
+        // nothing *of*. Whether a folder is already pinned is not knowable from here anyway — the
+        // bookmark list is not published to the callbacks.
+        Onto::Bookmarks | Onto::BookmarkGroup(_) => false,
+    }
+}
+
+/// What to call what a drag is carrying: the one item's name, or how many there are.
+///
+/// A name while there is one to give, because *Move one.txt into docs* is a sentence about the file
+/// in front of you; a count past that, because ten names under the pointer is not a label anybody
+/// reads and there is nowhere to put them. `None` for a drag that has not said what it holds — see
+/// [`Told::source`].
+pub fn carrying(items: &[PathBuf]) -> Option<String> {
+    match items {
+        [] => None,
+        [one] => Some(crate::fs::display_name(one)),
+        many => Some(format!("{} items", many.len())),
+    }
+}
+
+/// One droppable region: where it is, what a drop there means, and what to call the place it
+/// would land in.
+///
+/// The **name** is here because the callbacks cannot go and ask for it. They run on the UI
+/// thread from inside the message pump with the application out of reach — see [`Shared`] — and
+/// what they have to answer is not only an effect but a sentence: *Copy one.txt into src*, *Pin
+/// src to Work*. A group's name lives in the bookmark list and a folder's is a path away, so the
+/// frame loop decides both and publishes them alongside the rectangle they apply to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Region {
+    /// Where it is, in physical pixels: left, top, right, bottom.
+    pub rect: (i32, i32, i32, i32),
+    /// What a drop here is for.
+    pub onto: Onto,
+    /// What to call the destination in the drop description: the folder's own name, the
+    /// group's, or the Bookmarks section's.
+    pub name: String,
+}
+
 /// What a completed drop asks for.
 #[derive(Clone, Debug)]
 pub struct Dropped {
@@ -91,19 +414,34 @@ pub struct Dropped {
 /// `DragOver` *immediately* with an effect — so the answer has to already be here.
 #[derive(Clone, Default)]
 pub struct Targets {
-    /// Each droppable region and what it is for, in physical pixels, back to front.
-    pub zones: Vec<((i32, i32, i32, i32), Onto)>,
+    /// Each droppable region, back to front.
+    pub zones: Vec<Region>,
+    /// The pane a drag *this window started* was picked up from, in the same pixels as the zones.
+    ///
+    /// `None` for a drag out of another program, and between drags. It is here because the pointer
+    /// has one thing to say that depends on where the gesture *began* rather than on what is under
+    /// it now — see [`Shared::silent`] — and the callbacks have no other way to know: they cannot
+    /// reach the application, and a pane is a rectangle only the frame loop knows.
+    pub from: Option<(i32, i32, i32, i32)>,
 }
 
 impl Targets {
     /// What is at a point, if anything.
-    pub fn at(&self, (x, y): (i32, i32)) -> Option<&Onto> {
-        self.zones
-            .iter()
-            .rev()
-            .find(|((l, t, r, b), _)| x >= *l && x < *r && y >= *t && y < *b)
-            .map(|(_, onto)| onto)
+    pub fn at(&self, at: (i32, i32)) -> Option<&Region> {
+        self.zones.iter().rev().find(|region| holds(region.rect, at))
     }
+
+    /// Whether a point is inside the pane the drag came out of — see [`Self::from`].
+    pub fn started_in(&self, at: (i32, i32)) -> bool {
+        self.from.is_some_and(|rect| holds(rect, at))
+    }
+}
+
+/// Whether a rectangle in physical pixels holds a point.
+///
+/// Right and bottom exclusive, so two zones that share an edge do not both claim it.
+fn holds((l, t, r, b): (i32, i32, i32, i32), (x, y): (i32, i32)) -> bool {
+    x >= l && x < r && y >= t && y < b
 }
 
 /// The block the OLE callbacks and the frame loop share.
@@ -125,6 +463,33 @@ pub struct Shared {
     /// Explorer, which is the same window and the same folder row answering the same question two
     /// different ways. So the callbacks request a repaint of their own — see `Target::wake`.
     pub hovering: Option<(i32, i32)>,
+    /// What a drop where the drag is hovering would do, in words — and `None` when there is
+    /// nothing under the pointer that would take it.
+    ///
+    /// Written by the same callback that answers the effect, so the sentence and the cursor cannot
+    /// disagree, and read by the frame loop that draws it. See the module header, and [`Told`] for
+    /// why it is pieces rather than a string.
+    pub telling: Option<Told>,
+    /// Whether the drop under the pointer is one to say **nothing at all** about: no sentence, no
+    /// mark, no highlight, and not even a cursor.
+    ///
+    /// Two cases, and what they have in common is that nothing can land — the effect is
+    /// `DROPEFFECT_NONE` either way — while *saying so would be the wrong thing to say*. What this
+    /// suppresses is the telling of it, the no-entry cursor OLE would put on the pointer included.
+    /// That cursor is why this lives here rather than in the frame loop: only the drag source can
+    /// override it, and it reads this on the drag's own thread between one `DragOver` and the next.
+    ///
+    /// - **A folder over its own row, in the pane it was picked up from.** The beginning of every
+    ///   drag of a folder is spent there, and a mistake is not what that is: it is where the folder
+    ///   *is*. Across panes the same drop is a deliberate aim at a wrong answer and says so, which
+    ///   is why this asks about [`Targets::from`] and not about the refusal alone.
+    ///   [`Self::telling`] still carries the reason here, for the frame loop to stand the highlight
+    ///   down by.
+    /// - **A move into the folder the items are already in**, in any pane and out of any program —
+    ///   see [`does_nothing`]. Nothing is refused as such; there is simply nothing to do, so there
+    ///   is nothing to promise and no mistake to point at either. [`Self::telling`] is `None` for
+    ///   this one, and the highlight stands down from this flag instead.
+    pub silent: bool,
     /// Completed drops, waiting to be acted on.
     pub dropped: Vec<Dropped>,
 }
@@ -155,7 +520,7 @@ impl Zone {
     /// For tests: the callbacks answer from the published zones on another stack entirely, and
     /// this is the only way to ask them the same question from here.
     #[cfg(test)]
-    pub fn resolve(&self, at: (i32, i32)) -> Option<Onto> {
+    pub fn resolve(&self, at: (i32, i32)) -> Option<Region> {
         self.shared.lock().ok()?.targets.at(at).cloned()
     }
 
@@ -183,6 +548,59 @@ impl Zone {
     /// Where a drag is currently hovering, for the highlight.
     pub fn hovering(&self) -> Option<(i32, i32)> {
         self.shared.lock().ok().and_then(|shared| shared.hovering)
+    }
+
+    /// What the drag under the pointer would do, for the frame loop to draw.
+    ///
+    /// See [`Shared::telling`].
+    pub fn telling(&self) -> Option<Told> {
+        self.shared
+            .lock()
+            .ok()
+            .and_then(|shared| shared.telling.clone())
+    }
+
+    /// Put a sentence under a drag, as `DragOver` does.
+    ///
+    /// For tests, and for the same reason [`Self::hover`] exists: what writes this runs on OLE's
+    /// stack, and nothing a test can do starts a drag from another program.
+    #[cfg(test)]
+    pub fn tell(&self, told: Option<Told>) {
+        if let Ok(mut shared) = self.shared.lock() {
+            shared.telling = told;
+        }
+    }
+
+    /// Whether the drop under the pointer is one to say nothing about — see [`Shared::silent`].
+    pub fn silent(&self) -> bool {
+        self.shared
+            .lock()
+            .map(|shared| shared.silent)
+            .unwrap_or(false)
+    }
+
+    /// Hold the pointer's tongue, as `DragOver` does over the row a drag started on.
+    ///
+    /// For tests, alongside [`Self::tell`]: the rule itself is the callbacks' — driven for real in
+    /// `the_pane_a_drag_came_out_of_hears_nothing_about_it` — and this is how the *drawing* side of
+    /// it is asked the question from here.
+    #[cfg(test)]
+    pub fn be_silent(&self, silent: bool) {
+        if let Ok(mut shared) = self.shared.lock() {
+            shared.silent = silent;
+        }
+    }
+
+    /// Whether a point is in the pane the drag in flight came out of — see [`Targets::from`].
+    ///
+    /// For tests: what the frame loop publishes is read on OLE's stack, and this is the only way to
+    /// ask from here whether it published the right rectangle.
+    #[cfg(test)]
+    pub fn started_in(&self, at: (i32, i32)) -> bool {
+        self.shared
+            .lock()
+            .map(|shared| shared.targets.started_in(at))
+            .unwrap_or(false)
     }
 
     /// Take any completed drops.
@@ -293,7 +711,11 @@ impl Drag {
 ///
 /// Returns as soon as the drag is under way. Ask the handle for the outcome — a move has taken
 /// the files out of the folder they were in, so the source needs re-reading.
-pub fn drag_out(items: Vec<PathBuf>) -> Option<Drag> {
+///
+/// `zone` is the window's own drop target, and the source is handed the block it writes: **the
+/// cursor is the source's to set**, and what it should be is decided at the other end of the
+/// gesture. See [`Shared::silent`], which is the one thing the standard cursors cannot say.
+pub fn drag_out(items: Vec<PathBuf>, zone: &Zone) -> Option<Drag> {
     if items.is_empty() {
         return None;
     }
@@ -303,6 +725,7 @@ pub fn drag_out(items: Vec<PathBuf>) -> Option<Drag> {
         let ui_thread = unsafe {
             windows::Win32::System::Threading::GetCurrentThreadId()
         };
+        let shared = zone.shared.clone();
         let (tx, done) = std::sync::mpsc::channel();
         std::thread::Builder::new()
             .name("drag-source".to_owned())
@@ -310,14 +733,14 @@ pub fn drag_out(items: Vec<PathBuf>) -> Option<Drag> {
                 // This thread's own apartment: the data object, the drop source and the modal
                 // loop all belong to it.
                 crate::shell::init();
-                let _ = tx.send(win::drag_out(&items, ui_thread));
+                let _ = tx.send(win::drag_out(&items, ui_thread, shared));
             })
             .ok()?;
         Some(Drag { done })
     }
     #[cfg(not(windows))]
     {
-        let _ = items;
+        let _ = (items, zone);
         None
     }
 }
@@ -934,7 +1357,12 @@ mod tests {
 
         let shared = Arc::new(Mutex::new(Shared::default()));
         shared.lock().unwrap().targets = Targets {
-            zones: vec![((0, 0, 100, 100), Onto::Folder(PathBuf::from(r"C:\into")))],
+            zones: vec![Region {
+                rect: (0, 0, 100, 100),
+                onto: Onto::Folder(PathBuf::from(r"C:\into")),
+                name: "into".to_owned(),
+            }],
+            from: None,
         };
         let ctx = egui::Context::default();
         let target: IDropTarget = win::Target::new(shared.clone(), 0, ctx.clone()).into();
@@ -976,16 +1404,687 @@ mod tests {
         assert_eq!(effect, DROPEFFECT_COPY, "a folder should take a copy");
     }
 
+    /// **The pointer is told what the drop will do, at both ends of the gesture.**
+    ///
+    /// *Copy one.txt into into* — the verb, what is being carried, where it would land. Driven
+    /// through the real `IDropTarget`, because that is where all three are decided and only one of
+    /// them is a lookup: over a folder the verb follows the effect, and over the sidebar it is
+    /// *Pin* whatever effect came out — pinning copies nothing, and a source that offers no
+    /// `DROPEFFECT_LINK` has that answer degraded to a copy on the way past [`permitted`]. Reading
+    /// the verb back off the effect would therefore promise a *copy* into Bookmarks for a gesture
+    /// that copies nothing, which is the bug this shape exists to make impossible.
+    #[cfg(windows)]
+    #[test]
+    fn the_pointer_is_told_what_the_drop_will_do() {
+        use windows::Win32::Foundation::POINTL;
+        use windows::Win32::System::Ole::{IDropTarget, DROPEFFECT_COPY};
+        use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
+
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        shared.lock().unwrap().targets = Targets {
+            zones: vec![
+                Region {
+                    rect: (0, 0, 100, 100),
+                    onto: Onto::Folder(PathBuf::from(r"C:\parent\into")),
+                    name: "into".to_owned(),
+                },
+                Region {
+                    rect: (0, 100, 100, 200),
+                    onto: Onto::Bookmarks,
+                    name: "Bookmarks".to_owned(),
+                },
+            ],
+            from: None,
+        };
+        let ctx = egui::Context::default();
+        let target: IDropTarget = win::Target::new(shared.clone(), 0, ctx).into();
+
+        let told = |at: POINTL| {
+            let mut effect = DROPEFFECT_COPY;
+            // SAFETY: an out-parameter this call owns for its duration, and no data object —
+            // `DragOver` is the callback that carries none.
+            unsafe {
+                target
+                    .DragOver(MODIFIERKEYS_FLAGS(0), at, &mut effect)
+                    .expect("DragOver refused");
+            }
+            shared.lock().unwrap().telling.clone()
+        };
+
+        // With no data object there is nothing to have read, so the near end is unnamed — which is
+        // the case a lazy source puts this in for real, and the sentence still has to read.
+        assert_eq!(
+            told(POINTL { x: 10, y: 10 }).map(|told| told.sentence()),
+            Some("Copy into into".to_owned()),
+            "over a folder the words follow the effect, and name the folder"
+        );
+        assert_eq!(
+            told(POINTL { x: 10, y: 150 }).map(|told| told.sentence()),
+            Some("Pin to Bookmarks".to_owned()),
+            "over the sidebar the gesture is a pin, whatever effect the source allowed"
+        );
+        assert_eq!(
+            told(POINTL { x: 400, y: 400 }),
+            None,
+            "nowhere that takes a drop has nothing to promise"
+        );
+    }
+
+    /// **One item in the way refuses the whole selection, and the sentence names that item.**
+    ///
+    /// A folder and a file dragged together, driven through the real `IDropTarget` because the
+    /// refusal and the words are decided in the same callback and the effect is the third thing
+    /// that has to agree with them: nothing may land — see [`refuses`] — so `DROPEFFECT_NONE` comes
+    /// out, which is what makes the drop a no-op wherever it is let go.
+    ///
+    /// The near end of the sentence is the **item**, not the load: *Cannot move src into itself*
+    /// and not *Cannot move 2 items into itself*, which would be a sentence about something nobody
+    /// dragged. See [`culprit`]. And the same selection over an ordinary folder is described by
+    /// what it is carrying, as any allowed drop is.
+    #[cfg(windows)]
+    #[test]
+    fn one_item_in_the_way_refuses_the_selection_and_is_the_one_named() {
+        use windows::Win32::Foundation::POINTL;
+        use windows::Win32::System::Ole::{
+            IDropTarget, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_MOVE, DROPEFFECT_NONE,
+        };
+        use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
+
+        let folder = PathBuf::from(r"C:\parent\src");
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        shared.lock().unwrap().targets = Targets {
+            zones: vec![
+                Region {
+                    rect: (0, 0, 100, 100),
+                    onto: Onto::Folder(folder.clone()),
+                    name: "src".to_owned(),
+                },
+                Region {
+                    rect: (0, 100, 100, 200),
+                    onto: Onto::Folder(folder.join("main")),
+                    name: "main".to_owned(),
+                },
+                Region {
+                    rect: (0, 200, 100, 300),
+                    onto: Onto::Folder(PathBuf::from(r"C:\parent\docs")),
+                    name: "docs".to_owned(),
+                },
+                Region {
+                    rect: (0, 300, 100, 400),
+                    onto: Onto::Bookmarks,
+                    name: "Bookmarks".to_owned(),
+                },
+            ],
+            from: None,
+        };
+        // A folder and a file in the air together: the selection the whole of this is about.
+        let items = vec![folder.clone(), PathBuf::from(r"C:\parent\one.txt")];
+        let ctx = egui::Context::default();
+        let target: IDropTarget =
+            win::Target::holding(shared.clone(), ctx, items, false).into();
+
+        let told = |y: i32| {
+            // Both effects offered, so nothing is degraded on the way out and the verb is the one
+            // the same-volume rule picked — see [`default_effect`] and `permitted`.
+            let mut effect = DROPEFFECT(DROPEFFECT_COPY.0 | DROPEFFECT_MOVE.0);
+            // SAFETY: an out-parameter this call owns for its duration, and no data object —
+            // `DragOver` is the callback that carries none.
+            unsafe {
+                target
+                    .DragOver(MODIFIERKEYS_FLAGS(0), POINTL { x: 10, y }, &mut effect)
+                    .expect("DragOver refused");
+            }
+            let said = shared.lock().unwrap().telling.clone();
+            (effect, said.map(|told| told.sentence()))
+        };
+
+        assert_eq!(
+            told(10),
+            (
+                DROPEFFECT_NONE,
+                Some("Cannot move src into itself".to_owned())
+            ),
+            "the folder in the selection cannot go into itself, so none of the selection goes"
+        );
+        assert_eq!(
+            told(150),
+            (
+                DROPEFFECT_NONE,
+                Some("Cannot move src into main, which is inside it".to_owned())
+            ),
+            "nor into what is inside it, and the reason is the tail of the sentence"
+        );
+        assert_eq!(
+            told(350),
+            (DROPEFFECT_NONE, Some("Cannot pin a file".to_owned())),
+            "one file refuses a pin of the whole selection"
+        );
+        assert_eq!(
+            told(250),
+            (
+                DROPEFFECT_MOVE,
+                Some("Move 2 items into docs".to_owned())
+            ),
+            "and a folder beside them takes all of it, described by what is carried"
+        );
+    }
+
+    /// **A move into the folder the items are already in is nothing, and a copy there is not.**
+    ///
+    /// See [`does_nothing`]. The distinction is the whole of it: a move asks for the folder a name
+    /// already has, and Ctrl over that same folder asks for `one - Copy.txt`, which is a gesture
+    /// people use on purpose. A right drag has not decided which it is, so it keeps its feedback
+    /// and the menu on drop is where it says so.
+    #[test]
+    fn a_move_into_the_folder_the_items_are_in_does_nothing_and_a_copy_does_not() {
+        let here = PathBuf::from(r"C:\work");
+        let file = here.join("one.txt");
+        let folder = here.join("src");
+        let elsewhere = PathBuf::from(r"D:\other\two.txt");
+        let into = Onto::Folder(here.clone());
+        let mine = [file.clone()];
+
+        // ---- Already there: a move is nothing, whatever it is carrying ----
+        assert!(does_nothing(&into, &mine, true, false));
+        let both = [file.clone(), folder.clone()];
+        assert!(
+            does_nothing(&into, &both, true, false),
+            "a folder is in its parent the same way a file is"
+        );
+        assert!(
+            does_nothing(
+                &Onto::Folder(PathBuf::from(r"C:\WORK")),
+                &mine,
+                true,
+                false
+            ),
+            "the same folder with a different shift key held"
+        );
+
+        // ---- And every way it is something after all ----
+        assert!(
+            !does_nothing(&into, &mine, false, false),
+            "a copy into the folder a file is in is `one - Copy.txt`"
+        );
+        assert!(
+            !does_nothing(&into, &mine, true, true),
+            "a right drag has not said which it is yet, and its menu is where it will"
+        );
+        let mixed = [file.clone(), elsewhere.clone()];
+        assert!(
+            !does_nothing(&into, &mixed, true, false),
+            "one item from elsewhere has somewhere to go, so the drop is not empty"
+        );
+        assert!(
+            !does_nothing(&Onto::Folder(folder.clone()), &mine, true, false),
+            "a subfolder is a different folder"
+        );
+        assert!(
+            !does_nothing(&Onto::Bookmarks, &mine, true, false),
+            "pinning is not a move and has nothing to do nothing of"
+        );
+        assert!(
+            !does_nothing(&into, &[], true, false),
+            "a source that has not named its files must not be refused for it"
+        );
+
+        // ---- The primitive underneath, which the drop acts on again ----
+        assert!(already_in(&file, &here));
+        assert!(already_in(&folder, &here));
+        assert!(!already_in(&file, &here.join("src")));
+        assert!(!already_in(&elsewhere, &here));
+    }
+
+    /// **The pane a drag came out of hears nothing about the drop it started on.**
+    ///
+    /// A folder is over its own row for the first inch of every drag of it, and that drop is
+    /// refused — so a sign there would mark the *start of the gesture* as a mistake. It is not one:
+    /// it is where the folder is. See [`Shared::silent`], and note what does **not** change: the
+    /// effect is still `DROPEFFECT_NONE` and the reason is still published, so nothing lands and
+    /// the highlight the frame loop draws still stands down. Only the saying of it goes — the
+    /// words, their mark, and the no-entry cursor OLE would otherwise put up.
+    ///
+    /// Three zones, because the rule has to be narrow to be right. The same folder's row in
+    /// *another* pane is a deliberate aim at a wrong answer and says so; a *different* refusal
+    /// inside the pane the drag came from — the folder over something inside itself — is a
+    /// deliberate aim too, and the pointer had no reason to pass over it on the way anywhere.
+    #[cfg(windows)]
+    #[test]
+    fn the_pane_a_drag_came_out_of_hears_nothing_about_it() {
+        use windows::Win32::Foundation::POINTL;
+        use windows::Win32::System::Ole::{IDropTarget, DROPEFFECT_MOVE, DROPEFFECT_NONE};
+        use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
+
+        let folder = PathBuf::from(r"C:\parent\src");
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        shared.lock().unwrap().targets = Targets {
+            zones: vec![
+                // The row the drag came off, in the pane it came from.
+                Region {
+                    rect: (0, 0, 100, 100),
+                    onto: Onto::Folder(folder.clone()),
+                    name: "src".to_owned(),
+                },
+                // A folder inside it, in that same pane.
+                Region {
+                    rect: (0, 100, 100, 200),
+                    onto: Onto::Folder(folder.join("main")),
+                    name: "main".to_owned(),
+                },
+                // And the same row again, in the pane below.
+                Region {
+                    rect: (0, 200, 100, 300),
+                    onto: Onto::Folder(folder.clone()),
+                    name: "src".to_owned(),
+                },
+            ],
+            // The top half of the window is the pane the drag was picked up in.
+            from: Some((0, 0, 100, 200)),
+        };
+        let ctx = egui::Context::default();
+        let target: IDropTarget =
+            win::Target::holding(shared.clone(), ctx, vec![folder], true).into();
+
+        let told = |y: i32| {
+            let mut effect = DROPEFFECT_MOVE;
+            // SAFETY: an out-parameter this call owns for its duration, and no data object —
+            // `DragOver` is the callback that carries none.
+            unsafe {
+                target
+                    .DragOver(MODIFIERKEYS_FLAGS(0), POINTL { x: 10, y }, &mut effect)
+                    .expect("DragOver refused");
+            }
+            let shared = shared.lock().unwrap();
+            (
+                effect,
+                shared.telling.as_ref().map(Told::sentence),
+                shared.silent,
+            )
+        };
+
+        let (effect, sentence, silent) = told(50);
+        assert!(silent, "the drag is being signed where it started");
+        assert_eq!(
+            effect, DROPEFFECT_NONE,
+            "the drop is still refused, whatever the pointer says about it"
+        );
+        assert_eq!(
+            sentence.as_deref(),
+            Some("Cannot move src into itself"),
+            "and the reason is still published, for the highlight to stand down by"
+        );
+
+        let (effect, sentence, silent) = told(250);
+        assert!(!silent, "in another pane the same refusal is worth saying");
+        assert_eq!(effect, DROPEFFECT_NONE);
+        assert_eq!(sentence.as_deref(), Some("Cannot move src into itself"));
+
+        let (_, sentence, silent) = told(150);
+        assert!(
+            !silent,
+            "aiming a folder at something inside it is a mistake in any pane"
+        );
+        assert_eq!(
+            sentence.as_deref(),
+            Some("Cannot move src into main, which is inside it")
+        );
+    }
+
+    /// **A drop that would do nothing is offered nothing: no effect, no words, no cursor.**
+    ///
+    /// The pointer's half of [`does_nothing`], driven through the real `IDropTarget` because the
+    /// two things that decide it arrive there and nowhere else: the effect the gesture is asking
+    /// for, and the button carrying it.
+    ///
+    /// **In any pane and out of any program**, which is why no [`Targets::from`] is published here
+    /// — two panes on the same folder, or Explorer dragging a file back into the folder it is
+    /// showing, are the same nothing as a drag that never left home. And `telling` is `None` rather
+    /// than a refusal, because there is no mistake to name: what stands the destination's highlight
+    /// down is [`Shared::silent`] itself.
+    #[cfg(windows)]
+    #[test]
+    fn a_drop_that_would_do_nothing_is_not_offered() {
+        use windows::Win32::Foundation::POINTL;
+        use windows::Win32::System::Ole::{
+            IDropTarget, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_MOVE, DROPEFFECT_NONE,
+        };
+        use windows::Win32::System::SystemServices::{MK_CONTROL, MK_RBUTTON, MODIFIERKEYS_FLAGS};
+
+        let here = PathBuf::from(r"C:\work");
+        let file = here.join("one.txt");
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        shared.lock().unwrap().targets = Targets {
+            zones: vec![
+                // The folder the file is already in.
+                Region {
+                    rect: (0, 0, 100, 100),
+                    onto: Onto::Folder(here.clone()),
+                    name: "work".to_owned(),
+                },
+                // And a folder it could actually go into.
+                Region {
+                    rect: (0, 100, 100, 200),
+                    onto: Onto::Folder(here.join("src")),
+                    name: "src".to_owned(),
+                },
+            ],
+            from: None,
+        };
+        let ctx = egui::Context::default();
+        let target: IDropTarget =
+            win::Target::holding(shared.clone(), ctx, vec![file], false).into();
+
+        let told = |y: i32, keys: MODIFIERKEYS_FLAGS| {
+            let mut effect = DROPEFFECT(DROPEFFECT_COPY.0 | DROPEFFECT_MOVE.0);
+            // SAFETY: an out-parameter this call owns for its duration, and no data object —
+            // `DragOver` is the callback that carries none.
+            unsafe {
+                target
+                    .DragOver(keys, POINTL { x: 10, y }, &mut effect)
+                    .expect("DragOver refused");
+            }
+            let shared = shared.lock().unwrap();
+            (
+                effect,
+                shared.telling.as_ref().map(Told::sentence),
+                shared.silent,
+            )
+        };
+        let plain = MODIFIERKEYS_FLAGS(0);
+
+        // Over the folder it is in: a move with nowhere to go, so nothing at all.
+        assert_eq!(
+            told(50, plain),
+            (DROPEFFECT_NONE, None, true),
+            "a move into the folder the file is in was offered as something"
+        );
+
+        // Ctrl over the same folder is a copy, and that is `one - Copy.txt`.
+        assert_eq!(
+            told(50, MODIFIERKEYS_FLAGS(MK_CONTROL.0)),
+            (
+                DROPEFFECT_COPY,
+                Some("Copy one.txt into work".to_owned()),
+                false
+            ),
+            "a copy into the folder a file is in is a gesture people use on purpose"
+        );
+
+        // And the right button is a question rather than a move, so it keeps its feedback.
+        let (effect, sentence, silent) = told(50, MODIFIERKEYS_FLAGS(MK_RBUTTON.0));
+        assert!(!silent, "a right drag is asked about, not hushed");
+        assert_eq!(effect, DROPEFFECT_MOVE);
+        assert!(sentence.is_some());
+
+        // A folder that would actually take it is untouched by any of this.
+        assert_eq!(
+            told(150, plain),
+            (
+                DROPEFFECT_MOVE,
+                Some("Move one.txt into src".to_owned()),
+                false
+            )
+        );
+    }
+
+    /// **What a drag is carrying is a name while there is one, and a count past that.**
+    ///
+    /// The near end of the sentence — see [`carrying`]. One file is *one.txt*, because that is the
+    /// file in front of you; four are *4 items*, because four names under the pointer is not a
+    /// label anybody reads. And a drag whose source has rendered nothing yet has no near end at
+    /// all, which is a case rather than a guard: an archiver is entitled to hold its files back
+    /// until the drop is real.
+    #[test]
+    fn a_drag_is_described_by_its_one_name_or_by_how_many() {
+        assert_eq!(carrying(&[]), None);
+        assert_eq!(
+            carrying(&[PathBuf::from(r"C:\docs\one.txt")]).as_deref(),
+            Some("one.txt")
+        );
+        assert_eq!(
+            carrying(&[
+                PathBuf::from(r"C:\docs\one.txt"),
+                PathBuf::from(r"C:\docs\two.txt"),
+            ])
+            .as_deref(),
+            Some("2 items")
+        );
+        // A folder dragged by its own name, and a root by the only name it has.
+        assert_eq!(
+            carrying(&[PathBuf::from(r"C:\docs\src")]).as_deref(),
+            Some("src")
+        );
+        assert_eq!(carrying(&[PathBuf::from(r"C:\")]).as_deref(), Some("C:"));
+    }
+
+    /// **A folder cannot be dropped into itself, or into anything inside it.**
+    ///
+    /// The test [`swallows`] exists for, and the two ways of getting it wrong are both here: a
+    /// **case** difference, because `Path::starts_with` is case-sensitive and Windows paths are
+    /// not, and a **prefix** that is not a parent — `C:\src2` shares five characters with `C:\src`
+    /// and is nowhere near inside it, which a `to_string_lossy().starts_with()` would have called
+    /// a descendant.
+    #[test]
+    fn a_folder_swallows_itself_and_everything_under_it() {
+        let src = Path::new(r"C:\work\src");
+        assert!(swallows(src, src), "onto itself is the same refusal");
+        assert!(swallows(src, Path::new(r"C:\work\src\main")));
+        assert!(swallows(src, Path::new(r"C:\work\src\main\java")));
+        assert!(
+            swallows(Path::new(r"C:\Work\Src"), Path::new(r"c:\work\src\main")),
+            "one folder inside itself with a different shift key held"
+        );
+        assert!(
+            !swallows(src, Path::new(r"C:\work\src2")),
+            "a folder whose name starts the same way is not inside it"
+        );
+        assert!(!swallows(src, Path::new(r"C:\work")), "its parent is not");
+        assert!(!swallows(src, Path::new(r"D:\work\src\main")));
+        // A file cannot swallow anything: nothing is inside it.
+        assert!(!swallows(
+            Path::new(r"C:\work\one.txt"),
+            Path::new(r"C:\work")
+        ));
+    }
+
+    /// **The drops this program will not make, and why each one is refused.**
+    ///
+    /// See [`refuses`]. All of it is decided from what the destination *is*, so all of it is
+    /// answerable while the drag is still moving — which is the whole point: a refusal after the
+    /// button comes up is a dialog, and a refusal before it is a cursor, a sentence and a mark.
+    ///
+    /// The *reason* is asserted and not merely the refusal, because the reason is what the sentence
+    /// is made of: [`Refused::Itself`] and [`Refused::Inside`] are two different mistakes and read
+    /// as two different sentences.
+    #[test]
+    fn a_file_cannot_be_pinned_and_a_folder_cannot_go_inside_itself() {
+        let file = PathBuf::from(r"C:\work\one.txt");
+        let folder = PathBuf::from(r"C:\work\src");
+        let a_file = [file.clone()];
+        let a_folder = [folder.clone()];
+        let both = [folder.clone(), file];
+        let bookmarks = Onto::Bookmarks;
+        let group = Onto::BookmarkGroup(0);
+
+        // ---- The sidebar takes folders, and only folders ---------------
+        assert_eq!(
+            refuses(&bookmarks, &a_file, false),
+            Some(Refused::AFile),
+            "a file is not a place to go, so the sidebar will not have it"
+        );
+        assert_eq!(
+            refuses(&group, &a_file, false),
+            Some(Refused::AFile),
+            "nor will a group"
+        );
+        assert_eq!(
+            refuses(&bookmarks, &both, false),
+            Some(Refused::AFile),
+            "one file in the selection refuses the whole of it: half a gesture is worse than none"
+        );
+        assert_eq!(
+            refuses(&bookmarks, &a_folder, true),
+            None,
+            "a folder is exactly what it is for"
+        );
+
+        // ---- A folder cannot go inside itself --------------------------
+        assert_eq!(
+            refuses(&Onto::Folder(folder.clone()), &a_folder, true),
+            Some(Refused::Itself),
+            "onto the very folder being dragged"
+        );
+        assert_eq!(
+            refuses(&Onto::Folder(PathBuf::from(r"C:\WORK\SRC")), &a_folder, true),
+            Some(Refused::Itself),
+            "the same folder with a different shift key held"
+        );
+        let inside = Onto::Folder(PathBuf::from(r"C:\work\src\main"));
+        assert_eq!(refuses(&inside, &a_folder, true), Some(Refused::Inside));
+        assert_eq!(
+            refuses(&Onto::Folder(PathBuf::from(r"C:\work\docs")), &a_folder, true),
+            None,
+            "a folder beside it is an ordinary destination"
+        );
+
+        // ---- And one such folder refuses the selection it is in --------
+        //
+        // The same rule as the sidebar's above, and for the same reason: the alternative is four of
+        // five items moved and the fifth left where it was, with nothing on screen having said so.
+        assert_eq!(
+            refuses(&Onto::Folder(folder.clone()), &both, true),
+            Some(Refused::Itself),
+            "the folder in the selection cannot go into itself, so none of it goes"
+        );
+        assert_eq!(
+            refuses(&inside, &both, true),
+            Some(Refused::Inside),
+            "nor into what is inside it, however much of the selection could have gone"
+        );
+        assert_eq!(
+            refuses(&Onto::Folder(PathBuf::from(r"C:\work\docs")), &both, true),
+            None,
+            "and a folder beside them takes the whole selection"
+        );
+
+        // ---- The item a refusal is about, which is the one it names ----
+        //
+        // See [`culprit`]. The nearer mistake wins: with `src` and `C:\work` both in the air over
+        // `C:\work\src`, it is `src` that cannot go into itself, and saying `C:\work` instead would
+        // point at the wrong folder.
+        let nested = [PathBuf::from(r"C:\work"), folder.clone()];
+        assert_eq!(
+            culprit(&nested, &folder).map(crate::fs::display_name).as_deref(),
+            Some("src")
+        );
+        assert_eq!(
+            refuses(&Onto::Folder(folder.clone()), &nested, true),
+            Some(Refused::Itself),
+            "and the refusal says the same thing the name does"
+        );
+        assert_eq!(
+            culprit(&both, &PathBuf::from(r"C:\work\docs")),
+            None,
+            "nothing in the way, nothing to name"
+        );
+
+        // ---- And a drag that has said nothing refuses nothing ----------
+        assert_eq!(
+            refuses(&bookmarks, &[], false),
+            None,
+            "a source that has not rendered its files yet must not be refused for it"
+        );
+        assert_eq!(refuses(&inside, &[], false), None);
+    }
+
+    /// **Both ends of the sentence are the blue ones, and nothing else is.**
+    ///
+    /// What the accent is *for* here: the two names are the answer and the rest is grammar. A run
+    /// marked wrong would put the verb in blue and the folder in grey, which reads as emphasis on
+    /// the wrong half of the promise.
+    #[test]
+    fn the_two_names_are_the_blue_part_of_the_sentence() {
+        let told = Told {
+            doing: Doing::Move,
+            refused: None,
+            source: Some("one.txt".to_owned()),
+            target: "docs".to_owned(),
+        };
+        fn blue_of(told: &Told) -> Vec<&str> {
+            told.runs()
+                .into_iter()
+                .filter(|(_, blue)| *blue)
+                .map(|(text, _)| text)
+                .collect()
+        }
+
+        assert_eq!(told.sentence(), "Move one.txt into docs");
+        assert_eq!(
+            blue_of(&told),
+            ["one.txt", "docs"],
+            "the wrong runs are picked out"
+        );
+
+        // A refusal is the same sentence about the same gesture, with the verb negated and the
+        // reason on the end of it — the two names are still the two names, so they are still blue.
+        let inside = Told {
+            refused: Some(Refused::Inside),
+            ..told.clone()
+        };
+        assert_eq!(
+            inside.sentence(),
+            "Cannot move one.txt into docs, which is inside it"
+        );
+        assert_eq!(blue_of(&inside), ["one.txt", "docs"]);
+
+        // Onto the folder being dragged, the far end is a word rather than the same name twice — so
+        // there is one name in the sentence and one blue run.
+        let itself = Told {
+            refused: Some(Refused::Itself),
+            ..told.clone()
+        };
+        assert_eq!(itself.sentence(), "Cannot move one.txt into itself");
+        assert_eq!(blue_of(&itself), ["one.txt"]);
+
+        // And the sidebar's refusal names nothing at all, so nothing in it is blue.
+        let a_file = Told {
+            doing: Doing::Pin,
+            refused: Some(Refused::AFile),
+            ..told.clone()
+        };
+        assert_eq!(a_file.sentence(), "Cannot pin a file");
+        assert!(blue_of(&a_file).is_empty());
+
+        // And with no near end, the one name there is stays the blue one — and the words either
+        // side of the hole do not run together.
+        let unnamed = Told {
+            source: None,
+            ..told
+        };
+        assert_eq!(unnamed.sentence(), "Move into docs");
+        assert_eq!(blue_of(&unnamed), ["docs"]);
+    }
+
     #[test]
     fn zones_resolve_the_front_one_first() {
-        let under = Onto::Folder(PathBuf::from(r"C:\under"));
-        let over = Onto::Folder(PathBuf::from(r"C:\over"));
+        let region = |rect, path: &str| Region {
+            rect,
+            onto: Onto::Folder(PathBuf::from(path)),
+            name: path.rsplit('\\').next().unwrap_or(path).to_owned(),
+        };
+        let under = region((0, 0, 100, 100), r"C:\under");
+        let over = region((50, 50, 150, 150), r"C:\over");
         let targets = Targets {
             zones: vec![
-                ((0, 0, 100, 100), Onto::Bookmarks),
-                ((0, 0, 100, 100), under.clone()),
-                ((50, 50, 150, 150), over.clone()),
+                Region {
+                    rect: (0, 0, 100, 100),
+                    onto: Onto::Bookmarks,
+                    name: "Bookmarks".to_owned(),
+                },
+                under.clone(),
+                over.clone(),
             ],
+            from: None,
         };
         assert_eq!(
             targets.at((60, 60)),
@@ -998,5 +2097,7 @@ mod tests {
             "a listing over the sidebar's own zone means the listing"
         );
         assert_eq!(targets.at((200, 200)), None);
+        // And the name comes back with it, which is what the pointer is told the drop will do.
+        assert_eq!(targets.at((60, 60)).map(|region| region.name.as_str()), Some("over"));
     }
 }
