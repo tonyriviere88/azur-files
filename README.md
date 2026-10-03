@@ -5265,16 +5265,26 @@ fully-lit from 31% to 37%. What remains between this and Explorer is that Azur's
 14px where Explorer's list is 9pt (12px at 96 DPI), and that Explorer uses ClearType's
 subpixel rendering where egui antialiases in grayscale.
 
-## Two palettes, and the regions a palette varies
+## Eight palettes, and the two things a palette can vary
 
-Dark and light, chosen by name in the menu under the mark, in `config.ini`, or with `--theme=`.
+Chosen by name in the menu under the mark, in `config.ini`, or with `--theme=`. Azur's own dark
+theme, [the stone family](#the-stone-family) — six palettes that are one rule with a different
+mineral in it — and the light one.
 
-|  | title bar | tab & path bar | panel & headers | sidebar | status bar | seam |
-| --- | --- | --- | --- | --- | --- | --- |
-| dark | `#14171a` | `#202329` | `#14171a` / `#191b1f` | `#191b1f` | `#191b1f` | `#202329` |
-| light | `#d8e6f7` | `#f2f8ff` | `#e6f1ff` / `#e6f1ff` | `#d8e6f7` | `#ebf4ff` | `#c0d8f4` |
+|  | title bar | tab & path bar | panel & headers | sidebar | status bar | seam | a selected row |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| dark | `#14171a` | `#202329` | `#14171a` / `#191b1f` | `#191b1f` | `#191b1f` | `#202329` | `#184e80` |
+| onyx | `#0e0e0e` | `#1c1c1c` | `#0e0e0e` / `#141414` | `#141414` | `#141414` | `#1c1c1c` | `#4c4c4c` |
+| cobalt | `#131529` | `#1c213d` | `#131529` / `#171930` | `#171930` | `#171930` | `#1c213d` | `#0046a8` |
+| malachite | `#0f190f` | `#152716` | `#0f190f` / `#111e11` | `#111e11` | `#111e11` | `#152716` | `#00591b` |
+| amethyst | `#1d1226` | `#2b1d37` | `#1d1226` / `#22162b` | `#22162b` | `#22162b` | `#2b1d37` | `#643199` |
+| citrine | `#18170d` | `#262315` | `#18170d` / `#1d1b12` | `#1d1b12` | `#1d1b12` | `#262315` | `#544d02` |
+| silver | `#1a1a1a` | `#262626` | `#1a1a1a` / `#1e1e1e` | `#1e1e1e` | `#1e1e1e` | `#262626` | `#5e5e5e` |
+| light | `#d8e6f7` | `#f2f8ff` | `#e6f1ff` / `#e6f1ff` | `#d8e6f7` | `#ebf4ff` | `#c0d8f4` | `#c2e2ff` |
 
-**A palette varies regions, not roles**, and that is the part worth reading. The dark palette takes
+**A palette varies regions, or roles, and the two are different jobs.** The family below varies
+roles: it keeps the mapping and changes what the roles *are*. The light palette varies regions,
+which is the harder case and the one the rest of this section is about. The dark palette takes
 every one of those surfaces from an Azur role — the sidebar, the column headers and the status bar
 are all `background-layer-alt`, and the title bar and the panels are both `background-layer`. The
 light palette gives those four surfaces three *different* colours and makes the panel and its
@@ -5351,6 +5361,73 @@ metadata on all seven regions of every palette, and
 meets. The light palette's tightest figures are 10.03:1 for a name on the seam and ΔL\* 5.3 for the
 seam against the title bar.
 
+### The stone family
+
+Six palettes, one rule, and none of them is a new dark theme: each is the **dark palette in a
+different material**. Every rung replaces a graphite or an azure one at that rung's own relative
+luminance, so a palette is a hue and a chroma and nothing more.
+
+That is the load-bearing part rather than a nicety, because `contrast` measures in the two
+quantities luminance decides — `ratio` is a function of it and `lstar` is a function of it — so
+**every contrast figure and every ΔL\* in this program carries over.** The seam is 3.93 ΔL\* off a
+column header in all six as it is in the dark palette, the checkerboard 15.4, the selection bar
+3.1:1 on the row it marks, `status.danger` 4.67:1 on the status line. Nothing was retuned, and
+nothing needed to be. `every_rung_is_the_dark_palettes_own_lightness` holds each rung to 0.25 ΔL\*
+of its ladder position, which is half a byte step down at this end of the ramp and no more.
+
+**The mineral picks the hue *and* the chroma**, and both come out of the same measurement:
+
+| palette | the stone | `L*` | `C*` | Lab hue | share of sRGB's chroma at that lightness |
+| --- | --- | --- | --- | --- | --- |
+| cobalt | cobalt blue `#0047AB` | 32.80 | 62.64 | 291.1 | **100.0%** |
+| malachite | malachite `#0BDA51` | 76.56 | 89.42 | 143.1 | 99.3% |
+| citrine | citrine `#E4D00A` | 82.72 | 82.69 | 96.8 | 98.9% |
+| amethyst | amethyst `#9966CC` | 52.55 | 60.72 | 311.6 | **61.3%** |
+| onyx | onyx `#353839` | 23.27 | 1.50 | — | 0% |
+| silver | silver `#C0C0C0` | 77.70 | 0.01 | — | 0% |
+
+The last column is the interesting one. Three of these stones sit *on* the sRGB gamut boundary at
+their own hue and lightness — cobalt blue exactly on it — because they are pigments, and a pigment
+is as saturated as its medium allows. Amethyst is a pale violet quartz and takes 61% of what is
+there, which is why the amethyst palette reads as a gem rather than as neon: nobody chose that, it
+was measured. So the rule is **the pigment ramp takes the share its mineral takes, and the stone
+ramp takes half of that** — half because a rock is not a pigment, and the panels have to read as
+dark first and coloured second or the listing competes with what it is listing.
+
+A share of a *ceiling* rather than a fixed chroma, because the ceiling is not flat: it collapses
+toward white and opens up toward black. The light palette's own table below is the same measurement
+from the other end.
+
+**Cobalt is the one that made the rule checkable.** At the rung a selected row is filled with, the
+whole of sRGB's chroma at hue 291 comes to `#0046a8` — one byte from `#0047ab`. Cobalt blue *is*
+the gamut boundary at its own hue and lightness, so an accent ramp that stops short of the ceiling
+is an accent ramp that is not cobalt, and a test says so.
+
+**The two with no hue are told apart by where their ladder sits.** Onyx sinks 3.5 ΔL\* and its
+canvas clamps at `#000000`; silver lifts 1.7 and puts the brightness that could not go into its
+surfaces into its pigment instead — a steel selection and a near-white mark at `L*` 84.9 against
+Azur's 64.4. **1.7 is the whole of the room there is**, and that is a measurement: `status.danger`
+drops under 4.5:1 on a status bar lighter than `L*` 11.52, and the code comment's green drops under
+4.5:1 on a panel lighter than `L*` 10.13, against the dark palette's own 9.72 and 7.55. A palette
+that wanted a genuinely pale window would need a `Bar` and a `Syntax` of its own, which is exactly
+what the light one has.
+
+Those two also have to fix the other thing a hue was doing. `desktop::row_fill` fills a selected
+row with `accent-active` and a hovered one with `background-control-hover`, and in the dark palette
+those are **2.5 ΔL\* apart** — a selected row is told from a hovered one almost entirely by hue.
+Fine for the four palettes that have one; in a grey palette it is two identical bands. So both
+bring their hover down, to `L*` 26.2 and 28.0, leaving 6.1 and 11.9 clear of their selections.
+`the_hueless_palettes_tell_a_selected_row_from_a_hovered_one` is the floor under that, and it
+asserts the *other* half too: in every palette that has a hue, the same pair is deliberately under
+the same floor.
+
+**The one thing a palette cannot reach** is the press. `desktop::press_fill` is a function of
+`t.dark` rather than a token, so the fill a control takes while the button is held is Azur's
+`GRAY_9` in every dark palette — the right lightness, the wrong hue, so a pressed toolbar button
+flashes graphite where its hover was coloured. The hover is reachable because `desktop::apply`
+writes it into `background-control-hover` and `hover_fill` reads the token back; the press has no
+token behind it. It belongs in the design system, and in onyx and silver it is simply right.
+
 One test earned its keep twice over and is worth knowing about:
 `every_colour_on_screen_belongs_to_the_palette_it_is_set_to` paints the window in each palette and
 checks that nothing on screen is a surface belonging to a *different* one. Contrast tests measure
@@ -5382,7 +5459,7 @@ Deliberately:
 | `--filter=<text>` | put a line in the first pane's filter box before anything is drawn |
 | `--lens=git\|images` | open the first pane showing one of [the funnel's listings](#the-funnel-is-a-button), which is otherwise behind a menu and out of reach of a run with no pointer. It brings what the menu entry brings — the flatten, and the tiles for pictures — because those are the listing rather than side effects of it |
 | `--size=WxH` | pin the window size |
-| `--theme=<name>` | override the remembered palette for this launch: `dark` or `light`. `--light` and `--dark` are shorthands for the two |
+| `--theme=<name>` | override the remembered palette for this launch: `dark`, `onyx`, `cobalt`, `malachite`, `amethyst`, `citrine`, `silver` or `light`. `--light` and `--dark` are shorthands for the two ends |
 | `--shot=<file>` | write the frame as a PNG and exit, for regenerating the images above |
 | `--menu` | raise the folder's context menu, so `--shot` can capture one |
 | `--rename` | open the selected name for editing, for the same reason |
@@ -5487,8 +5564,9 @@ reads back as exactly that. A `bookmark_in=` with no group above it means somebo
 file by hand; the folder is worth more than the line it was written on, so it lands at the top
 level rather than nowhere.
 
-`theme=` is the palette, by name: `dark` or `light` — and `light-blue`, which is what the light one
-used to be called and still reads. A name this build has never heard of leaves the default rather
+`theme=` is the palette, by name: `dark`, `onyx`, `cobalt`, `malachite`, `amethyst`, `citrine`,
+`silver` or `light` — and `light-blue`, which is what the light one used to be called and
+still reads. A name this build has never heard of leaves the default rather
 than refusing to start, which is what makes a settings file written by a *newer* build harmless
 here. The two words a file has always used still mean what they meant, so nothing written before
 the palette became a name reads differently.

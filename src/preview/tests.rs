@@ -214,14 +214,17 @@ fn a_name_says_what_it_will_be_shown_as() {
     assert_eq!(kind_of("Makefile", "", false), Some(Kind::Unknown));
     assert_eq!(kind_of(".gitignore", "gitignore", false), Some(Kind::Text));
     assert_eq!(kind_of(".npmrc", "npmrc", false), Some(Kind::Unknown));
-    // **And everything else is the shell's**, which is the point of the lists above being short: they
-    // are what this program decodes better than Windows would, not what has a preview. A `.pdf` has a
-    // registered visualizer; a `.zip` does not, and the difference is not knowable from the name — so
-    // both come here and `visual::load` is what finds out.
+    // **And everything else is looked at**, which is the point of the lists above being short: they
+    // are what this program has a better answer for than looking would give, not what has a preview.
+    // A `.tex` is text, a `.pdf` has a registered visualizer, a `.zip` has neither — and not one of
+    // those three is knowable from the name, so all of them come here and `read` finds out. On either
+    // platform: whether a file is text is not a question about the platform.
+    assert_eq!(kind_of("a.zip", "zip", false), Some(Kind::Shell));
+    assert_eq!(kind_of("a.pdf", "pdf", false), Some(Kind::Shell));
+    assert_eq!(kind_of("a.docx", "docx", false), Some(Kind::Shell));
+    assert_eq!(kind_of("a.tex", "tex", false), Some(Kind::Shell));
+    assert_eq!(kind_of("a.vcxproj", "vcxproj", false), Some(Kind::Shell));
     if cfg!(windows) {
-        assert_eq!(kind_of("a.zip", "zip", false), Some(Kind::Shell));
-        assert_eq!(kind_of("a.pdf", "pdf", false), Some(Kind::Shell));
-        assert_eq!(kind_of("a.docx", "docx", false), Some(Kind::Shell));
         // Except a video, which is neither decoded here nor rendered by the shell: it is *played*,
         // by Media Foundation, which is a player and not a read. See `Kind::Video`.
         assert_eq!(kind_of("a.mp4", "mp4", false), Some(Kind::Video));
@@ -232,14 +235,17 @@ fn a_name_says_what_it_will_be_shown_as() {
         // what a file *is* does not depend on what is installed, and the engine says so in the
         // panel when it cannot open one.
         assert_eq!(kind_of("a.flv", "flv", false), Some(Kind::Video));
-        // And an animated GIF stays a picture, because this program decodes those itself and can
-        // zoom, diff and compare the result. The two lists overlap and `PICTURES` is asked first.
-        assert_eq!(kind_of("a.gif", "gif", false), Some(Kind::Picture));
     } else {
-        assert_eq!(kind_of("a.pdf", "pdf", false), None);
-        // No engine off Windows, so a video is what it always was: something with no preview.
-        assert_eq!(kind_of("a.mp4", "mp4", false), None);
+        // No engine off Windows, so a video is whatever looking at it makes of it — which for an
+        // `.mp4` is the shell's kind, and off Windows the shell has nothing. Same "No preview" the
+        // panel has always shown for one there.
+        assert_eq!(kind_of("a.mp4", "mp4", false), Some(Kind::Shell));
     }
+    // And an animated GIF stays a picture, because this program decodes those itself and can
+    // zoom, diff and compare the result. **This is the assertion that guards the order of the
+    // tests in `kind_of`**: the video question is asked first, so a `.gif` that `crate::fs::fmt`
+    // ever came to call a video would lose all of that — and would fail here first.
+    assert_eq!(kind_of("a.gif", "gif", false), Some(Kind::Picture));
     // A folder is what the listing beside the panel is already showing, on either platform.
     assert_eq!(kind_of("src", "", true), None);
     assert_eq!(kind_of("pics", "", true), None);
@@ -350,6 +356,108 @@ fn text_comes_back_readable_and_bounded() {
     crate::sandbox::remove_file(&path);
     crate::sandbox::remove_file(&long);
     crate::sandbox::remove_file(&exact);
+}
+
+/// **An extension in none of the tables is read as text when it is text**, which is the whole of the
+/// preview priority below the four name tables: video, picture, binary, listed text — and then a look
+/// at the bytes.
+///
+/// Every extension here is deliberately one nobody thought to list, and every one of them used to be
+/// "No preview for a .tex" — not because the shell was asked and said no, but because the shell has
+/// no visualizer for a build script either. The `code` flag travels with the answer because it is the
+/// same question [`is_code`] always answered from the name, and a sniffed file still has one.
+///
+/// The other half — an unlisted extension that is *not* text going on to the shell — is
+/// `the_shell_draws_what_this_program_cannot_and_says_so_when_it_cannot_either`, which asks about a
+/// `.nosuchthing` full of NUL bytes through this very kind. It is not repeated here, because
+/// asserting it costs a real shell call and this test is meant to cost a `read`.
+#[test]
+fn an_unlisted_extension_is_read_as_text_when_it_is_text() {
+    let cases = [
+        // A build script, a subtitle file, an MSBuild project, a desktop entry: four formats with
+        // nothing in common except that a panel showing them is better than a panel saying nothing.
+        ("paper.tex", "documentclass{article}\n\nSome prose.\n"),
+        ("film.srt", "1\n00:00:01,000 --> 00:00:04,000\nA line of dialogue.\n"),
+        ("app.vcxproj", "<Project ToolsVersion=\"4.0\">\n  <ItemGroup/>\n</Project>\n"),
+        ("app.desktop", "[Desktop Entry]\nName=A thing\nExec=/usr/bin/thing\n"),
+    ];
+    for (name, body) in cases {
+        let path = scratch(name);
+        std::fs::write(&path, body).expect("a file");
+        // Through `kind_of` rather than with the kind written out, so this pins the *priority* and
+        // not just the arm in `read`: none of these is a video, a picture, a binary or a listed
+        // text extension, so every one of them has to land on `Kind::Shell`.
+        let ext = extension_of(&path);
+        let kind = kind_of(name, &ext, false).expect("a file always has some preview to try");
+        assert_eq!(kind, Kind::Shell, "{name} was claimed by one of the name tables");
+        let Payload::Text(text) = read(&Ask::One(path.clone(), kind)) else {
+            panic!("{name} is text and the panel would have said there was no preview for it");
+        };
+        assert!(text.body.starts_with(body.split('\n').next().expect("a line")));
+        assert!(!text.truncated);
+        // Columns that mean something, for all four: none of these extensions is in `PROSE`.
+        assert!(text.code, "{name} would be laid out as a paragraph");
+        crate::sandbox::remove_file(&path);
+    }
+}
+
+/// **XML and JSON are coloured under a name that does not say so** — and a name that *does* say
+/// something is never overruled by the body.
+///
+/// The wiring rather than the probe, which is
+/// `syntax::tests::the_language_comes_from_the_body_when_the_name_says_nothing`. What this pins is
+/// the precedence in [`text::lang_and_face`] and the one thing that surprises about it: the face
+/// moves with the language. A `.txt` is prose by [`is_code`] and gets the proportional role, but a
+/// `.txt` holding an XML document is columns that mean something, and laying that out in a
+/// proportional face would throw away the indentation that is most of what the file says.
+#[test]
+fn a_body_that_declares_itself_is_coloured_whatever_it_is_called() {
+    let read_as_text = |name: &str, body: &str| {
+        let path = scratch(name);
+        std::fs::write(&path, body).expect("a file");
+        let ext = extension_of(&path);
+        let kind = kind_of(name, &ext, false).expect("a file always has some preview to try");
+        let Payload::Text(text) = read(&Ask::One(path.clone(), kind)) else {
+            panic!("{name} did not come back as text");
+        };
+        crate::sandbox::remove_file(&path);
+        (text.lang, text.code)
+    };
+
+    // A structured log and a REST capture: the two shapes this exists for. Neither extension is in
+    // `syntax::lang_of`'s table and neither ever will be — `.log` is whatever a program writes.
+    assert_eq!(
+        read_as_text("service.log", "{\"level\": \"warn\", \"msg\": \"disk full\"}\n"),
+        (crate::syntax::Lang::Json, true)
+    );
+    assert_eq!(
+        read_as_text("capture.txt", "<?xml version=\"1.0\"?>\n<soap:Envelope/>\n"),
+        (crate::syntax::Lang::Markup, true),
+        "a `.txt` is prose by name, and this one is a document with indentation that means something"
+    );
+    // A file with no extension at all goes down the same road, through `Kind::Unknown` and its
+    // sniff — which is the other half of what makes an unnamed dump readable.
+    assert_eq!(
+        read_as_text("dump", "<root>\n  <item id=\"1\"/>\n</root>\n"),
+        (crate::syntax::Lang::Markup, true)
+    );
+
+    // **And the name wins wherever it said anything.** A `.md` is a document even when it opens
+    // with a brace, which is what keeps the markdown renderer reachable — see `Lang::Markdown`.
+    assert_eq!(
+        read_as_text("doc.md", "{\"looks\": \"like json\"}\n"),
+        (crate::syntax::Lang::Markdown, false)
+    );
+    // Prose that declares nothing is left exactly as it was: no colour, no monospace.
+    assert_eq!(
+        read_as_text("prose.txt", "Just some notes about the thing.\n"),
+        (crate::syntax::Lang::None, false)
+    );
+    // And a `.log` of ordinary lines keeps the face its name earned and gains no language.
+    assert_eq!(
+        read_as_text("build.log", "warning: unused variable `x`\n"),
+        (crate::syntax::Lang::None, true)
+    );
 }
 
 /// An extensionless file is text if it reads as text, and **never** text if it does not.

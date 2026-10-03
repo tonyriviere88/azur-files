@@ -138,6 +138,13 @@ pub enum Lang {
 /// file), and a language coloured with a nearly-right table is worse than one coloured
 /// with none: a wrong keyword is a claim about the code. Adding one is a `Rules` entry
 /// and a row in the table below.
+///
+/// # And when this answers nothing
+///
+/// [`Lang::None`] from here is not the end of the question: [`lang_of_body`] then looks at the front
+/// of the file, which is what colours the XML and JSON that arrive under an extension nobody would
+/// have thought to put in the table above. It is asked *after* this and never instead of it — a name
+/// that spoke is the better evidence.
 pub fn lang_of(stem: &str, ext: &str) -> Lang {
     // The name beats the extension, exactly as in `preview::is_code`.
     if stem.eq_ignore_ascii_case("cmakelists") {
@@ -163,6 +170,89 @@ pub fn lang_of(stem: &str, ext: &str) -> Lang {
         "cmake" => Lang::Cmake,
         "diff" | "patch" => Lang::Diff,
         "md" | "markdown" => Lang::Markdown,
+        _ => Lang::None,
+    }
+}
+
+/// Which language a **body** is in, for a file whose name did not say. XML or JSON, and nothing
+/// else.
+///
+/// The third way to answer the question [`lang_of`] answers from an extension and [`lang_of_tag`]
+/// from a fence label, and the only one of the three that reads the file. Asked by
+/// [`crate::preview::text`] where the name came back [`Lang::None`] and **only** there, so this never
+/// overrules a name that spoke: a `.md` is a document and a `.rb` is deliberately plain whatever
+/// their first character is.
+///
+/// # Why these two formats and no others
+///
+/// XML and JSON are the two worth colouring that **declare themselves in their first two
+/// characters** and are routinely shipped under a name that does not say so: an XML body in a
+/// `.config`, a `.plist`, a `.resx`, a `.csproj`, a `.nuspec` or a project's own invented extension;
+/// a JSON body in a `.log`, a `.lock`, a REST capture saved as `.txt`, or a file with no extension
+/// at all. Everything else either has an extension people actually use or cannot be told from prose
+/// in one glance — YAML most of all, where `key: value` is also an English sentence with a colon in
+/// it. A wrong answer here is a false claim about the file, which is the argument the module header
+/// makes about nearly-right keyword tables, so both tests below are deliberately narrow and both
+/// look at the **second** token as well as the first.
+///
+/// # The second token is what keeps it honest
+///
+/// - `<` opens markup when what follows is `?xml`, a `!` (a doctype or a comment), a `/` (a body cut
+///   off mid-document) or a tag name. `<?php` is **not** — PHP is [`Lang::None`] by decision, see
+///   [`lang_of`] — and neither is a `<` with arithmetic after it, which is the case
+///   `a_tag_is_a_name_and_its_text_is_not` already pins for the tokeniser.
+/// - `{` opens JSON when the next thing is a string key or the closing brace, and `[` when the next
+///   thing is a value. That test is the whole of it: `{\rtf1` is an RTF document, `{ print $1 }` is
+///   an awk program and `[Desktop Entry]` is a desktop file, and every one of them begins with a
+///   character JSON begins with.
+///
+/// Truncation cannot break either, because neither reads past the opening — a preview cut at
+/// [`crate::preview::TEXT_CAP`] still starts where the file does.
+pub fn lang_of_body(body: &str) -> Lang {
+    // A BOM is not whitespace, and a file written by a Windows tool has one sitting in front of the
+    // very character this function is about.
+    let body = body.trim_start_matches('\u{feff}').trim_start();
+    let bytes = body.as_bytes();
+    // Prefix tests over the bytes rather than slices of the `&str`: the character after the opening
+    // one may be any width, and `&body[1..2]` would be a panic on a file that starts `<é`.
+    let starts = |prefix: &[u8]| {
+        bytes
+            .get(..prefix.len())
+            .is_some_and(|it| it.eq_ignore_ascii_case(prefix))
+    };
+    match bytes.first().copied() {
+        // Nothing may come between a `<` and what it opens, so markup's tests are prefixes where
+        // JSON's below have to look past whitespace.
+        Some(b'<') => {
+            let opens = starts(b"<?xml")
+                || starts(b"<!")
+                || starts(b"</")
+                || bytes.get(1).is_some_and(u8::is_ascii_alphabetic);
+            if opens {
+                Lang::Markup
+            } else {
+                Lang::None
+            }
+        }
+        Some(open @ (b'{' | b'[')) => {
+            // Safe to cut here and only here: the byte just matched is one byte wide, so 1 is a
+            // character boundary.
+            let after = body[1..].trim_start().as_bytes().first().copied();
+            let opens = match (open, after) {
+                // An object's first key is a string, always — or it is the empty object.
+                (b'{', Some(b'"' | b'}')) => true,
+                // And an array holds values: a string, an object, an array, nothing, a negative
+                // number, or one of the three bare words.
+                (b'[', Some(b'"' | b'{' | b'[' | b']' | b'-' | b't' | b'f' | b'n')) => true,
+                (b'[', Some(digit)) => digit.is_ascii_digit(),
+                _ => false,
+            };
+            if opens {
+                Lang::Json
+            } else {
+                Lang::None
+            }
+        }
         _ => Lang::None,
     }
 }

@@ -10,13 +10,15 @@ pub struct Text {
     pub body: String,
     /// It is longer than [`TEXT_CAP`] and this is the front of it.
     pub truncated: bool,
-    /// Its columns mean something, so it wants the monospace role. See [`is_code`].
+    /// Its columns mean something, so it wants the monospace role. From the name, by [`is_code`] —
+    /// or from `lang` below having found structure the name did not mention. See [`lang_and_face`].
     pub code: bool,
     /// What language it is in, for colour — and [`crate::syntax::Lang::Markdown`], which
     /// is how the panel knows to render the document rather than the markup.
     ///
-    /// Decided from the name here on the worker rather than in the panel, because it is
-    /// the same question `code` is and comes from the same two halves of it.
+    /// Decided here on the worker rather than in the panel, because it is the same question `code`
+    /// is and is answered with it: from the name, and from the first two characters of the body
+    /// where the name said nothing. See [`lang_and_face`].
     pub lang: crate::syntax::Lang,
     /// What git says has changed in it, when it is in a repository and something has.
     ///
@@ -59,10 +61,26 @@ pub(super) fn code_of(path: &Path) -> bool {
     is_code(&stem, &ext)
 }
 
-/// And what language it is in, from the same two halves. See [`crate::syntax::lang_of`].
-fn lang_of(path: &Path) -> crate::syntax::Lang {
+/// And what language it is in: from the same two halves, and **failing that from the body**.
+///
+/// Two questions in that order, because they are not equally good. A name is what the person who
+/// saved the file said it was; the first two characters of the body are a guess, however narrow a
+/// one — so the guess is only ever asked where the name said nothing, and can never take a `.md`
+/// away from the document renderer or colour a `.rb` with a table this program does not have. See
+/// [`crate::syntax::lang_of_body`], which is where the guess and its limits live.
+///
+/// **The answer feeds the face as well as the colour.** XML and JSON are columns that mean
+/// something whatever the file is called, so a `.txt` full of XML gets the monospace role too — the
+/// one case where [`is_code`]'s answer is overruled, and the only honest way round: the reason a
+/// `.txt` is prose is that most of them are, and this one demonstrably is not.
+fn lang_and_face(path: &Path, body: &str) -> (crate::syntax::Lang, bool) {
     let (stem, ext) = halves(path);
-    crate::syntax::lang_of(&stem, &ext)
+    let named = crate::syntax::lang_of(&stem, &ext);
+    if named != crate::syntax::Lang::None {
+        return (named, code_of(path));
+    }
+    let sniffed = crate::syntax::lang_of_body(body);
+    (sniffed, sniffed != crate::syntax::Lang::None || code_of(path))
 }
 
 /// The name with the extension off, and the extension — the two things every question
@@ -106,11 +124,14 @@ pub(super) fn load(path: &Path) -> Payload {
     if body.contains('\t') {
         body = body.replace('\t', "    ");
     }
+    // Asked of the name first and of the body only where the name said nothing — and after the two
+    // substitutions above, so what is probed is the string the panel will actually lay out.
+    let (lang, code) = lang_and_face(path, &body);
     Payload::Text(Text {
         body,
         truncated,
-        code: code_of(path),
-        lang: lang_of(path),
+        code,
+        lang,
         // Asked for after the file has been read, so a folder with no repository above it costs the
         // `stat` walk and nothing else — see [`crate::git::changes`]. An empty answer is kept as
         // `None`: "nothing changed" and "no diff to show" are the same thing to the panel.

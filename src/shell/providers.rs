@@ -120,7 +120,7 @@ impl Providers {
     }
 
     /// Off Windows there are no registered providers to ask about, so the tick can only ever add
-    /// nothing — exactly as [`crate::preview::kind_of`] answers `None` for the shell's own kind there.
+    /// nothing — exactly as [`crate::preview::visual`]'s own `rendered` stub answers nothing there.
     #[cfg(not(windows))]
     fn ask(_ext: &str) -> bool {
         false

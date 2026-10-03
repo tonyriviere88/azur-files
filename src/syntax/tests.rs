@@ -235,6 +235,66 @@ fn the_language_comes_from_the_name() {
     }
 }
 
+/// **And from the body, where the name said nothing** — XML and JSON, and the several things that
+/// merely start with the same character.
+///
+/// The negatives are the half worth having. Each one is a real format that opens with `<`, `{` or
+/// `[`, and each one would have been claimed by a probe that looked only at the first character:
+/// RTF, awk, a desktop entry, an ini section, a PHP file, and C arithmetic inside markup's own
+/// tokeniser test. See [`lang_of_body`], which is why every test in it is two characters and not one.
+#[test]
+fn the_language_comes_from_the_body_when_the_name_says_nothing() {
+    for (body, want) in [
+        // XML, five ways in.
+        ("<?xml version=\"1.0\"?>\n<a/>", Lang::Markup),
+        ("<?XML version=\"1.0\"?>", Lang::Markup),
+        ("<!DOCTYPE html>\n<html>", Lang::Markup),
+        ("<!-- a comment first -->\n<a/>", Lang::Markup),
+        ("<configuration>\n  <appSettings/>\n</configuration>", Lang::Markup),
+        // A body that begins mid-document, which is what a file cut out of a larger one looks like.
+        ("</item>\n</items>", Lang::Markup),
+        // Leading blank lines, and a BOM in front of everything — which is not whitespace, and is
+        // what any XML written by a Windows tool has.
+        ("\n\n  <root/>", Lang::Markup),
+        ("\u{feff}<?xml version=\"1.0\"?>", Lang::Markup),
+        ("\u{feff}{\"a\": 1}", Lang::Json),
+        // JSON: an object keyed by a string, an empty one, and arrays of each kind of value.
+        ("{\"a\": 1}", Lang::Json),
+        ("{\n  \"name\": \"thing\"\n}", Lang::Json),
+        ("{ }", Lang::Json),
+        ("[\"a\", \"b\"]", Lang::Json),
+        ("[{\"a\": 1}]", Lang::Json),
+        ("[[1], [2]]", Lang::Json),
+        ("[]", Lang::Json),
+        ("[1, 2, 3]", Lang::Json),
+        ("[-1.5e3]", Lang::Json),
+        ("[true, false, null]", Lang::Json),
+        // **And everything that merely starts with one of those three characters.**
+        ("{\\rtf1\\ansi\\deff0 A document.}", Lang::None),
+        ("{ print $1 }", Lang::None),
+        ("[Desktop Entry]\nName=A thing", Lang::None),
+        ("[package]\nname = \"thing\"", Lang::None),
+        // PHP is plain by decision, so the one processing instruction that counts is `<?xml`.
+        ("<?php echo 'hello'; ?>", Lang::None),
+        ("<?xm", Lang::None),
+        // A `<` with arithmetic after it, which is the case the markup tokeniser is already careful
+        // about — and which must not get the whole file coloured as markup to begin with.
+        ("if (a < b) { return 0; }", Lang::None),
+        // Python's dict repr, which is a `{` and a quote of the wrong kind.
+        ("{'a': 1}", Lang::None),
+        // Prose, an empty file, and one holding only blanks.
+        ("Just some notes about the thing.", Lang::None),
+        ("", Lang::None),
+        ("   \n\n  ", Lang::None),
+        // A multi-byte character right behind the opening one: the answer is no, and the point is
+        // that asking does not panic on the character boundary.
+        ("<élan", Lang::None),
+        ("{é: 1}", Lang::None),
+    ] {
+        assert_eq!(lang_of_body(body), want, "{body:?}");
+    }
+}
+
 /// Nothing is coloured past the cap, and nothing is coloured for a language with no table.
 #[test]
 fn a_large_file_is_shown_plain_rather_than_half_coloured() {

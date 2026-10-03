@@ -13,11 +13,13 @@
 //!   has inside it.
 //! - **A video.** Played, with sound, by Media Foundation's Media Engine — the odd one out, because
 //!   it is not read at all. See [`video`], which does not go through the service below.
-//! - **Anything else.** Handed to whatever visualizer Windows has registered for the type, which
-//!   is where a `.pdf`, an `.mp4`, a `.docx` and a camera's `.cr2` get their picture — see
-//!   [`visual`]. **The general case, and the other three are the exceptions**: those are the file
-//!   types this program has a better answer for than the shell's, and nothing else has to be
-//!   listed for the panel to have something to show.
+//! - **Anything else.** Sniffed, and **read as text if it reads as text** — which is what makes a
+//!   `.tex`, a `.vcxproj`, a `.srt` or a `.desktop` readable without anybody having listed it.
+//!   Failing that, handed to whatever visualizer Windows has registered for the type, which is
+//!   where a `.pdf`, a `.docx` and a camera's `.cr2` get their picture — see [`visual`]. **The
+//!   general case, and the kinds above are the exceptions**: those are the file types this program
+//!   has a better answer for than looking would give, and nothing else has to be listed for the
+//!   panel to have something to show.
 //!
 //! # One service, one token, one answer
 //!
@@ -96,18 +98,25 @@ pub enum Kind {
     /// problem, which is to say nobody's, and the panel says there is no preview — exactly as it did
     /// for every video before this existed.
     Video,
-    /// No extension, or one nothing here has heard of. **Decided on the worker** by looking at
-    /// the first few kilobytes, because "is this text?" is a question about contents and the
-    /// answer for `README`, `LICENSE`, `Makefile` and `.gitignore` is yes. A file that turns out
-    /// not to be text falls through to [`Self::Shell`].
-    Unknown,
-    /// Something with no decoder here, shown by whatever visualizer Windows has registered for the
-    /// type: a `.pdf`, an `.mp4`, a `.docx`, a `.psd`, a camera's raw file. See [`visual`].
+    /// A name with nothing to go on: no extension at all, or nothing but one. **Decided on the
+    /// worker** by looking at the first few kilobytes, because "is this text?" is a question about
+    /// contents and the answer for `README`, `LICENSE`, `Makefile` and `.gitignore` is yes. A file
+    /// that turns out not to be text falls through to [`Self::Shell`].
     ///
-    /// **The default, not a list**, which is the one thing worth knowing about [`kind_of`]: the three
-    /// kinds above are the types this program decodes *better* than the shell would, and everything
-    /// else lands here without having to be enumerated. What the shell then has nothing for — a
-    /// `.zip`, a `.rlib` — is the panel's "No preview for a .zip", exactly as before.
+    /// **Kept distinct from [`Self::Shell`] although both now sniff**, because the two say different
+    /// things about the *name* and something reads that: `--preview` picks the first row this
+    /// program has a view of its own for, and a `README` is one where a `.pdf` is a coin toss. See
+    /// `App::open_preview_here`.
+    Unknown,
+    /// An extension none of the tables above claims: read as text if it *is* text, and otherwise
+    /// shown by whatever visualizer Windows has registered for the type — a `.pdf`, a `.docx`, a
+    /// `.psd`, a camera's raw file. See [`text::sniff`] and then [`visual`].
+    ///
+    /// **The default, not a list**, which is the one thing worth knowing about [`kind_of`]: the kinds
+    /// above are the types this program has a *better* answer for than looking would give, and
+    /// everything else lands here without having to be enumerated. What is neither text nor something
+    /// the shell can draw — a `.zip`, a `.rlib` — is the panel's "No preview for a .zip", exactly as
+    /// before.
     Shell,
 }
 
@@ -235,36 +244,51 @@ fn is_video(ext: &str) -> bool {
 /// its syntax, diff it against `HEAD` and walk a binary's imports, none of which a rendered thumbnail
 /// can be made to do.
 ///
-/// Anything else is [`Kind::Shell`], and a file with nothing to go on is [`Kind::Unknown`], which is
-/// the same thing with a look at the bytes first. So there is no list of what has no preview, and
-/// nothing needs adding here when a machine gains a visualizer for a type nobody has heard of.
+/// Anything else is [`Kind::Shell`], and a file with nothing to go on is [`Kind::Unknown`]. Both are
+/// **answered by looking at the bytes** on the worker — see [`read`] — so there is no list of what
+/// has no preview, and nothing needs adding here when a machine gains a visualizer for a type nobody
+/// has heard of.
 ///
-/// Off Windows there are no registered visualizers to ask, so the `Shell` answer is `None` and the
-/// panel says "No preview for a .pdf" as it always did. Not left to [`visual::load`] to discover: it
-/// would mean a quarter-second debounce, a thread and a `Reading…` for an answer that is knowable from
-/// the name.
+/// # The order of the tests is the priority
+///
+/// Video, picture, binary, text: four questions about the *name*, each answered from a table of what
+/// this program has a decoder for, and asked in that order. The four tables are disjoint today, so
+/// the order changes no answer — it is written this way because it is the policy, and because a name
+/// that comes to be in two of them should get the earlier one. `.gif` is the standing case in the
+/// other direction: `crate::fs::fmt` calls it an image rather than a video, so it stays a picture
+/// here, decoded and zoomable and diffable, and `a_name_says_what_it_will_be_shown_as` is what says
+/// so if that ever changes.
+///
+/// **Everything the four tables do not claim is read as text if it reads as text**, which is the one
+/// classification here not made from the name at all. Worth the four kilobytes it costs: a `.tex`, a
+/// `.srt`, a `.vcxproj`, a `.reg`, a `.desktop` and every other text format nobody thought to list
+/// used to be "No preview for a .tex", because the shell has no visualizer for those either. A
+/// `.pdf` is full of NUL bytes and reaches the shell as it always did — see [`text::sniff`], which is
+/// two tests over the front of the file and is why this is cheap enough to be the default.
+///
+/// Off Windows there is no registered visualizer to fall back to, so a file that is not text says
+/// "No preview" exactly as it always did. But it is *asked about* now rather than refused from its
+/// name, because whether a file is text is not a question about the platform.
 pub fn kind_of(name: &str, ext: &str, is_dir: bool) -> Option<Kind> {
     if is_dir {
         return None;
     }
     let is = |list: &[&str]| list.iter().any(|known| ext.eq_ignore_ascii_case(known));
-    if is(&PICTURES) {
+    if cfg!(windows) && is_video(ext) {
+        Some(Kind::Video)
+    } else if is(&PICTURES) {
         Some(Kind::Picture)
-    } else if is(&CODE) || is(&PROSE) {
-        Some(Kind::Text)
     } else if crate::pe::is_image(ext) {
         Some(Kind::Binary)
-    } else if cfg!(windows) && is_video(ext) {
-        Some(Kind::Video)
+    } else if is(&CODE) || is(&PROSE) {
+        Some(Kind::Text)
     } else if ext.is_empty() || name.starts_with('.') {
         // `README`, `LICENSE`, `Makefile`, `.gitignore`, `.npmrc`. A leading dot makes a dotfile
         // rather than an extension, so `Dir::ext` is empty for those anyway — the second test is
         // for `.gitignore`-style names whose *extension* is a word this list does happen to know.
         Some(Kind::Unknown)
-    } else if cfg!(windows) {
-        Some(Kind::Shell)
     } else {
-        None
+        Some(Kind::Shell)
     }
 }
 
@@ -486,7 +510,19 @@ fn read(ask: &Ask) -> Payload {
         // rather than with an `unreachable!`, because the cost of being wrong about that is then one
         // frame of a film where a player was meant to be, and not a window that closes.
         Kind::Video => visual::load(path),
-        Kind::Shell => visual::load(path),
+        // **The same question as [`Kind::Unknown`]'s, for an extension that was merely in none of
+        // the tables.** A `.pdf` is full of NUL bytes and goes straight on to the shell, which is
+        // the answer it always had; a `.tex` is text and is read as text now rather than handed to a
+        // visualizer no machine has registered. See [`kind_of`], where the priority is set out.
+        //
+        // A sniff that cannot *open* the file falls through rather than stopping here, which is the
+        // one way this differs from `Unknown` above: the per-user thumbnail cache outlives the file
+        // it was made from, so the shell may still have a render of something this process cannot
+        // read — and the shell's answer is what this kind was always going to get.
+        Kind::Shell => match text::sniff(path) {
+            Some(true) => text::load(path),
+            _ => visual::load(path),
+        },
     }
 }
 

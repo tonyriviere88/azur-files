@@ -1356,10 +1356,11 @@ fn the_preview_panel_follows_the_keyboard() {
     // dependency tree left next to a `.rmeta` would be a lie about the `.rmeta`.
     //
     // The row is picked as one this program has no decoder for, which since
-    // [`crate::preview::kind_of`] started handing those to the shell is no longer the same thing as
-    // "no preview": a `.d` is a `Kind::Shell`, so it is asked about and comes back
-    // `Payload::Unsupported` a moment later. Either way the panel has *let go of the binary*, and
-    // that — rather than the panel being empty — is what has to hold.
+    // [`crate::preview::kind_of`] started sniffing those and then handing them to the shell is no
+    // longer the same thing as "no preview": a `.d` is a `Kind::Shell`, so it is asked about and
+    // comes back a moment later — as text, since a dependency file is text, and as
+    // `Payload::Unsupported` for whatever else the row lands on. Either way the panel has *let go of
+    // the binary*, and that — rather than the panel being empty — is what has to hold.
     let plain = {
         let tab = h.app.panes[0].tab();
         let dir = tab.dir.as_ref().expect("the listing");

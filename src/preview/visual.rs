@@ -196,9 +196,10 @@ fn rendered(path: &Path) -> Option<egui::ColorImage> {
     None
 }
 
-/// Unreachable in the window: [`super::kind_of`] answers `None` off Windows, so nothing is ever
-/// classified as something to ask the shell about. Here so that the module still compiles there, and
-/// so that a caller reaching past `kind_of` gets "no preview" rather than a build error.
+/// Reached off Windows, and always with nothing to say: there is no registered visualizer to ask, so
+/// a [`super::Kind::Shell`] file that did not read as text is "no preview" exactly as it was before
+/// any of this existed. Here so that the module still compiles there rather than being `#[cfg]`-ed
+/// away from its call site — the same shape [`super::video`]'s empty `win` module takes.
 #[cfg(not(windows))]
 fn rendered(_path: &Path) -> Option<egui::ColorImage> {
     None
