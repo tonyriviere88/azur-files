@@ -697,14 +697,14 @@ const SIGN: f32 = typography::LINE_CAPTION;
 /// The mark at the head of [`drag_saying`]'s sentence, and the ink to draw it in.
 ///
 /// **What the drop would do, as a sign as well as in words**: a `+` for a copy, a forward arrow for
-/// a move, the bookmark star for a pin, and `icons::error` — an ✕ in a circle — for a drop that
-/// will not happen. The same pairing the platform puts on the cursor, moved to the head of the
-/// sentence, and that is the point of it: OLE's badge rides *under* the pointer while the words sit
-/// beside it, so the two are never read together. Here the sign and the sentence it belongs to are
-/// one thing.
+/// a move, the bookmark star for a pin, an opening folder for a tab, and `icons::error` — an ✕ in a
+/// circle — for a drop that will not happen. The same pairing the platform puts on the cursor, moved
+/// to the head of the sentence, and that is the point of it: OLE's badge rides *under* the pointer
+/// while the words sit beside it, so the two are never read together. Here the sign and the sentence
+/// it belongs to are one thing.
 ///
 /// **The refusal is the one with a colour of its own.** `status-danger` against the accent the
-/// other three wear, because it is the one that has to be seen before it is read; the rest are
+/// others wear, because it is the one that has to be seen before it is read; the rest are
 /// saying the same thing as the words next to them, in the same ink as the two names those words
 /// pick out.
 ///
@@ -712,6 +712,11 @@ const SIGN: f32 = typography::LINE_CAPTION;
 /// `DROPEFFECT_LINK`: a star is what the path bar's bookmark button and every pinned row in the
 /// sidebar already are, and the sentence beside it says *Pin*. A shortcut arrow would be naming the
 /// mechanism instead of the gesture.
+///
+/// And an opening folder for a tab, for the same reason and not the `+` the strip's own new-tab
+/// button wears: a plus at the head of this sentence has already been spent on a copy, and the drop
+/// that opens a tab is the one gesture here that changes nothing on disk. The effect it reports is
+/// `DROPEFFECT_LINK` as well — see `crate::shell::dnd::Onto::Tabs`.
 fn drag_sign(
     told: &crate::shell::dnd::Told,
     t: &Theme,
@@ -727,6 +732,7 @@ fn drag_sign(
         // The badge Windows puts on every shortcut, which is what the drop is about to make.
         Doing::Link => crate::icons::link,
         Doing::Pin => crate::icons::star,
+        Doing::Open => crate::icons::folder_open,
     };
     (glyph, t.accent.mark)
 }

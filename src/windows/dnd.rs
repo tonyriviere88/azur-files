@@ -649,7 +649,12 @@ impl Target_Impl {
             // Pinning moves nothing, so it answers `LINK` whatever is held down. It is
             // also the only honest answer: a copy cursor over the sidebar would be
             // promising a copy that is not going to happen.
-            Some(Onto::Bookmarks | Onto::BookmarkGroup(_)) => {
+            //
+            // A tab strip is the same answer for the same reason — a tab is a place a folder is
+            // *shown*, and nothing about the folder changes — with the modifiers ignored there too:
+            // Ctrl over a strip cannot mean "open a copy of it", so promising one would be worse
+            // than ignoring the key.
+            Some(Onto::Bookmarks | Onto::BookmarkGroup(_) | Onto::Tabs(_)) => {
                 return permitted(DROPEFFECT_LINK, allowed)
             }
             None => return DROPEFFECT_NONE,
@@ -724,6 +729,7 @@ impl Target_Impl {
         let doing = match region {
             Some(region) if would != DROPEFFECT_NONE => match region.onto {
                 Onto::Bookmarks | Onto::BookmarkGroup(_) => Some(Doing::Pin),
+                Onto::Tabs(_) => Some(Doing::Open),
                 Onto::Folder(_) if would.0 & DROPEFFECT_MOVE.0 != 0 => Some(Doing::Move),
                 // Before the copy, because `permitted` degrades a link the source will not allow
                 // *to* a copy — so by the time this is reached, `LINK` means the source agreed to
@@ -743,20 +749,38 @@ impl Target_Impl {
                 // **A refusal names the one item it is about instead**, which for a single-file
                 // drag is the same string and for a mixed selection is the difference between an
                 // explanation and a sentence about nothing — see [`super::culprit`].
-                let source = self.held.lock().ok().and_then(|held| {
-                    let items = held.as_ref().map_or(&[][..], |incoming| &incoming.items);
-                    match (refused, &region.onto) {
-                        (Some(Refused::Itself | Refused::Inside), Onto::Folder(into)) => {
-                            super::culprit(items, into).map(crate::fs::display_name)
-                        }
-                        _ => super::carrying(items),
-                    }
-                });
+                //
+                // `several` comes out of the same turn of the lock, for the far end of a tab drop:
+                // it is the one destination whose words depend on how many places are in the air,
+                // and counting them in a second lock would be a second answer about the same drag.
+                let (source, several) = self
+                    .held
+                    .lock()
+                    .ok()
+                    .map(|held| {
+                        let items = held.as_ref().map_or(&[][..], |incoming| &incoming.items);
+                        let source = match (refused, &region.onto) {
+                            (Some(Refused::Itself | Refused::Inside), Onto::Folder(into)) => {
+                                super::culprit(items, into).map(crate::fs::display_name)
+                            }
+                            _ => super::carrying(items),
+                        };
+                        (source, items.len() > 1)
+                    })
+                    .unwrap_or((None, false));
                 Some(Told {
                     doing,
                     refused,
                     source,
-                    target: region.name.clone(),
+                    // **A strip's zone is published in the singular** — the frame loop that names it
+                    // has no drag in hand, and *a new tab* is what one folder gets — so the plural
+                    // is put on here, where the count is. Four folders make four tabs, and *Open 4
+                    // items in a new tab* would promise one tab holding all of them, which is not a
+                    // thing a tab is.
+                    target: match (doing, several) {
+                        (Doing::Open, true) => "new tabs".to_owned(),
+                        _ => region.name.clone(),
+                    },
                 })
             }
             _ => None,
@@ -902,9 +926,12 @@ impl IDropTarget_Impl for Target_Impl {
         }
         // The one thing that has to happen before this returns: see [`super::claim`]. Not
         // for a pin, which copies nothing and would otherwise bookmark a scratch folder.
+        // Nor for a tab, which is the same case as the pin: a claim *moves* the files into this
+        // program's staging so a copy has something to read, and a drop that copies nothing would
+        // be moving somebody else's folder out from under them to show it.
         let items = match onto {
             Onto::Folder(_) => super::claim(items),
-            Onto::Bookmarks | Onto::BookmarkGroup(_) => items,
+            Onto::Bookmarks | Onto::BookmarkGroup(_) | Onto::Tabs(_) => items,
         };
         if let Ok(mut shared) = self.shared.lock() {
             shared.dropped.push(Dropped {

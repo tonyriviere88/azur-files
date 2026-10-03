@@ -276,6 +276,11 @@ impl App {
         let plan = self.plan_layout(body, bar);
 
         self.tab_slots.clear();
+        // And where the strips themselves went, which `body` fills in for the bands as it draws
+        // them: the title bar's are the plan's own rects, taken here because that is where the plan
+        // is. Both are read a frame later, by the drop zones and by the highlight over them.
+        self.tab_strips.clear();
+        self.tab_strips.extend_from_slice(&plan.in_bar);
         self.body(ui, &theme, body, &plan);
         let in_bar = chrome::title_bar(
             ui,
@@ -290,6 +295,14 @@ impl App {
             &mut self.actions,
         );
         self.tab_slots.extend(in_bar);
+
+        // A drag hovering over a strip: the same wash the listing and the Bookmarks section get, so
+        // *Open src in a new tab* has somewhere on screen that it is about. After the tabs and not
+        // under them, because a tab paints a surface of its own — the same correction
+        // [`crate::ui::drop_target`] already carries for a selected row in a listing.
+        if let Some(strip) = self.tabs_preview(ui.ctx().pixels_per_point()) {
+            crate::ui::drop_target(ui.painter(), strip, &theme);
+        }
 
         // Resolved after the panes, so the rects the pointer is tested against are the
         // ones drawn this frame rather than last frame's.
@@ -625,6 +638,10 @@ impl App {
                     &mut self.actions,
                 );
                 self.tab_slots.extend(slots);
+                // The inset rect and not the band's, because that is where the tabs went — a drop
+                // zone two points wider than the strip it stands for would claim the seam between
+                // two panes for one of them.
+                self.tab_strips.push((*id, inner));
             }
         }
     }

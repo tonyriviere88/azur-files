@@ -43,8 +43,8 @@
 //!
 //! A cursor with a `+` on it says a copy is coming and not where it is going, which over a
 //! listing full of folders is most of the question. So the drag says it in words — *Move one.txt
-//! into docs*, *Copy 4 items into src*, *Pin src to Bookmarks* — carries a stack of the icons it
-//! picked up, and lights up the place it would land in.
+//! into docs*, *Copy 4 items into src*, *Pin src to Bookmarks*, *Open src in a new tab* — carries a
+//! stack of the icons it picked up, and lights up the place it would land in.
 //!
 //! **The sentence names both ends and picks them out in the accent**, which is why it travels as
 //! pieces rather than as a string: see [`Told`] for the shape and [`Told::runs`] for which pieces
@@ -95,6 +95,19 @@ pub enum Onto {
     /// wins — exactly the arrangement a listing's folder rows have over the listing they are in,
     /// and for the same reason: dropping *on* something has to mean into that something.
     BookmarkGroup(usize),
+    /// Open each of them in a tab of its own, in this pane's strip.
+    ///
+    /// **A strip is a list of places**, which is the whole of what it has in common with the
+    /// sidebar: it takes folders and refuses files — see [`refuses`] — and it copies nothing and
+    /// moves nothing, so it too reports itself to the pointer as a link. **Several folders make
+    /// several tabs**, because a list has room for all of them where a pane can only show one.
+    ///
+    /// One zone for the whole strip, tabs included, rather than a zone per tab. Dropping *on* a tab
+    /// therefore means the strip and not that tab's folder, which is the one place in this file
+    /// where the rule the two arms above spell out does not apply — and it is why a drag over a tab
+    /// brings it to the front instead: `crate::app::App::reveal_hovered_tab` puts the pane it
+    /// governs on screen, so the folder that tab is showing is a drop away below.
+    Tabs(crate::pane::PaneId),
 }
 
 /// What a drop is about to do, as the pointer is told it.
@@ -110,6 +123,8 @@ pub enum Doing {
     Link,
     /// Pinning in the sidebar, which is what Explorer calls the same gesture onto Quick access.
     Pin,
+    /// Opening each folder in a tab of its own — the drop onto a tab strip. See [`Onto::Tabs`].
+    Open,
 }
 
 impl Doing {
@@ -117,17 +132,20 @@ impl Doing {
     ///
     /// *Copy `src` into `docs`* — the verb, what is being carried, the joining word, where it is
     /// going. `into` for a folder, because that is what a copy or a move does to one; `to` for the
-    /// sidebar, because nothing goes *into* a bookmark. Those are the two idioms and not one rule
-    /// spelled two ways, which is why they sit beside the verb rather than being appended to it.
+    /// sidebar, because nothing goes *into* a bookmark; `in` for a tab strip, because what the drop
+    /// makes is a tab and the folder goes in it. Those are the idioms this program has, and not one
+    /// rule spelled three ways — which is why they sit beside the verb rather than being appended
+    /// to it.
     ///
     /// `refused` negates the verb and leaves everything else alone — *Cannot move src into main* —
     /// so a refusal reads as the same sentence about the same gesture. Written out rather than
     /// built from the verb, because `Cannot ` plus a lowercased word is a rule that holds for
-    /// exactly these three and not for the next one.
+    /// exactly these four and not for the next one.
     ///
-    /// The sidebar's own refusal is a sentence of its own and does not come through here — see
-    /// [`Refused::AFile`] — so `Cannot pin ` is not reached today. It is written down anyway,
-    /// because this table is about how each verb negates and not about which refusals exist.
+    /// The two refusals a *place* has are sentences of their own and do not come through here — see
+    /// [`Refused::AFile`] — so neither `Cannot pin ` nor `Cannot open ` is reached today. They are
+    /// written down anyway, because this table is about how each verb negates and not about which
+    /// refusals exist.
     fn words(self, refused: bool) -> (&'static str, &'static str) {
         let (yes, no, joining) = match self {
             Self::Copy => ("Copy ", "Cannot copy ", " into "),
@@ -137,6 +155,9 @@ impl Doing {
             // into the folder is the shortcut and not the file.
             Self::Link => ("Link to ", "Cannot link to ", " in "),
             Self::Pin => ("Pin ", "Cannot pin ", " to "),
+            // *Open src in a new tab* — and the far end is the only one in this table that is not a
+            // name, which is what [`Told::runs`] keeps out of the accent.
+            Self::Open => ("Open ", "Cannot open ", " in "),
         };
         (if refused { no } else { yes }, joining)
     }
@@ -170,7 +191,9 @@ pub struct Told {
     /// a defence against one — a source is entitled to render nothing until the drop is real, which
     /// is what an archiver does, so the sentence has to read without it. See `Incoming`.
     pub source: Option<String>,
-    /// Where it would land: a folder's name, a group's, or the Bookmarks section's.
+    /// Where it would land: a folder's name, a group's, the Bookmarks section's — or, for a drop
+    /// onto a tab strip, *a new tab*, which is words rather than a name and is the reason
+    /// [`Self::runs`] asks whether the far end is one before painting it blue.
     pub target: String,
 }
 
@@ -186,12 +209,23 @@ impl Told {
     /// | *Cannot move src into itself* | [`Refused::Itself`]: the far end is a word, not a name |
     /// | *Cannot move src into main, which is inside it* | [`Refused::Inside`]: with a reason |
     /// | *Cannot pin a file* | [`Refused::AFile`], which names nothing at all |
+    /// | *Open src in a new tab* | [`Doing::Open`]: the far end is words, so it is not blue |
     pub fn runs(&self) -> Vec<(&str, bool)> {
         // The one refusal with nothing to name, so nothing else about the gesture is drawn: a
         // sentence naming the folder it was aimed at would read as though the folder were the
         // problem. See [`Refused::AFile`].
+        //
+        // **The verb still decides the words**, because the two places that refuse a file refuse it
+        // for the same reason and say so differently: a bookmark and a tab are both places, and
+        // *Cannot pin a file* over a tab strip would be a sentence about the sidebar. Nothing else
+        // can reach here — a folder takes files — so the rest share the pin's wording rather than
+        // each spelling out a refusal that never happens.
         if self.refused == Some(Refused::AFile) {
-            return vec![("Cannot pin a file", false)];
+            let sentence = match self.doing {
+                Doing::Open => "Cannot open a file in a tab",
+                _ => "Cannot pin a file",
+            };
+            return vec![(sentence, false)];
         }
         let (verb, joining) = self.doing.words(self.refused.is_some());
         let mut runs = Vec::with_capacity(5);
@@ -211,7 +245,11 @@ impl Told {
             // one name in this sentence and it has already been said.
             runs.push(("itself", false));
         } else {
-            runs.push((self.target.as_str(), true));
+            // **Blue means "this is the thing you named"**, so the far end of a tab drop stays
+            // plain: *a new tab* is what the strip would make rather than something on screen the
+            // drag was aimed at, and in the accent it would read as a place called *a new tab*.
+            // Every other destination here has a name, so this is the only verb to ask about.
+            runs.push((self.target.as_str(), self.doing != Doing::Open));
             if self.refused == Some(Refused::Inside) {
                 // Which is the whole difference from a refusal onto the folder itself, and not
                 // something the two names can say between them: `main` looks like an ordinary
@@ -258,10 +296,12 @@ pub fn swallows(item: &std::path::Path, into: &std::path::Path) -> bool {
 /// they made. See [`Told::runs`], where each becomes its words.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Refused {
-    /// The drag is carrying at least one file, and the sidebar is a list of *places*.
+    /// The drag is carrying at least one file, and what it is over is a list of *places*: the
+    /// sidebar, or a pane's tab strip.
     ///
     /// The one refusal with nothing to name: which of the files is in the way does not matter, and
-    /// naming one of several would read as though the rest were fine.
+    /// naming one of several would read as though the rest were fine. Which of the two lists it is
+    /// decides the words and nothing else — see [`Told::runs`].
     AFile,
     /// The destination is the folder being dragged.
     Itself,
@@ -280,9 +320,10 @@ pub enum Refused {
 /// or moved four of five items and left the fifth where it was, is one the user has to go and check
 /// afterwards — and nothing on screen would have said which half happened.
 ///
-/// - **The sidebar takes folders**, so a selection with a file anywhere in it is refused.
-///   `all_folders` is asked once when the drag arrives rather than here — `is_dir` is a syscall and
-///   this runs on every mouse move.
+/// - **The sidebar and a tab strip take folders**, so a selection with a file anywhere in it is
+///   refused over either: both are lists of places, and neither a bookmark nor a tab is a thing a
+///   file can be. `all_folders` is asked once when the drag arrives rather than here — `is_dir` is a
+///   syscall and this runs on every mouse move.
 /// - **A folder cannot take a drop of itself, or of anything it is inside** — see [`swallows`] — so
 ///   a selection with one such folder in it is refused over that destination. Which item it is is
 ///   [`culprit`], and it is the one the sentence names.
@@ -296,7 +337,9 @@ pub fn refuses(onto: &Onto, items: &[PathBuf], all_folders: bool) -> Option<Refu
         return None;
     }
     match onto {
-        Onto::Bookmarks | Onto::BookmarkGroup(_) => (!all_folders).then_some(Refused::AFile),
+        Onto::Bookmarks | Onto::BookmarkGroup(_) | Onto::Tabs(_) => {
+            (!all_folders).then_some(Refused::AFile)
+        }
         Onto::Folder(into) => {
             let culprit = culprit(items, into)?;
             // Which of the two it is, from the item [`culprit`] picked — which prefers the one that
@@ -360,7 +403,11 @@ pub fn does_nothing(onto: &Onto, items: &[PathBuf], moving: bool, asked: bool) -
         // Pinning is not a move and never was: it copies nothing, so there is nothing for it to do
         // nothing *of*. Whether a folder is already pinned is not knowable from here anyway — the
         // bookmark list is not published to the callbacks.
-        Onto::Bookmarks | Onto::BookmarkGroup(_) => false,
+        //
+        // Nor is opening a tab, and there the answer is *no* rather than unknowable: a second tab on
+        // a folder that already has one is a second tab, which is exactly what the `+` at the end of
+        // the strip makes.
+        Onto::Bookmarks | Onto::BookmarkGroup(_) | Onto::Tabs(_) => false,
     }
 }
 
@@ -2041,6 +2088,99 @@ mod tests {
         // And Alt wins over either of them, which is what a hand resting on Ctrl needs it to do.
         assert_eq!(told(ALT | MK_CONTROL.0), linking);
         assert_eq!(told(ALT | MK_SHIFT.0), linking);
+    }
+
+    /// **A tab strip promises a tab, and says how many of them.**
+    ///
+    /// The three answers a strip's zone has, driven through the real `IDropTarget` because all three
+    /// are decided in the same callback and have to agree: the effect is `LINK` whatever is held down
+    /// — a tab copies nothing, and a copy cursor over a row of tabs would promise a copy that is
+    /// never going to happen — the verb is *Open* rather than anything read back off that effect, and
+    /// the far end of the sentence is the only one in this program that is **words rather than a
+    /// name**. See [`Onto::Tabs`].
+    ///
+    /// The plural is the reason this is not a lookup: a strip's zone is published in the singular by
+    /// a frame loop with no drag in hand, and *Open 3 items in a new tab* would promise one tab for
+    /// three folders. Only the callback knows how many are in the air.
+    ///
+    /// And a file refuses the whole drag with a sentence of its own — a tab is a place, and a file is
+    /// not one. Which is [`Refused::AFile`], the same refusal the sidebar has, saying so in the words
+    /// of the verb it refused rather than in the sidebar's.
+    #[cfg(windows)]
+    #[test]
+    fn a_tab_strip_promises_a_tab_and_counts_them() {
+        use windows::Win32::Foundation::POINTL;
+        use windows::Win32::System::Ole::{
+            IDropTarget, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE,
+            DROPEFFECT_NONE,
+        };
+        use windows::Win32::System::SystemServices::{MK_CONTROL, MK_SHIFT, MODIFIERKEYS_FLAGS};
+
+        let strip = Targets {
+            zones: vec![Region {
+                rect: (0, 0, 100, 100),
+                onto: Onto::Tabs(7),
+                name: "a new tab".to_owned(),
+            }],
+            from: None,
+        };
+        // One drag per case, because what a target holds is read once when the drag arrives.
+        let told = |items: Vec<PathBuf>, all_folders: bool, keys: MODIFIERKEYS_FLAGS| {
+            let shared = Arc::new(Mutex::new(Shared::default()));
+            shared.lock().unwrap().targets = strip.clone();
+            let ctx = egui::Context::default();
+            let target: IDropTarget =
+                win::Target::holding(shared.clone(), ctx, items, all_folders).into();
+            // Every effect offered, so nothing is degraded on the way out — see `permitted` — and
+            // what comes back is what the strip asked for rather than what the source allowed.
+            let mut effect =
+                DROPEFFECT(DROPEFFECT_COPY.0 | DROPEFFECT_MOVE.0 | DROPEFFECT_LINK.0);
+            // SAFETY: an out-parameter this call owns for its duration, and no data object —
+            // `DragOver` is the callback that carries none.
+            unsafe {
+                target
+                    .DragOver(keys, POINTL { x: 10, y: 50 }, &mut effect)
+                    .expect("DragOver refused");
+            }
+            let said = shared.lock().unwrap().telling.as_ref().map(Told::sentence);
+            (effect, said)
+        };
+        let plain = MODIFIERKEYS_FLAGS(0);
+        let one = vec![PathBuf::from(r"C:\work\src")];
+        let three = vec![
+            PathBuf::from(r"C:\work\src"),
+            PathBuf::from(r"C:\work\docs"),
+            PathBuf::from(r"C:\work\target"),
+        ];
+
+        assert_eq!(
+            told(one.clone(), true, plain),
+            (DROPEFFECT_LINK, Some("Open src in a new tab".to_owned())),
+            "a folder over a strip is a tab, and the sentence names the folder"
+        );
+        assert_eq!(
+            told(three, true, plain),
+            (DROPEFFECT_LINK, Some("Open 3 items in new tabs".to_owned())),
+            "three folders make three tabs, and the words have to say so"
+        );
+        // The modifiers change nothing: there is no such thing as opening a copy of a folder in a
+        // tab, so promising one would be worse than ignoring the key.
+        for keys in [MK_CONTROL.0, MK_SHIFT.0, MK_CONTROL.0 | MK_SHIFT.0] {
+            assert_eq!(
+                told(one.clone(), true, MODIFIERKEYS_FLAGS(keys)),
+                (DROPEFFECT_LINK, Some("Open src in a new tab".to_owned())),
+                "keys {keys} changed what a drop onto a strip would do"
+            );
+        }
+        // And a file in the air refuses all of it, in the verb's own words.
+        assert_eq!(
+            told(vec![PathBuf::from(r"C:\work\one.txt")], false, plain),
+            (
+                DROPEFFECT_NONE,
+                Some("Cannot open a file in a tab".to_owned())
+            ),
+            "a tab is a place, so a file over a strip is refused and told why"
+        );
     }
 
     /// A link into the folder the items are already in is a **real gesture**, unlike a move there.

@@ -1032,6 +1032,161 @@ fn a_folder_row_is_its_own_drop_target() {
     }
 }
 
+/// **The tab strip is a drop target, and what lands on it becomes tabs.**
+///
+/// The whole strip and not the tabs in it — see [`crate::shell::dnd::Onto::Tabs`] — so this asks the
+/// published zones at both ends: over a tab, where dropping still means the strip, and past the
+/// last one, where there is nothing else it could mean. The zone is what the OLE callbacks answer
+/// `DragOver` from, so it is the thing worth checking; the sentence they build out of it is
+/// `shell::dnd`'s own `a_tab_strip_promises_a_tab_and_counts_them`.
+///
+/// Then the drop itself, through [`crate::app::App::land`]: **several folders make several tabs**,
+/// in the order they were dragged and with the last of them showing, and nothing is copied or moved
+/// on the way — which is why this can run against the repository's own folders rather than in a
+/// sandbox.
+#[test]
+#[cfg(windows)]
+fn a_tab_strip_takes_folders_and_opens_them_in_tabs() {
+    use crate::shell::dnd::Onto;
+
+    let mut h = Harness::new();
+    h.settle();
+    let pane = h.app.panes[0].id;
+
+    let (strip_pane, strip) = *h
+        .app
+        .tab_strips
+        .first()
+        .expect("the window reported no tab strip at all, so nothing can be dropped on one");
+    assert_eq!(strip_pane, pane, "the one pane's strip belongs to it");
+
+    h.app.publish_drop_targets(&h.ctx.clone());
+    let scale = h.ctx.pixels_per_point();
+    let physical = |at: Pos2| ((at.x * scale) as i32, (at.y * scale) as i32);
+    // The one tab that is there, and the empty room past the `+` at the end of the strip.
+    let tab = h.app.tab_slots.first().expect("a tab on screen").rect;
+    for at in [tab.center(), pos2(strip.right() - 2.0, strip.center().y)] {
+        let resolved = h
+            .app
+            .drops
+            .resolve(physical(at))
+            .unwrap_or_else(|| panic!("no zone at {at:?} in the strip"));
+        assert_eq!(
+            resolved.onto,
+            Onto::Tabs(pane),
+            "{at:?} in the strip resolved to {resolved:?} rather than to the strip"
+        );
+        // Named in the singular, which is the far end of *Open src in a new tab*. The plural is put
+        // on by the callback that counts what the drag is holding, since a zone is published before
+        // there is a drag to count.
+        assert_eq!(
+            resolved.name, "a new tab",
+            "a strip's zone has to say what a drop there makes"
+        );
+        // And the highlight is the whole strip, wherever in it the pointer is: one tab lit up would
+        // promise a destination this program does not have.
+        h.app.drop_hover = Some(physical(at));
+        assert_eq!(h.app.tabs_preview(scale), Some(strip));
+    }
+    h.app.drop_hover = None;
+
+    // The drop. Two folders that exist, since a tab is opened on a folder that is going to be
+    // listed — and both are named, so the order they arrive in is checkable.
+    let here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let dropped = crate::shell::dnd::Dropped {
+        items: vec![here.join("src"), here.join("assets")],
+        // What the pointer was answered with over a strip, and what it means here is *nothing on
+        // disk changes*: see `Onto::Tabs`.
+        effect: crate::shell::clipboard::Effect::Link,
+        at: physical(strip.center()),
+        onto: Onto::Tabs(pane),
+        asked: false,
+    };
+    let before = h.app.panes[0].tabs.len();
+    h.app.land(&h.ctx.clone(), dropped);
+
+    let tabs: Vec<PathBuf> = h.app.panes[0]
+        .tabs
+        .iter()
+        .map(|tab| tab.path.clone())
+        .collect();
+    assert_eq!(
+        tabs.len(),
+        before + 2,
+        "two folders dropped on the strip should be two new tabs, got {tabs:?}"
+    );
+    assert_eq!(
+        &tabs[before..],
+        &[here.join("src"), here.join("assets")],
+        "the tabs have to arrive in the order the folders were dragged"
+    );
+    assert_eq!(
+        h.app.panes[0].active,
+        tabs.len() - 1,
+        "the last tab opened is the one on show, as it is for every other way of opening one"
+    );
+    assert!(
+        h.app.ops.in_progress().is_none(),
+        "a drop that opens tabs started a file operation: {:?}",
+        h.app.ops.in_progress()
+    );
+}
+
+/// **A drag over a tab brings that tab forward**, so the folder it names can be dropped into.
+///
+/// A drop onto the strip opens a tab, so a tab is not itself a way into the folder it shows — and
+/// without this there would be no way to reach a folder open in a tab you are not looking at: the
+/// drag would have to be put down, the tab clicked, and the files picked up again. See
+/// [`crate::app::App::reveal_hovered_tab`].
+///
+/// Driven through whole frames from the hover the OLE callbacks publish, because that is the only
+/// thing that knows a drag is over the window at all: OLE has the pointer for the length of the
+/// gesture, so egui sees no mouse event and `Response::hovered` is false everywhere.
+#[test]
+#[cfg(windows)]
+fn a_drag_over_a_tab_brings_it_forward() {
+    let mut h = Harness::new();
+    let here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    h.app.panes[0].tabs.push(Tab::new(here.join("src")));
+    h.app.panes[0].active = 1;
+    h.settle();
+
+    let scale = h.ctx.pixels_per_point();
+    let physical = |at: Pos2| ((at.x * scale) as i32, (at.y * scale) as i32);
+    let first = h
+        .app
+        .tab_slots
+        .iter()
+        .find(|slot| slot.tab == 0)
+        .expect("the first tab is not on screen")
+        .rect;
+
+    // A drag from another program, hovering the tab that is not the active one.
+    h.app.drops.hover(Some(physical(first.center())));
+    h.frame(Vec::new());
+    assert_eq!(
+        h.app.panes[0].active, 0,
+        "hovering a tab with files in the air did not bring it forward"
+    );
+    assert!(
+        h.take_journal().contains(&"ActivateTab"),
+        "the tab came forward by some other route than the action every other caller uses"
+    );
+
+    // And it stays put while the drag hovers it, rather than being re-activated every frame.
+    h.frame(Vec::new());
+    assert!(
+        !h.take_journal().contains(&"ActivateTab"),
+        "the tab was activated again on a frame where nothing about the drag had changed"
+    );
+
+    // The drag leaving takes nothing back: what it revealed is where the window now is, exactly as
+    // a click on the tab would have left it.
+    h.app.drops.hover(None);
+    h.frame(Vec::new());
+    assert_eq!(h.app.panes[0].active, 0);
+}
+
 /// Copy, cut, paste and delete, driven the way the keyboard drives them, on real files.
 ///
 /// The pieces are tested where they live -- `shell::clipboard` for the data object,

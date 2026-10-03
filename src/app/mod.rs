@@ -380,7 +380,17 @@ pub struct App {
     pane_rects: Vec<(PaneId, Rect)>,
     /// Every tab drawn this frame, wherever its strip was. The drag resolution needs all
     /// of them at once, and they are not all known until the panes have been drawn.
+    ///
+    /// A drag of *files* reads them too, to bring the tab under the pointer to the front — see
+    /// [`App::reveal_hovered_tab`].
     tab_slots: Vec<chrome::Slot>,
+    /// And each pane's strip, whole: the tabs, the `+`, and the room left over.
+    ///
+    /// The zone a folder is dropped on to be opened in a tab — see [`crate::shell::dnd::Onto::Tabs`]
+    /// — so it is the strip and not the tabs: the empty end of a strip is the part of it that is
+    /// obviously not a tab, and it has to take the drop as much as the tabs do. Read a frame late,
+    /// like every other published zone: see [`App::publish_drop_targets`].
+    tab_strips: Vec<(PaneId, Rect)>,
     splitters: Vec<Splitter>,
     pane_order: Vec<PaneId>,
 
@@ -623,6 +633,7 @@ impl App {
             scratch: String::with_capacity(64),
             pane_rects: Vec::new(),
             tab_slots: Vec::new(),
+            tab_strips: Vec::new(),
             splitters: Vec::new(),
             pane_order: vec![first],
             config,

@@ -340,6 +340,20 @@ impl App {
             .any(|tab| tab.preview.busy())
     }
 
+    /// Where the drag over the window is, in points — `None` when there is no drag.
+    ///
+    /// **The hover point arrives in physical pixels**, because that is what the drop zones are
+    /// published in and the OLE callbacks answer from: see [`App::publish_drop_targets`]. Everything
+    /// that draws the gesture works in points, so all six places that read it divided by the scale a
+    /// line at a time — and each carried its own `max(0.01)`, which is the part worth having in one
+    /// place: a division by a scale of nothing answers `inf` rather than failing, and a point at
+    /// infinity is inside no rectangle at all.
+    pub(super) fn hover_at(&self, scale: f32) -> Option<egui::Pos2> {
+        let (x, y) = self.drop_hover?;
+        let scale = scale.max(0.01);
+        Some(egui::pos2(x as f32 / scale, y as f32 / scale))
+    }
+
     /// What the drop highlight should cover in this pane, if anything.
     ///
     /// The folder row under the pointer when there is one, and the listing otherwise — which
@@ -350,14 +364,11 @@ impl App {
         if self.refusing() {
             return None;
         }
-        let (x, y) = self.drop_hover?;
+        let at = self.hover_at(scale)?;
         let pane = self.panes.iter().find(|p| p.id == pane)?;
         if pane.tab().path.as_os_str().is_empty() {
             return None;
         }
-        // The hover point arrives in physical pixels, as the drop zones are published.
-        let scale = scale.max(0.01);
-        let at = egui::pos2(x as f32 / scale, y as f32 / scale);
         if !pane.drop_area.contains(at) {
             return None;
         }
@@ -405,11 +416,9 @@ impl App {
     /// is that program's to picture, and Explorer already does — a second ghost drawn over its own
     /// is not this window's to add. The sentence and the highlight still appear for those.
     pub(super) fn draw_the_drag(&mut self, ui: &mut egui::Ui, t: &Theme, screen: Rect) {
-        let Some((x, y)) = self.drop_hover else {
+        let Some(at) = self.hover_at(ui.ctx().pixels_per_point()) else {
             return;
         };
-        let scale = ui.ctx().pixels_per_point().max(0.01);
-        let at = egui::pos2(x as f32 / scale, y as f32 / scale);
 
         // What it is carrying, above the pointer; what letting go would do, below it.
         if let Some((icons, count)) = self.ghost_icons(ui.ctx()) {
@@ -475,9 +484,7 @@ impl App {
         ctx: &egui::Context,
         screen: Rect,
     ) -> Option<(String, Rect)> {
-        let (x, y) = self.drop_hover?;
-        let scale = ctx.pixels_per_point().max(0.01);
-        let at = egui::pos2(x as f32 / scale, y as f32 / scale);
+        let at = self.hover_at(ctx.pixels_per_point())?;
         let told = self.saying()?.clone();
         // Into a throwaway layer: what is wanted is the arithmetic, and the painter is what does
         // it. Nothing reads this layer, and the context it is on is the test's own.
@@ -507,9 +514,8 @@ impl App {
         if self.refusing() {
             return None;
         }
-        let (x, y) = self.drop_hover?;
+        let at = self.hover_at(scale)?;
         let rect = self.bookmarks_rect?;
-        let at = egui::pos2(x as f32 / scale.max(0.01), y as f32 / scale.max(0.01));
         if !rect.contains(at) {
             return None;
         }
@@ -520,5 +526,26 @@ impl App {
                 .map(|(row, _)| row.intersect(rect))
                 .unwrap_or(rect),
         )
+    }
+
+    /// What the drop highlight should cover in a tab strip, when a drag is over one.
+    ///
+    /// **The whole strip, wherever in it the pointer is**, because that is the zone — a drop onto a
+    /// tab means the strip and not that tab's folder, so lighting one tab up would promise a
+    /// destination this program does not have. See [`crate::shell::dnd::Onto::Tabs`], and
+    /// [`Self::preview_rect`] for the rule this is the exception to: the highlight is a picture of
+    /// where the drop will land, and here that is the list.
+    ///
+    /// The tab under the pointer says what it has to say by *coming forward* instead — see
+    /// [`App::reveal_hovered_tab`], which is a change to the window rather than a mark on it.
+    pub(super) fn tabs_preview(&self, scale: f32) -> Option<Rect> {
+        if self.refusing() {
+            return None;
+        }
+        let at = self.hover_at(scale)?;
+        self.tab_strips
+            .iter()
+            .find(|(_, strip)| strip.contains(at))
+            .map(|&(_, strip)| strip)
     }
 }

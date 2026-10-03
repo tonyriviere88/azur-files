@@ -3714,6 +3714,34 @@ Windows sends `WM_XBUTTONDOWN` with `XBUTTON1`/`XBUTTON2`, winit turns those int
 `MouseButton::Back`/`Forward`, and egui into `PointerButton::Extra1`/`Extra2`. Anything past the
 fifth button becomes `winit::MouseButton::Other` and is dropped before egui sees it.
 
+### Dropping folders on a tab strip
+
+**Drop folders onto a pane's tabs and they open as tabs** — four folders, four tabs, in the order
+they were dragged and with the last of them showing, which is what opening several tabs any other
+way leaves. The strip is a list of *places* exactly as Bookmarks is, so it takes folders and refuses
+a drag with a file anywhere in it: *Cannot open a file in a tab*, and nothing lands. It answers
+`LINK` for the same reason the sidebar does — a tab is a folder being *shown*, so nothing is copied
+and nothing is moved — and the modifiers are ignored there, because there is no such thing as
+opening a copy of a folder in a tab and a `+` on the cursor would be promising one.
+
+**The zone is the whole strip, tabs included**, which is the one place in this program where
+dropping *on* something does not mean into that something: a tab is not a way into the folder it
+names. The highlight is the whole strip too, wherever in it the pointer is, since lighting one tab
+up would promise a destination that does not exist. And the sentence beside the pointer is the only
+one whose far end is words rather than a name — *Open src in a new tab*, *Open 3 items in new tabs*
+— so that end stays out of the accent, which everywhere else means "this is the thing you named".
+The count is put on in the callback rather than in the zone: a strip is named before there is a drag
+to count, and *Open 3 items in a new tab* would promise one tab holding three folders.
+
+**A drag over a tab brings that tab forward**, which is what makes the rest of it usable: since a
+drop on a tab opens a tab, hovering is how the folder a tab *shows* is reached at all — the pane
+appears under the pointer and its listing is a drop away below it. Otherwise the drag would have to
+be put down, the tab clicked, and the files picked up again. It happens the moment the pointer is
+over the tab, with no dwell: switching is `show_tab` and nothing else — every tab in a window is
+scanned whether it is on show or not, so no listing is read for being passed over — and a delay
+would be a gesture that does nothing for a moment and then does something. What it revealed stays
+revealed when the drag leaves, exactly as a click on the tab would have left it.
+
 ### An effect is an instruction, not a preference
 
 A drop out of a **7-Zip archive** deleted the files it was copying, halfway through. An archiver has

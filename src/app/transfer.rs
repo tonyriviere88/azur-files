@@ -217,7 +217,16 @@ impl App {
         /// and so what the pointer has to be told it means.
         const SECTION: &str = "Bookmarks";
 
-        let mut zones: Vec<Region> = Vec::with_capacity(self.panes.len() + 1);
+        /// And what a tab strip makes, which is the nearest thing it has to a name: there is no
+        /// heading over a row of tabs, and the place a drop there lands does not exist yet.
+        ///
+        /// The **singular**, because a zone is named here, before there is a drag to count. The
+        /// plural is put on where the count is — see `Target::describe`.
+        const A_NEW_TAB: &str = "a new tab";
+
+        // A pane's listing and a pane's strip, plus the Bookmarks section. The rows either of them
+        // publishes are what the vector grows for.
+        let mut zones: Vec<Region> = Vec::with_capacity(self.panes.len() * 2 + 1);
         // The bookmarks group first, so it is *behind* the panes: they cannot overlap, and
         // if a future layout let them, dropping onto a listing should mean the listing.
         if let Some(rect) = self.bookmarks_rect {
@@ -282,6 +291,25 @@ impl App {
                 }
             }
         }
+        // And the tab strips last, which is the order they are *painted* in: a strip is drawn over
+        // the panes so that a tab is never under a pane's card, and the zone that answers for it has
+        // to agree. Nothing overlaps today — a band's height comes off the panes under it — but a
+        // layout where it did should give the drop to the tab you can see.
+        //
+        // **The whole strip and not the tabs in it**, which is what makes the far end of the
+        // sentence *a new tab* rather than a folder's name: see [`crate::shell::dnd::Onto::Tabs`]
+        // for why dropping *on* a tab means the strip, and [`App::reveal_hovered_tab`] for what a
+        // drag over a tab does instead.
+        for (pane, strip) in &self.tab_strips {
+            if !usable(*strip) || !self.panes.iter().any(|it| it.id == *pane) {
+                continue;
+            }
+            zones.push(Region {
+                rect: physical(*strip),
+                name: A_NEW_TAB.to_owned(),
+                onto: Onto::Tabs(*pane),
+            });
+        }
         // And where this window's own drag began, which is not a place anything can be dropped but
         // is the one thing the pointer cannot work out for itself — see
         // [`crate::shell::dnd::Targets::from`]. The whole pane and not the row: a folder is in one
@@ -320,6 +348,48 @@ impl App {
             .collect()
     }
 
+    /// Bring the tab a drag is hovering over to the front, so the pane under it shows that folder.
+    ///
+    /// **What a drop onto a tab strip does is open a tab** — see [`crate::shell::dnd::Onto::Tabs`] —
+    /// so a tab is not a way in to the folder it names, and without this there would be no way to
+    /// reach a folder that is open in a tab you are not looking at: the drag would have to be put
+    /// down, the tab clicked, and the files picked up again. Hovering the tab reveals its pane, and
+    /// the listing that appears is a drop away below the pointer.
+    ///
+    /// **The moment the pointer is over it, with no dwell.** Sweeping along a strip therefore shows
+    /// each folder it crosses, which is worth more than it costs: switching a tab here is
+    /// [`crate::pane::Pane::show_tab`] and nothing else — every tab in the window is scanned whether
+    /// it is on show or not, so no listing is read for being passed over — and a delay would be a
+    /// gesture that does nothing for a moment and then does something, which is the shape of a bug.
+    ///
+    /// Read from [`App::tab_slots`], which is last frame's: the strips are drawn after this runs.
+    /// The same frame-late reading as every published drop zone, and for the same reason — a drag
+    /// holds the pointer, so the layout under it is not moving.
+    pub(super) fn reveal_hovered_tab(&mut self, ctx: &egui::Context) {
+        let Some(at) = self.hover_at(ctx.pixels_per_point()) else {
+            return;
+        };
+        let Some((pane, tab)) = self
+            .tab_slots
+            .iter()
+            .find(|slot| slot.rect.contains(at))
+            .map(|slot| (slot.pane, slot.tab))
+        else {
+            return;
+        };
+        // The pane is still there, the tab is still one of its tabs, and it is not already the one on
+        // show — which is what makes this happen once per tab rather than once per frame of the drag.
+        // Through the action, so that a tab coming forward is one thing wherever it is asked for,
+        // journal entry included.
+        if self
+            .panes
+            .iter()
+            .any(|it| it.id == pane && tab < it.tabs.len() && it.active != tab)
+        {
+            self.perform(ctx, Action::ActivateTab { pane, tab });
+        }
+    }
+
     /// Act on files dropped onto a pane, and highlight the one being hovered.
     pub(super) fn collect_drops(&mut self, ctx: &egui::Context) {
         // The highlight, while a drag is over the window. A repaint is asked for
@@ -345,6 +415,11 @@ impl App {
             self.drop_silent = silent;
             ctx.request_repaint();
         }
+
+        // And the tab under the pointer comes forward, which is the other half of what a drag over a
+        // strip does — the three above are what it *says*, this is what it changes. Beside them
+        // rather than after the drop, because it happens while the drag is still moving.
+        self.reveal_hovered_tab(ctx);
 
         for dropped in self.drops.take_drops() {
             self.land(ctx, dropped);
@@ -406,6 +481,24 @@ impl App {
                 for item in dropped.items {
                     if item.is_dir() {
                         self.perform(ctx, Action::AddBookmarkIn { group, path: item });
+                    }
+                }
+                return;
+            }
+            // Onto a pane's tab strip: a tab per folder, in the order they were dragged, and the
+            // last of them showing — which is what opening several tabs any other way leaves.
+            //
+            // **Nothing is copied and nothing is moved**, so there is no [`App::droppable`] here and
+            // no job: a tab is a folder being *shown*, and a folder can be shown in as many of them
+            // as somebody drops. The `is_dir` is the same guard the two arms above carry, for the
+            // same drag — the one that named its items only when it landed.
+            crate::shell::dnd::Onto::Tabs(pane) => {
+                if !self.panes.iter().any(|it| it.id == pane) {
+                    return;
+                }
+                for item in dropped.items {
+                    if item.is_dir() {
+                        self.perform(ctx, Action::NavigateNewTab { pane, path: item });
                     }
                 }
                 return;
