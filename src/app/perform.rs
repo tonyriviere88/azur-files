@@ -420,7 +420,35 @@ impl App {
                 if let Some(p) = self.pane_mut(pane) {
                     p.tab_mut().preview.close();
                 }
+                // A video filling the screen belongs to the panel that was showing it, and the panel
+                // has just gone. Nothing else has to be undone — the player went with the content —
+                // but the *window* is still fullscreen, and a fullscreen window with a file listing
+                // in it is not a state anybody asked for.
+                if self.fullscreen_video == Some(pane) {
+                    self.perform(ctx, Action::ToggleVideoFullscreen(pane));
+                }
                 self.config_dirty = true;
+            }
+            // **The window follows the state and not the other way round.** The flag is what the
+            // drawing reads — see [`App::theatre`] — and the viewport command is sent from here so
+            // that the four ways in and out cannot each have their own idea of what the window should
+            // be doing. Not written to the settings file: nobody wants to reopen the program with a
+            // video filling the screen.
+            //
+            // # The window is moved directly, not asked
+            //
+            // `ViewportCommand::Fullscreen` is the obvious way and it is wrong twice over for *this*
+            // window — which carries `WS_MAXIMIZE` and sits on the monitor's work area, so the
+            // platform keeps it clamped to the screen minus the taskbar. See `win::fill_screen`, which
+            // has both failures and does the whole transition in one move that does not animate.
+            Action::ToggleVideoFullscreen(pane) => {
+                let filling = self.fullscreen_video != Some(pane);
+                self.fullscreen_video = filling.then_some(pane);
+                self.fill_screen(filling);
+                // Nothing else asks for one: the window is about to change shape underneath a
+                // program that is idle between events, and the frame that notices is this one's
+                // successor.
+                ctx.request_repaint();
             }
             // The shell is not started here and not stopped here. Opening the panel is the cheap
             // half — `console_panel` starts one on the frame it first has a rect to draw in, and

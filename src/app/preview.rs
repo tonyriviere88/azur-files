@@ -63,6 +63,20 @@ impl App {
             })
             .collect();
 
+        // **A tab that has stopped being the active one is told**, before anything else, and it is
+        // the one thing here that has to reach the panels the loop above filtered out. An inactive
+        // tab is not drawn and not followed — so a video in one would go on playing, unseen and
+        // audible, until the tab was closed. Nothing else is affected: every other view is a still
+        // thing that costs nothing to be holding out of sight.
+        for pane in self.panes.iter_mut() {
+            let active = pane.active;
+            for (at, tab) in pane.tabs.iter_mut().enumerate() {
+                if at != active {
+                    tab.preview.out_of_sight();
+                }
+            }
+        }
+
         let mut soonest: Option<f64> = None;
         for (id, at, what) in wanted {
             let Some(pane) = self.panes.iter_mut().find(|p| p.id == id) else {
@@ -74,14 +88,30 @@ impl App {
             tab.preview.follow(what, now);
             let (ready, left) = tab.preview.settle(now);
             if let Some(ask) = ready {
-                let token = self.previews.request(&ask);
+                // **A video is opened here rather than asked for.** It is a player and not a read —
+                // see [`crate::preview::Kind::Video`] — so there is no worker, no token and no
+                // payload: the panel is handed the thing itself. Which is also why this is the one
+                // request that can fail on the spot, and says so where a decoder's complaint would
+                // have gone.
+                let player = match &ask {
+                    crate::preview::Ask::One(path, crate::preview::Kind::Video) => {
+                        Some(crate::preview::Player::open(path, self.preview.muted, ctx))
+                    }
+                    _ => None,
+                };
+                let token = player.is_none().then(|| self.previews.request(&ask));
                 if let Some(tab) = self
                     .panes
                     .iter_mut()
                     .find(|p| p.id == id)
                     .and_then(|p| p.tabs.get_mut(at))
                 {
-                    tab.preview.asked(ask, token);
+                    match (player, token) {
+                        (Some(Ok(player)), _) => tab.preview.plays(ask, player),
+                        (Some(Err(why)), _) => tab.preview.refused(ask, why),
+                        (None, Some(token)) => tab.preview.asked(ask, token),
+                        (None, None) => {}
+                    }
                 }
             }
             if let Some(left) = left {
@@ -146,6 +176,31 @@ impl App {
             return Some(Ask::AgainstHead(path));
         }
         Some(Ask::One(path, kind))
+    }
+
+    /// Fill the monitor with this window, or put it back exactly as it was.
+    ///
+    /// Windows only, and off it there is nothing to do rather than something missing: a video is only
+    /// ever [`crate::preview::Kind::Video`] on Windows, so there is no player anywhere else to fill a
+    /// screen with. See `win::fill_screen` for why the window is moved rather than asked.
+    pub(super) fn fill_screen(&self, on: bool) {
+        #[cfg(windows)]
+        crate::win::fill_screen(self.owner, on);
+        #[cfg(not(windows))]
+        let _ = on;
+    }
+
+    /// Whether a video is filling the screen. For the tests; the frame reads the field.
+    #[cfg(test)]
+    pub fn fullscreen_for_tests(&self) -> bool {
+        self.fullscreen_video.is_some()
+    }
+
+    /// The window size that would be written to the settings file. For the test that checks the
+    /// monitor's size is not recorded as the window's while a video is filling it.
+    #[cfg(test)]
+    pub fn window_size_for_tests(&self) -> Option<[f32; 2]> {
+        self.window_size
     }
 
     /// Whether any preview has been asked for and has not come back yet.

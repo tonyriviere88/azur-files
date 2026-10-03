@@ -169,16 +169,30 @@ fn a_name_says_what_it_will_be_shown_as() {
     assert_eq!(kind_of(".gitignore", "gitignore", false), Some(Kind::Text));
     assert_eq!(kind_of(".npmrc", "npmrc", false), Some(Kind::Unknown));
     // **And everything else is the shell's**, which is the point of the lists above being short: they
-    // are what this program decodes better than Windows would, not what has a preview. A `.pdf` and an
-    // `.mp4` have a registered visualizer; a `.zip` does not, and the difference is not knowable from
-    // the name — so all three come here and `visual::load` is what finds out.
+    // are what this program decodes better than Windows would, not what has a preview. A `.pdf` has a
+    // registered visualizer; a `.zip` does not, and the difference is not knowable from the name — so
+    // both come here and `visual::load` is what finds out.
     if cfg!(windows) {
         assert_eq!(kind_of("a.zip", "zip", false), Some(Kind::Shell));
-        assert_eq!(kind_of("a.mp4", "mp4", false), Some(Kind::Shell));
         assert_eq!(kind_of("a.pdf", "pdf", false), Some(Kind::Shell));
         assert_eq!(kind_of("a.docx", "docx", false), Some(Kind::Shell));
+        // Except a video, which is neither decoded here nor rendered by the shell: it is *played*,
+        // by Media Foundation, which is a player and not a read. See `Kind::Video`.
+        assert_eq!(kind_of("a.mp4", "mp4", false), Some(Kind::Video));
+        assert_eq!(kind_of("a.MKV", "MKV", false), Some(Kind::Video));
+        assert_eq!(kind_of("a.mov", "mov", false), Some(Kind::Video));
+        assert_eq!(kind_of("a.webm", "webm", false), Some(Kind::Video));
+        // A video by name that no ordinary machine has a decoder for is still a video by name —
+        // what a file *is* does not depend on what is installed, and the engine says so in the
+        // panel when it cannot open one.
+        assert_eq!(kind_of("a.flv", "flv", false), Some(Kind::Video));
+        // And an animated GIF stays a picture, because this program decodes those itself and can
+        // zoom, diff and compare the result. The two lists overlap and `PICTURES` is asked first.
+        assert_eq!(kind_of("a.gif", "gif", false), Some(Kind::Picture));
     } else {
         assert_eq!(kind_of("a.pdf", "pdf", false), None);
+        // No engine off Windows, so a video is what it always was: something with no preview.
+        assert_eq!(kind_of("a.mp4", "mp4", false), None);
     }
     // A folder is what the listing beside the panel is already showing, on either platform.
     assert_eq!(kind_of("src", "", true), None);
@@ -777,3 +791,76 @@ fn a_complaint_is_cut_to_something_that_fits_in_a_panel() {
     assert!(short(&"very long complaint ".repeat(20)).len() <= 80);
 }
 
+
+/// **A video frame is fetched at the size it will be drawn**, which is the bound that makes copying
+/// every frame back from the graphics device affordable at all.
+///
+/// Four rules in one function, and each of them is a thing that goes wrong without it — see
+/// [`video::wanted`]. The aspect ratio is checked on every answer rather than only where it is the
+/// point: the canvas draws this texture into a rect it has fitted, so a size that has drifted off
+/// the file's shape is a picture stretched by a pixel or two with nothing to say it happened.
+#[test]
+fn a_video_frame_is_asked_for_at_the_size_it_will_be_drawn() {
+    use egui::vec2;
+    use video::wanted;
+
+    let ratio = |[w, h]: [u32; 2]| w as f32 / h as f32;
+    let hd = [1920u32, 1080];
+
+    // A panel a few hundred points wide gets a few hundred pixels, not two million: 400 points
+    // against 1920 is a fit of 0.208, which ceils onto the second of eight steps — a quarter.
+    let small = wanted(hd, vec2(400.0, 300.0), 1.0);
+    assert_eq!(small, [480, 270]);
+    assert!((ratio(small) - ratio(hd)).abs() < 0.01, "{small:?} is not 16:9");
+
+    // The same panel on a 2× display asks for twice the pixels, because that is how many will be
+    // drawn — 0.417 of the file, which is the fourth step.
+    assert_eq!(wanted(hd, vec2(400.0, 300.0), 2.0), [960, 540]);
+
+    // **Never past the file's own size.** A clip smaller than the panel is fetched at its size and
+    // the canvas is what stretches it — enlarging on the device and then again in egui would be two
+    // blurs for the price of one.
+    assert_eq!(wanted([320, 240], vec2(1200.0, 900.0), 1.0), [320, 240]);
+
+    // **And never past `CAP`**, which for a 4K file is the rule that decides the answer.
+    let huge = wanted([3840, 2160], vec2(4000.0, 3000.0), 1.0);
+    assert!(huge[0] <= CAP && huge[1] <= CAP, "{huge:?} is over the cap");
+    assert!((ratio(huge) - ratio(hd)).abs() < 0.01, "{huge:?} is not 16:9");
+
+    // **Quantised**, which is what keeps a splitter drag from reallocating a texture pair on every
+    // frame of it: a range of panel widths has to come back with one answer.
+    let steady: Vec<[u32; 2]> = (0..12)
+        .map(|i| wanted(hd, vec2(400.0 + i as f32, 300.0), 1.0))
+        .collect();
+    assert_eq!(
+        steady.iter().collect::<std::collections::BTreeSet<_>>().len(),
+        1,
+        "twelve panel widths one point apart wanted more than one frame size: {steady:?}"
+    );
+
+    // A panel dragged to nothing still asks for something the engine will accept.
+    let tiny = wanted(hd, vec2(0.0, 0.0), 1.0);
+    assert!(tiny[0] >= 1 && tiny[1] >= 1, "{tiny:?} is not a texture");
+    // As does a file whose size is not known yet, which is what the caller checks for.
+    assert_eq!(wanted([0, 0], vec2(400.0, 300.0), 1.0), [0, 0]);
+}
+
+/// The strip's clock: minutes for a clip, hours only when there are hours.
+#[test]
+fn a_position_in_a_video_reads_as_a_clock() {
+    use video::clock;
+
+    assert_eq!(clock(0.0), "0:00");
+    assert_eq!(clock(7.4), "0:07");
+    assert_eq!(clock(59.9), "0:59");
+    assert_eq!(clock(60.0), "1:00");
+    assert_eq!(clock(252.0), "4:12");
+    // Padded to two digits inside the hour and not outside it: `1:03:20` reads as a position and
+    // `0:00:07` reads as a stopwatch.
+    assert_eq!(clock(3800.0), "1:03:20");
+    // Nothing sensible is still a clock rather than a panic or an empty label: a stream's duration
+    // is infinite and an unopened file's is not a number.
+    assert_eq!(clock(f64::NAN), "0:00");
+    assert_eq!(clock(f64::INFINITY), "0:00");
+    assert_eq!(clock(-5.0), "0:00");
+}

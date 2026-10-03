@@ -81,6 +81,7 @@ mod picture;
 mod text;
 #[cfg(test)]
 mod tests;
+mod video;
 
 // The view modules reach each other through here: the panel is one thing on screen and the
 // pieces of it are not independent — the find bar's marks land on the text canvas, the diff
@@ -234,6 +235,16 @@ pub struct Layout {
     /// **Off by default**, and the opposite argument to `diff`: this one hides most of the file, which
     /// is right when reviewing a change and wrong when reading a file that happens to have one.
     pub collapse: bool,
+    /// Play video with the sound off.
+    ///
+    /// A preference and not a per-file setting, for the reason `numbers` is one: somebody who does
+    /// not want a folder of clips making noise does not want the next one making noise either, and a
+    /// mute that had to be pressed again on every file would be a mute nobody used.
+    ///
+    /// **Off by default** — a video plays with its sound. Muted-by-default is the web's convention
+    /// and it is a convention about *pages that start playing at you*; this one plays because the
+    /// keyboard was moved onto it and held still.
+    pub muted: bool,
 }
 
 impl Default for Layout {
@@ -245,6 +256,7 @@ impl Default for Layout {
             markup: false,
             diff: true,
             collapse: false,
+            muted: false,
         }
     }
 }
@@ -260,6 +272,14 @@ enum Content {
     Picture(Box<Picture>),
     Text(Text),
     Binary(deps::View),
+    /// A video, playing.
+    ///
+    /// **The only variant that is a live thing rather than an answer**, and the only one whose drop
+    /// matters: it holds a decoder, a clock and the audio device, and a player let go of without
+    /// being shut down goes on being audible. Every path that stops showing one therefore has to
+    /// come through [`Preview::forget`] — which it does, because that is where the content is
+    /// replaced, and replacing it is what drops this.
+    Video(preview::Player),
     /// Something went wrong, in a few words.
     Failed(String),
 }
@@ -305,7 +325,18 @@ impl Preview {
     }
 
     /// Whether a read has been asked for, or is about to be, and has not landed yet.
+    ///
+    /// **A video that has not shown its first frame counts**, even though nothing was asked of
+    /// [`preview::Previews`] for it: this is what `--shot --preview` waits on, and without it a
+    /// capture of a video panel is a photograph of the word `Opening…`. It stops counting the moment
+    /// there is a frame *or* a complaint, so a file Media Foundation cannot play does not hold a
+    /// capture open until its patience runs out.
     pub fn busy(&self) -> bool {
+        if let Content::Video(player) = &self.content {
+            if player.opening() {
+                return true;
+            }
+        }
         self.awaiting.is_some() || self.pending.is_some()
     }
 
@@ -337,9 +368,22 @@ impl Preview {
     /// [`crate::ui::deps::View::first_foldable`], which is where the reason this is needed is
     /// written down.
     #[cfg(test)]
-    pub fn dependency_first_foldable(&self) -> Option<usize> {
+    pub fn dependency_first_foldable(&self, rows: usize) -> Option<usize> {
         match &self.content {
-            Content::Binary(view) => view.first_foldable(),
+            Content::Binary(view) => view.first_foldable(rows),
+            _ => None,
+        }
+    }
+
+    /// Whether this is the video view, and what the player has to say for itself: the complaint if
+    /// it has one, and how long the file runs if it got that far. For the tests.
+    #[cfg(test)]
+    pub fn video(&self) -> Option<(Option<String>, Option<f64>)> {
+        match &self.content {
+            Content::Video(player) => Some((
+                player.failed().map(str::to_owned),
+                player.duration(),
+            )),
             _ => None,
         }
     }
@@ -475,6 +519,52 @@ impl Preview {
         self.content = Content::Reading;
     }
 
+    /// A player has been opened for it instead — see [`preview::Kind::Video`].
+    ///
+    /// The same bookkeeping as [`Self::asked`] minus the token, because there is no answer coming:
+    /// the panel is holding the thing itself. Assigning over `content` is what shuts whatever player
+    /// was there before, which is the whole of the teardown for arrowing from one clip to the next.
+    pub fn plays(&mut self, ask: Ask, player: preview::Player) {
+        self.of = Some(ask);
+        self.awaiting = None;
+        self.content = Content::Video(player);
+    }
+
+    /// And it could not be opened at all: no engine on this machine, or a path it would not take.
+    ///
+    /// Distinct from a [`Payload::Failed`] arriving only in where it comes from — there is no read to
+    /// come back — so the panel shows the same thing either way: the sentence, in the middle, where
+    /// the canvas would be.
+    pub fn refused(&mut self, ask: Ask, why: String) {
+        self.of = Some(ask);
+        self.awaiting = None;
+        self.content = Content::Failed(why);
+    }
+
+    /// The player the keyboard belongs to, if it is this panel's.
+    ///
+    /// `force` is for a video filling the screen, which has the keys by construction: there is nothing
+    /// else on screen to have clicked, so requiring a click first would mean a fullscreen video that
+    /// ignored the space bar until you had pressed it once for no reason.
+    pub fn keyed_player(&mut self, force: bool) -> Option<&mut preview::Player> {
+        match &mut self.content {
+            Content::Video(player) if force || player.has_keys() => Some(player),
+            _ => None,
+        }
+    }
+
+    /// This panel's tab has stopped being the one on show.
+    ///
+    /// **Only a video needs telling.** Every other view is a still thing that costs nothing to be
+    /// holding out of sight, and this one is a video going on playing in a tab nobody can see. It is
+    /// paused rather than dropped: coming back to the tab should find the clip where it was left,
+    /// which is what switching tabs means everywhere else in this window.
+    pub fn out_of_sight(&mut self) {
+        if let Content::Video(player) = &mut self.content {
+            player.hidden();
+        }
+    }
+
     /// A read has come back. Ignored unless it is the one being waited for.
     pub fn arrived(&mut self, token: u64, payload: Payload, ctx: &egui::Context) {
         if self.awaiting != Some(token) {
@@ -558,6 +648,27 @@ impl Preview {
                     .unwrap_or_default(),
             ),
         };
+    }
+}
+
+/// Draw this panel's video over the whole window instead of in its panel. See [`video::theatre`].
+///
+/// `false` when there is nothing to fill a screen with — no video in this panel any more, or one that
+/// will not play — and then the caller takes the window back. It is asked as one question rather than
+/// two so that "is there a player" and "draw the player" cannot disagree: this is the only thing on
+/// screen while it is true, so a frame that decided wrongly is a frame with nothing in it at all.
+pub fn theatre(
+    ui: &mut Ui,
+    t: &Theme,
+    screen: Rect,
+    pane: PaneId,
+    preview: &mut Preview,
+    layout: &mut Layout,
+    out: &mut Vec<Action>,
+) -> bool {
+    match &mut preview.content {
+        Content::Video(player) => video::theatre(ui, t, screen, pane, player, layout, out),
+        _ => false,
     }
 }
 
@@ -696,6 +807,7 @@ pub fn show(
             note(ui, t, canvas, &why)
         }
         Content::Picture(picture) => pictures(ui, t, canvas, pane, picture),
+        Content::Video(player) => video::show(ui, t, canvas, pane, player, layout, out),
         Content::Text(text) => match &text.doc {
             Some(doc) if !layout.markup => document::draw(ui, t, canvas, pane, doc, find),
             _ => text_canvas(ui, t, canvas, pane, text, layout.numbers, find),

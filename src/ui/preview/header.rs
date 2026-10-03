@@ -359,6 +359,20 @@ pub(super) fn header(
                 comment.push_str("first part only");
             }
         }
+        // The picture's size in the slot that survives, and how long it runs in the one that gives
+        // way — which is the other way round from what it looks like it should be, and is the same
+        // argument the shell render makes two arms up. The running time is *already on screen*, in
+        // the strip under the canvas beside a clock that says where in it you are; the pixel size is
+        // written down nowhere else. Repeating the duration here at the cost of the dimensions would
+        // be spending the surviving slot on the one fact the panel is already showing.
+        Content::Video(player) => {
+            if let Some([w, h]) = player.native() {
+                let _ = write!(size, "{w} × {h}");
+            }
+            if let Some(duration) = player.duration() {
+                comment.push_str(&crate::preview::video::clock(duration));
+            }
+        }
         Content::Binary(view) => {
             let (files, api_sets, missing) = view.graph().tally();
             if missing > 0 {
@@ -387,6 +401,9 @@ pub(super) fn header(
     let mut x = rect.left() + PAD;
     let (glyph, ink): (azur_egui_theme::icons::Icon<'_>, Color32) = match &preview.content {
         Content::Picture(_) => (&crate::icons::image, t.image),
+        // The same glyph and the same hue the row in the listing beside it is wearing, which is what
+        // the whole table in `crate::icons::for_kind` is for.
+        Content::Video(_) => (&crate::icons::video, t.video),
         Content::Text(_) => (&crate::icons::document, t.document),
         Content::Binary(_) => (&crate::icons::executable, t.executable),
         Content::Failed(_) => (&azur_icons::error, t.status.danger),

@@ -1352,9 +1352,9 @@ them.
 
 ## The preview panel
 
-The eye on the path bar — or `Ctrl+P` — opens a panel **inside the pane**, showing what is in the
-file the keyboard is on. Three views: a picture, some text, or for a binary the dependency tree
-below.
+The eye on the path bar — or `Ctrl+P`, or `Space` — opens a panel **inside the pane**, showing what
+is in the file the keyboard is on. Four views: a picture, a video playing, some text, or for a
+binary the dependency tree below.
 
 ```
 ┌───────────────┬──────────────────────────────────────────────────────┐
@@ -1373,6 +1373,15 @@ below.
 folder it is beside: two panes each showing a build of the same DLL get their own, and comparing
 them is a matter of looking left and right rather than clicking back and forth. So each *folder*
 has one — shut by default, and switching tabs puts back the one that tab had open.
+
+**`Space` is the other key for it**, from the listing, and it needs a rule because a space is also a
+letter: names on a Windows disk are full of them, so while a word is being typed the bar belongs to
+the word — `annual r` goes on looking for `Annual Report.pdf` rather than opening the panel halfway
+through it. A word is in flight for one second after the last letter, the gap the type-ahead already
+measures, which is also the rule the platform's own listings follow. A space that is merely *still*
+down is a letter too, or a thumb resting on the bar would flap the panel at the machine's repeat
+rate. And a video that has been clicked keeps the key —
+[it plays and pauses instead](#its-keyboard-and-the-click-that-has-to-wait).
 
 Where it goes is the window's preference and lives on the eye's **context menu**: `Show preview`,
 then `Right`, `Bottom` or `Auto`. One setting rather than one per folder, because "where the
@@ -1572,6 +1581,152 @@ percentage on the bar is the honest count, before any of that.
 
 The same three views are what `±` shows for **one** picture git has an older version of — see
 [A picture, and the one in the last commit](#a-picture-and-the-one-in-the-last-commit).
+
+### Video, played rather than pictured
+
+A `.mp4`, `.mkv`, `.mov`, `.webm`, `.avi`, `.wmv` — anything the Type column calls a video — opens on
+its **first frame, paused**, ready to play. A strip along the bottom of the canvas holds play/pause,
+where it has got to against how long it runs, a scrubber that seeks, mute, and fullscreen.
+
+```
+┌───────────────────────────────────────────┐
+│ 🎬 clip.mp4              1:24  1920×1080  │  the panel's bar
+├───────────────────────────────────────────┤
+│                                           │
+│              (the picture)                │
+│                                           │
+├───────────────────────────────────────────┤
+│ ▶  0:07 ──────●───────────  1:24  🔊  ⛶   │  the strip
+└───────────────────────────────────────────┘
+```
+
+**It does not start by itself.** The panel follows the keyboard, so autoplay would mean a folder of
+clips performing one after another as you looked down it — and the loud half of that is not something
+to make somebody undo. Which makes the interesting part of opening one a pair of settings rather than
+a decision: with autoplay off the engine has no reason to fetch anything, so it is asked to preload
+anyway, and the ready state reaching `HAVE_CURRENT_DATA` is exactly "there is a frame to show now".
+Without that the panel would sit on `Opening…` until somebody pressed play, which is not a preview.
+
+**A click on the picture is play/pause, a double click fills the screen** — and so does the button in
+the corner of the strip, with `Esc` or either gesture again to come back. Fullscreen is drawn *instead
+of* the window rather than over it: the panes, the sidebar and the title bar are not drawn at all, so
+there is nothing underneath still hit-testing itself for a click meant for the scrubber, and nothing
+laying out columns or asking the shell for thumbnails nobody can see. The window's shortcuts stand
+down with them, all but the one that gets out. The ground beside the picture goes from `bg.canvas` to
+black on the way in, because a panel belongs to the window around it and there is no longer a window
+around it.
+
+**The window is moved rather than asked**, and `ViewportCommand::Fullscreen` is wrong twice over for
+this one. This window is maximised by carrying `WS_MAXIMIZE` and sitting on the monitor's *work area* —
+see `win::open_maximized`, whose whole point is that the client area is the work area exactly — and the
+work area is the screen minus the taskbar. Windows keeps a window wearing that bit clamped to it, so
+asking for fullscreen grew the window and left the client area behind: the program drew into a surface
+one taskbar shorter than the window it was in, and the band along the bottom showed whatever the
+compositor last had there. It read as the video not quite filling the screen.
+
+Un-maximising first fixes that and costs an animation each way — the window shrinking to its restored
+size, then growing to the monitor, both animated by the platform. What a video filling the screen wants
+is for the screen to *be* filled, now. So the whole transition is **one `SetWindowPos`**, which does
+not animate: the style bit comes off, the window goes to the monitor's bounds, and the way back is the
+same move in reverse, through `open_maximized`'s own recipe when the window was maximised so `WM_SIZE`
+arrives as `SIZE_MAXIMIZED` and winit learns the state it is in. It is topmost while it fills the
+screen, because Windows hiding the taskbar for a fullscreen window is a heuristic rather than a
+promise, and the failure is the taskbar sitting exactly where the controls are.
+
+### Its keyboard, and the click that has to wait
+
+Clicking the picture gives that player the keyboard: **Space** plays and pauses, **← and →** move ten
+seconds, and holding one keeps stepping. Nothing is drawn differently for it — a focus ring around a
+video is a border around the picture, which is worse than not knowing, and the panel sits beside the
+row it is about.
+
+Which player has the keys is decided by each canvas about itself: a press anywhere tells every drawn
+video canvas whether the pointer was over it, so clicking one video takes the keys off another without
+either knowing the other exists. Those three keys are then *consumed*, so the listing does not also see
+them — the arrows are how a selection moves, and `Space` is [the listing's own key for the
+panel](#the-preview-panel), so one press either plays the video or shuts the panel and never both.
+Everything else falls through, so `Ctrl+P` and `F5` still work; `Alt+←` stays Back, because the keys
+are only taken bare.
+
+A field being typed into keeps them, though, and that is not the same question as which video was
+clicked: `` Ctrl+` `` moves the keyboard into the console without the pointer ever leaving the video,
+so the player still holds the keys and a space at the prompt would pause the film instead of
+arriving. A video filling the screen is the one case where nothing else can be typed into, and it
+keeps them regardless.
+
+A held arrow steps at **the player's own cadence, not the machine's key-repeat rate**, which is a
+setting on the machine and has no business deciding how fast a video scrubs: at a typical thirty
+repeats a second, ten seconds a repeat would cross a five-minute film in under a second. A step every
+eighth of a second is about eighty seconds of travel a second — and it makes a tap exactly one step
+whatever the repeat delay is set to.
+
+**A click on the picture is held before it plays.** egui reports the first press of a double click as an
+ordinary click and only names the second one, so acting immediately means a double click plays *and*
+fills the screen — a video that pauses itself for having been maximised. So the click waits one
+double-click delay and a double click cancels it, which is why play/pause from the picture is a fraction
+slower than from the button in the strip, where there is no ambiguity to wait out.
+
+And a seek asks for **a few frames afterwards** whatever the play state. A seek while paused produces
+exactly one new frame, milliseconds later, and nothing else would come back for it: the window is idle
+in front of a paused video, so the scrubber would move and the picture would not.
+
+**It is Windows' player, not a decoder in here.** `IMFMediaEngine` — Media Foundation's Media Engine,
+the one Edge plays `<video>` with — resolves the file, picks the hardware decoder, opens the audio
+device, keeps picture and sound together and answers a seek. Every one of those is a thing this program
+would otherwise be writing, and the audio one is not writable at all without an output device, so the
+alternative here was never `ffmpeg`: it was *no player*. What it costs is four feature flags on the
+`windows` crate that is already in the graph, and **not one new dependency**.
+
+**Frame-server mode, which is chosen by omission.** Tell the engine about a window and it renders into
+one; tell it about a composition visual and it renders into that. Setting neither makes it a frame
+server that writes each frame into a texture this program owns — and that is the only one of the three
+usable here. The other two are the same trap `IPreviewHandler` is, which is why a `.pdf` in this panel
+is a still page and not Explorer's scrolling one: a surface the compositor owns sits **over** everything
+egui paints, so every menu, dropdown and drag overlay in the window would go behind the video. See
+`preview::visual`, which sets that out at length and is where the decision was first taken.
+
+So the deal is a copy: the engine writes a frame on the graphics device, and this reads it back and
+hands it to egui as an ordinary image. That is affordable because of what is asked for — **the frame at
+panel size, not the file's**. The engine does the scaling where scaling belongs, so a 4K film costs the
+same here as a phone clip: a few hundred kilobytes a frame instead of 33 MB. The size is quantised onto
+eight steps of the file's own, because the panel's size follows a splitter drag continuously and a pair
+of textures reallocated per frame of a drag would make it the most expensive gesture in the window.
+
+Zero-copy is possible — a shared handle out of D3D11, imported into wgpu — and is deliberately not
+done: it can only work on one backend, and it would cost the `AZUR_GLOW=1` escape hatch that
+[the renderer](#the-one-that-was-not-ours) keeps. An egui texture works on both.
+
+**The device is never given back**, and that is deliberate rather than sloppy. Releasing a D3D11 device
+Media Foundation has been decoding on hangs inside the display driver — measured, with a debugger on
+the stuck process:
+
+```text
+drop_glue<Shared>  →  IMFDXGIDeviceManager::Release
+  →  d3d11!CDevice::LLOBeginLayerDestruction  →  nvwgf2umx  →  WaitForSingleObject   ⟵ forever
+```
+
+Media Foundation is not shut down either, for the reason the shell modules never call
+`CoUninitialize`, so its work queues are still live when the last reference to the device goes and the
+driver waits for something that never happens. It surfaced in a *test*, whose thread exits mid-process
+and so ran the destructor — but the same destructor runs on the main thread as the program closes, so
+what the leak buys is the window shutting instead of hanging with nothing on screen to click. Leaked
+memory has no destructor to deadlock, and at exit the kernel takes it back like everything else.
+
+**Playing costs frames.** The window is idle between events everywhere else in this program; a playing
+video asks for a repaint per frame for as long as it plays, and stops asking the moment it is paused.
+Which is also why **switching tabs pauses it**: an inactive tab is not drawn, so nothing would be
+pulling frames — and nothing would have stopped the sound either, and a video playing where nobody can
+see it is the one failure here somebody would report as a bug in the file manager.
+
+Sound is **on**, and mute is a window preference like line numbers rather than a per-file switch —
+somebody who does not want a folder of clips making noise does not want the next one making noise
+either. Muted-by-default is the web's convention and it is a convention about pages that start playing
+at you; this one plays because the keyboard was moved onto it and held still for a quarter of a second.
+
+**What the machine cannot play says so.** The extension list is what a video *is* — a `.flv` is a video
+whether or not anything can decode one — so an AV1 or HEVC file on a machine without that decoder
+installed gets `No codec for this video` in the middle of the panel rather than a silent empty box. A
+container holding a sound track and no picture says that too, and still plays.
 
 ### Text
 
@@ -3706,6 +3861,7 @@ A pipe is not a terminal and every program can tell:
 | `Ctrl+H` | show hidden files — every pane, and remembered between sessions |
 | `Ctrl+D` | bookmark this folder |
 | `Ctrl+P` | preview the selection — works from inside the filter box, like `Ctrl+E` |
+| `Space` | the same, from the listing — unless a name is being typed, or a video has the keys |
 | `Ctrl+X` / `Ctrl+C` / `Ctrl+V` | cut / copy / paste |
 | `Delete` / `Shift+Delete` | recycle / delete permanently |
 | `F2` | rename |

@@ -11,6 +11,8 @@
 //!   never paint a megabyte of `\0` into a wrapped paragraph.
 //! - **A binary.** [`crate::pe`]'s dependency walk, which is the interesting thing a `.dll`
 //!   has inside it.
+//! - **A video.** Played, with sound, by Media Foundation's Media Engine — the odd one out, because
+//!   it is not read at all. See [`video`], which does not go through the service below.
 //! - **Anything else.** Handed to whatever visualizer Windows has registered for the type, which
 //!   is where a `.pdf`, an `.mp4`, a `.docx` and a camera's `.cr2` get their picture — see
 //!   [`visual`]. **The general case, and the other three are the exceptions**: those are the file
@@ -42,6 +44,7 @@
 //! | [`vector`] | `.svg`, rasterised by `resvg` at the size asked for |
 //! | [`diff`] | two pictures, or one against `HEAD` |
 //! | [`search`] | the find bar's walk over a text body |
+//! | [`video`] | anything to play, through Media Foundation — a player, not a read |
 //! | [`visual`] | everything else, through whatever Windows has registered for it |
 
 use std::path::Path;
@@ -53,6 +56,7 @@ pub mod picture;
 pub mod search;
 pub mod text;
 pub mod vector;
+pub mod video;
 pub mod visual;
 
 // The names the rest of the program knows this module by. Splitting the reading up by content
@@ -62,6 +66,7 @@ pub use diff::Diff;
 pub use picture::Picture;
 pub use search::{hits, Search};
 pub use text::Text;
+pub use video::Player;
 // And the three [`crate::shell::thumbs`] needs, for the file types it draws itself instead of
 // handing to the shell — see that module's header. Named here for the reason just above: which file
 // each decoder lives in is this module's business, and these were the first names in the program to
@@ -79,6 +84,18 @@ pub enum Kind {
     Text,
     /// A Windows binary: what it imports, and from where.
     Binary,
+    /// Something to play: a `.mp4`, a `.mkv`, a `.mov`.
+    ///
+    /// **The one kind that is not read at all.** Every other answer here names a decoder that runs
+    /// once on a worker and hands back a finished thing; this one names a *player*, which has a
+    /// clock, makes sound and has to be shut down. So it never reaches [`read`] — see
+    /// [`crate::app::App::collect_previews`], which opens a [`video::Player`] straight into the
+    /// panel, and [`video`]'s header for why that is the right shape rather than a shortcut.
+    ///
+    /// Windows only, because the engine behind it is. Off Windows a video is [`Kind::Shell`]'s
+    /// problem, which is to say nobody's, and the panel says there is no preview — exactly as it did
+    /// for every video before this existed.
+    Video,
     /// No extension, or one nothing here has heard of. **Decided on the worker** by looking at
     /// the first few kilobytes, because "is this text?" is a question about contents and the
     /// answer for `README`, `LICENSE`, `Makefile` and `.gitignore` is yes. A file that turns out
@@ -188,6 +205,22 @@ pub fn is_code(stem: &str, ext: &str) -> bool {
     true
 }
 
+/// Whether this extension is something to play.
+///
+/// **There is no `VIDEOS` list here**, deliberately, and it is the one classification in this module
+/// that borrows somebody else's table: [`crate::fs::fmt`]'s, the same one the Type column reads and
+/// the same one [`crate::fs::fmt::shows_a_picture`] counts to decide whether a folder opens as tiles.
+/// A second list would be a second opinion about what a `.mkv` is — and the listing's Type column
+/// saying "Matroska video" beside a panel that had never heard of it is exactly the disagreement
+/// [`PICTURES`] and the tiles once had.
+///
+/// It is a wider list than Media Foundation can play: a `.flv` is a video by name and there is no
+/// decoder for one on any ordinary machine. That is the right way round — what a *file* is does not
+/// depend on what is installed — and the engine says so in the panel when it cannot open one.
+fn is_video(ext: &str) -> bool {
+    crate::fs::fmt::kind_of(ext, false) == crate::fs::fmt::Kind::Video
+}
+
 /// What a file is, from its name alone. `None` for something with no preview at all.
 ///
 /// A folder is not previewed: what a folder contains is what the listing beside the panel is
@@ -221,6 +254,8 @@ pub fn kind_of(name: &str, ext: &str, is_dir: bool) -> Option<Kind> {
         Some(Kind::Text)
     } else if crate::pe::is_image(ext) {
         Some(Kind::Binary)
+    } else if cfg!(windows) && is_video(ext) {
+        Some(Kind::Video)
     } else if ext.is_empty() || name.starts_with('.') {
         // `README`, `LICENSE`, `Makefile`, `.gitignore`, `.npmrc`. A leading dot makes a dotfile
         // rather than an extension, so `Dir::ext` is empty for those anyway — the second test is
@@ -422,6 +457,11 @@ fn read(ask: &Ask) -> Payload {
             Some(false) => visual::load(path),
             None => Payload::Failed("Cannot be read".to_owned()),
         },
+        // **Not reached.** A video is a player rather than a read — see [`Kind::Video`] — and
+        // `collect_previews` opens one instead of asking for this. Answered with the shell's still
+        // rather than with an `unreachable!`, because the cost of being wrong about that is then one
+        // frame of a film where a player was meant to be, and not a window that closes.
+        Kind::Video => visual::load(path),
         Kind::Shell => visual::load(path),
     }
 }

@@ -101,10 +101,28 @@ eframe = { version = "0.35", default-features = false, features = [
 # change nothing would be churn in the one place that must not regress.
 windows = { version = "0.62", features = [
     "Win32_Foundation",
+    # The three that carry one texture. The preview panel plays video by asking Media Foundation's
+    # Media Engine for the frame that is on screen, which it writes into a D3D11 texture — so a
+    # device, a texture and a DXGI format have to be nameable. `Direct3D` is here for one enum
+    # (`D3D_DRIVER_TYPE_HARDWARE`) and `Dxgi_Common` for one constant
+    # (`DXGI_FORMAT_B8G8R8A8_UNORM`); neither is a dependency in any other sense.
+    #
+    # No swap chain, no renderer, no second compositor in the window: the texture is copied back to
+    # memory and handed to egui as an ordinary image. `windows::video`'s header has the reasoning,
+    # including what asking for a window instead would have cost.
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
     # `DwmSetWindowAttribute`, for one attribute: the cloak that keeps the compositor from
     # showing this window before anything has been drawn into it. See `main::cloak`.
     "Win32_Graphics_Dwm",
+    "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
+    # The whole player: `IMFMediaEngine` in frame-server mode, which resolves the file, picks the
+    # hardware decoder, opens the audio device, keeps picture and sound together and answers a seek.
+    # Every one of those is a thing this program would otherwise be writing — and the audio one is
+    # not writable at all without an output device — which is why the alternative here was never
+    # `ffmpeg` but "no player". See `preview::video`.
+    "Win32_Media_MediaFoundation",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_DataExchange",

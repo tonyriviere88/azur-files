@@ -152,12 +152,18 @@ fn the_preview_panel_takes_room_from_the_listing_and_its_close_button_gives_it_b
         // anything to this crate can rearrange it. It did — an API set came to the top, an API
         // set has nothing under it, and the click landed on a row that could not unfold. Which
         // says nothing about whether the click reached it, and that is the whole question here.
-        // See `crate::ui::deps::View::first_foldable`.
+        // And it has to be a row this panel can *show*, not merely one the tree holds: a click below
+        // the last visible row lands on empty canvas, and the panel along the bottom of a pane holds
+        // about nine rows where the one down the side holds twenty-five. See
+        // `crate::ui::deps::View::first_foldable`, where both halves of that are written down.
+        let fits = ((panel.height() - crate::ui::preview::HEADER) / crate::ui::deps::ROW) as usize;
         let row = h.app.panes[0]
             .tab()
             .preview
-            .dependency_first_foldable()
-            .unwrap_or_else(|| panic!("{at:?}: nothing in the tree can be unfolded at all"));
+            .dependency_first_foldable(fits)
+            .unwrap_or_else(|| {
+                panic!("{at:?}: none of the {fits} rows on show can be unfolded at all")
+            });
         let first_import = pos2(
             panel.left() + 80.0,
             panel.top()
@@ -779,6 +785,66 @@ fn ctrl_p_opens_and_shuts_this_folders_preview() {
     assert!(!h.app.panes[1].tab().preview.open, "it did not shut again");
 }
 
+/// **`Space` is the other key for the preview panel**, and it steps aside for a name.
+///
+/// Three things, and the last two are the whole reason the key is read where the characters are
+/// rather than up with the shortcuts: a space with nothing being typed is the panel, a space a
+/// moment after a letter is part of what is being looked for, and a space that is merely *still*
+/// down is a letter too — otherwise a thumb on the bar would flap the panel at the repeat rate.
+#[test]
+fn space_opens_the_preview_panel_unless_a_name_is_being_typed() {
+    let mut h = Harness::with_panes(2);
+    let second = h.app.panes[1].id;
+    h.app.perform(&h.ctx.clone(), Action::Focus(second));
+    h.frame(Vec::new());
+
+    // A space arrives as a key *and* as a character, which is what `egui-winit` sends for it.
+    let bar = |h: &mut Harness, repeat: bool| {
+        h.take_journal();
+        h.frame(vec![
+            Event::Key {
+                key: egui::Key::Space,
+                physical_key: None,
+                pressed: true,
+                repeat,
+                modifiers: Modifiers::NONE,
+            },
+            Event::Text(" ".to_owned()),
+        ]);
+        h.frame(Vec::new());
+        h.take_journal()
+    };
+
+    assert!(!h.app.panes[1].tab().preview.open);
+    assert_eq!(bar(&mut h, false), vec!["TogglePreview"]);
+    assert!(h.app.panes[1].tab().preview.open, "it did not open");
+    // And only in the pane the keyboard is in, exactly as `Ctrl+P`.
+    assert!(
+        !h.app.panes[0].tab().preview.open,
+        "it opened in the other pane as well"
+    );
+    assert_eq!(bar(&mut h, false), vec!["TogglePreview"]);
+    assert!(!h.app.panes[1].tab().preview.open, "it did not shut again");
+
+    // Held down: the same character, no press, and so no toggle.
+    assert!(
+        bar(&mut h, true).is_empty(),
+        "a held space toggled the panel"
+    );
+    assert!(!h.app.panes[1].tab().preview.open);
+
+    // And with a word in flight the space belongs to the word. The letter goes to the type-ahead
+    // in the frame before, which is what puts a word in flight at all — and the wait first is what
+    // makes this an assertion about *that* letter, since the held space above typed one too.
+    h.wait();
+    h.frame(vec![Event::Text("a".to_owned())]);
+    assert!(
+        bar(&mut h, false).is_empty(),
+        "the space in a name opened the panel"
+    );
+    assert!(!h.app.panes[1].tab().preview.open);
+}
+
 /// **Two selected pictures become a comparison**: three views, and a toggle down to one.
 ///
 /// End to end, because the interesting part is the *decision* — two selected rows rather than
@@ -1271,5 +1337,139 @@ fn everything_in_a_dependency_row_sits_on_one_line() {
     assert!(
         widest >= 3,
         "no row had a name, a location and a tag in it: at most {widest} texts"
+    );
+}
+
+/// **A video the machine cannot play says why, in the panel, and stops being busy.**
+///
+/// Driven with a file that is a `.mp4` in name and nonsense inside, which is the only video fixture
+/// this repository can carry: encoding a real one needs an encoder, and shipping one would be
+/// shipping a megabyte of somebody's footage to test a plumbing run.
+///
+/// Nonsense is enough to test the plumbing, and that is most of what there is to test here. This
+/// exercises the whole chain in the running program — `kind_of` answering `Kind::Video`,
+/// `collect_previews` opening a player instead of asking the read service, `MFStartup`, the D3D11
+/// device, the Media Engine, the path-to-URL conversion, Media Foundation's resolver refusing the
+/// file, the `IMFMediaEngineNotify` callback on one of its worker threads, the channel back, and the
+/// panel picking the word up on a later frame. Every one of those is a place this can break, and a
+/// broken one of them looks the same from here as a missing codec does — which is why the assertion
+/// is on the *complaint*: a chain that failed to run at all leaves the panel silent.
+///
+/// What it deliberately does not test is playback: whether a frame comes out, whether the clock
+/// moves, whether the scrubber lands where it was dragged. That needs a real file with a real codec
+/// behind it, and it is the gap in this feature's coverage worth knowing about.
+#[cfg(windows)]
+#[test]
+fn a_video_the_machine_cannot_play_says_so_in_the_panel() {
+    let dir = crate::sandbox::fresh("preview-video");
+    let broken = dir.join("broken.mp4");
+    // Long enough that the resolver reads it rather than refusing an empty file, and nothing a
+    // container parser will recognise.
+    std::fs::write(&broken, vec![0x5Au8; 64 * 1024]).expect("a file in the sandbox");
+
+    let mut h = Harness::new();
+    let pane = h.app.panes[0].id;
+    h.app.perform(
+        &h.ctx.clone(),
+        Action::Navigate {
+            pane,
+            path: dir.clone(),
+        },
+    );
+    h.settle();
+
+    let at = {
+        let tab = h.app.panes[0].tab();
+        let listing = tab.dir.as_ref().expect("the listing arrived");
+        tab.order
+            .iter()
+            .position(|&i| listing.name(i as usize) == "broken.mp4")
+            .expect("the fixture is in its own folder's listing")
+    };
+    h.app.panes[0].tab_mut().select_only(at);
+    h.app.panes[0].tab_mut().preview.open = true;
+    h.time += crate::ui::preview::FOLLOW_DELAY * 2.0;
+
+    // The panel takes the player on the frame after the selection settles, and the engine's refusal
+    // arrives on one of its own threads some frames later.
+    let mut said = None;
+    for _ in 0..400 {
+        h.frame(Vec::new());
+        if let Some((why, _)) = h.app.panes[0].tab().preview.video() {
+            if why.is_some() {
+                said = why;
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+
+    // It is the video view and not the shell's still: a `.mp4` used to go to `visual::load`, and a
+    // regression to that would show up here as `None` rather than as a wrong sentence.
+    assert!(
+        h.app.panes[0].tab().preview.video().is_some(),
+        "the panel is not showing the video view for a .mp4"
+    );
+    let said = said.expect(
+        "the player never complained: either Media Foundation accepted 64 KB of `Z` or the chain \
+         from the engine's callback back to the panel is broken",
+    );
+    assert!(
+        said.ends_with("video"),
+        "the complaint reads as {said:?}, which is not one of the sentences `windows::video` writes"
+    );
+    // **And it stops holding a capture open.** `--shot --preview` waits on `preview_pending`, so a
+    // player that stayed busy after failing would make a screenshot of a video folder wait out its
+    // whole patience and then photograph the complaint anyway.
+    assert!(
+        !h.app.preview_pending(),
+        "a player that has already failed is still reported as busy"
+    );
+
+    crate::sandbox::remove(&dir);
+}
+
+/// **A screen filled by a video that is not there comes back by itself.**
+///
+/// The way out that nobody presses, and it is not a corner case: closing the panel, switching tabs and
+/// a background scan moving the selection all reach it. Without it the window is left filling the
+/// monitor with nothing in it and no way out but the keyboard.
+///
+/// It also pins the settings-file guard, which is the bug this feature is one line away from at all
+/// times: a window filling the screen reports itself as neither maximised nor resized, so a frame
+/// drawn in that state will happily record the *monitor's* size as the window's — and that reopens
+/// the program filling the screen, for ever, out of a file the user edits by hand.
+///
+/// **The window itself is not asserted on**, and cannot be: `win::fill_screen` moves a real `HWND`
+/// with `SetWindowPos`, and this harness runs the application against a context with no window behind
+/// it. What is testable from here is the state the drawing reads and the file that outlives the
+/// session, which is where the two failures that survive a restart live. The move itself is one
+/// `SetWindowPos` per transition and its reasoning is written out where it happens.
+#[test]
+fn a_screen_filled_by_a_video_that_is_not_there_comes_back_by_itself() {
+    let mut h = Harness::new();
+    h.settle();
+    let pane = h.app.panes[0].id;
+    let size_before = h.app.window_size_for_tests();
+
+    h.app.perform(&h.ctx.clone(), Action::ToggleVideoFullscreen(pane));
+    // The flag straight away, because it is what the *next* frame reads to decide what to draw.
+    assert!(
+        h.app.fullscreen_for_tests(),
+        "the action did not put the window into fullscreen"
+    );
+
+    // One frame is enough: `App::theatre` finds no video in this pane, draws nothing, and queues the
+    // way out, which `apply` performs at the end of the same frame.
+    h.frame(Vec::new());
+    assert!(
+        !h.app.fullscreen_for_tests(),
+        "the window is still filling the screen over a pane with no video in it"
+    );
+    assert_eq!(
+        h.app.window_size_for_tests(),
+        size_before,
+        "the monitor's size was recorded as the window's during the fullscreen frame, which is what \
+         would reopen the program filling the screen"
     );
 }

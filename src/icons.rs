@@ -721,6 +721,113 @@ pub fn stop(p: &Painter, rect: Rect, color: Color32) {
     p.rect_filled(g.rect(4.6, 4.6, 11.4, 11.4), g.radius(1.0), color);
 }
 
+/// Pause: two filled bars.
+///
+/// The third member of the family [`play`] and [`stop`] make, and it obeys the same rule they do —
+/// filled, and about the same optical area — because the preview panel's strip swaps this and Play
+/// in one slot. Two glyphs of visibly different weight in a slot that swaps reads as the button
+/// moving rather than as the state changing.
+///
+/// The bars are `radius-small` like Stop's square, and 2.4 units wide with a 1.4 gap: any thinner
+/// and the pair turns into a single grey block at fourteen pixels, which is the size this is drawn
+/// at everywhere it appears.
+pub fn pause(p: &Painter, rect: Rect, color: Color32) {
+    let g = Grid::new(rect);
+    p.rect_filled(g.rect(4.9, 3.6, 7.3, 12.4), g.radius(0.6), color);
+    p.rect_filled(g.rect(8.7, 3.6, 11.1, 12.4), g.radius(0.6), color);
+}
+
+/// Sound: a speaker cone and the two arcs coming off it.
+///
+/// Filled, like [`play`] — this is a control in the same strip, not a file glyph, so the outlined
+/// convention at the top of this file has nothing to say about it. The cone is two shapes because
+/// the silhouette is not convex and `convex_polygon` is what draws a clean edge: a box and the
+/// trapezoid flaring out of it.
+pub fn sound(p: &Painter, rect: Rect, color: Color32) {
+    let g = Grid::new(rect);
+    cone(p, &g, color);
+    // Two arcs off the cone's mouth, the near one shorter — which is what reads as sound rather
+    // than as two brackets.
+    for (radius, sweep) in [(2.6, 0.85), (4.5, 1.0)] {
+        const STEPS: usize = 10;
+        let center = g.at(8.6, 8.0);
+        let points = (0..=STEPS)
+            .map(|i| {
+                let a = -sweep + 2.0 * sweep * i as f32 / STEPS as f32;
+                center + Vec2::new(a.cos(), a.sin()) * (g.scale * radius)
+            })
+            .collect();
+        p.add(Shape::line(points, g.hairline(color)));
+    }
+}
+
+/// And sound turned off: the same cone with a cross where the arcs were.
+///
+/// A cross rather than one diagonal slash across the whole glyph. The slash is what a web player
+/// draws, and at fourteen pixels it lands *on* the cone and turns the silhouette into a smudge; a
+/// cross beside it leaves the cone legible and is the same "not this" mark either way.
+pub fn sound_off(p: &Painter, rect: Rect, color: Color32) {
+    let g = Grid::new(rect);
+    cone(p, &g, color);
+    let stroke = g.hairline(color);
+    p.line_segment([g.at(10.8, 5.8), g.at(14.2, 10.2)], stroke);
+    p.line_segment([g.at(14.2, 5.8), g.at(10.8, 10.2)], stroke);
+}
+
+/// Fullscreen: four corners pointing out of the box.
+///
+/// Corners rather than a rectangle with arrows in it, which is what fits at fourteen pixels — and
+/// they are drawn as two strokes each rather than as one bent line, because a `Shape::line` of three
+/// points renders its join and this reads better as two clean segments meeting.
+pub fn fullscreen(p: &Painter, rect: Rect, color: Color32) {
+    corners(p, rect, color, true);
+}
+
+/// And leaving it: the same four corners turned to point in.
+///
+/// The pair swap in one slot the way [`play`] and [`pause`] do, so they are the same drawing with one
+/// argument between them — which is the only way two glyphs in a slot that swaps stay the same
+/// weight.
+pub fn fullscreen_exit(p: &Painter, rect: Rect, color: Color32) {
+    corners(p, rect, color, false);
+}
+
+/// The four corners both fullscreen glyphs are, `out` deciding which way they open.
+fn corners(p: &Painter, rect: Rect, color: Color32, out: bool) {
+    let g = Grid::new(rect);
+    let stroke = g.stroke(color);
+    // The near and far ends of one arm, in grid units from the corner it belongs to. Pointing out,
+    // the corner sits at the edge and the arms run inwards; pointing in, it sits inside and they run
+    // towards the edge. Same ink either way, which is the point.
+    let (corner, arm) = if out { (2.4, 4.2) } else { (6.0, 2.4) };
+    for (sx, sy) in [(1.0, 1.0), (-1.0, 1.0), (1.0, -1.0), (-1.0, -1.0)] {
+        // The corner of this quadrant, mirrored out of the top-left one.
+        let at = |x: f32, y: f32| {
+            g.at(
+                if sx > 0.0 { x } else { 16.0 - x },
+                if sy > 0.0 { y } else { 16.0 - y },
+            )
+        };
+        p.line_segment([at(corner, corner), at(arm, corner)], stroke);
+        p.line_segment([at(corner, corner), at(corner, arm)], stroke);
+    }
+}
+
+/// The speaker both sound glyphs are built on, so the two cannot drift apart.
+fn cone(p: &Painter, g: &Grid, color: Color32) {
+    p.rect_filled(g.rect(2.4, 6.4, 5.6, 9.6), g.radius(0.4), color);
+    fill(
+        p,
+        vec![
+            g.at(5.2, 6.9),
+            g.at(9.0, 3.4),
+            g.at(9.0, 12.6),
+            g.at(5.2, 9.1),
+        ],
+        color,
+    );
+}
+
 /// Back.
 pub fn arrow_left(p: &Painter, rect: Rect, color: Color32) {
     arrow(p, rect, color, 3.0);

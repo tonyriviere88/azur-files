@@ -355,6 +355,7 @@ impl Config {
                 // stands. See [`crate::ui::preview::Layout::diff`].
                 "diff" => config.preview.diff = value != "0",
                 "diff_collapse" => config.preview.collapse = value == "1",
+                "video_muted" => config.preview.muted = value == "1",
                 "sidebar_width" => {
                     if let Ok(width) = value.parse::<f32>() {
                         config.sidebar_width = width.clamp(140.0, 520.0);
@@ -475,6 +476,7 @@ impl Config {
         text.push_str(&format!("markdown_source={}\n", flag(self.preview.markup)));
         text.push_str(&format!("diff={}\n", flag(self.preview.diff)));
         text.push_str(&format!("diff_collapse={}\n", flag(self.preview.collapse)));
+        text.push_str(&format!("video_muted={}\n", flag(self.preview.muted)));
         // **Network last, out of panel order**, and deliberately: the first three positions are
         // what every settings file already written means by this line, and moving one of them
         // would silently reinterpret those files. A new group goes on the end.

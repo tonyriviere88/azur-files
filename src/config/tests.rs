@@ -34,6 +34,7 @@ fn the_window_comes_back_the_way_it_was_left() {
             // match what was asked for.
             diff: false,
             collapse: true,
+            muted: true,
         },
         console_share: 0.28,
         console_shell: crate::console::Kind::PowerShell,
@@ -71,11 +72,16 @@ fn the_window_comes_back_the_way_it_was_left() {
     assert!(back.preview.markup);
     assert!(!back.preview.diff, "the one flag whose default is on");
     assert!(back.preview.collapse);
+    // Whether video plays with its sound, which is a habit in exactly the way the four above are.
+    assert!(back.preview.muted);
     // A settings file from the build before this feature has no line for either, and the diff
     // has to come back *on* — its default — rather than off because the key was missing.
     let older = Config::parse("theme=dark\nline_numbers=1\n");
     assert!(older.preview.diff, "on by default");
     assert!(!older.preview.collapse);
+    // And a file from before there was a player in this program comes back with the sound on, which
+    // is what a video did the first time anybody previewed one.
+    assert!(!older.preview.muted);
     // Which flatten mode the button produces, written as a word for the same reason the shell
     // is — and a file without the line comes back as the list, which is the view the button
     // produced before there was a choice.

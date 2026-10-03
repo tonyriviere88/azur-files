@@ -177,6 +177,134 @@ pub(super) fn open_maximized(cc: &eframe::CreationContext<'_>, position: Option<
     };
 }
 
+/// What the window was before it filled the screen, so it can be put back exactly.
+///
+/// Four numbers and a bit, kept here rather than in [`crate::app::App`] because it is a Win32
+/// rectangle in physical pixels and nothing portable has any use for it. One window, so one slot.
+#[cfg(windows)]
+static SAVED: std::sync::Mutex<Option<([i32; 4], bool)>> = std::sync::Mutex::new(None);
+
+/// Fill the monitor with this window, or put it back exactly as it was.
+///
+/// # Why this is not `ViewportCommand::Fullscreen`
+///
+/// Because of what this window *is*. It is maximised by carrying `WS_MAXIMIZE` and sitting on the
+/// monitor's **work area** — see [`open_maximized`], whose whole point is that the client area is the
+/// work area exactly. The work area is the screen minus the taskbar, and Windows keeps a window
+/// wearing that bit clamped to it. So asking such a window to go fullscreen grew the window and left
+/// the client area behind, and the program drew into a surface one taskbar shorter than the window it
+/// was in: a band along the bottom, exactly one taskbar tall, of pixels nothing ever painted.
+///
+/// Un-maximising first fixes that and costs an animation each way — the window shrinking to its
+/// restored size and then growing to the monitor, twice per transition, both of which the platform
+/// animates. What a video filling the screen wants is for the screen to *be* filled, now.
+///
+/// So the whole transition is one `SetWindowPos`, which does not animate: the style bit comes off, the
+/// window goes to the monitor's bounds, and the way back is the same move in reverse — through
+/// [`open_maximized`]'s own recipe when the window was maximised, so `WM_SIZE` arrives as
+/// `SIZE_MAXIMIZED` and winit learns the state it is in.
+///
+/// **Topmost while it is filling the screen**, which is the one thing here that is not merely a
+/// restatement of the window's own geometry. Windows hides the taskbar for a foreground window that
+/// covers a monitor, but that is a heuristic about the shell's own idea of "fullscreen" rather than a
+/// promise — and the failure is the taskbar sitting over the controls at the bottom of the video,
+/// which is exactly where they are. Given back on the way out.
+#[cfg(windows)]
+pub(crate) fn fill_screen(owner: shell::Owner, on: bool) {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongW, GetWindowRect, SetWindowLongW, SetWindowPos, GWL_STYLE, HWND_NOTOPMOST,
+        HWND_TOPMOST, SWP_FRAMECHANGED, SWP_NOACTIVATE, WS_MAXIMIZE,
+    };
+
+    if owner.0 == 0 {
+        return;
+    }
+    let hwnd = owner.hwnd();
+    // SAFETY: every call below is against a window this process owns. The two style calls read and
+    // write one bit; the rest are a read of a rectangle and a move.
+    unsafe {
+        // Which monitor this window is on, and `None` when the platform will not say — every caller
+        // of it here answers that the same way, by leaving the window alone rather than moving it to
+        // a rectangle that was guessed at. A `MONITORINFO` has to be told its own size before it can
+        // be filled in, which is the part worth writing once.
+        let monitor = || {
+            let mut screen = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut screen)
+                .as_bool()
+                .then_some(screen)
+        };
+        // And the move, which is the same move every way through here: `SWP_FRAMECHANGED` because
+        // the style bit changed underneath it, and never activating, because the window being moved
+        // is the one already in front.
+        let place = |z, to: RECT| {
+            let _ = SetWindowPos(
+                hwnd,
+                Some(z),
+                to.left,
+                to.top,
+                to.right - to.left,
+                to.bottom - to.top,
+                SWP_NOACTIVATE | SWP_FRAMECHANGED,
+            );
+        };
+
+        let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
+
+        if on {
+            // Both reads first, and nothing is changed until they have both answered — the same
+            // order `open_maximized` takes, and for the same reason: half of this would be worse
+            // than none of it.
+            let Some(screen) = monitor() else { return };
+            let mut was = RECT::default();
+            if GetWindowRect(hwnd, &mut was).is_err() {
+                return;
+            }
+            if let Ok(mut slot) = SAVED.lock() {
+                let maximised = style & WS_MAXIMIZE.0 != 0;
+                *slot = Some(([was.left, was.top, was.right, was.bottom], maximised));
+            }
+            // **The bit comes off before the move**, or the move is clamped to the work area and this
+            // is the bug it exists to prevent.
+            SetWindowLongW(hwnd, GWL_STYLE, (style & !WS_MAXIMIZE.0) as i32);
+            place(HWND_TOPMOST, screen.rcMonitor);
+            return;
+        }
+
+        // And back. Nothing saved means nothing to go back to, which is a window that was never
+        // filling the screen — leave it alone rather than guess at a rectangle for it.
+        let Some((rect, was_maximised)) = SAVED.lock().ok().and_then(|mut slot| slot.take()) else {
+            return;
+        };
+        if was_maximised {
+            // `open_maximized`'s recipe: the bit on, then onto the work area, so the platform adjusts
+            // the rectangle the way it adjusts any maximised window's and `WM_SIZE` says
+            // `SIZE_MAXIMIZED`.
+            if let Some(screen) = monitor() {
+                SetWindowLongW(hwnd, GWL_STYLE, (style | WS_MAXIMIZE.0) as i32);
+                place(HWND_NOTOPMOST, screen.rcWork);
+                return;
+            }
+        }
+        let [left, top, right, bottom] = rect;
+        place(
+            HWND_NOTOPMOST,
+            RECT {
+                left,
+                top,
+                right,
+                bottom,
+            },
+        );
+    }
+}
+
 /// Keep the compositor from showing this window, or stop keeping it.
 ///
 /// **The last white frame, and why hiding the window was not enough to stop it.** eframe keeps a

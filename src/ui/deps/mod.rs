@@ -167,10 +167,19 @@ impl View {
     /// top, and an API set has nothing under it to show, so the click landed on a row that could not
     /// unfold and the test failed for a reason that had nothing to do with whether the click reached
     /// it. Which is the only thing it was ever trying to prove.
+    ///
+    /// **`rows` is how many of them the panel can actually show**, and it is the second half of the
+    /// same lesson. A row is only clickable if it is on screen, and the panel along the *bottom* of a
+    /// pane holds about nine — so a foldable row at index twenty is a click into the canvas below the
+    /// last row, which does nothing. That is what happened when this crate gained `mfplat.dll` and
+    /// `d3d11.dll` for the video player: two more imports at the top of the table pushed the first
+    /// foldable one out of sight, and a test about whether a click reaches a row failed because the
+    /// row it had chosen was not there to be reached.
     #[cfg(test)]
-    pub fn first_foldable(&self) -> Option<usize> {
+    pub fn first_foldable(&self, rows: usize) -> Option<usize> {
         self.rows
             .iter()
+            .take(rows)
             .position(|row| row.expandable && !row.open && !row.cyclic)
     }
 

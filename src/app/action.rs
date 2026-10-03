@@ -119,6 +119,12 @@ pub enum Action {
     ToggleConsole(PaneId),
     /// Shut it — the panel's own close button.
     ClosePreview(PaneId),
+    /// Let the video this pane is previewing fill the screen, or give the window back.
+    ///
+    /// **Both halves are this one action**, which is what keeps the four ways in and out of it
+    /// agreeing: the button in the strip, a double click on the picture, `Escape`, and the panel
+    /// noticing the player it was showing has gone. See [`crate::app::App::theatre`].
+    ToggleVideoFullscreen(PaneId),
     /// The preview panel's position or size changed, so the settings file is out of date.
     RememberLayout,
 
@@ -259,6 +265,7 @@ impl Action {
             Self::TogglePreview(_) => "TogglePreview",
             Self::ToggleConsole(_) => "ToggleConsole",
             Self::ClosePreview(_) => "ClosePreview",
+            Self::ToggleVideoFullscreen(_) => "ToggleVideoFullscreen",
             Self::RememberLayout => "RememberLayout",
             Self::Cut(_) => "Cut",
             Self::Copy(_) => "Copy",

@@ -2,6 +2,12 @@
 
 use super::*;
 
+/// How long a typed word stays in flight, in seconds.
+///
+/// Named because two things read it: the type-ahead itself, which starts a fresh word after it,
+/// and `Space`, which is a shortcut only when no word is in flight.
+const TYPEAHEAD_GAP: f64 = 1.0;
+
 impl Tab {
     #[inline]
     pub fn is_selected(&self, position: usize) -> bool {
@@ -414,13 +420,22 @@ impl Tab {
         true
     }
 
+    /// Whether a word is still being typed, and so whether the next character belongs to it.
+    ///
+    /// The same second [`Tab::type_ahead`] measures, asked from outside, and it exists for one
+    /// key: `Space` is a shortcut in a listing and a letter of most names on a Windows disk, and
+    /// this is the difference between the two — see the type-ahead in `App::keyboard`.
+    pub fn typing_a_name(&self, now: f64) -> bool {
+        !self.typeahead.is_empty() && now - self.typeahead_at <= TYPEAHEAD_GAP
+    }
+
     /// Jump to the next row whose name starts with what has been typed.
     ///
     /// `now` is the frame time; a gap longer than a second starts a fresh word,
     /// which is what makes typing `re` find `readme` but typing `r` a minute later
     /// start again from `r`.
     pub fn type_ahead(&mut self, ch: char, now: f64) {
-        if now - self.typeahead_at > 1.0 {
+        if now - self.typeahead_at > TYPEAHEAD_GAP {
             self.typeahead.clear();
         }
         self.typeahead_at = now;

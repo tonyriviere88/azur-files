@@ -285,6 +285,16 @@ pub struct App {
     sidebar_width: f32,
 
     maximized: bool,
+    /// Whose video is filling the screen, if one is.
+    ///
+    /// **The one state in this program that suppresses the rest of the window.** While it is set the
+    /// frame draws the player and nothing else — no panes, no sidebar, no title bar — and the
+    /// keyboard's shortcuts stand down but for the one that gets out. See [`App::theatre`], which is
+    /// also where every way of leaving is listed.
+    ///
+    /// Not in the settings file. Where the preview panel goes is a habit worth keeping; a video
+    /// filling the screen is a thing you were doing a minute ago.
+    fullscreen_video: Option<PaneId>,
     /// The window's inner size, tracked so it can be restored next launch.
     window_size: Option<[f32; 2]>,
     /// And where it is: the outer top-left corner in *physical pixels*. See
@@ -519,6 +529,7 @@ impl App {
             // to but the default. What the platform actually did with them is
             // `main::open_maximized`'s business; this is only what is remembered.
             maximized: config.maximized,
+            fullscreen_video: None,
             window_size: config.window,
             window_position: config.position,
             actions: Vec::new(),

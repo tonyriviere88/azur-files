@@ -133,7 +133,11 @@ impl App {
         self.pump_asking(&ctx);
         self.collect_changes(&ctx);
         self.collect_modal();
-        if !self.maximized {
+        // **Nor while a video is filling the screen**, which is the same argument the maximised test
+        // makes and a sharper case of it: fullscreen reports itself as neither maximised nor resized,
+        // so without this the monitor's size would be written to the settings file as the window's and
+        // the program would reopen filling the screen for good.
+        if !self.maximized && self.fullscreen_video.is_none() {
             // Only a restored window's size is worth remembering; a maximised one is
             // described by the flag, and saving the screen size would pin the window
             // to this monitor.
@@ -187,6 +191,23 @@ impl App {
         // rects rather than through egui's panels, which is what makes that ordering free
         // to choose: the title bar is drawn *last*, over canvas nothing else wanted.
         let screen = ctx.viewport_rect();
+
+        // **A video filling the screen, and then nothing else at all.**
+        //
+        // Drawn instead of the window rather than over it, which is the whole reason this is here
+        // rather than beside the drag and the menu at the bottom of this function. Over the top it
+        // would be one layer above a listing that was still hit-testing every point of itself, so a
+        // click meant for the scrubber would also land on whatever row happened to be under it — and
+        // the panes would still be laying out, measuring columns and asking the shell for thumbnails
+        // nobody can see. Instead of, there is nothing underneath to reach or to pay for.
+        //
+        // The keyboard still runs, because the way out is a key. See [`App::theatre`].
+        if self.theatre(ui, &theme, screen) {
+            self.keyboard(&ctx);
+            self.apply(&ctx);
+            return;
+        }
+
         let bar = chrome::bar_rect(screen);
         let body = Rect::from_min_max(pos2(screen.left(), bar.bottom()), screen.max);
         let plan = self.plan_layout(body, bar);
@@ -250,6 +271,40 @@ impl App {
         // here is, the newest information would be a frame old and "on screen" would have to be guessed
         // at. See [`crate::shell::thumbs::Thumbs::poll`].
         self.thumbs.poll();
+    }
+
+    /// The video filling the screen, if one is. Answers whether it drew — in which case that is the
+    /// whole frame.
+    ///
+    /// **Four ways out, and they are all one action.** The button in the strip, a double click on the
+    /// picture, `Escape`, and this: the player it was about is no longer there. The last one is not a
+    /// corner case — closing the panel, switching tabs and a background scan moving the selection all
+    /// reach it, and without it the window would be left fullscreen with nothing in it.
+    fn theatre(&mut self, ui: &mut Ui, t: &Theme, screen: Rect) -> bool {
+        let App {
+            panes,
+            preview,
+            actions,
+            fullscreen_video,
+            ..
+        } = self;
+        let Some(id) = *fullscreen_video else {
+            return false;
+        };
+        let drew = panes
+            .iter_mut()
+            .find(|pane| pane.id == id)
+            .map(|pane| pane.tab_mut())
+            .is_some_and(|tab| {
+                crate::ui::preview::theatre(ui, t, screen, id, &mut tab.preview, preview, actions)
+            });
+        if !drew {
+            // Through the action rather than by clearing the field, because the *window* has to be
+            // given back as well and that is the action's job. One frame of an empty window is what
+            // it costs, and the alternative is two places that both know how to leave fullscreen.
+            actions.push(Action::ToggleVideoFullscreen(id));
+        }
+        drew
     }
 
     /// Divide the window up and lay the panes out, without drawing anything.

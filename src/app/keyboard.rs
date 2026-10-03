@@ -6,11 +6,88 @@
 use super::*;
 
 impl App {
+    /// Space and the arrows, for the video that has the keyboard.
+    ///
+    /// **Which player that is comes from the last press**, not from a focus ring: a press over a video
+    /// canvas gives it the keys and a press anywhere else takes them away, decided by each canvas about
+    /// itself as it is drawn — see [`crate::preview::Player::keys`]. A video filling the screen has them
+    /// whether or not it was clicked, because there is nothing else on screen to have clicked.
+    ///
+    /// The keys are **consumed**, so the listing does not also see them: the arrows are how a selection
+    /// moves, and a video that took over the keyboard without saying so would otherwise scrub *and*
+    /// move the selection out from under itself. Everything else falls through untouched, so `Ctrl+P`,
+    /// `F5` and the rest still work while a video has the keys.
+    ///
+    /// Held keys step at the player's own cadence rather than the machine's repeat rate — see
+    /// [`crate::preview::video::STEP`] — which is also what makes a tap exactly one step.
+    fn video_keys(&mut self, ctx: &egui::Context) {
+        use egui::Key as K;
+
+        // Read before anything is borrowed, and *not* consumed yet: whether these keys are the
+        // video's depends on finding a player that wants them, and a key consumed for a player that
+        // turns out not to exist is a key the listing never sees.
+        //
+        // **Bare keys only**, which is not fussiness: `Alt+Left` is Back and has been since long
+        // before this panel existed, and a video that swallowed it would take the window's history
+        // away for as long as it was on screen.
+        let (space, back, forward, now) = ctx.input(|i| {
+            let plain = i.modifiers.is_none();
+            (
+                plain && i.key_pressed(K::Space),
+                plain && i.key_down(K::ArrowLeft),
+                plain && i.key_down(K::ArrowRight),
+                i.time,
+            )
+        });
+        if !space && !back && !forward {
+            return;
+        }
+
+        let fullscreen = self.fullscreen_video;
+        for pane in self.panes.iter_mut() {
+            let forced = fullscreen == Some(pane.id);
+            let active = pane.active;
+            let Some(tab) = pane.tabs.get_mut(active) else {
+                continue;
+            };
+            let Some(player) = tab.preview.keyed_player(forced) else {
+                continue;
+            };
+            if space {
+                player.toggle();
+            }
+            // Both at once is neither, which is what a keyboard hands you when a hand moves between
+            // the two — and it is cheaper to say so than to pick a winner.
+            match (back, forward) {
+                (true, false) => player.step(-crate::preview::video::STEP, now),
+                (false, true) => player.step(crate::preview::video::STEP, now),
+                _ => {}
+            }
+            // Held down, so the next step has to be able to arrive: this program is idle between
+            // events and a key that is merely *still* down produces none.
+            if back || forward {
+                ctx.request_repaint();
+            }
+            ctx.input_mut(|i| {
+                if space {
+                    i.consume_key(egui::Modifiers::NONE, K::Space);
+                }
+                for key in [K::ArrowLeft, K::ArrowRight] {
+                    i.consume_key(egui::Modifiers::NONE, key);
+                }
+            });
+            return;
+        }
+    }
+
     pub(super) fn keyboard(&mut self, ctx: &egui::Context) {
         use egui::Key as K;
 
         // A focused text field owns the keyboard. Escape is the one key that still
         // has to get through, or a filter box becomes a trap.
+        //
+        // Read here rather than where it is used, because the video's keys are asked the same
+        // question first.
         let renaming = self
             .panes
             .iter()
@@ -19,6 +96,34 @@ impl App {
         // it is drawn, and the listing must not move underneath it at the same time.
         let typing =
             renaming || self.menu.is_some() || ctx.memory(|m| m.focused()).is_some();
+
+        // **The video's own keys, before anything else can claim them.** Space and the arrows, for the
+        // player that was last clicked — see [`App::video_keys`].
+        //
+        // Not out from under a field, though, and the reason is that the player holds the keys
+        // until something else is *clicked*: `` Ctrl+` `` moves the keyboard into the console
+        // without the pointer ever leaving the video, so a space typed at the prompt would pause
+        // the film instead of arriving. A video filling the screen keeps them regardless — there is
+        // nothing else on screen to have typed into.
+        if !typing || self.fullscreen_video.is_some() {
+            self.video_keys(ctx);
+        }
+
+        // **A video filling the screen takes the rest of the keyboard with it**, and gives back one
+        // key.
+        //
+        // Everything below this line acts on a window that is not on screen: `Ctrl+W` would shut a tab
+        // nobody can see, `F5` would re-read a folder nobody is looking at, and the arrows would move
+        // a selection that is the only thing keeping the video open. `Escape` is the way out, and it
+        // has to be here rather than further down for the same reason — the handler below it would
+        // have used the key for something else first.
+        if let Some(pane) = self.fullscreen_video {
+            if ctx.input(|i| i.key_pressed(K::Escape)) {
+                self.actions.push(Action::ToggleVideoFullscreen(pane));
+            }
+            return;
+        }
+
         if typing {
             // **`Ctrl+E` and `Ctrl+P` still get through.** Both are questions about the folder you
             // are looking at rather than about the field the caret happens to be in, and both
@@ -139,6 +244,9 @@ impl App {
             }
             // This folder's preview panel. On the pane the keyboard is in, since that is the
             // folder whose selection it would be showing.
+            //
+            // `Space` is the other way in, read further down with the type-ahead because that is
+            // where the two things a space can mean are told apart.
             if m.command && i.key_pressed(K::P) {
                 push(Action::TogglePreview(pane));
             }
@@ -261,6 +369,7 @@ impl App {
 
         let mut open: Option<(bool, PathBuf)> = None;
         let mut typed: Vec<char> = Vec::new();
+        let mut panel = false;
 
         {
             let tab = self.panes[index].tab_mut();
@@ -353,10 +462,36 @@ impl App {
                     }
                 }
                 // Type-ahead: anything printable that is not a shortcut.
+                //
+                // **`Space` is the second key for this folder's preview panel** — `Ctrl+P` is the
+                // first, further up — and it is read *here*, among the characters, because this is
+                // the only place that knows which of its two meanings it has. A space is a letter
+                // of most names on a Windows disk, so while a word is in flight it belongs to the
+                // word: `annual r` has to keep finding `Annual Report.pdf` rather than open the
+                // panel halfway through typing it. That is the rule the platform's own listings
+                // follow, and the second it lasts is the gap [`Tab::type_ahead`] already measures —
+                // letters typed earlier in this same frame count too, which is why `word` is
+                // tracked through the loop rather than asked once.
+                //
+                // **The press, and not only the character**: a held key repeats its text but is
+                // pressed once, so `key_pressed` is what keeps a thumb resting on the bar from
+                // flapping the panel open and shut at the machine's repeat rate. A held space goes
+                // on typing spaces, which is what it has always done. Bare only — a modified space
+                // stays the letter it was, which is nothing this listing can find and so nothing
+                // that happens.
                 if !i.modifiers.command && !i.modifiers.alt {
+                    let space = i.modifiers.is_none() && i.key_pressed(K::Space);
+                    let mut word = tab.typing_a_name(i.time);
                     for event in &i.events {
                         if let egui::Event::Text(text) = event {
-                            typed.extend(text.chars());
+                            for ch in text.chars() {
+                                if ch == ' ' && space && !word {
+                                    panel = true;
+                                } else {
+                                    word = true;
+                                    typed.push(ch);
+                                }
+                            }
                         }
                     }
                 }
@@ -368,6 +503,9 @@ impl App {
             }
         }
 
+        if panel {
+            self.actions.push(Action::TogglePreview(pane));
+        }
         if let Some((is_dir, path)) = open {
             self.actions.push(if is_dir {
                 Action::Navigate { pane, path }
