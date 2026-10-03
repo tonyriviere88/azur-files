@@ -1,6 +1,6 @@
 [package]
 name = "azur-files"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 rust-version = "1.85"
 description = "A file explorer that stays out of the way: tabs in the title bar, a real breadcrumb, and side-by-side panes"
