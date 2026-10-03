@@ -441,6 +441,13 @@ nothing, and a toggle whose two states are a hollow star and a filled one is a p
 told anything. `Ctrl+D` still pins the folder, and so does its context menu, which is where the
 rest of what you can do to a folder already lives.
 
+And so does **Windows' own entry for it**. A folder's context menu has `Pin to Quick access`
+in it — `Épingler à l'accès rapide` on a French Windows — because the shell put it there, and
+what it is *for* is the sidebar of a file manager. The sidebar in front of you is this one, so
+that entry pins here, into Bookmarks, exactly as `Ctrl+D` would; `Unpin from Quick access`
+removes it again. It is recognised by verb (`pintohome`, `unpinfromhome`) rather than by label,
+since the label is a translation. Everything else in that menu is still Windows'.
+
 With one difference from Explorer: **going up does not trim the bar.**
 
 ```
@@ -1755,8 +1762,8 @@ with Defender.
 The trick is that `IContextMenu::QueryContextMenu` does not display anything — it
 *populates an `HMENU`*. So one is created, the shell and every extension fill it, and it
 is read back out with `GetMenuItemInfoW`: labels, separators, disabled and checked
-states, the bold default item, accelerator text, item bitmaps and submenus.
-`TrackPopupMenuEx` is never called and no native menu ever appears.
+states, accelerator text, item bitmaps and submenus. `TrackPopupMenuEx` is never called
+and no native menu ever appears.
 
 Two details are what make that faithful rather than approximate:
 
@@ -1765,10 +1772,19 @@ Two details are what make that faithful rather than approximate:
   gets that message, so it is sent explicitly before a submenu is read. Without it,
   Send To and New come back empty — the usual way a re-drawn shell menu ends up looking
   finished and being broken.
-- **Commands are invoked by canonical verb** (`open`, `copy`, `properties`) where the
-  shell offers one, since a verb is stable and usable from any thread. Where an extension
-  offers none, the numeric id is used against a menu re-queried with identical flags and
-  items, so the numbering matches.
+- **Commands are invoked by canonical verb** (`open`, `copy`, `properties`, or a CLSID in
+  braces for anything registered as an `IExplorerCommand`) where the shell offers one,
+  since a verb is stable and usable from any thread. Where an extension offers none, the
+  numeric id is used — and then the whole shape of the menu has to be reproduced: the same
+  `CMF_` flags, the same items, and the submenu it came from populated, because that is
+  when the ids inside a submenu are handed out. All three of those were wrong at once, and
+  a third of the menu did nothing at all: read the note on `shell::menu::win::invoke`
+  before changing how a command is resolved.
+
+The one thing that is *not* reproduced is which entry Windows would have run on a double
+click. The shell says so with `MFS_DEFAULT`, and the mark for it here was the 2px accent
+bar a selected row gets — which put a blue bar down the side of the top row of every menu,
+where it read as a selection nobody had made. So it is not read and not drawn.
 
 ### None of it happens in a frame
 
@@ -2918,11 +2934,12 @@ the one thing `↑2 ↓1` cannot say for itself: what it is counted against.
 
 **The colour convention is posh-git's**, which is the one most people already read every day: green
 for what is in the index, red for what is not, cyan for the branch — the nearest role Azur has being
-`info`. Two departures, both because a status line is not a prompt. Changed is **amber, not red**:
+`info`. Three departures, all because a status line is not a prompt. Changed is **amber, not red**:
 posh-git's working-tree colour is `DarkRed`, and red in this line is where the window says something
-has gone *wrong*, while having uncommitted work is the normal state of working. And untracked is
+has gone *wrong*, while having uncommitted work is the normal state of working. Untracked is
 **grey**: it is the state of every build artefact on the disk, and alarming about those trains people
-to ignore the colour.
+to ignore the colour. And staged is **amber too, not green** — green is the colour of nothing left to
+do, and a staged file still has a commit owed on it, so it sits with the rest of the uncommitted work.
 
 Per row, a badge in the icon's bottom-left corner — the shell's own corner, at the shell's own
 proportion, which is where an eye trained on Explorer already looks:
@@ -2930,7 +2947,7 @@ proportion, which is where an eye trained on Explorer already looks:
 | | | |
 | --- | --- | --- |
 | ● green tick | tracked and the same as HEAD | the only mark most rows wear |
-| ● green plus | staged, and new | |
+| ● amber plus | staged, and new | the plus is what tells it from a plain change |
 | ● amber | changed on disk, staged or not | plain, because it is the state a tree is usually in |
 | ● red minus | gone from disk, still in the index | |
 | ● blue arrow | moved or copied, and git saw it | |

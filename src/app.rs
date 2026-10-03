@@ -2140,6 +2140,7 @@ impl App {
                         asking.items,
                         asking.folder,
                         entries,
+                        depth,
                         token,
                     ));
                 }
@@ -2589,7 +2590,15 @@ impl App {
                     // Properties sheet to an installer, and neither belongs in a frame.
                     // Nothing is remembered about which pane asked: whatever the command does
                     // to the folder, `crate::watch` is what notices. See `collect_modal`.
+                    //
+                    // Unless it is a pin, which this program answers itself — see
+                    // `pin_is_a_bookmark`.
                     Command::Shell { .. } => {
+                        let ours = Self::pin_is_a_bookmark(&menu, &command);
+                        if !ours.is_empty() {
+                            self.actions.extend(ours);
+                            return;
+                        }
                         // With one exception, and it is written down *here* because here is the
                         // last moment it can be.
                         self.watch_for_a_new_item(menu.pane, &menu.folder, &command);
@@ -2597,12 +2606,60 @@ impl App {
                             parent: menu.folder.clone(),
                             items: menu.items.clone(),
                             command,
+                            depth: menu.depth,
                             owner: self.owner,
                         });
                     }
                 }
             }
         }
+    }
+
+    /// `Pin to Quick access` means *this* program's bookmarks, not Explorer's Quick access.
+    ///
+    /// The entry is Windows' own — it is in the menu because the shell put it there, under
+    /// whatever name this Windows is in: `Épingler à l'accès rapide` here, `Pin to Quick access`
+    /// on an English one. What it is *for* is the sidebar of a file manager, and the sidebar in
+    /// front of the user is this one. Handing it to the shell put the folder in Explorer's
+    /// Quick access, where nothing in this program can see it, and left this program's own
+    /// bookmarks — the same gesture, on Ctrl+D — untouched.
+    ///
+    /// Recognised by verb, because the label is a translation: `pintohome` is what the shell
+    /// calls it on every Windows, and `unpinfromhome` is the other half. Both are folder-only,
+    /// which is also what a bookmark is. `pintohomefile` — Windows 11's `Add to Favorites`, for
+    /// files — is deliberately *not* here: it is a different list of a different kind of thing,
+    /// and a bookmark bar of files is not what this sidebar is.
+    ///
+    /// Empty means "not ours, give it to the shell".
+    fn pin_is_a_bookmark(menu: &crate::ui::menu::Open, command: &crate::shell::menu::Command) -> Vec<Action> {
+        let crate::shell::menu::Command::Shell { verb: Some(verb), .. } = command else {
+            return Vec::new();
+        };
+        let add = match verb.as_str() {
+            "pintohome" => true,
+            "unpinfromhome" => false,
+            _ => return Vec::new(),
+        };
+        // A selection is what is selected; an empty one is the folder the menu was raised in,
+        // which is the background menu's answer to "pin what?".
+        let mut targets: Vec<PathBuf> = if menu.items.is_empty() {
+            vec![menu.folder.clone()]
+        } else {
+            menu.items.clone()
+        };
+        // Only folders. The shell offers this on nothing else, but the selection is this
+        // program's and a rule that depends on the shell having filtered it is not a rule.
+        targets.retain(|path| path.is_dir());
+        targets
+            .into_iter()
+            .map(|path| {
+                if add {
+                    Action::AddBookmark(path)
+                } else {
+                    Action::RemoveBookmark(path)
+                }
+            })
+            .collect()
     }
 
     /// Note the listing before handing over a verb that is about to add to it.
@@ -2983,8 +3040,18 @@ impl App {
                 self.close_menu();
                 // Built here rather than through the builder: these are this program's own
                 // entries and there is nothing to ask the shell about, so the menu is ready now.
-                // Token 0 matches no build, which is exactly right -- no answer is coming.
-                self.menu = Some(crate::ui::menu::Open::new(pane, at, items, into, own, 0));
+                // Token 0 matches no build, which is exactly right -- no answer is coming, and
+                // the depth is the same nothing: every entry here is this program's own, so
+                // there is no shell menu for one of them ever to be resolved against.
+                self.menu = Some(crate::ui::menu::Open::new(
+                    pane,
+                    at,
+                    items,
+                    into,
+                    own,
+                    crate::shell::menu::Depth::Full,
+                    0,
+                ));
                 continue;
             }
             let job = match dropped.effect {
@@ -4571,6 +4638,92 @@ mod tests {
         assert!(app.bookmarks.is_empty(), "This PC is not a folder to pin");
     }
 
+    /// Windows' `Pin to Quick access` pins *here*, to the sidebar in front of the user, and never
+    /// reaches the shell.
+    ///
+    /// By verb and not by label, because the entry reads `Épingler à l'accès rapide` on this
+    /// machine and `Pin to Quick access` on an English one. Everything else in the menu still
+    /// belongs to the shell, which is what the last case holds down: an empty answer here is what
+    /// sends a command on to [`crate::shell::Modal`], so a rule that matched too much would take
+    /// entries away from Windows rather than adding one to this program.
+    #[test]
+    fn pin_to_quick_access_bookmarks_here_instead() {
+        use crate::shell::menu::Command;
+
+        // Real directories, because the rule only pins folders and asks the disk which is which.
+        let dir = crate::sandbox::dir("pin-verb");
+        let sub = dir.join("inner");
+        std::fs::create_dir_all(&sub).expect("a folder to pin");
+        let file = dir.join("one.txt");
+        std::fs::write(&file, b"x").expect("a file that is not one");
+
+        let shell = |verb: &str| Command::Shell {
+            verb: Some(verb.to_owned()),
+            id: 0,
+            path: Vec::new(),
+            label: "whatever Windows calls it".to_owned(),
+        };
+        let menu = |items: Vec<PathBuf>| {
+            crate::ui::menu::Open::new(
+                1,
+                pos2(0.0, 0.0),
+                items,
+                dir.clone(),
+                Vec::new(),
+                crate::shell::menu::Depth::Full,
+                0,
+            )
+        };
+
+        // A selected folder.
+        let on_selection = menu(vec![sub.clone()]);
+        match App::pin_is_a_bookmark(&on_selection, &shell("pintohome")).as_slice() {
+            [Action::AddBookmark(path)] => assert_eq!(*path, sub),
+            other => panic!("`pintohome` on a folder gave {:?}", names(other)),
+        }
+        match App::pin_is_a_bookmark(&on_selection, &shell("unpinfromhome")).as_slice() {
+            [Action::RemoveBookmark(path)] => assert_eq!(*path, sub),
+            other => panic!("`unpinfromhome` on a folder gave {:?}", names(other)),
+        }
+
+        // Nothing selected is the folder the menu was raised in.
+        match App::pin_is_a_bookmark(&menu(Vec::new()), &shell("pintohome")).as_slice() {
+            [Action::AddBookmark(path)] => assert_eq!(*path, dir),
+            other => panic!("`pintohome` on a background menu gave {:?}", names(other)),
+        }
+
+        // Several folders at once, which is what the shell would have pinned.
+        let both = menu(vec![sub.clone(), dir.clone()]);
+        assert_eq!(App::pin_is_a_bookmark(&both, &shell("pintohome")).len(), 2);
+
+        // A file is not a bookmark, so the shell keeps it.
+        let on_file = menu(vec![file.clone()]);
+        assert!(
+            App::pin_is_a_bookmark(&on_file, &shell("pintohome")).is_empty(),
+            "a file was turned into a sidebar entry"
+        );
+
+        // And every other verb in the menu is still Windows'.
+        for verb in ["open", "copy", "delete", "properties", "pintohomefile", "PinToStartScreen"] {
+            assert!(
+                App::pin_is_a_bookmark(&on_selection, &shell(verb)).is_empty(),
+                "`{verb}` was taken off the shell"
+            );
+        }
+        assert!(
+            App::pin_is_a_bookmark(&on_selection, &Command::Own(crate::shell::menu::Own::CopyHere))
+                .is_empty()
+        );
+
+        crate::sandbox::remove(&dir);
+    }
+
+    /// Action names, for a panic message that says which ones came back.
+    #[cfg(test)]
+    fn names(actions: &[Action]) -> Vec<&'static str> {
+        actions.iter().map(Action::name).collect()
+    }
+
     #[test]
     fn split_focused_opens_the_folder_already_showing() {
         let (mut app, ctx) = app(&["/here"]);
@@ -5858,6 +6011,7 @@ mod click_tests {
             Vec::new(),
             PathBuf::new(),
             own,
+            crate::shell::menu::Depth::Full,
             0,
         ));
 
@@ -10993,6 +11147,7 @@ mod click_tests {
             parent: dir.clone(),
             items: Vec::new(),
             command,
+            depth: crate::shell::menu::Depth::Full,
             owner: crate::shell::Owner::default(),
         }));
 

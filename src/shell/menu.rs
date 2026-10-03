@@ -10,8 +10,8 @@
 //! `IContextMenu::QueryContextMenu` does not display anything: it *populates an
 //! `HMENU`*. So this creates one, lets the shell and every extension fill it, and then
 //! reads it back out with `GetMenuItemInfoW` — labels, separators, disabled and checked
-//! states, the default (bold) item, the accelerator text, the item bitmaps and the
-//! submenus. `TrackPopupMenuEx` is never called, and no native menu ever appears.
+//! states, the accelerator text, the item bitmaps and the submenus. `TrackPopupMenuEx` is
+//! never called, and no native menu ever appears.
 //!
 //! Two things make that read faithful rather than approximate:
 //!
@@ -22,12 +22,16 @@
 //! usual way a re-drawn shell menu ends up looking finished and being broken.
 //!
 //! **Commands are invoked by verb where there is one.** `GetCommandString` gives the
-//! canonical name — `open`, `copy`, `delete`, `properties` — which is stable and can be
-//! used from any thread against a freshly obtained `IContextMenu`. That matters because
-//! invoking a command can put up a dialog, which has to happen off the UI thread; see
-//! [`crate::shell::Modal`]. Where an extension offers no canonical verb, the numeric id
-//! is used instead, against a menu re-queried with identical flags and items so the
-//! numbering is identical.
+//! canonical name — `open`, `copy`, `delete`, `properties`, or a CLSID in braces for
+//! anything registered as an `IExplorerCommand` — which is stable and can be used from any
+//! thread against a freshly obtained `IContextMenu`. That matters because invoking a command
+//! can put up a dialog, which has to happen off the UI thread; see [`crate::shell::Modal`].
+//!
+//! Where an extension offers no canonical verb the numeric id is used instead, and then the
+//! *whole shape* of the menu has to be reproduced: identical flags, identical items, and the
+//! submenu it came from populated, because that is when the ids inside a submenu are handed
+//! out. All of which is [`invoke`], and all three of them were wrong at once — read the note
+//! there before changing how a command is resolved.
 //!
 //! # Why none of it happens in a frame
 //!
@@ -93,6 +97,19 @@
 //! by `what_the_shell_menu_costs` — whether or not anybody ever right-clicks. Warming on the
 //! first menu instead doubles the wait for that one menu. Neither is worth it for one short
 //! submenu once per run, so this is left as it is, and written down.
+//!
+//! **It is not only the submenus.** Measured on a selected folder, five entries at the *top*
+//! level are missing from the first menu of a process and present in every one after it:
+//! `Ouvrir dans le Terminal`, `Open with Zed`, `Renommer avec PowerRename`, `Unlock with File
+//! Locksmith` and one of the two `Déplacer vers OneDrive` — 30 entries against 35. Every one of
+//! them is an `IExplorerCommand`, which is how anything written for Windows 11 registers, so
+//! what the first menu is short of is the modern half of the menu.
+//!
+//! Two things follow. A `--shot --menu` capture only ever builds one menu per process, so a
+//! screenshot of this program's context menu is a screenshot of the short one — which is not a
+//! bug in the capture and is worth knowing before hunting for one. And the *ids* in that first
+//! menu are five entries out from the ids in every later one, which matters when a command has
+//! no canonical verb and can only be named by its number: see [`win::resolve`].
 
 use std::path::{Path, PathBuf};
 
@@ -130,8 +147,31 @@ impl Own {
 pub enum Command {
     /// One of this program's own.
     Own(Own),
-    /// A shell command: its canonical verb if it has one, and its id either way.
-    Shell { verb: Option<String>, id: u32 },
+    /// A shell command, and everything needed to run it later against a menu built afresh.
+    ///
+    /// The menu it was read from is gone by then — see [`invoke`] — so all four of these are
+    /// carried rather than looked up again.
+    Shell {
+        /// Its canonical verb, where the shell gave one.
+        verb: Option<String>,
+        /// Its id, as an offset from the first command id this program handed out.
+        id: u32,
+        /// The submenus it sits inside, as positions in each enclosing `HMENU`, root first.
+        ///
+        /// Empty for a top-level entry. It is what lets an entry with **no** canonical verb be
+        /// invoked at all: the id only exists in a menu whose submenu has been populated, and a
+        /// menu built afresh has populated none of them. So `Send to > Documents` and
+        /// `Open with > Notepad` — neither of which has a verb — used to invoke nothing
+        /// whatsoever, because the id read from a populated submenu was handed to a menu where
+        /// nothing had assigned it. See [`win::invoke`], which walks this and sends each level
+        /// its `WM_INITMENUPOPUP` before using the id.
+        path: Vec<u32>,
+        /// The label it was shown under, so the id can be checked against the rebuilt menu
+        /// before it is used. See [`win::invoke`] — a numeric id is a *position* in somebody
+        /// else's numbering, and the one thing worse than a menu entry that does nothing is one
+        /// that does something else.
+        label: String,
+    },
 }
 
 impl Command {
@@ -226,8 +266,6 @@ pub struct Entry {
     pub kind: Kind,
     pub enabled: bool,
     pub checked: bool,
-    /// The bold one — what a double click would have done.
-    pub default: bool,
     /// The item's own bitmap, as RGBA, when the shell gave one.
     pub icon: Option<egui::ColorImage>,
 }
@@ -240,7 +278,6 @@ impl Entry {
             kind: Kind::Separator,
             enabled: false,
             checked: false,
-            default: false,
             icon: None,
         }
     }
@@ -253,7 +290,6 @@ impl Entry {
             kind: Kind::Command(Command::Own(which)),
             enabled: true,
             checked: false,
-            default: false,
             icon: None,
         }
     }
@@ -749,7 +785,13 @@ impl Held {
 /// read from a real folder contains Delete, and `InvokeCommand` runs whatever it is handed without
 /// a confirmation this program ever sees — which is how `probe_invokable`, pointed at this
 /// repository, deleted it. `shell::ops::FOR_REAL` guards `IFileOperation` and never saw this call.
-pub fn invoke(parent: &Path, items: &[PathBuf], command: &Command, owner: super::Owner) {
+pub fn invoke(
+    parent: &Path,
+    items: &[PathBuf],
+    command: &Command,
+    depth: Depth,
+    owner: super::Owner,
+) {
     #[cfg(test)]
     {
         let mut paths = vec![parent.to_path_buf()];
@@ -757,11 +799,11 @@ pub fn invoke(parent: &Path, items: &[PathBuf], command: &Command, owner: super:
         crate::sandbox::guard("IContextMenu::InvokeCommand", &paths);
     }
     #[cfg(windows)]
-    if let Command::Shell { verb, id } = command {
-        win::invoke(parent, items, verb.as_deref(), *id, owner);
+    if matches!(command, Command::Shell { .. }) {
+        win::invoke(parent, items, command, depth, owner);
     }
     #[cfg(not(windows))]
-    let _ = (parent, items, command, owner);
+    let _ = (parent, items, command, depth, owner);
 }
 
 #[cfg(windows)]
@@ -772,12 +814,11 @@ mod win {
     use windows::Win32::UI::Shell::Common::ITEMIDLIST;
     use windows::Win32::UI::Shell::{
         IContextMenu, IContextMenu2, IShellFolder, SHBindToObject, SHBindToParent,
-        SHParseDisplayName, CMF_EXPLORE, CMF_NORMAL, CMF_OPTIMIZEFORINVOKE, CMINVOKECOMMANDINFOEX,
-        GCS_VERBW,
+        SHParseDisplayName, CMF_EXPLORE, CMF_NORMAL, CMINVOKECOMMANDINFOEX, GCS_VERBW,
     };
     use windows::Win32::UI::WindowsAndMessaging::{
         CreatePopupMenu, DestroyMenu, GetMenuItemCount, GetMenuItemInfoW, HMENU, MENUITEMINFOW,
-        MFS_CHECKED, MFS_DEFAULT, MFS_DISABLED, MFS_GRAYED, MFT_SEPARATOR, MIIM_BITMAP, MIIM_FTYPE,
+        MFS_CHECKED, MFS_DISABLED, MFS_GRAYED, MFT_SEPARATOR, MIIM_BITMAP, MIIM_FTYPE,
         MIIM_ID, MIIM_STATE, MIIM_STRING, MIIM_SUBMENU, SW_SHOWNORMAL, WM_INITMENUPOPUP,
     };
 
@@ -891,7 +932,7 @@ mod win {
     }
 
     /// What is needed to fill one submenu.
-    #[derive(Clone, Copy)]
+    #[derive(Clone)]
     struct Sub {
         menu: HMENU,
         /// The item's position inside its *parent* `HMENU`, which is what
@@ -900,6 +941,12 @@ mod win {
         position: u32,
         /// How deep the parent was, for the guard against a malformed extension.
         depth: u32,
+        /// The positions of the submenus above this one, root first — so `trail + [position]`
+        /// is the route from the top of the menu to this submenu's contents.
+        ///
+        /// Kept because it is the only way back to an entry once this `HMENU` is gone: see
+        /// [`Command::Shell::path`].
+        trail: Vec<u32>,
     }
 
     impl Drop for Live {
@@ -927,14 +974,14 @@ mod win {
                     submenus: std::collections::HashMap::new(),
                     next: 0,
                 };
-                let entries = live.read(hmenu, 0);
+                let entries = live.read(hmenu, 0, &[]);
                 Some((live, entries))
             }
         }
 
         /// The contents of the submenu with this id, asking the extension to fill it first.
         pub fn fill(&mut self, id: u32) -> Vec<Entry> {
-            let Some(sub) = self.submenus.get(&id).copied() else {
+            let Some(sub) = self.submenus.get(&id).cloned() else {
                 return Vec::new();
             };
             if sub.depth >= MAX_DEPTH {
@@ -946,19 +993,18 @@ mod win {
                 // An extension fills its submenu when the menu is about to pop up. This
                 // menu never pops up, so it is told to anyway — otherwise Send To and New
                 // come back empty.
-                if let Ok(two) = self.context.cast::<IContextMenu2>() {
-                    let _ = two.HandleMenuMsg(
-                        WM_INITMENUPOPUP,
-                        WPARAM(sub.menu.0 as usize),
-                        LPARAM(sub.position as isize),
-                    );
-                }
-                self.read(sub.menu, sub.depth + 1)
+                init_popup(&self.context, sub.menu, sub.position);
+                let mut trail = sub.trail.clone();
+                trail.push(sub.position);
+                self.read(sub.menu, sub.depth + 1, &trail)
             }
         }
 
         /// Read one `HMENU` the shell has filled into something drawable.
-        unsafe fn read(&mut self, hmenu: HMENU, depth: u32) -> Vec<Entry> {
+        ///
+        /// `trail` is how this `HMENU` was reached from the top of the menu, and is what every
+        /// command read out of it is stamped with. See [`Command::Shell::path`].
+        unsafe fn read(&mut self, hmenu: HMENU, depth: u32, trail: &[u32]) -> Vec<Entry> {
             let count = GetMenuItemCount(Some(hmenu));
             if count <= 0 {
                 return Vec::new();
@@ -1006,7 +1052,12 @@ mod win {
 
                 let enabled = info.fState.0 & (MFS_DISABLED.0 | MFS_GRAYED.0) == 0;
                 let checked = info.fState.0 & MFS_CHECKED.0 != 0;
-                let default = info.fState.0 & MFS_DEFAULT.0 != 0;
+                // `MFS_DEFAULT` — the entry a double click would have run — is deliberately not
+                // read. It was, and it was drawn as the 2px accent bar a selected row gets, which
+                // put a blue bar down the side of the top row of every context menu in the
+                // program: the default entry is nearly always the first one, so what read as a
+                // selection nobody had made was there every time the menu opened. There is
+                // nothing else it would be used for, so it is not carried.
                 let icon = menu_bitmap(info.hbmpItem);
 
                 let kind = if !info.hSubMenu.is_invalid() && depth < MAX_DEPTH {
@@ -1020,6 +1071,7 @@ mod win {
                             menu: info.hSubMenu,
                             position: position as u32,
                             depth,
+                            trail: trail.to_vec(),
                         },
                     );
                     Kind::unfilled(id)
@@ -1028,6 +1080,8 @@ mod win {
                     Kind::Command(Command::Shell {
                         verb: canonical_verb(&self.context, offset as usize),
                         id: offset,
+                        path: trail.to_vec(),
+                        label: label.clone(),
                     })
                 } else {
                     // An id outside the range this program handed out is not ours to
@@ -1041,7 +1095,6 @@ mod win {
                     kind,
                     enabled,
                     checked,
-                    default,
                     icon,
                 });
             }
@@ -1051,6 +1104,98 @@ mod win {
             }
             entries
         }
+    }
+
+    /// Tell whoever owns a submenu that it is about to pop up, so that it fills it.
+    ///
+    /// An extension populates its submenu lazily, on `WM_INITMENUPOPUP`, which a menu that is
+    /// never shown never gets. Without this Send To, Open With and New come back empty — and,
+    /// on the way to invoking one of their entries, the *ids* inside them are never assigned
+    /// either. `wParam` is the submenu's handle and `lParam` its position in its parent, which
+    /// is what the message carries when Windows sends it for real.
+    unsafe fn init_popup(context: &IContextMenu, menu: HMENU, position: u32) {
+        if let Ok(two) = context.cast::<IContextMenu2>() {
+            let _ = two.HandleMenuMsg(
+                WM_INITMENUPOPUP,
+                WPARAM(menu.0 as usize),
+                LPARAM(position as isize),
+            );
+        }
+    }
+
+    /// The submenu hanging off one position of an `HMENU`, if there is one.
+    unsafe fn submenu_at(hmenu: HMENU, position: u32) -> Option<HMENU> {
+        let mut info = MENUITEMINFOW {
+            cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
+            fMask: MIIM_SUBMENU,
+            ..Default::default()
+        };
+        GetMenuItemInfoW(hmenu, position, true, &mut info).ok()?;
+        (!info.hSubMenu.is_invalid()).then_some(info.hSubMenu)
+    }
+
+    /// Every command in one level of a menu, as `(id, label)` — the id already offset from
+    /// [`FIRST`], the label as [`split_label`] would have given it.
+    ///
+    /// Walked by position rather than asked for by id, and one `HMENU` rather than the whole
+    /// tree: `GetMenuItemInfoW` with `fByPosition = false` searches submenus too, and a match
+    /// found in a *different* submenu from the one the entry came out of would be exactly the
+    /// confusion [`resolve`] is here to catch.
+    unsafe fn commands_of(hmenu: HMENU) -> Vec<(u32, String)> {
+        let count = GetMenuItemCount(Some(hmenu)).max(0);
+        let mut out = Vec::with_capacity(count as usize);
+        for position in 0..count {
+            let mut info = MENUITEMINFOW {
+                cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
+                fMask: MIIM_ID | MIIM_STRING | MIIM_SUBMENU,
+                ..Default::default()
+            };
+            if GetMenuItemInfoW(hmenu, position as u32, true, &mut info).is_err() {
+                continue;
+            }
+            // A popup's `wID` means nothing, and must not be allowed to match.
+            if !info.hSubMenu.is_invalid() || info.wID < FIRST || info.wID > LAST {
+                continue;
+            }
+            let id = info.wID - FIRST;
+            let mut text = vec![0u16; info.cch as usize + 1];
+            info.dwTypeData = PWSTR(text.as_mut_ptr());
+            info.cch = text.len() as u32;
+            if GetMenuItemInfoW(hmenu, position as u32, true, &mut info).is_err() {
+                continue;
+            }
+            let raw = String::from_utf16_lossy(&text[..info.cch as usize]);
+            out.push((id, split_label(&raw).0));
+        }
+        out
+    }
+    /// Which id in the rebuilt menu is the entry the user clicked, if any.
+    ///
+    /// The id first, when it still carries the same label. Otherwise the label, when exactly one
+    /// entry in this level has it. Otherwise nothing at all.
+    ///
+    /// **The id really does move.** The first context menu of a process is short — measured on
+    /// this machine, 30 entries against the 35 every menu after it gets, because the modern
+    /// `IExplorerCommand` entries are not there yet; see the note at the top of this file. So a
+    /// command read off that first menu and rebuilt a moment later, once the shell is warm, is
+    /// numbered five entries out. Caught in the act: `Open Git Bash here`, id 86, came back as
+    /// `Open with Visual Studio` at id 86 in the rebuilt menu.
+    ///
+    /// A verb is immune to all of this, which is why it is tried first. This is for the third of
+    /// a menu that has none.
+    ///
+    /// The uniqueness requirement is not pedantry either: a Windows 11 menu carries the same
+    /// entry twice over — `Déplacer vers OneDrive` appears once as an `IExplorerCommand` and
+    /// once as the legacy handler behind it — so "the one with this label" is a question that
+    /// can have two answers, and two answers is no answer.
+    unsafe fn resolve(hmenu: HMENU, id: u32, label: &str) -> Option<u32> {
+        let commands = commands_of(hmenu);
+        if commands.iter().any(|(found, name)| *found == id && name == label) {
+            return Some(id);
+        }
+        let mut matching = commands.iter().filter(|(_, name)| name == label);
+        let first = matching.next()?;
+        matching.next().is_none().then_some(first.0)
     }
 
     /// A menu label as the shell writes it, split into what to draw.
@@ -1125,7 +1270,9 @@ mod win {
     #[cfg(test)]
     pub(super) fn probe_flags(parent: &Path, items: &[PathBuf]) {
         use std::time::Instant;
-        use windows::Win32::UI::Shell::{CMF_DEFAULTONLY, CMF_DONOTPICKDEFAULT, CMF_NOVERBS};
+        use windows::Win32::UI::Shell::{
+            CMF_DEFAULTONLY, CMF_DONOTPICKDEFAULT, CMF_NOVERBS, CMF_OPTIMIZEFORINVOKE,
+        };
 
         for (label, flags) in [
             ("NORMAL|EXPLORE (what it uses)", CMF_NORMAL | CMF_EXPLORE),
@@ -1153,7 +1300,7 @@ mod win {
                     submenus: std::collections::HashMap::new(),
                     next: 0,
                 };
-                let entries = live.read(hmenu, 0);
+                let entries = live.read(hmenu, 0, &[]);
                 eprintln!(
                     "  {label:<32} {took:>9.1} ms  {} entries",
                     entries.len()
@@ -1252,6 +1399,8 @@ mod win {
     /// TEMPORARY probe: which entries survive into the menu `invoke` resolves against.
     #[cfg(test)]
     pub(super) fn probe_invokable(parent: &Path, items: &[PathBuf]) {
+        use windows::Win32::UI::Shell::CMF_OPTIMIZEFORINVOKE;
+
         unsafe fn collect(
             live: &mut Live,
             entries: Vec<Entry>,
@@ -1265,7 +1414,7 @@ mod win {
                     collect(live, children, &deeper, out);
                     continue;
                 }
-                if let Kind::Command(Command::Shell { verb, id }) = entry.kind {
+                if let Kind::Command(Command::Shell { verb, id, .. }) = entry.kind {
                     out.push((format!("{prefix}{}", entry.label), verb, id));
                 }
             }
@@ -1286,7 +1435,7 @@ mod win {
                     submenus: std::collections::HashMap::new(),
                     next: 0,
                 };
-                let entries = live.read(hmenu, 0);
+                let entries = live.read(hmenu, 0, &[]);
                 let mut out = Vec::new();
                 collect(&mut live, entries, "", &mut out);
                 out
@@ -1313,14 +1462,65 @@ mod win {
         }
     }
 
-    /// Run a shell command, by verb where there is one.
+    /// `CMIC_MASK_UNICODE`, which the `windows` crate does not name. It is `SEE_MASK_UNICODE` —
+    /// the two families of flags share their numbering — and it is what makes the shell read
+    /// `lpVerbW`, `lpParametersW` and **`lpDirectoryW`** instead of the ANSI members. Without it
+    /// the wide half of `CMINVOKECOMMANDINFOEX` is filled in and ignored.
+    const CMIC_MASK_UNICODE: u32 = windows::Win32::UI::Shell::SEE_MASK_UNICODE;
+    /// `CMIC_MASK_FLAG_LOG_USAGE`, likewise unnamed: `SEE_MASK_FLAG_LOG_USAGE`. What Explorer
+    /// sets so that a verb the user chose counts towards the recent and frequent lists — an
+    /// "Open with Code" from here should teach the same things it teaches from Explorer.
+    const CMIC_MASK_FLAG_LOG_USAGE: u32 = windows::Win32::UI::Shell::SEE_MASK_FLAG_LOG_USAGE;
+
+    /// Run a shell command against a menu built afresh, by verb where there is one.
+    ///
+    /// # Why the menu is built with the flags it was *shown* with
+    ///
+    /// This used to ask for `CMF_OPTIMIZEFORINVOKE` whenever there was a verb — the flag whose
+    /// documented job is to skip the work only a displayed menu needs, and which was measured at
+    /// half a second saved on a file. It is also **the reason half the menu did nothing**.
+    ///
+    /// Measured by `probe_invokable` on this machine, comparing the menu as shown against the
+    /// same menu rebuilt with that flag:
+    ///
+    /// | menu | commands as shown | rebuilt | verbs that vanished |
+    /// | --- | --- | --- | --- |
+    /// | a folder | 57 | 40 | Open in Terminal, PowerRename, Open with Zed, Move to OneDrive, Unlock with File Locksmith, Pin to Start |
+    /// | a text file | 53 | 35 | those, plus Ask Copilot and Edit in Notepad |
+    /// | a folder's background | 18 | 17 | — |
+    ///
+    /// Everything in that last column is an `IExplorerCommand` — which is how anything written
+    /// for Windows 11 registers — and their canonical "verb" is a CLSID in braces,
+    /// `{9F156763-7844-4DC4-B2B1-901F640F5155}` for Open in Terminal. `CMF_OPTIMIZEFORINVOKE`
+    /// skips that whole wrapper, so the rebuilt menu has no such verb, `InvokeCommand` matches
+    /// nothing, and the entry silently does nothing at all. Which is exactly what "Open in
+    /// Terminal does not work" was.
+    ///
+    /// So: the same flags, from the same [`Depth`], as the menu the user actually clicked. It
+    /// costs what the first build cost — and rather less in practice, since the shell has just
+    /// been asked the same question and its caches are warm. It happens on
+    /// [`crate::shell::Modal`], where nothing is waiting for it.
+    ///
+    /// # And why an id needs the submenu opened first
+    ///
+    /// An entry with no canonical verb — every `Send to`, every `Open with`, `Include in
+    /// library` — can only be named by its numeric id, and that id is handed out by the
+    /// extension when it *populates* the submenu. A menu built afresh has populated none of
+    /// them, so the id names nothing. Hence [`Command::Shell::path`] and the walk below, which
+    /// sends each level on the way down the `WM_INITMENUPOPUP` that Windows would have sent.
+    ///
+    /// The walk is not done for a verb, only as the fallback: it costs an extension's populate
+    /// per level — 3 ms for New, up to 116 ms for Open With — and a verb has no use for it.
     pub fn invoke(
         parent: &Path,
         items: &[PathBuf],
-        verb: Option<&str>,
-        id: u32,
+        command: &super::Command,
+        depth: Depth,
         owner: crate::shell::Owner,
     ) {
+        let super::Command::Shell { verb, id, path, label } = command else {
+            return;
+        };
         // SAFETY: the menu is destroyed before returning, and every string outlives the
         // call that reads it.
         unsafe {
@@ -1330,53 +1530,146 @@ mod win {
             let Ok(hmenu) = CreatePopupMenu() else {
                 return;
             };
-            // A verb needs no numbering, so the shell is told not to build a menu it will
-            // never show: `CMF_OPTIMIZEFORINVOKE` is what lets an extension skip the
-            // registry and disk work that `QueryContextMenu` otherwise costs, and that
-            // work was measured at half a second on a file. Without a verb the flag cannot
-            // be used — the command is a *position* in the menu, so the menu has to be
-            // built the same way it was when the position was read, or the wrong thing
-            // runs.
-            let flags = match verb {
-                Some(_) => CMF_OPTIMIZEFORINVOKE,
-                None => CMF_NORMAL | CMF_EXPLORE,
-            };
-            let _ = context.QueryContextMenu(hmenu, 0, FIRST, LAST, flags);
+            let _ = context.QueryContextMenu(hmenu, 0, FIRST, LAST, flags(depth));
 
-            let verb_bytes: Option<Vec<u8>> = verb.map(|verb| {
-                let mut bytes = verb.as_bytes().to_vec();
-                bytes.push(0);
-                bytes
-            });
-            let verb_wide: Option<Vec<u16>> = verb.map(|verb| {
-                verb.encode_utf16().chain(std::iter::once(0)).collect()
-            });
-
-            let mut info = CMINVOKECOMMANDINFOEX {
-                cbSize: std::mem::size_of::<CMINVOKECOMMANDINFOEX>() as u32,
-                fMask: 0,
-                hwnd: if owner.0 != 0 {
-                    owner.hwnd()
-                } else {
-                    HWND::default()
-                },
-                // A verb is a string; an id is a small integer pretending to be one,
-                // which is how `IContextMenu` has taken numeric commands since it was
-                // introduced.
-                lpVerb: match &verb_bytes {
-                    Some(bytes) => PCSTR(bytes.as_ptr()),
-                    None => PCSTR(id as usize as *const u8),
-                },
-                lpVerbW: match &verb_wide {
-                    Some(wide) => PCWSTR(wide.as_ptr()),
-                    None => PCWSTR(id as usize as *const u16),
-                },
-                nShow: SW_SHOWNORMAL.0,
-                ..Default::default()
-            };
-            let _ = context.InvokeCommand(&mut info as *mut _ as *const _);
+            // A verb first: it is a name rather than a position, so nothing about the shape of
+            // this menu can make it mean the wrong thing.
+            let mut ran = false;
+            if let Some(verb) = verb {
+                ran = run(&context, parent, Named::Verb(verb), owner);
+            }
+            // And the id, when there was no verb or the verb was refused. `InvokeCommand`
+            // answering with a failure is the only signal there is that a verb did not resolve.
+            if !ran {
+                let mut level = hmenu;
+                let mut reached = true;
+                for position in path {
+                    match submenu_at(level, *position) {
+                        Some(sub) => {
+                            init_popup(&context, sub, *position);
+                            level = sub;
+                        }
+                        None => {
+                            reached = false;
+                            break;
+                        }
+                    }
+                }
+                // The id has to still name the entry the user clicked. It is a position in
+                // somebody else's numbering, and a menu that came back a different shape would
+                // otherwise run whatever now sits at that number — which in a context menu is
+                // one slot away from Delete. See `resolve`, which is also what recovers the
+                // right number when the shape did change.
+                match reached.then(|| resolve(level, *id, label)).flatten() {
+                    Some(id) => {
+                        run(&context, parent, Named::Id(id), owner);
+                    }
+                    None => {
+                        // Only a debug build has a console to say it on, and this is the kind of
+                        // thing that is unreadable in a log and priceless in a session.
+                        #[cfg(debug_assertions)]
+                        eprintln!(
+                            "shell menu: `{label}` (id {id}, verb {verb:?}, path {path:?}) is not \
+                             in the rebuilt menu — {:?} — so nothing was invoked",
+                            commands_of(level)
+                        );
+                    }
+                }
+            }
             let _ = DestroyMenu(hmenu);
         }
+    }
+
+    /// How a command is being named to `InvokeCommand`.
+    enum Named<'a> {
+        Verb(&'a str),
+        /// An offset from the first id this program handed out.
+        Id(u32),
+    }
+
+    /// One `InvokeCommand`. `true` when the shell says it ran.
+    ///
+    /// `lpDirectory` is the folder, which is what `%V` and `%W` expand to in a registered
+    /// command line and what a launched process gets as its working directory. Explorer sets it;
+    /// this did not, and left every `Open <something> here` verb to guess.
+    unsafe fn run(
+        context: &IContextMenu,
+        parent: &Path,
+        named: Named<'_>,
+        owner: crate::shell::Owner,
+    ) -> bool {
+        let verb_bytes: Option<Vec<u8>> = match named {
+            Named::Verb(verb) => {
+                let mut bytes = verb.as_bytes().to_vec();
+                bytes.push(0);
+                Some(bytes)
+            }
+            Named::Id(_) => None,
+        };
+        let verb_wide: Option<Vec<u16>> = match named {
+            Named::Verb(verb) => Some(verb.encode_utf16().chain(std::iter::once(0)).collect()),
+            Named::Id(_) => None,
+        };
+        let id = match named {
+            Named::Verb(_) => 0,
+            Named::Id(id) => id,
+        };
+
+        // Wide, which is what `CMIC_MASK_UNICODE` selects — and the ANSI half as well, for an
+        // extension that reads it regardless of the mask.
+        //
+        // Only when the path is ASCII, though: there is no cheap correct ANSI form of
+        // `D:\Sources\Été`, and UTF-8 bytes are *not* one. A null there says "no directory",
+        // which is what this passed for every path until now; the wrong directory would be new
+        // and worse.
+        let dir_wide = crate::shell::wide(parent);
+        let dir_text = parent.to_string_lossy().replace('/', "\\");
+        let dir_bytes: Option<Vec<u8>> = dir_text.is_ascii().then(|| {
+            dir_text
+                .clone()
+                .into_bytes()
+                .into_iter()
+                .chain(std::iter::once(0))
+                .collect()
+        });
+
+        let mut info = CMINVOKECOMMANDINFOEX {
+            cbSize: std::mem::size_of::<CMINVOKECOMMANDINFOEX>() as u32,
+            fMask: CMIC_MASK_UNICODE | CMIC_MASK_FLAG_LOG_USAGE,
+            hwnd: if owner.0 != 0 {
+                owner.hwnd()
+            } else {
+                HWND::default()
+            },
+            // A verb is a string; an id is a small integer pretending to be one,
+            // which is how `IContextMenu` has taken numeric commands since it was
+            // introduced. Both halves get it, since which one is read is the shell's choice.
+            lpVerb: match &verb_bytes {
+                Some(bytes) => PCSTR(bytes.as_ptr()),
+                None => PCSTR(id as usize as *const u8),
+            },
+            lpVerbW: match &verb_wide {
+                Some(wide) => PCWSTR(wide.as_ptr()),
+                None => PCWSTR(id as usize as *const u16),
+            },
+            lpDirectory: match &dir_bytes {
+                Some(bytes) => PCSTR(bytes.as_ptr()),
+                None => PCSTR::null(),
+            },
+            lpDirectoryW: PCWSTR(dir_wide.as_ptr()),
+            nShow: SW_SHOWNORMAL.0,
+            ..Default::default()
+        };
+        let result = context.InvokeCommand(&mut info as *mut _ as *const _);
+        #[cfg(debug_assertions)]
+        if let Err(error) = &result {
+            let named = match named {
+                Named::Verb(verb) => verb.to_owned(),
+                Named::Id(id) => format!("id {id}"),
+            };
+            eprintln!("shell menu: InvokeCommand({named}) refused: {error}");
+        }
+        result.is_ok()
     }
 }
 
@@ -1551,6 +1844,99 @@ mod tests {
             filled.iter().any(|(_, count)| *count > 0),
             "every submenu came back empty when asked, so the fill never reached the \
              extensions: {filled:?}"
+        );
+
+        crate::sandbox::remove(&dir);
+    }
+
+    /// Every command knows the route back to the `HMENU` it was read out of.
+    ///
+    /// Which is what makes an entry with no canonical verb usable at all. `Send to > Documents`
+    /// and `Open with > Notepad` have none — the shell offers only a numeric id — and that id is
+    /// handed out by the extension when it *populates* the submenu. [`invoke`] builds the menu
+    /// afresh, where nothing has populated anything, so without the route down it hands over an
+    /// id nobody has assigned and the entry does nothing whatsoever. That was measured: 22 of the
+    /// 57 commands on a folder and 14 of the 53 on a file had no verb.
+    ///
+    /// Positions and not entry indices, because they are not the same number: separators are
+    /// coalesced and unusable items dropped on the way out of [`Live::read`].
+    #[test]
+    #[cfg(windows)]
+    fn a_command_carries_the_route_back_to_its_submenu() {
+        let _serialised = crate::shell::serialised();
+        crate::shell::init();
+        let (dir, file, _) = scratch("route");
+
+        let (mut live, entries) =
+            super::win::Live::open(&dir, std::slice::from_ref(&file), Depth::Full)
+                .expect("the shell's menu");
+
+        for entry in &entries {
+            if let Kind::Command(Command::Shell { path, label, .. }) = &entry.kind {
+                assert!(
+                    path.is_empty(),
+                    "`{label}` is at the top of the menu and thinks it is inside {path:?}"
+                );
+                assert_eq!(label, &entry.label, "a command was stamped with another's label");
+            }
+        }
+
+        // Every submenu with anything in it, one level down.
+        let mut checked = 0;
+        for entry in &entries {
+            let Some(id) = entry.kind.unasked() else { continue };
+            let children = live.fill(id);
+            let inside: Vec<&Vec<u32>> = children
+                .iter()
+                .filter_map(|c| match &c.kind {
+                    Kind::Command(Command::Shell { path, .. }) => Some(path),
+                    _ => None,
+                })
+                .collect();
+            if inside.is_empty() {
+                continue;
+            }
+            checked += 1;
+            let first = inside[0].clone();
+            assert_eq!(
+                first.len(),
+                1,
+                "`{}` is one level down, so its entries' route is one position: {first:?}",
+                entry.label
+            );
+            for path in inside {
+                assert_eq!(
+                    *path, first,
+                    "two entries of `{}` disagree about which submenu they are in",
+                    entry.label
+                );
+            }
+
+            // And one level deeper, where an off-by-one in appending to the trail would hide:
+            // `7-Zip > CRC SHA > MD5` has to come back with both positions, outer first.
+            for child in &children {
+                let Some(id) = child.kind.unasked() else { continue };
+                for deep in live.fill(id) {
+                    if let Kind::Command(Command::Shell { path, .. }) = &deep.kind {
+                        assert_eq!(
+                            path.len(),
+                            2,
+                            "`{} > {} > {}` is two levels down and reports {path:?}",
+                            entry.label,
+                            child.label,
+                            deep.label
+                        );
+                        assert_eq!(
+                            path[0], first[0],
+                            "the deeper route does not start where the shallower one did"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(
+            checked > 0,
+            "a text file on any Windows has at least one submenu with commands in it"
         );
 
         crate::sandbox::remove(&dir);
@@ -1881,6 +2267,90 @@ mod tests {
         }
     }
 
+    /// Does `InvokeCommand` accept the three kinds of entry that used to do nothing?
+    ///
+    /// Each one really runs, so this launches whatever it launches — a shell, a terminal, an
+    /// editor — against a file inside the sandbox. Nothing here deletes, moves or copies
+    /// anything. What is being read is the `HRESULT`: the failures this is here for were silent,
+    /// and `InvokeCommand` refusing a verb is the only signal the shell gives.
+    ///
+    /// - a plain registered verb on the folder's **background** menu, which is where `%V` and so
+    ///   `lpDirectory` matter;
+    /// - an `IExplorerCommand` on a selected folder, whose canonical verb is a CLSID in braces
+    ///   and which `CMF_OPTIMIZEFORINVOKE` used to leave out of the rebuilt menu entirely;
+    /// - an entry with **no** canonical verb inside a submenu, which can only be named by an id
+    ///   that does not exist until the submenu has been populated.
+    #[test]
+    #[ignore = "probe: really runs the verbs, so windows open"]
+    #[cfg(windows)]
+    fn probe_invoking() {
+        let _serialised = crate::shell::serialised();
+        crate::shell::init();
+        let (dir, file, sub) = scratch("invoking");
+
+        /// The first entry, at any depth, that `pick` likes — with the path it was found under.
+        fn find(
+            entries: &[Entry],
+            pick: &dyn Fn(&str, &Command) -> bool,
+            prefix: &str,
+        ) -> Option<(String, Command)> {
+            for entry in entries {
+                match &entry.kind {
+                    Kind::Command(command) if pick(&entry.label, command) => {
+                        return Some((format!("{prefix}{}", entry.label), command.clone()));
+                    }
+                    Kind::Submenu { children, .. } => {
+                        let deeper = format!("{prefix}{} > ", entry.label);
+                        if let Some(found) = find(children, pick, &deeper) {
+                            return Some(found);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            None
+        }
+
+        let cases: [(&str, Vec<PathBuf>, Box<dyn Fn(&str, &Command) -> bool>); 3] = [
+            (
+                "a plain verb on the folder's background",
+                Vec::new(),
+                Box::new(|_label: &str, c: &Command| {
+                    matches!(c, Command::Shell { verb: Some(v), .. } if v == "git_shell")
+                }),
+            ),
+            (
+                "an IExplorerCommand (CLSID verb) on a selected folder",
+                vec![sub.clone()],
+                Box::new(|label: &str, c: &Command| {
+                    label.contains("Terminal")
+                        && matches!(c, Command::Shell { verb: Some(v), .. } if v.starts_with('{'))
+                }),
+            ),
+            (
+                "a no-verb entry inside a submenu, on a file",
+                vec![file.clone()],
+                Box::new(|label: &str, c: &Command| {
+                    (label.contains("Bloc-notes") || label.contains("Notepad"))
+                        && matches!(c, Command::Shell { verb: None, path, .. } if !path.is_empty())
+                }),
+            ),
+        ];
+
+        for (what, items, pick) in cases {
+            let entries = build(&dir, &items);
+            match find(&entries, pick.as_ref(), "") {
+                Some((label, command)) => {
+                    eprintln!("--- {what}\n    invoking `{label}`: {command:?}");
+                    invoke(&dir, &items, &command, Depth::Full, crate::shell::Owner::default());
+                }
+                None => eprintln!("--- {what}\n    not installed on this machine, skipped"),
+            }
+        }
+        // The scratch folder is deliberately *not* removed: whatever was launched may still have
+        // it open, and this is a probe somebody is watching rather than a test that has to tidy.
+    }
+
     /// Invoking a shell command has to actually do it, and the result has to be usable.
     ///
     /// The menu's own Cut, Copy, Paste, Delete and Rename are the *shell's* entries, so they go
@@ -1927,6 +2397,7 @@ mod tests {
             parent: dir.clone(),
             items: vec![file.clone()],
             command: copy,
+            depth: Depth::Full,
             owner: crate::shell::Owner::default(),
         }));
 
@@ -1966,6 +2437,8 @@ mod tests {
         let shell = |verb: Option<&str>| Command::Shell {
             verb: verb.map(str::to_owned),
             id: 0,
+            path: Vec::new(),
+            label: String::new(),
         };
         // The New submenu as it reads out of this machine, where the labels are `Dossier`,
         // `Raccourci`, `Document texte` and the verbs are these.
@@ -1994,7 +2467,7 @@ mod tests {
     fn probe_invokable() {
         let _serialised = crate::shell::serialised();
         crate::shell::init();
-        let (dir, file, _) = scratch("invokable");
+        let (dir, file, sub) = scratch("invokable");
         // **`YAFE_PROBE` is checked before it is used, not after.** This test used to take the
         // variable, enumerate the menu, and finish with `std::fs::remove_dir_all(&dir)` to clear
         // the scratch folder up. Given `YAFE_PROBE=D:\Sources\MyTools\yet-another-file-explorer`
@@ -2013,6 +2486,8 @@ mod tests {
         super::win::probe_invokable(&dir, &[]);
         eprintln!("--- a text file");
         super::win::probe_invokable(&dir, std::slice::from_ref(&file));
+        eprintln!("--- a selected folder");
+        super::win::probe_invokable(&dir, std::slice::from_ref(&sub));
         crate::sandbox::remove(&dir);
     }
 
@@ -2025,7 +2500,7 @@ mod tests {
         assert_eq!(Own::Cancel.label(), "Cancel");
         let entry = Entry::own(Own::CopyHere);
         assert!(entry.enabled);
-        assert!(!entry.checked && !entry.default);
+        assert!(!entry.checked);
         assert!(
             entry.shortcut.is_empty(),
             "a drop answer is not on a shortcut"

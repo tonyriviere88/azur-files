@@ -52,6 +52,9 @@ pub struct Open {
     pub items: Vec<std::path::PathBuf>,
     pub folder: std::path::PathBuf,
     pub entries: Vec<Entry>,
+    /// How much of a menu this is, carried through so that a command chosen here is resolved
+    /// against a menu built the same way. See [`crate::shell::menu::invoke`].
+    pub depth: crate::shell::menu::Depth,
     /// Which submenu chain is showing, as indices from the root.
     pub open: Vec<usize>,
     /// The keyboard highlight, as a path from the root.
@@ -80,6 +83,7 @@ impl Open {
         items: Vec<std::path::PathBuf>,
         folder: std::path::PathBuf,
         entries: Vec<Entry>,
+        depth: crate::shell::menu::Depth,
         token: u64,
     ) -> Self {
         Self {
@@ -88,6 +92,7 @@ impl Open {
             items,
             folder,
             entries,
+            depth,
             open: Vec::new(),
             cursor: None,
             token,
@@ -407,16 +412,14 @@ fn draw_level(
             response.scroll_to_me(None);
         }
 
-        // The bold entry — what a double click would have done. Azur's `MenuItem` has no
-        // weight of its own, so the mark is a 2px accent bar, the same one a selected row
-        // gets, which is the vocabulary already in use.
-        if entry.default && entry.enabled {
-            ui.painter().rect_filled(
-                Rect::from_min_size(response.rect.min, vec2(2.0, response.rect.height())),
-                egui::CornerRadius::same(radius::CIRCULAR),
-                t.accent.default,
-            );
-        }
+        // The default entry — what a double click would have done — is *not* marked.
+        //
+        // It was, with the 2px accent bar a selected row gets. Which is a real thing to say and
+        // the wrong place to say it: the default entry is almost always the first one, so every
+        // context menu in the program opened with a blue bar down the side of its top row, where
+        // it read as a selection nobody had made rather than as a hint about double-clicking.
+        // `entry.default` is still read off `MFS_DEFAULT` — the read of the shell's menu stays
+        // faithful whether or not this program draws it.
 
         if response.hovered() {
             *wants_open = Some(if is_submenu {
@@ -682,7 +685,6 @@ mod tests {
             kind: Kind::Command(Command::Own(Own::CopyHere)),
             enabled: true,
             checked: false,
-            default: false,
             icon: None,
         }
     }
@@ -709,6 +711,7 @@ mod tests {
             Vec::new(),
             std::path::PathBuf::from(r"C:\x"),
             entries,
+            crate::shell::menu::Depth::Full,
             1,
         )
     }

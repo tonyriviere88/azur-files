@@ -332,6 +332,10 @@ impl Theme {
     ///   gone from disk, and a conflict.
     /// - **Untracked is grey, not red.** It is the state of every build artefact and editor backup on
     ///   the disk; colouring those alarms nobody twice.
+    /// - **Staged is amber too, not green.** Green is the colour of *nothing left to do*, and a staged
+    ///   file still has a commit owed on it — so it belongs with the other uncommitted work rather
+    ///   than with the clean rows. The plus inside the disc is what tells it from a plain change,
+    ///   which is the job the shape is there for.
     ///
     /// No new colours: these are Azur's status roles, which is what keeps them legible on both sides
     /// of the theme and moving with it if the palette does. Which role means which state is this
@@ -339,8 +343,8 @@ impl Theme {
     pub fn git(&self, state: crate::git::State) -> Color32 {
         use crate::git::State;
         match state {
-            State::Clean | State::Staged => self.status.success,
-            State::Modified => self.status.warning,
+            State::Clean => self.status.success,
+            State::Staged | State::Modified => self.status.warning,
             State::Deleted | State::Conflicted => self.status.danger,
             // A move is neither a gain nor a loss, and `info` is the role for a fact.
             State::Renamed => self.status.info,

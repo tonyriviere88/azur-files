@@ -306,6 +306,9 @@ pub enum Request {
         parent: std::path::PathBuf,
         items: Vec<std::path::PathBuf>,
         command: menu::Command,
+        /// How much of a menu the one it was chosen from was, so the menu it is resolved
+        /// against is built the same way. See [`menu::invoke`].
+        depth: menu::Depth,
         owner: Owner,
     },
 }
@@ -384,9 +387,10 @@ impl Modal {
                             parent,
                             items,
                             command,
+                            depth,
                             owner,
                         } => {
-                            menu::invoke(&parent, &items, &command, owner);
+                            menu::invoke(&parent, &items, &command, depth, owner);
                             Reply::Invoked
                         }
                     };
