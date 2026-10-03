@@ -96,7 +96,10 @@ pub(crate) fn prompt(
         if running {
             out.stop = true;
         } else {
-            state.run(out);
+            // Never feeding: this arm is only reached when nothing is running, and the button is Stop
+            // whenever something is. Typing at a running command is `Enter`, which is where you
+            // already are.
+            state.run(false, out);
         }
     }
     if button.hovered() || button.is_pointer_button_down_on() {

@@ -804,10 +804,22 @@ impl App {
             )
         };
 
+        // Somewhere this panel is not, so it needs no session — and it is what the panel tells you to
+        // press when it has just refused a command a pipe cannot carry.
+        if let Some(command) = &out.terminal {
+            let kind = self.panes[index].console_state.kind();
+            if let Err(why) = crate::console::in_terminal(kind, &here, command) {
+                self.notice = Some(why);
+            }
+        }
+
         let mut orphan = None;
         if let Some(session) = &mut self.panes[index].console {
             if let Some(command) = &out.send {
                 session.send(Some(&here), command);
+            }
+            if let Some(text) = &out.feed {
+                session.feed(text);
             }
             if out.stop && session.running() {
                 session.stop(&ctx);

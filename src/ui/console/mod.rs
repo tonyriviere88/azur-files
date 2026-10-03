@@ -168,6 +168,11 @@ pub fn split(above: Rect, open: bool, share: f32) -> (Rect, Option<Rect>) {
 pub struct Outcome {
     /// A command to run.
     pub send: Option<String>,
+    /// A line for the command that is already running to read — not a command. See
+    /// [`crate::console::Session::feed`].
+    pub feed: Option<String>,
+    /// A command to run in a terminal of its own, for the things a pipe cannot carry.
+    pub terminal: Option<String>,
     /// End whatever is running.
     pub stop: bool,
     /// Point the panel at another shell.
@@ -572,8 +577,22 @@ impl State {
             return false;
         }
         match key {
+            // **`Ctrl+Enter` runs it somewhere else.** For `claude`, `vim` and everything else that
+            // wants a screen rather than a pipe — which the panel says so about rather than hanging,
+            // and this is the way out it names.
+            Key::Enter if m.command => {
+                self.hand_off(out);
+                true
+            }
             Key::Enter => {
-                self.run(out);
+                // A command reading standard input owns the pipe, so the line is *input* for it. The
+                // block itself says whether it can be: one whose closing statement went on its own
+                // line cannot, and there the line goes back to being a queued command.
+                let running = blocks.last().is_some_and(Block::running);
+                let takes_input = blocks
+                    .last()
+                    .is_some_and(|block| block.running() && block.takes_input);
+                self.run(running && takes_input, out);
                 true
             }
             // Taken whether or not it does anything, because `Tab` is *why* the focus filter is
@@ -680,13 +699,21 @@ impl State {
         }
     }
 
-    /// Run what is on the line.
-    fn run(&mut self, out: &mut Outcome) {
+    /// Run what is on the line — or, with `feeding`, give it to the command already running.
+    fn run(&mut self, feeding: bool, out: &mut Outcome) {
         let command = self.line.text().trim().to_owned();
         self.line.clear();
         self.recall = None;
         self.draft.clear();
         self.aim = Aim::Prompt;
+        // **An empty line is a real answer while something is reading.** Pressing Enter at a `[Y/n]`
+        // is how the default is taken, so this one goes down the pipe rather than being dropped as the
+        // empty command it would otherwise be.
+        if feeding {
+            self.tail = true;
+            out.feed = Some(command);
+            return;
+        }
         if command.is_empty() {
             return;
         }
@@ -705,6 +732,24 @@ impl State {
         self.remember(command.clone());
         self.tail = true;
         out.send = Some(command);
+    }
+
+    /// Send what is on the line to a terminal of its own, and keep it in the history.
+    ///
+    /// The line is cleared like a run, because it *was* run — somewhere this panel is not. Remembered
+    /// too, so `Up` finds it: the commands that come through here are the ones typed again most, and
+    /// having them missing from the history because they went to a terminal would be its own puzzle.
+    fn hand_off(&mut self, out: &mut Outcome) {
+        let command = self.line.text().trim().to_owned();
+        if command.is_empty() {
+            return;
+        }
+        self.line.clear();
+        self.recall = None;
+        self.draft.clear();
+        self.aim = Aim::Prompt;
+        self.remember(command.clone());
+        out.terminal = Some(command);
     }
 
     /// Put a command in the history. The same one twice running is one entry, which is what makes

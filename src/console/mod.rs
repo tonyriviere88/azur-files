@@ -72,6 +72,12 @@ const BLOCKS: usize = 200;
 /// How much text one read hands over. 8 KiB is a pipe buffer's worth.
 const CHUNK: usize = 8 << 10;
 
+/// Which of the two slots in [`Session::partial`] and [`Session::redrawing`] is standard error.
+///
+/// `usize::from(err)` is how [`Session::absorb`] picks between them, so this is `usize::from(true)`
+/// spelled out for the one place that names the pipe rather than being handed it.
+const ERR: usize = 1;
+
 /// Which shell a session is.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum Kind {
@@ -111,18 +117,22 @@ impl Kind {
         Self::ALL.into_iter().find(|kind| kind.label() == text)
     }
 
-    /// The line that closes a command: prints the marker, this command's status, and where the shell
-    /// now is.
+    /// The statement that closes a command: prints the marker, this command's status, and where the
+    /// shell now is.
+    ///
+    /// **No separator and no line ending** — [`Session::dispatch_with`] owns both, because whether
+    /// this goes on the command's own line is the difference between a command that can be typed at
+    /// and one that cannot. See [`Kind::needs_its_own_line`].
     ///
     /// **The status is captured into a variable first.** Writing `$?` directly into the `printf`
     /// works, but only by an argument-evaluation-order argument that is easy to break later — and
     /// the failure mode is every command reporting the status of the `pwd` inside its own sentinel.
-    fn sentinel(self, id: u64) -> String {
+    fn closing(self, id: u64) -> String {
         match self {
             // `pwd -W` is a builtin in Git Bash and gives the Windows spelling, so the panel gets a
             // path the rest of this program can navigate to without translation.
             Kind::Bash => format!(
-                "__azur=$?; printf '[AZUR:{id}:%d:%s]\\n' \"$__azur\" \"$(pwd -W 2>/dev/null || pwd)\"\n"
+                "__azur=$?; printf '[AZUR:{id}:%d:%s]\\n' \"$__azur\" \"$(pwd -W 2>/dev/null || pwd)\""
             ),
             // Two PowerShell rules, both of which this got wrong first time.
             //
@@ -136,9 +146,69 @@ impl Kind {
             // and the panel appears to hang.
             Kind::PowerShell => format!(
                 "$__ok=$?; $__azur=$LASTEXITCODE; if ($null -eq $__azur) {{ $__azur = if ($__ok) {{ 0 }} else {{ 1 }} }}; \
-                 Write-Output \"[AZUR:{id}:${{__azur}}:$($PWD.Path)]\"\n"
+                 Write-Output \"[AZUR:{id}:${{__azur}}:$($PWD.Path)]\""
             ),
-            Kind::Cmd => format!("echo [AZUR:{id}:%ERRORLEVEL%:%CD%]\n"),
+            // **`!…!` and not `%…%` for both of them**, which is why `cmd` is started `/V:ON`. On a
+            // line of its own either spelling works. On the *command's* line `%ERRORLEVEL%` and `%CD%`
+            // are expanded when the line is parsed — before the command has run — so the block
+            // reported the status *and the folder* of the command before it. Measured both ways:
+            // `cmd /c exit 3 & echo %ERRORLEVEL%` prints `0` where two lines print `3`, and `cd .. &
+            // echo %CD%` names the folder it started in. Delayed expansion reads them when the `echo`
+            // runs, which is the whole point of the sentinel.
+            Kind::Cmd => format!("echo [AZUR:{id}:!ERRORLEVEL!:!CD!]"),
+        }
+    }
+
+    /// What puts [`Kind::closing`] after a command on the same line.
+    ///
+    /// Nothing but a space after a `&` or a `;` the command already ends with: those are separators
+    /// themselves, and a second one is a syntax error rather than a no-op.
+    fn joiner(self, command: &str) -> &'static str {
+        let text = command.trim_end();
+        if text.ends_with('&') || text.ends_with(';') {
+            return " ";
+        }
+        match self {
+            Kind::Bash | Kind::PowerShell => "; ",
+            Kind::Cmd => " & ",
+        }
+    }
+
+    /// Whether the closing statement has to go on a line of its own.
+    ///
+    /// **One line is what lets a command read what you type.** A shell reading commands from a pipe
+    /// reads exactly one line at a time — measured, by giving `head -1` a sentinel on the next line
+    /// and watching it read the sentinel — so a closing statement on its own line is sitting in the
+    /// pipe when the command starts, and the command eats it. The block then never closes, because the
+    /// line that closes it has been consumed. On one line the shell has taken both before the command
+    /// runs, and the pipe is empty for the command to read from.
+    ///
+    /// So one line is the default and this is the list of commands whose own text would eat, comment
+    /// out or condition whatever is put after it. Those go back to two lines: they cannot be typed at,
+    /// which is exactly the old behaviour, and their block still closes — which is the part that must
+    /// never fail.
+    fn needs_its_own_line(self, command: &str) -> bool {
+        let text = command.trim_end();
+        // Ordered before the bare `&` in `joiner`: `&&` and `||` would make the closing statement
+        // conditional on the command succeeding, so a failing command would never close its block.
+        // A trailing `|` or a continuation character means the command is unfinished either way.
+        let continues = ["&&", "||", "|"]
+            .iter()
+            .chain(match self {
+                Kind::Cmd => ["^"].iter(),
+                _ => ["\\"].iter(),
+            })
+            .any(|tail| text.ends_with(tail));
+        if continues {
+            return true;
+        }
+        match self {
+            // A `#` runs to the end of the line and takes the closing statement with it. Tested for
+            // anywhere rather than only outside quotes: `git commit -m "fix #12"` is then sent over two
+            // lines for no reason, which costs it nothing — it is not a command anybody types at.
+            Kind::Bash | Kind::PowerShell => text.contains('#'),
+            // `rem` is `cmd`'s comment and swallows the `&` as well.
+            Kind::Cmd => text.len() >= 3 && text[..3].eq_ignore_ascii_case("rem"),
         }
     }
 
@@ -185,6 +255,13 @@ pub struct Block {
     /// A block's index is not a name: the cap drops blocks off the front, `Del` removes one from
     /// the middle, and either of those would silently move a selection onto its neighbour.
     pub id: u64,
+    /// Whether this command can be typed at while it runs.
+    ///
+    /// True when its closing statement went on its own line — see [`Kind::needs_its_own_line`] — and
+    /// so the pipe is the command's to read rather than the shell's. Recorded per block rather than
+    /// asked again later, because the answer depends on the text of the command that is running and
+    /// the panel is drawing long after that text was decided about.
+    pub takes_input: bool,
 }
 
 impl Block {
@@ -342,11 +419,44 @@ impl Session {
         let moved = dir
             .filter(|dir| !dir.as_os_str().is_empty() && Some(*dir) != self.cwd.as_deref())
             .map(|dir| self.kind.cd(dir));
-        self.dispatch_with(moved, command.to_owned());
+        self.dispatch_or_refuse(moved, command.to_owned());
     }
 
-    fn dispatch(&mut self, command: String) {
-        self.dispatch_with(None, command);
+    /// Run a command, or say why it cannot be. **Only with nothing already running.**
+    ///
+    /// Both ways in go through here — typed, and taken off the queue a command ahead of it filled —
+    /// because the queue was the hole: a `vim` typed while a build was going was queued before anything
+    /// looked at it, and then dispatched with no check at all.
+    ///
+    /// The reason it cannot be done while something runs is [`Session::refuse`]'s block. A refusal is a
+    /// *closed* block, and pushing one on top of a running block makes the closed one last — so
+    /// [`Session::running`] says nothing is going, and the sentinel that arrives for the real command
+    /// no longer matches the last block's id and never closes it.
+    fn dispatch_or_refuse(&mut self, before: Option<String>, command: String) {
+        match needs_a_terminal(&command) {
+            Some(why) => self.refuse(&command, why),
+            None => self.dispatch_with(before, command),
+        }
+    }
+
+    /// A command that was not run, and why, as a block of its own.
+    ///
+    /// A block rather than a notice over the window: it belongs in the log next to the command it is
+    /// about, it can be scrolled back to, and it is the same shape as every other answer the panel
+    /// gives. Closed on arrival, because there is nothing to wait for.
+    fn refuse(&mut self, command: &str, why: String) {
+        let id = self.next_id;
+        self.next_id += 1;
+        if self.blocks.len() >= BLOCKS {
+            self.blocks.remove(0);
+        }
+        self.blocks.push(Block {
+            command: command.to_owned(),
+            id,
+            code: Some(1),
+            lines: vec![Line { text: why, err: true }],
+            ..Block::default()
+        });
     }
 
     fn dispatch_with(&mut self, before: Option<String>, command: String) {
@@ -365,15 +475,23 @@ impl Session {
         if self.blocks.len() >= BLOCKS {
             self.blocks.remove(0);
         }
-        // The sentinel goes down the pipe in the same write as the command, so nothing can be
-        // interleaved between them by a second `send`.
+        // The closing statement goes down the pipe in the same write as the command, so nothing can be
+        // interleaved between them by a second `send` — and, wherever it can, on the same *line*, so
+        // the pipe is empty for the command to read from. See [`Kind::needs_its_own_line`].
+        let own_line = self.kind.needs_its_own_line(&command);
         let mut text = before.unwrap_or_default();
         text.push_str(&command);
+        if own_line {
+            text.push('\n');
+        } else {
+            text.push_str(self.kind.joiner(&command));
+        }
+        text.push_str(&self.kind.closing(id));
         text.push('\n');
-        text.push_str(&self.kind.sentinel(id));
         self.blocks.push(Block {
             command,
             id,
+            takes_input: !own_line,
             ..Block::default()
         });
         self.write(&text);
@@ -384,13 +502,19 @@ impl Session {
     /// **Only `cmd`, and only because it cannot be told not to.** A `cmd` reading commands from a
     /// pipe writes each line it reads back down stdout, and `@echo off` does not stop it — that
     /// setting is about the prompt, and the read-back happens because stdin is not a console. So
-    /// every block came out with the command repeated under its own header, followed by the literal
-    /// text of the sentinel command, which reads as though the shell had printed the protocol.
+    /// every block came out with the command repeated under its own header — with the literal text of
+    /// the closing statement on the end of it, since the two now share a line — which reads as though
+    /// the shell had printed the protocol.
     ///
     /// Since this program is the one that wrote those lines it knows exactly what they will be, so
     /// they are matched and dropped rather than guessed at by shape. A line the *command* prints that
     /// happens to be identical is dropped too, which is the one thing this can get wrong, and it
     /// costs one duplicate line in `cmd` alone.
+    ///
+    /// It matches on the line as written, before `cmd` expands anything: delayed expansion happens when
+    /// the line is *run*, and `cmd` reads it back first. Asserted per shell by
+    /// `a_real_shell_reports_its_own_status_and_folder`, which fails if any of the protocol reaches the
+    /// log.
     fn expect_echo(&mut self, text: &str) {
         if self.kind != Kind::Cmd {
             return;
@@ -401,6 +525,15 @@ impl Session {
 
     fn write(&mut self, text: &str) {
         self.expect_echo(text);
+        self.write_raw(text);
+    }
+
+    /// Down the pipe without registering an echo.
+    ///
+    /// For [`Session::feed`], whose text is read by the *command* rather than by the shell — so `cmd`
+    /// never reads it back, and registering it would arm [`Session::expect_echo`] to drop the next
+    /// output line that happened to match what was typed.
+    fn write_raw(&mut self, text: &str) {
         let failed = match self.stdin.as_mut() {
             Some(stdin) => stdin.write_all(text.as_bytes()).and_then(|()| stdin.flush()).is_err(),
             None => true,
@@ -408,6 +541,44 @@ impl Session {
         if failed {
             self.gone = true;
         }
+    }
+
+    /// Type at the command that is running.
+    ///
+    /// **Not a command.** The text goes down the same pipe, but no block is opened and no closing
+    /// statement follows it: it is standard input for whatever is reading it, which is how `python -i`
+    /// gets a line to evaluate and how a `[y/N]` gets answered.
+    ///
+    /// Echoed into the block on the way past, because a pipe is not a terminal — nothing gives back
+    /// what was typed, so without this the answers are invisible and the log reads as though the
+    /// program talked to itself.
+    ///
+    /// **There is no way to send an end of file.** Closing the pipe is what `Ctrl+D` means and this
+    /// pipe is the session's, so closing it would take the shell with it; a `cat` with nothing to end
+    /// it needs [`Session::stop`]. A REPL wants its own word — `exit()`, `quit`, `\q`.
+    /// **The prompt that has just been answered is thrown away.** A prompt is written without a line
+    /// ending behind it — that is what makes it a prompt — so `>>> ` sits in the standard error partial
+    /// line waiting for a newline that is never coming. The next thing on stderr was a traceback, which
+    /// then arrived as `>>> >>> Traceback (most recent call last):` with every prompt since answered
+    /// stuck to the front of it. Answering a prompt consumes it, which is what a terminal's own echo
+    /// would have made obvious, and dropping it here is what makes the log read as a transcript.
+    pub fn feed(&mut self, text: &str) {
+        if self.gone || !self.takes_input() {
+            return;
+        }
+        self.partial[ERR] = String::new();
+        self.redrawing[ERR] = false;
+        if let Some(block) = self.blocks.last_mut() {
+            block.push(text.to_owned(), false);
+        }
+        self.write_raw(&format!("{text}\n"));
+    }
+
+    /// Whether what is running now can be typed at. False when nothing is running.
+    pub fn takes_input(&self) -> bool {
+        self.blocks
+            .last()
+            .is_some_and(|block| block.running() && block.takes_input)
     }
 
     /// Stop whatever is running.
@@ -478,7 +649,7 @@ impl Session {
         // Anything queued while that was running.
         if !self.running() && !self.gone {
             if let Some(next) = self.queued.pop_front() {
-                self.dispatch(next);
+                self.dispatch_or_refuse(None, next);
             }
         }
     }
@@ -748,6 +919,134 @@ pub fn windows_path(text: &str) -> Option<PathBuf> {
     }
 }
 
+// ---------------------------------------------------------------------------
+// What a pipe cannot carry
+// ---------------------------------------------------------------------------
+
+/// Programs that draw over the whole screen, and so can never work on a pipe.
+///
+/// Not "programs that are interactive" — a great many of those are fine here now that a command can
+/// be typed at. These are the ones that put the terminal in raw mode, switch to the alternate screen
+/// and address the cursor: there is no partial version of that on a pipe, and no amount of forwarding
+/// keystrokes makes one.
+const FULL_SCREEN: [&str; 15] = [
+    "vim", "vi", "nvim", "nano", "pico", "emacs", "htop", "btop", "top", "less", "more", "man",
+    "fzf", "tig", "lazygit",
+];
+
+/// Why a command cannot work down a pipe, if it cannot — as a sentence for the panel to show.
+///
+/// **A short list on purpose.** The failure this exists to prevent is the silent one: a full-screen
+/// program on a pipe prints nothing at all and waits for ever, and before this the only way out was
+/// Stop. Saying so costs nothing and names the way to run it.
+///
+/// What is deliberately *not* guessed at is anything whose behaviour depends on configuration this
+/// program does not read. `git commit` and `git rebase -i` open whatever `core.editor` is, which may
+/// as easily be `code --wait` and work perfectly — so refusing them would break a working command to
+/// warn about a broken one. They are left to hang, and Stop, as before.
+pub fn needs_a_terminal(command: &str) -> Option<String> {
+    let mut words = command.split_whitespace();
+    let name = bare_name(words.next()?);
+    let rest: Vec<&str> = words.collect();
+    let flagged = |flags: [&str; 2]| rest.iter().any(|arg| flags.contains(arg));
+
+    if FULL_SCREEN.contains(&name.as_str()) {
+        return Some(format!(
+            "`{name}` draws over the whole screen, which a pipe cannot carry. \
+             Ctrl+Enter runs it in a terminal of its own."
+        ));
+    }
+    match name.as_str() {
+        "claude" if !flagged(["-p", "--print"]) => Some(
+            "`claude` is a full-screen program. `claude -p \"…\"` prints one answer and works here; \
+             Ctrl+Enter opens the interactive one in a terminal."
+                .to_owned(),
+        ),
+        // Bare, these read their standard input as a *script* rather than prompting — so the panel
+        // would show nothing, and anything typed would be swallowed as more source. `-i` is the flag
+        // that makes each of them a REPL that works here, which is worth saying rather than leaving
+        // somebody to find out.
+        "python" | "python3" | "py" | "node" if rest.is_empty() => Some(format!(
+            "bare `{name}` reads its standard input as a script and never prompts. \
+             `{name} -i` is a REPL you can type at here."
+        )),
+        _ => None,
+    }
+}
+
+/// The bare name of a program: no folder, no `.exe`, lower case.
+fn bare_name(word: &str) -> String {
+    word.rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(word)
+        .trim_end_matches(".exe")
+        .trim_end_matches(".EXE")
+        .to_ascii_lowercase()
+}
+
+/// Run a command in a terminal of its own, for the things a pipe cannot carry.
+///
+/// **Outside this program's session and outside its job object.** Nothing about it is the panel's: it
+/// does not appear as a block, Stop does not reach it, and closing the window it came from leaves it
+/// running. Which is the point — it is a real terminal, and the reason to go there is that this panel
+/// is not one.
+///
+/// Windows Terminal when it is installed, because that is the terminal somebody who wants one has,
+/// and a console of this program's own making otherwise. No new dependency either way: the whole cost
+/// of this is picking the right arguments.
+pub fn in_terminal(kind: Kind, dir: &Path, command: &str) -> Result<(), String> {
+    let (program, args) =
+        interactive(kind, command).ok_or_else(|| format!("{} is not installed", kind.label()))?;
+
+    // **A `;` is Windows Terminal's own argument separator**, for splitting a window into panes — so a
+    // command with one in it would be cut in half at it and half of it run somewhere unexpected.
+    // Those go the other way rather than being launched wrong.
+    if !command.contains(';') && !dir.as_os_str().is_empty() {
+        if let Some(wt) = which("wt.exe") {
+            let mut launch = Command::new(wt);
+            launch.arg("-d").arg(dir).arg(&program).args(&args);
+            if launch.spawn().is_ok() {
+                return Ok(());
+            }
+        }
+    }
+    // `CREATE_NEW_CONSOLE` rather than merely leaving `CREATE_NO_WINDOW` off: this process is a
+    // `windows` subsystem binary with no console of its own, and asking for one outright is clearer
+    // than relying on what an absent flag falls back to.
+    let mut launch = Command::new(&program);
+    launch.args(&args);
+    if !dir.as_os_str().is_empty() {
+        launch.current_dir(dir);
+    }
+    crate::shell::new_console(&mut launch);
+    launch
+        .spawn()
+        .map(|_| ())
+        .map_err(|why| format!("Cannot start {}: {why}", kind.label()))
+}
+
+/// A shell told to run one command interactively.
+///
+/// **The window closes when the command ends**, which is right for what comes through here: `claude`,
+/// `vim` and `htop` are quit deliberately, and a window left over afterwards would need a second
+/// gesture to be rid of. It also keeps the command out of a `;`-joined argument, which is what lets
+/// Windows Terminal be used at all.
+fn interactive(kind: Kind, command: &str) -> Option<(PathBuf, Vec<String>)> {
+    // The same flags [`program`] starts the panel's own shell with, plus the one that takes a command
+    // and the `-i` that a program looking for a terminal wants to find.
+    let (path, flags): (PathBuf, Vec<&str>) = match kind {
+        Kind::Bash => (bash()?, vec!["--login", "-i", "-c"]),
+        Kind::PowerShell => (
+            which("pwsh.exe").or_else(|| which("powershell.exe"))?,
+            vec!["-NoLogo", "-Command"],
+        ),
+        Kind::Cmd => (PathBuf::from("cmd.exe"), vec!["/C"]),
+    };
+    let mut args: Vec<String> = flags.into_iter().map(str::to_owned).collect();
+    args.push(command.to_owned());
+    Some((path, args))
+}
+
 /// Start a shell, wire its pipes to threads, and put it in a job.
 fn spawn(
     kind: Kind,
@@ -795,42 +1094,115 @@ fn spawn(
     Ok((child, from, job))
 }
 
+/// Bytes off a pipe as text, and the one place two encodings meet.
+///
+/// **A console pipe carries UTF-8 and the OEM code page at the same time.** The shell writes UTF-8;
+/// `net`, `ipconfig`, `sc`, `tasklist` and every other Win32 console tool write the code page
+/// [`GetOEMCP`](oem) reports, because that is what console output *is* and redirecting the handle to
+/// a pipe does not change it. So on a French machine `net use` sends `m\x82moris\x82es` down the same
+/// pipe that `echo é` sent `\xc3\xa9` down, and nothing in either says which it is.
+///
+/// Valid UTF-8 wins, and what is not UTF-8 goes to [`oem::decode`] **one broken sequence at a time**,
+/// with UTF-8 tried again immediately after. Handing the code page every byte from `0x80` up instead
+/// is the shortcut that looks equivalent and is not: a stray `\x82` from `net` would swallow the
+/// perfectly good `\xc3\xa9` printed behind it and turn one `é` into two other letters.
+///
+/// # Why `valid_up_to` on its own was a hang
+///
+/// This was three lines and a `continue`, on the reasoning that a sequence which does not parse is a
+/// sequence still arriving. `\x82` is not: it is a *continuation* byte, so it can never begin one.
+/// `valid_up_to` was 0 for ever, every read appended to a buffer nothing would drain, and **nothing
+/// was forwarded again** — the sentinel included. So the block stayed open, the panel span for ever
+/// about a command that had finished in a second, and every later command in that session was dead
+/// behind it. Only stderr kept working, because it is a second thread with its own buffer.
+///
+/// The discriminator is [`std::str::Utf8Error::error_len`], which the old code did not consult:
+/// `None` is a sequence truncated by the read boundary and waits, `Some` is a byte that will never be
+/// valid and has to be consumed.
+#[derive(Default)]
+struct Decoder {
+    /// Bytes held back until the rest of their character arrives: the start of a UTF-8 sequence split
+    /// by a read boundary, or the lead byte of a double-byte OEM character split by the same.
+    tail: Vec<u8>,
+}
+
+impl Decoder {
+    /// One read's worth of bytes, holding back only a character the boundary cut in half.
+    fn feed(&mut self, bytes: &[u8]) -> String {
+        self.tail.extend_from_slice(bytes);
+        let mut out = String::with_capacity(self.tail.len());
+        while !self.tail.is_empty() {
+            // `None` for the length means there is nothing invalid: either all of it parsed, or what
+            // did not is a sequence still on its way.
+            let (good, bad) = match std::str::from_utf8(&self.tail) {
+                Ok(_) => (self.tail.len(), None),
+                Err(why) => (why.valid_up_to(), why.error_len()),
+            };
+            if good > 0 {
+                // Valid by construction: `valid_up_to` is exactly where it stopped being.
+                if let Ok(text) = std::str::from_utf8(&self.tail[..good]) {
+                    out.push_str(text);
+                }
+                self.tail.drain(..good);
+            }
+            let Some(bad) = bad else {
+                break;
+            };
+            // Not UTF-8 at all, so the code page. The whole of the broken sequence goes, since those
+            // bytes are a code page character and its neighbours rather than a prefix of anything.
+            let run = if oem::double_byte(self.tail[0]) { 2 } else { bad };
+            if run > self.tail.len() {
+                // A lead byte whose trail byte is in the next read.
+                break;
+            }
+            out.push_str(&oem::decode(&self.tail[..run]));
+            self.tail.drain(..run);
+        }
+        out
+    }
+
+    /// Whatever is held back when the pipe closes.
+    ///
+    /// The rest of it is never coming, so the code page's reading of those bytes is the better guess:
+    /// a sequence that looked like truncated UTF-8 at the very end of a stream which also carried
+    /// code page bytes most likely never was UTF-8. Either way it is a character the panel shows
+    /// rather than one it silently drops.
+    fn flush(&mut self) -> String {
+        oem::decode(&std::mem::take(&mut self.tail))
+    }
+}
+
 /// One thread per pipe, forwarding decoded text.
 ///
-/// The thread does as little as possible: read bytes, decode, send. It deliberately does not know
-/// about lines, escape sequences or the protocol — all of that is [`Session::absorb`], on the UI
-/// thread, where it can be tested without a process.
-///
-/// The decoding is the one subtle part. A read can end in the middle of a UTF-8 sequence, and
-/// `from_utf8_lossy` on each chunk would turn every such split into a replacement character — one
-/// per 8 KiB, for ever. So the tail is carried to the next read.
+/// The thread does as little as possible: read bytes, [`Decoder::feed`], send. It deliberately does
+/// not know about lines, escape sequences or the protocol — all of that is [`Session::absorb`], on the
+/// UI thread, where it can be tested without a process.
 fn pipe(mut source: impl Read + Send + 'static, to_ui: Sender<Chunk>, err: bool, ctx: egui::Context) {
     let _ = std::thread::Builder::new()
         .name(format!("console-{}", if err { "err" } else { "out" }))
         .spawn(move || {
+            let wrap = |text| if err { Chunk::Err(text) } else { Chunk::Out(text) };
             let mut buffer = [0u8; CHUNK];
-            let mut tail: Vec<u8> = Vec::new();
+            let mut decoder = Decoder::default();
             loop {
                 let read = match source.read(&mut buffer) {
                     Ok(0) | Err(_) => break,
                     Ok(read) => read,
                 };
-                tail.extend_from_slice(&buffer[..read]);
-                let good = match std::str::from_utf8(&tail) {
-                    Ok(_) => tail.len(),
-                    Err(why) => why.valid_up_to(),
-                };
-                if good == 0 {
+                // Empty only when the read was a character's first bytes and nothing else.
+                let text = decoder.feed(&buffer[..read]);
+                if text.is_empty() {
                     continue;
                 }
-                let text = String::from_utf8_lossy(&tail[..good]).into_owned();
-                tail.drain(..good);
-                let chunk = if err { Chunk::Err(text) } else { Chunk::Out(text) };
-                if to_ui.send(chunk).is_err() {
+                if to_ui.send(wrap(text)).is_err() {
                     return;
                 }
                 // Nothing else would wake a window that paints on demand.
                 ctx.request_repaint();
+            }
+            let left = decoder.flush();
+            if !left.is_empty() {
+                let _ = to_ui.send(wrap(left));
             }
             let _ = to_ui.send(Chunk::Closed);
             ctx.request_repaint();
@@ -850,8 +1222,10 @@ fn program(kind: Kind) -> Option<(PathBuf, Vec<&'static str>)> {
         Kind::PowerShell => which("pwsh.exe")
             .or_else(|| which("powershell.exe"))
             .map(|path| (path, vec!["-NoLogo", "-Command", "-"])),
-        // `/Q` is echo off, without which every command appears twice.
-        Kind::Cmd => Some((PathBuf::from("cmd.exe"), vec!["/Q", "/K"])),
+        // `/Q` is echo off, without which every command appears twice. `/V:ON` turns on delayed
+        // expansion, which is what makes `!ERRORLEVEL!` in [`Kind::closing`] mean anything — without
+        // it every block reports the status of the command before it. See the comment there.
+        Kind::Cmd => Some((PathBuf::from("cmd.exe"), vec!["/V:ON", "/Q", "/K"])),
     }
 }
 
@@ -895,6 +1269,25 @@ struct Job(#[cfg(windows)] isize);
 #[cfg(windows)]
 #[path = "../windows/job.rs"]
 mod win;
+
+/// The other encoding on the pipe. See [`Decoder`] for which bytes reach it and why.
+#[cfg(windows)]
+#[path = "../windows/oem.rs"]
+mod oem;
+
+#[cfg(not(windows))]
+mod oem {
+    /// Nowhere but Windows has a second encoding on a pipe, so there is nothing to decode with: a
+    /// byte that is not UTF-8 here is a byte with no code page behind it.
+    pub fn decode(bytes: &[u8]) -> String {
+        String::from_utf8_lossy(bytes).into_owned()
+    }
+
+    /// No code page, so no lead bytes.
+    pub fn double_byte(_first: u8) -> bool {
+        false
+    }
+}
 
 #[cfg(not(windows))]
 mod win {

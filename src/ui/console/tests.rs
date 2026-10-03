@@ -15,6 +15,7 @@ fn block(id: u64, command: &str, lines: &[&str]) -> Block {
         dropped: 0,
         collapsed: false,
         id,
+        takes_input: false,
     }
 }
 
@@ -69,6 +70,85 @@ fn typing_goes_in_and_enter_sends_it() {
     assert_eq!(out.send.as_deref(), Some("git status"));
     // And the line is empty again, ready for the next one.
     assert_eq!(state.line.text(), "");
+}
+
+/// A block still going, which is what `Enter` means something different at.
+fn running(id: u64, command: &str, takes_input: bool) -> Block {
+    Block {
+        command: command.to_owned(),
+        code: None,
+        id,
+        takes_input,
+        ..Block::default()
+    }
+}
+
+/// **`Enter` at a running command is input for it, not a command of its own.**
+///
+/// Which is how `python -i` gets a line to evaluate. The block says whether it can be: one whose
+/// closing statement went on its own line owns none of the pipe, and there `Enter` goes back to being
+/// a queued command.
+#[test]
+fn enter_types_at_a_running_command_that_can_be_typed_at() {
+    let mut state = State::default();
+    let mut blocks = vec![running(1, "python -i", true)];
+    let out = feed(
+        &mut state,
+        &mut blocks,
+        vec![
+            egui::Event::Text("print(6*7)".to_owned()),
+            press(Key::Enter, Modifiers::NONE),
+        ],
+    );
+    assert_eq!(out.feed.as_deref(), Some("print(6*7)"));
+    assert_eq!(out.send, None, "it must not be run as a command of its own");
+    assert_eq!(state.line.text(), "");
+
+    // **An empty line is a real answer while something is reading**, because pressing Enter at a
+    // `[Y/n]` is how the default is taken. As a command it would be nothing at all.
+    let out = feed(&mut state, &mut blocks, vec![press(Key::Enter, Modifiers::NONE)]);
+    assert_eq!(out.feed.as_deref(), Some(""), "the default was never answered");
+
+    // And a running command that cannot be typed at queues one, exactly as before.
+    let mut blocks = vec![running(2, "ls # look", false)];
+    let out = feed(
+        &mut state,
+        &mut blocks,
+        vec![
+            egui::Event::Text("git status".to_owned()),
+            press(Key::Enter, Modifiers::NONE),
+        ],
+    );
+    assert_eq!(out.send.as_deref(), Some("git status"));
+    assert_eq!(out.feed, None);
+}
+
+/// `Ctrl+Enter` sends it to a terminal of its own, and the history keeps it.
+///
+/// Remembered because the commands that go through here — `claude`, `vim` — are the ones typed again
+/// most, and having them silently missing from `Up` would be its own puzzle.
+#[test]
+fn ctrl_enter_hands_the_command_to_a_terminal() {
+    let mut state = State::default();
+    let mut blocks = Vec::new();
+    let out = feed(
+        &mut state,
+        &mut blocks,
+        vec![egui::Event::Text("claude".to_owned()), press(Key::Enter, CTRL)],
+    );
+    assert_eq!(out.terminal.as_deref(), Some("claude"));
+    assert_eq!(out.send, None, "it must not also be run down the pipe");
+    assert_eq!(state.line.text(), "");
+
+    // `Up` finds it.
+    let out = feed(&mut state, &mut blocks, vec![press(Key::ArrowUp, Modifiers::NONE)]);
+    assert_eq!(state.line.text(), "claude");
+    assert_eq!(out.terminal, None);
+
+    // Nothing typed is nothing to hand over.
+    let mut state = State::default();
+    let out = feed(&mut state, &mut blocks, vec![press(Key::Enter, CTRL)]);
+    assert_eq!(out.terminal, None);
 }
 
 #[test]

@@ -268,6 +268,27 @@ pub fn no_window(command: &mut std::process::Command) {
     let _ = command;
 }
 
+/// Start a child process **with** a console window of its own.
+///
+/// The opposite of [`no_window`], and the one thing this program cannot give a child any other way: a
+/// release build is a `windows` subsystem binary with no console to share, so a program that wants a
+/// terminal — `claude`, `vim`, anything that draws over the screen — has to be handed a new one. See
+/// [`crate::console::in_terminal`], which is the only caller and the only reason this exists.
+///
+/// Said outright rather than by leaving `CREATE_NO_WINDOW` off: a debug build *does* have a console,
+/// so the absent flag would mean two different things in the two builds, and the one that worked would
+/// be the one nobody ships.
+pub fn new_console(command: &mut std::process::Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt as _;
+        const CREATE_NEW_CONSOLE: u32 = 0x0000_0010;
+        command.creation_flags(CREATE_NEW_CONSOLE);
+    }
+    #[cfg(not(windows))]
+    let _ = command;
+}
+
 // ---------------------------------------------------------------------------
 // The modal thread
 // ---------------------------------------------------------------------------

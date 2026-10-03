@@ -415,7 +415,19 @@ pub(crate) fn log(
             let ink = match row {
                 Row::Head(which, _) if blocks[*which].failed() => t.status.danger,
                 Row::Cut(_) => t.text.tertiary,
-                Row::Text(which, line, _) if blocks[*which].lines[*line].err => t.status.danger,
+                // **Standard error is quieter, not red.** It was `status.danger`, on the reading that
+                // stderr is the error stream. It is not: it is the unbuffered, diagnostic,
+                // not-my-output stream, and the programs that use it properly are the ones that
+                // suffered. Measured — a *successful* `cargo build` writes 0 bytes to stdout and all
+                // 159 of `Compiling`/`Finished` to stderr, so every green build was painted as a
+                // failure; `python -i` puts its banner and its `>>>` prompts there too.
+                //
+                // Failure is said by the exit code instead, which is a thing this panel actually
+                // knows: the header above carries `status.danger` and the code itself when the command
+                // failed. Two streams still tell apart, because the separation is worth keeping — it
+                // is the one place this beats a terminal — but the one that means "went wrong" is the
+                // one that went wrong.
+                Row::Text(which, line, _) if blocks[*which].lines[*line].err => t.text.secondary,
                 // **Output is `text-primary`, the same as the command above it.** It is the thing
                 // being read; greying it to tell it apart from its header is the wrong way round,
                 // and the header has a band, a mark and a chevron already.

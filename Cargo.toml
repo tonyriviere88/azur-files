@@ -126,6 +126,12 @@ eframe = { version = "0.35", default-features = false, features = [
 # change nothing would be churn in the one place that must not regress.
 windows = { version = "0.62", features = [
     "Win32_Foundation",
+    # `GetOEMCP`, `IsDBCSLeadByteEx` and `MultiByteToWideChar` — the *other* encoding on a console
+    # pipe. The shell writes UTF-8; `net`, `ipconfig` and every other Win32 console tool write the
+    # OEM code page, and redirecting the handle to a pipe does not change that. Decoding it is what
+    # keeps `net use` on a French machine from arriving as `m?moris?es` — and, before that, from
+    # wedging the pipe's decoder for the rest of the session. See `console::Decoder`.
+    "Win32_Globalization",
     # The three that carry one texture. The preview panel plays video by asking Media Foundation's
     # Media Engine for the frame that is on screen, which it writes into a D3D11 texture — so a
     # device, a texture and a DXGI format have to be nameable. `Direct3D` is here for one enum
