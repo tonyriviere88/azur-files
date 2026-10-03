@@ -13,5 +13,52 @@
 # decides that, and defaults to release. It is here so that compiling the helper needs only the
 # dependencies the release build is about to want anyway, rather than a second debug copy of
 # eframe and wgpu on a fresh clone.
+# `cargo claude-*` — the agent's build, kept out of the way of mine.
+#
+# `target/debug` and `target/release` are mine. Something that relinks
+# `azur-file-explorer.exe` behind my back invalidates the instance I have running, and I have
+# one running most of the time — Windows locks the running image, so the build fails and
+# leaves the *old* exe behind, which is the worst of both outcomes. So the agent builds into
+# `target/claude/` instead: inside `target/` rather than in a temp directory, so that it survives
+# the session and stays incremental. An empty target directory compiles eframe, wgpu and resvg
+# from nothing, which is 2m35s and 2.8 GB on an idle machine — and much worse when the C++
+# tooling has the commit, which is where the "about an hour" figure came from. Kept warm it is
+# 0.8s for a no-op build and 4.7s for a one-file edit.
+#
+#   cargo claude-clippy            everything, and it reports rustc's errors too
+#   cargo claude-build             -> target/claude/debug/azur-file-explorer.exe
+#   cargo claude-test <filter>     same directory, so it shares the compiled dependencies
+#   cargo claude-run
+#
+# There is deliberately no `claude-check`: `clippy` and `check` disagree about the rustc
+# wrapper, so alternating them in one directory re-checks the world each time. Clippy is the
+# strict superset — use it and never the other.
+#
+# `--target-dir` hangs off each alias rather than being a `[build] target-dir` below, because
+# that would move my builds too. It is relative to the directory cargo is invoked from, so
+# these want the repository root.
+#
+# **No faster linker here, and that was measured rather than assumed.** LLVM's `lld-link.exe` is
+# the standing advice for Windows link times, and on this crate it does not win: timed on the
+# identical link job — a shim standing in as the linker and running both — MSVC's `link.exe`
+# takes 2137 ms against lld's 2136 ms for the 31 MB executable and its 280 MB PDB, and 285 ms
+# against 504 ms for a build script. rustc passes `/DEBUG`, which turns `/INCREMENTAL` on
+# implicitly, and an incremental link is the thing lld has no answer to. Reaching the
+# toolchain's own bundled copy instead would need `-Clinker-features=+lld`, still unstable on
+# 1.97 stable, and it is the same linker.
+#
+# Nor is the linker where the time goes: ~2 s of a 4.7 s one-file rebuild, the rest being rustc.
+# Debug info is the lever that does move it — adding
+# `--config "profile.dev.debug='line-tables-only'"` to these aliases takes that rebuild to 3.4 s
+# and the PDB from 280 MB to 88 MB, keeping `file:line` in backtraces and giving up variable
+# inspection in a debugger. Left off: 1.3 s is not worth an agent's build that debugs
+# differently from yours. A linker or a profile written into the tables below rather than into an
+# alias would be worse than useless — both are part of cargo's fingerprint, so either one marks
+# every unit in the warm `target/debug` `Dirty ("the config settings changed")` and rebuilds it
+# from scratch.
 [alias]
 deploy = "run --quiet --release --example deploy --"
+claude-clippy = "clippy --all-targets --target-dir target/claude"
+claude-build = "build --target-dir target/claude"
+claude-test = "test --target-dir target/claude"
+claude-run = "run --target-dir target/claude"
