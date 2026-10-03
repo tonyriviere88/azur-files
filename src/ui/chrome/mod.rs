@@ -808,7 +808,7 @@ fn app_menu(
     win_key: bool,
     out: &mut Vec<Action>,
 ) {
-    use azur_egui_theme::components::{submenu, Menu, MenuItem};
+    use azur_egui_theme::components::{Menu, MenuItem};
 
     Menu::new(trigger).min_width(220.0).show(ui.ctx(), |ui| {
         if ui
@@ -892,35 +892,13 @@ fn app_menu(
             out.push(Action::Window(WindowAction::ResetSize));
         }
         azur_egui_theme::components::menu_divider(ui);
-        // The themes, behind one entry rather than side by side in the open. They are a *choice
-        // between* things and not a row of switches, which a submenu says by shape: one row naming
-        // the question, and the answers a level in. Out here they were the first thing the menu
-        // said, which is a great deal of prominence for something set once.
-        //
-        // **Driven by `Palette::ALL`**, so a new palette appears here by existing. This used to be
-        // a literal pair, which is the kind of list that gets forgotten the one time it matters.
-        //
-        // The parent carries the same `dot` its options do, rather than for want of a better glyph:
-        // there is no appearance icon in either set, and a row that opens a choice reading in the
-        // same visual family as the choice beats an unrelated shape standing in for one.
-        //
-        // `ui.close()` after the push, per this helper's own documentation — a click in a nested menu
-        // has to bring the whole stack down and not just the level it landed in.
-        submenu(ui, MenuItem::new("Theme").icon(&azur_icons::dot), |ui| {
-            for wants in crate::theme::Palette::ALL {
-                if ui
-                    .add(
-                        MenuItem::new(wants.label())
-                            .selected(palette == wants)
-                            .icon(&azur_icons::dot),
-                    )
-                    .clicked()
-                {
-                    out.push(Action::SetTheme(wants));
-                    ui.close();
-                }
-            }
-        });
+        // The themes, behind one entry and grouped by side — the design system's own list, so
+        // every application offers them the same way; see `azur_egui_theme::palettes::submenu`.
+        // Out here they were the first thing the menu said, which is a great deal of prominence
+        // for something set once.
+        if let Some(wants) = azur_egui_theme::palettes::submenu(ui, palette) {
+            out.push(Action::SetTheme(wants));
+        }
         // Windows' own folder key, and **the one entry in this window that changes something outside
         // it**. It is last but for `Close window`, and that is the reasoning: everything above acts
         // on this window and stops existing when the window closes, and this one outlives the
@@ -997,7 +975,8 @@ fn window_buttons(
 
         let (fill, color) = if response.hovered() {
             if danger {
-                (Some(t.status.danger), t.text.on_accent)
+                // One red whatever the palette; see `desktop::CLOSE_FILL`.
+                (Some(azur_egui_theme::desktop::CLOSE_FILL), azur_egui_theme::desktop::CLOSE_INK)
             } else {
                 (Some(t.bg.control_hover), t.text.primary)
             }

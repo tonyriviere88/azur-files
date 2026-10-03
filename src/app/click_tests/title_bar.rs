@@ -628,6 +628,65 @@ fn losing_the_window_puts_the_path_bar_and_the_context_menu_away() {
     );
 }
 
+/// The Theme entry opens the design system's list: the dark palettes under one heading and the
+/// light ones under another, each in `Palette::ALL`'s order — and a click on one sets it.
+#[test]
+fn the_theme_menu_groups_the_palettes_and_sets_the_one_clicked() {
+    use crate::theme::Palette;
+    let mut h = Harness::new();
+    let at = (0..64)
+        .step_by(2)
+        .map(|x| pos2(x as f32, crate::ui::chrome::HEIGHT * 0.5))
+        .find(|at| h.hovers(Id::new("app-menu"), *at))
+        .expect("the application mark is not reachable");
+    h.click_at(at);
+    let text = |h: &Harness, want: &str| {
+        h.texts()
+            .into_iter()
+            .find(|(_, t)| t == want)
+            .map(|(pos, _)| pos)
+    };
+    let theme = text(&h, "Theme").expect("the application menu has no Theme entry");
+    // A submenu opens on hover, and takes a frame or two to be laid out beside its parent.
+    h.frame(vec![egui::Event::PointerMoved(theme + vec2(8.0, 6.0))]);
+    for _ in 0..4 {
+        h.frame(Vec::new());
+    }
+
+    let y = |h: &Harness, want: &str| {
+        text(h, want)
+            .unwrap_or_else(|| panic!("the theme menu does not show {want:?}"))
+            .y
+    };
+    let (dark, light) = (y(&h, "Dark themes"), y(&h, "Light themes"));
+    assert!(dark < light, "the dark heading is not above the light one");
+    let mut last = dark;
+    for palette in Palette::ALL.into_iter().filter(|p| p.is_dark()) {
+        let at = y(&h, palette.label());
+        assert!(at > last && at < light, "{palette:?} is not in order under Dark themes");
+        last = at;
+    }
+    last = light;
+    for palette in Palette::ALL.into_iter().filter(|p| !p.is_dark()) {
+        let at = y(&h, palette.label());
+        assert!(at > last, "{palette:?} is not in order under Light themes");
+        last = at;
+    }
+    // A heading starts on its entries' own column, so it reads as their title.
+    for (heading, entry) in [("Dark themes", Palette::Dark), ("Light themes", Palette::Light)] {
+        let (a, b) = (text(&h, heading).unwrap().x, text(&h, entry.label()).unwrap().x);
+        assert!((a - b).abs() < 0.5, "{heading:?} starts at {a}, its entries at {b}");
+    }
+    let order: Vec<_> = Palette::ALL.into_iter().filter(|p| !p.is_dark()).collect();
+    assert_eq!(order, [Palette::Light, Palette::Celestine], "Celestine is not after Light");
+
+    let cobalt = text(&h, Palette::Cobalt.label()).unwrap();
+    h.click_at(cobalt + vec2(8.0, 6.0));
+    h.settle();
+    assert_eq!(h.app.theme.palette, Palette::Cobalt, "clicking a theme did not set it");
+    assert!(!egui::Popup::is_any_open(&h.ctx), "the menu stayed open after the choice");
+}
+
 #[test]
 fn losing_the_window_puts_the_application_menu_away() {
     // The one at the top left, which egui tracks in its own memory rather than this program
