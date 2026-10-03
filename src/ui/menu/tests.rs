@@ -294,6 +294,145 @@ fn a_capped_menu_keeps_its_pinned_tail_and_still_comes_out_the_size_it_measured(
     );
 }
 
+/// Every string a frame painted, dug out of that frame's own shapes.
+///
+/// The frame's rather than the context's, because what is being asked is whether *this* frame
+/// drew anything: a menu that was skipped leaves last frame's `drawn` and last frame's areas
+/// behind it, and both of those answer yes.
+fn painted(shapes: &[egui::epaint::ClippedShape]) -> Vec<String> {
+    fn walk(shape: &egui::Shape, into: &mut Vec<String>) {
+        match shape {
+            egui::Shape::Text(text) => into.push(text.galley.text().to_owned()),
+            egui::Shape::Vec(shapes) => {
+                for shape in shapes {
+                    walk(shape, into);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    for clipped in shapes {
+        walk(&clipped.shape, &mut out);
+    }
+    out
+}
+
+/// The arrow keys move the cursor *and* leave the menu on screen.
+///
+/// The reported bug: navigating with the arrows made the menu disappear for a frame. `keyboard`
+/// returned `Outcome::Open` before a single level was drawn, so the frame that took the key put
+/// nothing on screen — one press blinked the whole menu out and back, and an arrow held down
+/// strobed it.
+///
+/// The second half is the trap that comes with the fix. Now that a key falls through to the
+/// drawing, the *pointer* gets a say on the same frame — and `hovered()` is true for a pointer
+/// that is merely resting there, on a menu that opened underneath it. Without the gate in
+/// [`show`], the row the menu happened to open on top of takes the open chain straight back off
+/// the keyboard and Right never gets a submenu open.
+#[test]
+fn the_arrow_keys_draw_the_menu_on_the_frame_they_move_it() {
+    let screen = Rect::from_min_size(Pos2::ZERO, vec2(400.0, 300.0));
+    let ctx = egui::Context::default();
+    let theme = Theme::dark();
+    let mut base = egui::RawInput {
+        screen_rect: Some(screen),
+        ..Default::default()
+    };
+    base.viewports.entry(egui::ViewportId::ROOT).or_default().inner_rect = Some(screen);
+
+    // One frame, and what it painted.
+    let frame = |open: &mut Open, events: Vec<egui::Event>| -> Vec<String> {
+        let mut input = base.clone();
+        input.events = events;
+        let out = ctx.run_ui(input, |ui| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                let _ = show(ui, &theme, open);
+            });
+        });
+        painted(&out.shapes)
+    };
+    let press = |key: egui::Key| egui::Event::Key {
+        key,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    };
+    let entries = || {
+        vec![
+            entry("Open"),
+            entry("Rename"),
+            submenu("Send to", vec![entry("Desktop")]),
+        ]
+    };
+    // The middle of the first row: the menu is at (100, 100) with `space-2` of padding and
+    // `row::COMPACT` rows, so the first one is 104..132.
+    let on_the_first_row = pos2(190.0, 118.0);
+
+    // ---- The pointer really is on that row -------------------------------
+    //
+    // Which the rest of this depends on twice over, and neither an `Open` nor a shape says so
+    // directly. What does is the hover doing its job: a submenu open beside a pointer that is
+    // over a different row closes.
+    let mut hovered = menu(entries());
+    hovered.open = vec![2];
+    for _ in 0..3 {
+        frame(&mut hovered, vec![egui::Event::PointerMoved(on_the_first_row)]);
+    }
+    assert!(
+        hovered.open.is_empty(),
+        "the point the rest of this test uses is not on the menu's first row, so nothing below \
+         proves anything"
+    );
+
+    // ---- An arrow key draws, rather than blanking the frame ---------------
+    let mut open = menu(entries());
+    let first = frame(&mut open, vec![egui::Event::PointerMoved(on_the_first_row)]);
+    assert!(
+        first.iter().any(|text| text == "Rename"),
+        "the menu is not on screen even without a key: {first:?}"
+    );
+
+    let moved = frame(&mut open, vec![press(egui::Key::ArrowDown)]);
+    assert_eq!(open.cursor.as_deref(), Some([0].as_slice()), "the key did nothing");
+    assert!(
+        moved.iter().any(|text| text == "Rename"),
+        "the frame that took the arrow key drew no menu at all: {moved:?}"
+    );
+
+    // ---- And Right opens the submenu, on the frame it is pressed ----------
+    frame(&mut open, vec![press(egui::Key::ArrowDown)]);
+    let at_the_submenu = frame(&mut open, vec![press(egui::Key::ArrowDown)]);
+    assert_eq!(open.cursor.as_deref(), Some([2].as_slice()), "three rows down");
+    assert!(
+        at_the_submenu.iter().any(|text| text == "Send to"),
+        "the menu went away on the way down it: {at_the_submenu:?}"
+    );
+
+    let opened = frame(&mut open, vec![press(egui::Key::ArrowRight)]);
+    assert_eq!(
+        open.open,
+        vec![2],
+        "the pointer resting on the first row took the submenu straight back off the keyboard"
+    );
+    assert!(
+        opened.iter().any(|text| text == "Desktop"),
+        "the submenu was opened but the frame that opened it drew nothing of it: {opened:?}"
+    );
+
+    // ---- The pointer takes over again the moment it moves -----------------
+    //
+    // The gate is for a pointer that is sitting still, not one being used: a move onto the second
+    // row closes the submenu that the keyboard opened, which is what a pointer is asking for.
+    let second_row = pos2(on_the_first_row.x, on_the_first_row.y + 28.0);
+    frame(&mut open, vec![egui::Event::PointerMoved(second_row)]);
+    assert!(
+        open.open.is_empty(),
+        "the keyboard kept the submenu open against a pointer that had moved off it"
+    );
+}
+
 /// A menu opens at its first entry, however the last one was left.
 ///
 /// The reported bug: a `ScrollArea` keeps its offset in egui's memory under an id that

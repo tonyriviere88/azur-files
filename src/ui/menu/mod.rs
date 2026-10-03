@@ -79,6 +79,11 @@ pub struct Open {
     textures: HashMap<Vec<usize>, TextureHandle>,
     /// Set on the frame it opens, so the click that opened it does not also close it.
     fresh: bool,
+    /// The keyboard is driving, so a pointer merely resting on the menu does not undo it.
+    ///
+    /// Cleared by the first real pointer movement — see [`show`], where it is set and where it
+    /// gates the hover.
+    by_key: bool,
     /// The levels that were on screen last frame, by path.
     ///
     /// What it is for is the scroll offset. A `ScrollArea` keeps its offset in `egui`'s memory
@@ -125,6 +130,7 @@ impl Open {
             asked: std::collections::HashSet::new(),
             textures: HashMap::new(),
             fresh: true,
+            by_key: false,
             shown: std::collections::HashSet::new(),
             drawn: Vec2::ZERO,
             scrolled: 0.0,
@@ -287,8 +293,24 @@ pub fn show(ui: &mut Ui, t: &Theme, menu: &mut Open) -> Outcome {
     let ctx = ui.ctx().clone();
 
     // ---- Keyboard ------------------------------------------------------
-    if let Some(outcome) = keyboard(&ctx, menu) {
+    //
+    // Read before the levels are drawn, because a key changes what is about to be drawn — but
+    // only *returned* from when the key ends the menu. A key that merely moves the cursor or
+    // opens a submenu falls through and the same frame draws the menu in its new state.
+    //
+    // It used to return `Outcome::Open` here, which left a frame with nothing drawn on it: an
+    // arrow key blinked the whole menu out and back, and an arrow held down strobed it.
+    let keys = keyboard(&ctx, menu);
+    if let Keys::Done(outcome) = keys {
         return outcome;
+    }
+    // Who is in charge of the open chain, decided before the rows are drawn and read again
+    // below, once the hover is known. A key this frame takes it from the pointer; a pointer
+    // that actually moved takes it back.
+    if matches!(keys, Keys::Moved) {
+        menu.by_key = true;
+    } else if ctx.input(|i| i.pointer.delta() != Vec2::ZERO) {
+        menu.by_key = false;
     }
 
     // Textures for the shell's item bitmaps, uploaded once each.
@@ -444,8 +466,9 @@ pub fn show(ui: &mut Ui, t: &Theme, menu: &mut Open) -> Outcome {
         }
     }
     // What is on screen now, so the next frame can tell an appearing level from one that has
-    // been there and been scrolled. Set here rather than at the top: `keyboard` returns before
-    // anything is drawn, and a frame that drew no levels must not be read as all of them closing.
+    // been there and been scrolled. Set from what this pass drew rather than from `menu.open`,
+    // which is a level that has been *asked* for: a submenu the shell has not filled yet has no
+    // area on screen, and must still count as appearing on the frame it finally gets one.
     menu.shown = on_screen.into_iter().collect();
 
     if let Some(command) = chosen {
@@ -454,8 +477,13 @@ pub fn show(ui: &mut Ui, t: &Theme, menu: &mut Open) -> Outcome {
 
     // Opening and closing submenus follows the pointer: hovering a submenu opens it,
     // hovering a sibling closes whatever was open beside it.
+    //
+    // Unless the keyboard is the one driving. A pointer that is merely sitting there is still
+    // `hovered()`, and a menu opens *under* the pointer — so the row it happened to land on top
+    // of would take the open chain straight back off the arrow keys, and Right would never get a
+    // submenu open at all. The pointer takes over again the moment it actually moves.
     if let Some(path) = wants_open {
-        if menu.open != path {
+        if !menu.by_key && menu.open != path {
             menu.open = path;
         }
     }
@@ -705,7 +733,22 @@ fn upload_icons(ctx: &egui::Context, menu: &mut Open, path: &mut Vec<usize>) {
     }
 }
 
+/// What a frame's keys did to the menu. See [`keyboard`].
+enum Keys {
+    /// Nothing that concerns the menu.
+    Idle,
+    /// The cursor or the open chain moved. The menu is still up and still has to be drawn on
+    /// this frame, and the pointer must not undo what the key just did.
+    Moved,
+    /// The menu is over, one way or the other.
+    Done(Outcome),
+}
+
 /// Arrow keys, Enter and Escape.
+///
+/// **Nothing here draws or skips a frame.** Everything but [`Keys::Done`] is a menu that is still
+/// up: the caller goes on to draw it in whatever state this left it. Returning early for a key
+/// that only moved the cursor is what made an arrow key flicker the menu.
 ///
 /// **Taken rather than read.** `App::keyboard` keeps the listing's own keys off while a menu is up
 /// — see the `typing` gate there — but it runs *after* the menu is drawn in the same frame, and by
@@ -718,7 +761,7 @@ fn upload_icons(ctx: &egui::Context, menu: &mut Open, path: &mut Vec<usize>) {
 /// key the menu has already acted on. All six, not only the two that close a menu: the others are
 /// harmless today purely because the gate happens to still be shut for them, and that is not a
 /// property worth depending on.
-fn keyboard(ctx: &egui::Context, menu: &mut Open) -> Option<Outcome> {
+fn keyboard(ctx: &egui::Context, menu: &mut Open) -> Keys {
     use egui::Key;
 
     let (up, down, left, right, enter, escape) = ctx.input_mut(|i| {
@@ -735,11 +778,11 @@ fn keyboard(ctx: &egui::Context, menu: &mut Open) -> Option<Outcome> {
     if escape {
         // Escape closes one level at a time, and the whole menu from the root.
         return if menu.open.is_empty() {
-            Some(Outcome::Closed)
+            Keys::Done(Outcome::Closed)
         } else {
             menu.open.pop();
             menu.cursor = None;
-            Some(Outcome::Open)
+            Keys::Moved
         };
     }
 
@@ -747,7 +790,7 @@ fn keyboard(ctx: &egui::Context, menu: &mut Open) -> Option<Outcome> {
         let level_path: Vec<usize> = menu.open.clone();
         let count = menu.level(&level_path).map(Vec::len).unwrap_or(0);
         if count == 0 {
-            return None;
+            return Keys::Idle;
         }
         let current = menu
             .cursor
@@ -770,11 +813,11 @@ fn keyboard(ctx: &egui::Context, menu: &mut Open) -> Option<Outcome> {
                 .is_some_and(|e| e.enabled && !matches!(e.kind, Kind::Separator));
             if usable {
                 menu.cursor = Some(candidate);
-                return Some(Outcome::Open);
+                return Keys::Moved;
             }
             next += step;
         }
-        return Some(Outcome::Open);
+        return Keys::Moved;
     }
 
     if right {
@@ -782,29 +825,29 @@ fn keyboard(ctx: &egui::Context, menu: &mut Open) -> Option<Outcome> {
             if matches!(menu.entry(&cursor).map(|e| &e.kind), Some(Kind::Submenu { .. })) {
                 menu.open = cursor;
                 menu.cursor = None;
-                return Some(Outcome::Open);
+                return Keys::Moved;
             }
         }
     }
     if left && !menu.open.is_empty() {
         menu.cursor = Some(menu.open.clone());
         menu.open.pop();
-        return Some(Outcome::Open);
+        return Keys::Moved;
     }
     if enter {
         if let Some(cursor) = menu.cursor.clone() {
             match menu.entry(&cursor).map(|e| e.kind.clone()) {
-                Some(Kind::Command(command)) => return Some(Outcome::Chose(command)),
+                Some(Kind::Command(command)) => return Keys::Done(Outcome::Chose(command)),
                 Some(Kind::Submenu { .. }) => {
                     menu.open = cursor;
                     menu.cursor = None;
-                    return Some(Outcome::Open);
+                    return Keys::Moved;
                 }
                 _ => {}
             }
         }
     }
-    None
+    Keys::Idle
 }
 
 #[cfg(test)]
