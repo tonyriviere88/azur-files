@@ -5,13 +5,18 @@
 
 use super::*;
 
-/// How long a change under a watched folder or its `.git` is presumed to be our own git write
-/// echoing back, rather than something worth asking git about again.
+/// How long a change to a watched **folder** is presumed to be our own git write echoing back,
+/// rather than the folder having changed and being worth re-reading.
 ///
 /// Generous against how fast the echo actually arrives: the write happens inside the same
 /// `git::read` call whose answer just landed, so the two are always close, typically well under a
 /// second. See [`App::collect_changes`] for the loop this exists to break, and
 /// [`crate::pane::Tab::git_settled_at`] for the timestamp it is measured against.
+///
+/// **Not the `.git` watch, which no longer has a window at all.** A clock cannot be a filter for
+/// that one: a change it drops is gone, and a commit made in the same two seconds as a navigation
+/// used to leave the branch on the status line wrong until something else happened to touch the
+/// folder. What that watch compares instead is `.git` itself — see [`crate::git::stamp`].
 pub(super) const GIT_WRITE_SETTLE: f64 = 2.0;
 
 impl App {

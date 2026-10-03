@@ -465,13 +465,17 @@ pub struct Tab {
     pub git_answered: bool,
     /// When the last answer landed, in [`egui::InputState::time`] — `None` before the first one.
     ///
-    /// **What tells our own hand from somebody else's.** `git::read` can write the repository's
-    /// index as a side effect — see its own doc — and that write lands inside `.git`, which is
-    /// watched so that a commit made elsewhere is noticed. The watch cannot tell which file changed
-    /// — see [`crate::watch`] — so without this, our own write reads as an external change, which
-    /// asks git again, which writes again, forever: a folder that never stops spawning `git`
-    /// underneath it, on its own, whether or not anyone is looking at the window. See
-    /// [`crate::app::App::collect_changes`], which is where this is read.
+    /// **What tells our own hand from somebody else's, on the *folder's* watch.** `git::read` can
+    /// write the repository's index as a side effect — see its own doc — and `.git` is a direct
+    /// child of a repository's root, so that write is reported by the watch on the *folder* as well
+    /// as by the one on `.git`. The watch does not say which file changed — see [`crate::watch`] —
+    /// so without this, our own write reads as the folder having changed, which re-reads the
+    /// listing, which asks git again, which writes again: a folder that never stops spawning `git`
+    /// underneath it, whether or not anyone is looking at the window.
+    ///
+    /// The `.git` watch itself no longer needs a clock: an answer carries a fingerprint of the
+    /// `.git` it was made from, and our own write is inside it. See [`crate::git::stamp`], and
+    /// [`crate::app::App::collect_changes`], where both halves are read.
     pub git_settled_at: Option<f64>,
 
     /// Display order: indices into `dir.entries`, sorted and filtered.

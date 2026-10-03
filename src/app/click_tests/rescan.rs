@@ -374,3 +374,141 @@ fn a_quick_folder_never_says_it_is_reading() {
 
     crate::sandbox::remove(&root);
 }
+
+/// **A branch switched outside the window reaches the status line.**
+///
+/// The one kind of change that leaves the working tree exactly as the listing last read it: a
+/// `git checkout -b`, a commit, a pull, a rebase. Nothing in the folder moves, so the folder's own
+/// watch has nothing to report — which is why [`crate::app::App::collect_changes`] watches
+/// `crate::git::Repo::dot_git` as well, and why a change there resets `git_asked` rather than
+/// re-reading the listing.
+///
+/// **The checkout happens immediately, and that is the test.** This is what used to be dropped: a
+/// change under `.git` was told from this program's own write of the index by *when* it arrived —
+/// anything within `GIT_WRITE_SETTLE` of git's last answer was presumed to be the echo — and a
+/// notification, once consumed, was never reconsidered. So a branch switched in the two seconds
+/// after a folder was opened left `master` on the status line for as long as nothing else happened
+/// to that folder. It is told by `crate::git::stamp` now, which our own write is inside.
+///
+/// Measured before the fix, with this same test: the spin below ran ten seconds of frames and the
+/// branch never changed at all — this is a wrong answer that stays, not a slow one.
+#[test]
+#[cfg(windows)]
+fn a_branch_switched_outside_reaches_the_status_line() {
+    let root = crate::sandbox::dir("git-branch-switch");
+    crate::sandbox::remove(&root);
+    std::fs::create_dir_all(&root).expect("sandbox");
+
+    let run = |args: &[&str]| {
+        let mut command = std::process::Command::new("git");
+        command.args(args).current_dir(&root);
+        crate::shell::no_window(&mut command);
+        command
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false)
+    };
+    // No git on this machine is not a test failure; there is nothing to test.
+    if !run(&["init", "--quiet"]) {
+        eprintln!("no git: skipping");
+        return;
+    }
+    // A repository of this program's own making, so nothing here depends on the developer's name,
+    // editor or signing key.
+    assert!(run(&["config", "user.email", "test@example.invalid"]));
+    assert!(run(&["config", "user.name", "Test"]));
+    assert!(run(&["config", "commit.gpgsign", "false"]));
+    std::fs::write(root.join("one.txt"), b"one
+").expect("a file");
+    assert!(run(&["add", "-A"]));
+    assert!(run(&["commit", "--quiet", "-m", "base"]));
+
+    let mut h = Harness::new();
+    let pane = h.app.panes[0].id;
+    h.app.perform(
+        &h.ctx.clone(),
+        Action::Navigate {
+            pane,
+            path: root.clone(),
+        },
+    );
+    h.settle();
+
+    // Frames with the clock and the disk both moving, until the question holds. The sleep is what
+    // gives a worker — the scan, git, the watcher thread — somewhere to run.
+    let spin = |h: &mut Harness, rounds: usize, done: fn(&Harness) -> bool| {
+        for _ in 0..rounds {
+            if done(h) {
+                return true;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            h.frame(Vec::new());
+        }
+        done(h)
+    };
+
+    let branch = |h: &Harness| {
+        h.tab(0)
+            .git
+            .as_ref()
+            .map(|repo| repo.head.clone())
+            .unwrap_or_default()
+    };
+    assert!(
+        spin(&mut h, 400, |h| !h
+            .tab(0)
+            .git
+            .as_ref()
+            .map(|repo| repo.head.clone())
+            .unwrap_or_default()
+            .is_empty()),
+        "git never answered about the sandbox repository at all"
+    );
+    let was = branch(&h);
+
+    // **The checkout: a new branch at the same commit.** Not a branch with different content,
+    // deliberately — nothing in the working tree changes, so the folder's watch stays silent and
+    // `.git` is the only thing that can carry this.
+    assert!(run(&["checkout", "--quiet", "-b", "other"]));
+
+    let arrived = spin(&mut h, 600, |h| {
+        h.tab(0)
+            .git
+            .as_ref()
+            .is_some_and(|repo| repo.head == "other")
+    });
+    assert!(
+        arrived,
+        "the status line still says `{was}` after the checkout; it says `{}`",
+        branch(&h)
+    );
+
+    // **And it stops.** The clock this replaced existed to break a loop — our own write of the
+    // index arrives as a change under `.git`, which asks git again, which writes again — so
+    // removing it from that watch means measuring the other half here: with the checkout's answer
+    // in and nothing else touching the repository, nothing more may be asked.
+    //
+    // Counted by the identity of the answer itself: `Tab::git` is an `Arc` per reading, and the
+    // one being replaced is alive while its replacement is stored, so two readings are never the
+    // same pointer.
+    let mut answers = 0;
+    let mut last = h.tab(0).git.as_ref().map(std::sync::Arc::as_ptr);
+    for _ in 0..200 {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        h.frame(Vec::new());
+        let at = h.tab(0).git.as_ref().map(std::sync::Arc::as_ptr);
+        if at != last {
+            answers += 1;
+            last = at;
+        }
+    }
+    // Measured: **zero**. One is allowed for the one ordering that can cost a reading without
+    // being a loop — an echo released by the watch's own settle *before* the answer it belongs to
+    // has landed, so the fingerprint it is compared against is still the previous one.
+    assert!(
+        answers <= 1,
+        "git was asked {answers} more times over two seconds of frames with nothing changing"
+    );
+
+    crate::sandbox::remove(&root);
+}

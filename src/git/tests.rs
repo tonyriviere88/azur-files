@@ -553,3 +553,131 @@ fn a_tick_never_overwrites_a_change() {
     assert_eq!(repo.state("added.txt"), Some(State::Staged));
     assert_eq!(repo.state("quiet.txt"), Some(State::Clean));
 }
+
+/// **The fingerprint that tells a commit from this program's own write of the index.**
+///
+/// Against a real repository, because what it is measuring is what git does to `.git` — the
+/// interesting half is the *negative*: reading it twice with nothing between has to give the same
+/// answer, or every notification would look like a change and the loop
+/// [`crate::app::git::GIT_WRITE_SETTLE`] used to break would be back.
+#[test]
+fn a_stamp_moves_when_git_does_and_not_otherwise() {
+    let root = crate::sandbox::dir("git-stamp");
+    crate::sandbox::remove(&root);
+    std::fs::create_dir_all(&root).expect("a temp folder");
+
+    let run = |args: &[&str]| {
+        let mut command = Command::new("git");
+        command.args(args).current_dir(&root);
+        crate::shell::no_window(&mut command);
+        command
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false)
+    };
+    if !run(&["init", "--quiet"]) {
+        eprintln!("no git: skipping");
+        return;
+    }
+    assert!(run(&["config", "user.email", "test@example.invalid"]));
+    assert!(run(&["config", "user.name", "Test"]));
+    assert!(run(&["config", "commit.gpgsign", "false"]));
+    std::fs::write(root.join("one.txt"), b"one
+").unwrap();
+    assert!(run(&["add", "-A"]));
+    assert!(run(&["commit", "--quiet", "-m", "base"]));
+
+    let dot = root.join(".git");
+    let before = stamp(&dot);
+    assert_ne!(before, 0, "a `.git` that exists has a stamp");
+    assert_eq!(before, stamp(&dot), "reading `.git` twice is not a change to it");
+
+    // A file appearing in the working tree is not a change to the repository, and must not read as
+    // one: the folder's own watch is what answers for that, and this is the other watch.
+    std::fs::write(root.join("two.txt"), b"two
+").unwrap();
+    assert_eq!(
+        stamp(&dot),
+        before,
+        "an untracked file in the folder moved the repository's stamp"
+    );
+
+    // And the case the whole thing exists for: the head moved, and nothing in the folder did.
+    assert!(run(&["checkout", "--quiet", "-b", "other"]));
+    assert_ne!(stamp(&dot), before, "a branch switch is invisible in the stamp");
+
+    crate::sandbox::remove(&root);
+}
+
+/// **A linked worktree keeps its `HEAD` somewhere else, and that is what has to be watched.**
+///
+/// `git worktree add` writes a `.git` *file* holding `gitdir: <path>` instead of a directory, and
+/// `ReadDirectoryChangesW` takes a directory — handed the file it opens the handle and then refuses
+/// the read, with no error anywhere. So the watch was armed at nothing and a branch switched in a
+/// worktree never reached the status line: the only thing that ever refreshed it there was the
+/// folder's own watch noticing a file change, which a `checkout -b` does not make.
+///
+/// Both halves are asserted, because either alone would pass on the broken version: that the path
+/// is the directory the file *names* rather than the file, and that a switch there moves the
+/// fingerprint the watch compares.
+#[test]
+fn a_worktree_is_watched_where_its_head_actually_lives() {
+    let root = crate::sandbox::dir("git-worktree");
+    crate::sandbox::remove(&root);
+    std::fs::create_dir_all(&root).expect("a temp folder");
+
+    let git = |dir: &std::path::Path, args: &[&str]| {
+        let mut command = Command::new("git");
+        command.args(args).current_dir(dir);
+        crate::shell::no_window(&mut command);
+        command
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false)
+    };
+    let main = root.join("main");
+    std::fs::create_dir_all(&main).expect("a temp folder");
+    if !git(&main, &["init", "--quiet"]) {
+        eprintln!("no git: skipping");
+        return;
+    }
+    assert!(git(&main, &["config", "user.email", "test@example.invalid"]));
+    assert!(git(&main, &["config", "user.name", "Test"]));
+    assert!(git(&main, &["config", "commit.gpgsign", "false"]));
+    std::fs::write(main.join("one.txt"), b"one\n").unwrap();
+    assert!(git(&main, &["add", "-A"]));
+    assert!(git(&main, &["commit", "--quiet", "-m", "base"]));
+
+    let wt = root.join("side");
+    assert!(git(&main, &["worktree", "add", "--quiet", "-b", "side", "../side"]));
+    assert!(wt.join(".git").is_file(), "a worktree keeps a `.git` file");
+
+    let repo = read(&wt).expect("a worktree is a repository");
+    assert_eq!(repo.head, "side", "the worktree's own branch");
+    assert_eq!(
+        repo.dot_git,
+        main.join(".git").join("worktrees").join("side"),
+        "the watch would be pointed at the `.git` file, which reports nothing"
+    );
+    assert!(
+        repo.dot_git.is_dir(),
+        "and whatever it is pointed at has to be a directory"
+    );
+
+    // The fingerprint has to move for a switch that touches no file in the worktree at all —
+    // which is the case the folder's own watch cannot see.
+    let before = repo.stamp;
+    assert_ne!(before, 0, "the directory was read");
+    assert_eq!(before, stamp(&repo.dot_git), "reading it twice is not a change");
+    assert!(git(&wt, &["checkout", "--quiet", "-b", "elsewhere"]));
+    assert_ne!(
+        stamp(&repo.dot_git),
+        before,
+        "a branch switched in the worktree is invisible in its stamp"
+    );
+
+    // Tidy: the worktree's registration lives in the main repository, so removing the folder is
+    // not enough to leave the sandbox as it was found.
+    let _ = git(&main, &["worktree", "remove", "--force", "../side"]);
+    crate::sandbox::remove(&root);
+}

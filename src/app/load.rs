@@ -277,17 +277,55 @@ impl App {
         // the window is even being looked at. This is the loop [`GIT_WRITE_SETTLE`] exists to break.
         let now = ctx.input(|i| i.time);
         for path in self.watch.changed(now) {
-            // A change under `.git` asks git again and leaves the listing alone: the working tree
-            // did not move, so re-reading the folder would be a scan for nothing.
-            if path.file_name().is_some_and(|name| name == ".git") {
+            // A change to a repository's own git directory asks git again and leaves the listing
+            // alone: the working tree did not move, so re-reading the folder would be a scan for
+            // nothing.
+            //
+            // **Recognised by asking the answers, not by reading the path's name.** It was
+            // `file_name() == ".git"`, which is the name in a plain repository and in neither of
+            // the two shapes that actually needed this: a linked worktree's git directory is
+            // `…/.git/worktrees/<name>` and a submodule's is `…/.git/modules/<name>`. See
+            // [`crate::git::git_dir`], which is what follows the `.git` *file* to them.
+            //
+            // **Which change it was is asked of the directory itself**, not of the clock. This
+            // program's own `git status` writes the repository's index and that write comes back
+            // through this very watch; it used to be told from a real commit by arriving within
+            // [`GIT_WRITE_SETTLE`] of git's last answer, and a real commit that arrived inside that
+            // window was dropped with it — permanently, since nothing came back for a notification
+            // once it had been consumed. A branch switched a second after a folder was opened left
+            // the status line saying the old branch until something else happened to touch the
+            // folder. See [`crate::git::stamp`], which is what the answer carries so that its own
+            // write compares equal and everything else does not.
+            let watching_git = self
+                .panes
+                .iter()
+                .flat_map(|pane| pane.tabs.iter())
+                .any(|tab| tab.git.as_ref().is_some_and(|repo| repo.dot_git == path));
+            if watching_git {
+                // Once per notification rather than once per tab: two panes in one repository ask
+                // the same question of the same directory.
+                let stamp = crate::git::stamp(&path);
                 for tab in self.panes.iter_mut().flat_map(|pane| pane.tabs.iter_mut()) {
-                    if tab.git.as_ref().is_some_and(|repo| repo.dot_git == path)
-                        && now - tab.git_settled_at.unwrap_or(f64::NEG_INFINITY) > GIT_WRITE_SETTLE
+                    if tab
+                        .git
+                        .as_ref()
+                        .is_some_and(|repo| repo.dot_git == path && repo.stamp != stamp)
                     {
                         tab.git_asked = false;
                     }
                 }
-                continue;
+                // Unless it is *also* a folder on screen — somebody browsing `.git` — in which case
+                // it is a listing to re-read as well, and the rest of this loop is what does that.
+                // The old spelling stopped here unconditionally, so a file appearing in the `.git`
+                // you were looking at did not show up.
+                let on_screen = self
+                    .panes
+                    .iter()
+                    .flat_map(|pane| pane.tabs.iter())
+                    .any(|tab| tab.path == path);
+                if !on_screen {
+                    continue;
+                }
             }
             // **Except when a change to this folder is the thing being waited for.** A file the
             // user has just asked the shell to make is not our own git write coming back, and the

@@ -532,9 +532,14 @@ pub(crate) fn segments(
         // From behind, and this is the reason `field_hint` was reserved: the outline spans the
         // whole bar, and by the time the empty space at the end of it is known to be hovered,
         // every segment's label has been painted.
+        //
+        // Square, because the field it is a preview of is square — see [`crate::ui::squared`] and
+        // the path field in [`super::complete`]. A rounded hint promising a field with sharp
+        // corners is the outline moving as the click lands, in the one place on the bar where the
+        // hint and the thing it announces occupy the very same rect.
         ui.painter().set(
             field_hint,
-            egui::epaint::RectShape::stroke(field, corner, Stroke::new(1.0, pen_ink(t, true)), StrokeKind::Inside),
+            egui::epaint::RectShape::stroke(field, CornerRadius::ZERO, Stroke::new(1.0, pen_ink(t, true)), StrokeKind::Inside),
         );
     }
 

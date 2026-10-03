@@ -137,7 +137,8 @@ pub struct Repo {
     /// What the three commands took, end to end. For `--trace`, and for the same reason the scan's
     /// own figure is in the status line: a claim about speed nobody can check is not a claim.
     pub micros: u64,
-    /// The repository's own `.git`.
+    /// The directory this repository keeps its `HEAD` and its index in — see [`git_dir`], which is
+    /// **not always the `.git` beside the folder**.
     ///
     /// Watched while this folder is on screen, because **a commit changes the repository without
     /// touching the folder**: `git commit` in the console panel, a rebase in a terminal, a pull —
@@ -146,6 +147,12 @@ pub struct Repo {
     /// stale-overlay failure this design exists to avoid, so the one thing worth watching besides the
     /// folder is this.
     pub dot_git: PathBuf,
+    /// What [`dot_git`](Repo::dot_git) held when this answer was made. See [`stamp`].
+    ///
+    /// The whole of how a change under `.git` worth re-reading is told from **this program's own
+    /// write of the index**, which arrives through the same watch and is otherwise
+    /// indistinguishable from a commit somebody else made.
+    pub stamp: u64,
     /// State by path *relative to the folder that was asked about*, separators normalised to `/`.
     ///
     /// Every ancestor is in here too, wearing the strongest state under it — so a folder row is one
@@ -630,7 +637,7 @@ fn read(dir: &Path) -> Option<Repo> {
     }
 
     let mut repo = Repo {
-        dot_git: root.join(".git"),
+        dot_git: git_dir(&root),
         ..Repo::default()
     };
 
@@ -698,7 +705,151 @@ fn read(dir: &Path) -> Option<Repo> {
     }
 
     repo.micros = start.elapsed().as_micros() as u64;
+    // **Last, and that is the point**: `status` above may have rewritten the index, so a stamp
+    // taken before it would name a `.git` this answer is already out of date about — and the
+    // notification that write raises would then read as somebody else's commit for ever after.
+    repo.stamp = stamp(&repo.dot_git);
     Some(repo)
+}
+
+/// A fingerprint of `.git`'s direct children: their names, sizes and modification times.
+///
+/// **What a change under `.git` is compared against**, and the reason
+/// [`crate::app::git::GIT_WRITE_SETTLE`] no longer guards that watch. `git::read` writes the
+/// repository's index as a side effect of the question it was asked — see the note in [`read`] on
+/// `--no-optional-locks` — and that write lands directly inside `.git`, where it is reported
+/// exactly as a commit made in a terminal is. Telling the two apart used to be a *clock*: a change
+/// arriving within two seconds of git's last answer was presumed to be our own echo and dropped.
+///
+/// Dropped, not deferred — which is the bug this replaces. A branch switched in the two seconds
+/// after a folder was opened was thrown away with the echo, and nothing came back for it: the
+/// branch on the status line stayed wrong until the folder was re-read for some other reason. And
+/// the clock could not simply be extended into a delay instead, because re-applying our own echo
+/// asks git again, which writes again — the loop `GIT_WRITE_SETTLE` was written to break.
+///
+/// A stamp answers the question the clock was standing in for. Our own write is stamped **into**
+/// the answer it belongs to, so its echo compares equal and is ignored however late it arrives;
+/// anything else — `HEAD` rewritten by a checkout, a ref by a commit or a fetch, the index by
+/// somebody else's `git add`, `MERGE_MSG` and `REBASE_HEAD` by the operations that make them —
+/// differs, at any distance from the last answer.
+///
+/// One `read_dir` of a folder with a dozen entries in it, on the UI thread, once per notification.
+/// The subdirectories are not walked: `refs/` and `logs/` are entries here in their own right and
+/// a ref added or removed changes the folder they are in, which is enough to say "ask again" — the
+/// answer to every difference this can see is the same single `git status`.
+///
+/// Taken on [`Repo::dot_git`], which for a linked worktree or a submodule is the directory its
+/// `.git` file *names* rather than the file — see [`git_dir`]. The file itself is still stamped, as
+/// a file, for the case where that line cannot be followed: one `stat` instead of a listing, so
+/// that such a repository does not fall into the one shape where "could not be read" would be both
+/// readings' answer and every change would therefore compare equal.
+///
+/// `0` when neither can be read at all, which compares unequal to any real reading and so errs
+/// towards asking again.
+pub fn stamp(dot_git: &Path) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let Ok(entries) = std::fs::read_dir(dot_git) else {
+        return file_stamp(dot_git);
+    };
+    // Order-independent, because `read_dir` does not promise one and a folder whose entries came
+    // back in a different order is not a folder that changed. Summed rather than hashed in
+    // sequence, so the *set* is what is fingerprinted.
+    let mut total: u64 = 0;
+    for entry in entries.flatten() {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        entry.file_name().hash(&mut hasher);
+        if let Ok(meta) = entry.metadata() {
+            meta.len().hash(&mut hasher);
+            // A folder has no useful length, and on Windows its modification time moves when an
+            // entry is added or removed — which is how a new branch under `refs/heads` is seen.
+            if let Ok(at) = meta.modified() {
+                at.duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_nanos()
+                    .hash(&mut hasher);
+            }
+        }
+        total = total.wrapping_add(hasher.finish());
+    }
+    // Never `0` for a `.git` that was read, so "could not be read" stays its own answer.
+    total | 1
+}
+
+/// [`stamp`] for a `.git` that is a file: its size and modification time.
+fn file_stamp(dot_git: &Path) -> u64 {
+    use std::hash::{Hash, Hasher};
+
+    let Ok(meta) = std::fs::symlink_metadata(dot_git) else {
+        return 0;
+    };
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    meta.len().hash(&mut hasher);
+    if let Ok(at) = meta.modified() {
+        at.duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            .hash(&mut hasher);
+    }
+    hasher.finish() | 1
+}
+
+/// Where the repository rooted at `root` keeps the things a change to them is worth re-reading for:
+/// `HEAD`, the index, `MERGE_MSG`, `refs/`.
+///
+/// `<root>/.git` for a plain repository, and the reason this function exists is that **for a linked
+/// worktree and for a submodule that `.git` is a file**, holding one line — `gitdir: <path>` — that
+/// names the directory instead. `git worktree add` makes one per worktree under the main
+/// repository's `.git/worktrees/<name>`, and a submodule's lives under `.git/modules/<name>`.
+///
+/// Following it is what makes [`crate::watch`] work at all in a worktree, and the bug that says so
+/// is worth writing down: `ReadDirectoryChangesW` takes a **directory**. Handed a file it opens the
+/// handle and then refuses the read, silently — so the watch sat there armed at nothing, and a
+/// branch switched in a worktree never reached the status line unless it happened to change a file
+/// in the folder on screen, which is the *other* watch noticing. Which is to say the feature looked
+/// like it worked, and did, for every repository that was not one of the two shapes this program's
+/// author actually works in.
+///
+/// A relative `gitdir:` — which is what a submodule has — is relative to the folder holding the
+/// file, and is left with its `..` in it rather than canonicalised: Windows resolves it on the way
+/// into every call, and every comparison against this path is with another copy of *this* value.
+/// `std::fs::canonicalize` would answer a `\\?\` path, which is a different string for the same
+/// folder and one this program hands to the shell elsewhere.
+///
+/// Falls back to `<root>/.git` whenever the file cannot be read or says something else, which is the
+/// answer this had before and no worse than it: a watch on a path that is not a directory reports
+/// nothing, and everything else about the repository still works.
+fn git_dir(root: &Path) -> PathBuf {
+    let dot = root.join(".git");
+    let Ok(meta) = std::fs::symlink_metadata(&dot) else {
+        return dot;
+    };
+    // The common case, and no read at all: a directory is its own answer.
+    //
+    // The size cap is for the other one — this is about to be read as text, and a `.git` *file* is
+    // one short line. Anything larger is not one, whatever it is.
+    if meta.is_dir() || meta.len() > 4_096 {
+        return dot;
+    }
+    let Ok(text) = std::fs::read_to_string(&dot) else {
+        return dot;
+    };
+    let Some(named) = text
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("gitdir:"))
+        .map(|rest| Path::new(rest.trim()))
+    else {
+        return dot;
+    };
+    let joined = if named.is_absolute() {
+        named.to_path_buf()
+    } else {
+        root.join(named)
+    };
+    // Git writes that line with forward slashes even on Windows. See [`crate::fs::normalize`],
+    // which is what every other path in this program has been through by the time anything
+    // compares one.
+    crate::fs::normalize(&joined)
 }
 
 /// The folder holding the `.git` that governs `dir`, walking up from it.

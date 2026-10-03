@@ -288,6 +288,22 @@ fn the_breadcrumb_shows_where_the_path_field_opens() {
         pen
     );
 
+    // **Square**, because the field it announces is square: the path field that opens on the
+    // click is `crate::ui::squared`, so a rounded hint drawn over the very same rect was an
+    // outline that changed shape as the click landed. Picked out by its rect and its want of a
+    // fill — this is the border, not the surface of the bar behind it.
+    let corners = h
+        .rects()
+        .into_iter()
+        .find(|(rect, _, fill)| *rect == outline.0 && *fill == egui::Color32::TRANSPARENT)
+        .map(|(_, corner, _)| corner)
+        .expect("the border was not painted as a rect of its own");
+    assert_eq!(
+        corners,
+        egui::CornerRadius::ZERO,
+        "the hint's corners are rounded and the field's are not"
+    );
+
     // And no fill: the bar does not change colour to say this. Against the hover grey, which is
     // what a segment of the bar is washed with -- naming `control_fills`'s hover, as this once
     // did, stopped naming a colour the bar is ever painted, and the assertion passed because
