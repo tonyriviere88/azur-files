@@ -250,14 +250,8 @@ impl App {
                 .filter_map(|tab| tab.git.as_ref())
                 .map(|repo| repo.dot_git.clone()),
         );
-        // **Not a path inside an archive**, which is not a directory and cannot be handed to
-        // `ReadDirectoryChangesW`. Dropped here rather than refused deeper down because the watch
-        // keeps a handle per folder and a failed open would be retried on every frame that renews
-        // the set. What *would* be worth noticing — the archive file itself being rewritten — is
-        // caught by the listing's own key instead: see [`crate::archive::CACHE`], whose entries
-        // carry the size and timestamp they were read at, so F5 re-reads and a stale index cannot
-        // outlive the file it came from.
-        folders.retain(|path| !crate::archive::is_virtual(path));
+        // Which of these the watch can actually open is [`crate::watch::Watch::keep`]'s to say, and
+        // an archive is one of the ones it cannot.
         folders.dedup();
         self.watch.keep(&folders);
 
@@ -415,6 +409,19 @@ impl App {
             }
             for path in &done.touched {
                 self.loader.invalidate(path);
+            }
+            // **An archive that has just been deleted, moved or renamed is not one any more**, its
+            // index being keyed by path and read without a stat. See
+            // [`crate::shell::ops::Job::emptied`] for why the question is asked here rather than at
+            // the funnel that started the job.
+            //
+            // Off the job and not off `touched` above, though that is the general "this changed"
+            // signal and would also catch an archive deleted from a terminal: a folder-level answer
+            // would drop a browsed tarball's index every time anything else in its folder was
+            // written, and re-inflating 200 MB is the cost this module's cache exists to avoid. An
+            // external delete is left to the LRU and to F5.
+            if let (true, Some(job)) = (worked, &done.job) {
+                crate::archive::forget_each(job.emptied());
             }
             // Only a tab showing an affected folder re-reads. A tab elsewhere is left
             // alone, which is the point of tracking this by path.

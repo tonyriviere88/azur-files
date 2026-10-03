@@ -97,10 +97,20 @@ impl Watch {
     /// Called every frame with whatever is on screen, so it has to be cheap when nothing has
     /// moved: the set is compared against a local copy first and the lock is only taken when it
     /// actually differs.
+    ///
+    /// **What cannot be watched is dropped here**, so that no caller has to remember the list: the
+    /// empty path, which is "This PC", and anything an archive answers for, which is not a directory
+    /// and cannot be handed to `ReadDirectoryChangesW`. Dropped rather than left to fail because a
+    /// handle is kept per folder, so a failed open would be retried on every frame that renews the
+    /// set. An archive being *rewritten* is worth noticing and is caught elsewhere — see
+    /// [`crate::archive::inside_archive`], whose cache entries carry the size and timestamp they
+    /// were read at.
     pub fn keep(&mut self, folders: &[PathBuf]) {
         let mut wanted: Vec<PathBuf> = folders
             .iter()
-            .filter(|path| !path.as_os_str().is_empty())
+            .filter(|path| {
+                !path.as_os_str().is_empty() && !crate::archive::is_virtual_location(path)
+            })
             .cloned()
             .collect();
         wanted.sort();
@@ -225,6 +235,28 @@ mod tests {
         let mut watch = Watch::new(&ctx);
         watch.keep(&[PathBuf::new(), PathBuf::from(r"C:\Temp")]);
         assert_eq!(watch.mine, vec![PathBuf::from(r"C:\Temp")]);
+    }
+
+    /// **And nothing watches an archive**, which is a file however a pane is showing it.
+    ///
+    /// Beside the test above because both are the one filter in [`Watch::keep`] — that being the
+    /// point of the filter living there rather than in the caller that happened to need it first.
+    #[test]
+    fn nothing_watches_an_archive() {
+        let root = crate::sandbox::fresh("watch-archive");
+        let pkg = root.join("pkg.zip");
+        crate::archive::tests::zip_at(&pkg, &[("a.txt", "a")]);
+        // Read, because the guard is a cache lookup: an archive nobody has opened is only a file.
+        crate::fs::scan::scan(&pkg);
+
+        let ctx = egui::Context::default();
+        let mut watch = Watch::new(&ctx);
+        watch.keep(&[pkg, root.clone()]);
+        assert_eq!(
+            watch.mine,
+            vec![root],
+            "an archive cannot be handed to ReadDirectoryChangesW"
+        );
     }
 
     /// Two panes on one folder ask for it once.

@@ -46,7 +46,7 @@ impl App {
         // will *remove* the originals, and nothing in this program writes to an archive — see
         // [`crate::archive`], where that is scope and format both. Explorer refuses it on a zip for
         // the same reason.
-        if paths.iter().any(|path| crate::archive::is_virtual(path)) {
+        if paths.iter().any(|path| crate::archive::is_virtual_item(path)) {
             if cutting {
                 self.notice =
                     Some("Files cannot be moved out of an archive. Copy them instead.".to_owned());
@@ -449,7 +449,7 @@ impl App {
         // `any` and not `all`: a drag can mix an archive's entries with real files only through the
         // right-button menu, and [`crate::archive::extract::all`] hands back a real path unchanged,
         // so the mixed case needs nothing of its own.
-        if dropped.items.iter().any(|item| crate::archive::is_virtual(item)) {
+        if dropped.items.iter().any(|item| crate::archive::is_virtual_item(item)) {
             let paths = dropped.items.clone();
             self.out_of_archive(ctx, paths, Then::Land(Box::new(dropped)));
             return;

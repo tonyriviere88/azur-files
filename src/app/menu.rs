@@ -42,7 +42,7 @@ impl App {
         // work — `Ctrl+C` copies the files out (see [`crate::app::App::collect_operations`]) and
         // `Ctrl+Shift+C` copies their paths. The ones that do not are refused with a sentence
         // rather than left to fail.
-        if crate::archive::is_virtual(&folder) {
+        if crate::archive::is_virtual_location(&folder) {
             return;
         }
 

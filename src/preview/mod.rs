@@ -440,7 +440,7 @@ fn read(ask: &Ask) -> Payload {
     // solid `.7z` that has to be half unpacked to reach one file costs that thread and not the
     // window.
     let owned;
-    let ask = if crate::archive::is_virtual(ask.first()) {
+    let ask = if crate::archive::is_virtual_item(ask.first()) {
         match materialise(ask) {
             Ok(real) => {
                 owned = real;

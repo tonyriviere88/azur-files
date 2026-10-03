@@ -602,7 +602,7 @@ impl App {
                 // "no" is a worse way to say it than not offering the box.
                 let inside = self
                     .pane_mut(pane)
-                    .map(|p| crate::archive::is_virtual(&p.tab().path))
+                    .map(|p| crate::archive::is_virtual_location(&p.tab().path))
                     .unwrap_or(false);
                 if inside {
                     self.report("Files inside an archive cannot be renamed".to_owned());

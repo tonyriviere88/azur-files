@@ -19,7 +19,10 @@ fn work(name: &str) -> PathBuf {
 }
 
 /// Build a zip. `(name, contents)`, and a name ending in `/` is a stored directory entry.
-fn zip_at(path: &Path, entries: &[(&str, &str)]) {
+///
+/// `pub(crate)` for the tests in [`crate::shell::ops`] and [`crate::app`], which need an archive
+/// that has really been read before a guard will say anything about it.
+pub(crate) fn zip_at(path: &Path, entries: &[(&str, &str)]) {
     let file = std::fs::File::create(path).expect("sandbox");
     let mut writer = zip::ZipWriter::new(file);
     // Stored rather than deflated for most of these: it keeps the test about the *directory* — the
@@ -173,12 +176,12 @@ fn a_path_splits_at_the_archive() {
     assert!(!deep.is_root());
     // Browsable is about the archive, not about a file in it.
     assert!(!browsable(Path::new(r"D:\dl\pkg.tar.gz\src\ui\main.rs")));
-    // **And `is_virtual` is not asked here**, though it once was. It is the write guards' question
-    // and it needs more than an extension: nothing on `D:\dl` exists, so no archive has been read
-    // there and the honest answer is `false`. See
+    // **And `is_virtual_item` is not asked here**, though it once was. It is the write guards'
+    // question and it needs more than an extension: nothing on `D:\dl` exists, so no archive has
+    // been read there and the honest answer is `false`. See
     // [`a_real_folder_named_like_an_archive_can_still_be_written_to`], which is where that half is
     // tested, against archives and folders that are really on the disk.
-    assert!(!is_virtual(Path::new(r"D:\dl\pkg.tar.gz\src\ui\main.rs")));
+    assert!(!is_virtual_item(Path::new(r"D:\dl\pkg.tar.gz\src\ui\main.rs")));
 
     // A UNC path: the machine and the share are a prefix, not names, and must not be searched for
     // an extension.
@@ -189,7 +192,7 @@ fn a_path_splits_at_the_archive() {
     // Nothing in it at all.
     assert!(at(r"D:\Sources\project\src").is_none());
     assert!(at("").is_none());
-    assert!(!is_virtual(Path::new(r"D:\Sources")));
+    assert!(!is_virtual_item(Path::new(r"D:\Sources")));
 }
 
 /// The **first** archive wins, so an archive inside an archive names a file rather than being
@@ -830,7 +833,7 @@ fn an_overlapping_selection_extracts_each_entry_once() {
 
 /// **A real folder named `stuff.zip` must not be treated as read-only.**
 ///
-/// [`is_virtual`] is what every write guard in the program asks — the delete, the rename, the paste,
+/// [`inside_archive`] is what every guard in the program asks — the delete, the rename, the paste,
 /// the clipboard, the shell menu — and [`split`] answers by extension without touching the disk. So
 /// the question needs a second half, or a folder somebody happened to call `stuff.zip` becomes a
 /// folder in which Delete silently refuses and no context menu comes up. Which is not a cosmetic
@@ -847,11 +850,11 @@ fn a_real_folder_named_like_an_archive_can_still_be_written_to() {
 
     // And so are the guards, which is the part that needed the second half.
     assert!(
-        !is_virtual(&pretend),
+        !is_virtual_item(&pretend),
         "a real directory is not an archive, whatever it is called"
     );
     assert!(
-        !is_virtual(&pretend.join("inside.txt")),
+        !is_virtual_item(&pretend.join("inside.txt")),
         "nor is a real file inside one"
     );
 
@@ -859,8 +862,47 @@ fn a_real_folder_named_like_an_archive_can_still_be_written_to() {
     let pkg = root.join("real.zip");
     zip_at(&pkg, &[("a.txt", "a")]);
     let _ = listing_of(&pkg);
-    assert!(is_virtual(&pkg), "an archive that has been read is virtual");
-    assert!(is_virtual(&pkg.join("a.txt")));
+    assert!(is_virtual_location(&pkg), "an archive that has been read is virtual");
+    assert!(is_virtual_item(&pkg.join("a.txt")));
+}
+
+/// **Browsing an archive must not make the archive itself undeletable.**
+///
+/// The bug as reported, and the one telling of it: open a `.zip`, walk back out of it, press Delete
+/// on it, and the delete is refused with a sentence about files inside archives — for the rest of
+/// the session, because the index the guard reads is in [`CACHE`] and closing the tab does not take
+/// it out. Cut and drag went the same way, all three from one predicate answering the *location*
+/// question at every *item* guard in the program. Both halves are asserted here, because the fix is
+/// a split and either half alone would be a different bug.
+#[test]
+fn a_browsed_archive_is_still_a_file_that_can_be_deleted() {
+    let root = work("delete-the-archive");
+    let pkg = root.join("pkg.zip");
+    zip_at(&pkg, &[("a.txt", "a"), ("src/", ""), ("src/main.rs", "fn main() {}")]);
+
+    // Browsed: the root, then a folder in it, which is what a session leaves behind in the cache.
+    assert!(!names(&listing_of(&pkg)).is_empty());
+    let _ = listing_of(&pkg.join("src"));
+    assert!(indexed(&pkg), "the fixture has to leave a cached index behind");
+
+    // The item guard — every write, the clipboard and the drag — says the archive is a real file.
+    assert!(
+        !is_virtual_item(&pkg),
+        "the archive file is on the disk; Delete, Rename, Ctrl+X and a drag all have to work on it"
+    );
+    // And still refuses what genuinely has no file behind it.
+    assert!(is_virtual_item(&pkg.join("a.txt")));
+    assert!(is_virtual_item(&pkg.join("src")));
+    assert!(is_virtual_item(&pkg.join("src/main.rs")));
+
+    // The folder guard — the watch, the git ask, the context menu, the rename-in-place — is the
+    // other way about for the archive itself, a pane there showing the archive's root.
+    assert!(is_virtual_location(&pkg));
+    assert!(is_virtual_location(&pkg.join("src")));
+    assert!(
+        !is_virtual_location(&root),
+        "the folder the archive sits in is an ordinary folder"
+    );
 }
 
 /// A rewritten archive is not served out of the cache, which is what F5 depends on.

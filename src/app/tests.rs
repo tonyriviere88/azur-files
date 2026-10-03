@@ -1044,29 +1044,17 @@ fn progress_is_said_over_a_notice_and_under_a_file_operation() {
 /// `a_drop_out_of_an_archive_extracts_nothing_in_the_callback`.
 #[test]
 fn a_drop_out_of_an_archive_is_extracted_before_it_is_copied() {
-    use std::io::Write as _;
-
     let root = crate::sandbox::fresh("land-drop");
     let pkg = root.join("pkg.zip");
-    {
-        let file = std::fs::File::create(&pkg).expect("sandbox");
-        let mut writer = zip::ZipWriter::new(file);
-        let stored =
-            zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
-        for (entry, body) in [("a.txt", "first"), ("b.txt", "second")] {
-            writer.start_file(entry, stored).expect("zip");
-            writer.write_all(body.as_bytes()).expect("zip");
-        }
-        writer.finish().expect("zip");
-    }
+    crate::archive::tests::zip_at(&pkg, &[("a.txt", "first"), ("b.txt", "second")]);
     let into = root.join("elsewhere");
     std::fs::create_dir_all(&into).expect("sandbox");
     let picked = vec![pkg.join("a.txt"), pkg.join("b.txt")];
     // Listed first, because a path is only virtual once the archive behind it has been read — see
-    // [`crate::archive::is_virtual`], which is a cache lookup and not a stat.
+    // [`crate::archive::is_virtual_item`], which is a cache lookup and not a stat.
     crate::fs::scan::scan(&pkg);
     assert!(
-        picked.iter().all(|item| crate::archive::is_virtual(item)),
+        picked.iter().all(|item| crate::archive::is_virtual_item(item)),
         "the fixture is not inside an archive, so this would test the ordinary path"
     );
 
@@ -1119,5 +1107,42 @@ fn a_drop_out_of_an_archive_is_extracted_before_it_is_copied() {
     assert!(
         started.starts_with("Copying"),
         "the second pass has to be the one that copies, and it said {started:?}"
+    );
+}
+
+/// **Deleting an archive stops it being an archive**, which is the far end of the fix that let it
+/// be deleted at all.
+///
+/// The index in [`crate::archive`] is keyed by path and read without a stat, for the reason
+/// [`crate::archive::inside_archive`] gives — so it outlives the file unless something drops it,
+/// and a folder made under that name next would be one nothing could be written in. This is the
+/// wiring that drops it: [`App::collect_operations`], where the window reads finished jobs. The
+/// shell is not asked for anything — a test job reports back having touched nothing, and it is the
+/// *reporting* this is about. See [`crate::shell::ops::FOR_REAL`].
+#[test]
+fn deleting_an_archive_stops_it_being_one() {
+    let root = crate::sandbox::fresh("app-delete-archive");
+    let pkg = root.join("pkg.zip");
+    crate::archive::tests::zip_at(&pkg, &[("a.txt", "first")]);
+    crate::fs::scan::scan(&pkg);
+    assert!(
+        crate::archive::indexed(&pkg),
+        "the fixture has to leave a cached index behind, or this passes for the wrong reason"
+    );
+
+    let (mut app, ctx) = app(&["."]);
+    app.ops.start(
+        crate::shell::ops::Job::Delete {
+            items: vec![pkg.clone()],
+            to_bin: true,
+        },
+        app.owner,
+        &ctx,
+    );
+    app.collect_operations(0.0);
+    assert_eq!(app.notice, None, "the delete was refused");
+    assert!(
+        !crate::archive::indexed(&pkg),
+        "the cached index outlived the archive it was read from"
     );
 }

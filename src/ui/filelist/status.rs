@@ -430,8 +430,8 @@ pub(crate) fn status_line(
     //
     // `inside_archive` and not `split`: the latter answers by extension alone, so a real folder
     // somebody called `stuff.zip` would fly this mark over a directory it does not describe. See
-    // [`crate::archive::is_virtual`], which sets out why the confirmation is a cache lookup and not
-    // a `metadata` call.
+    // [`crate::archive::inside_archive`], which sets out why the confirmation is a cache lookup
+    // and not a `metadata` call.
     //
     // The word is laid out here rather than below, because its width is what the loop has to know —
     // and it travels *with* the archive it is about, so there is no pair of options to keep in step.

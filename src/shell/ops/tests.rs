@@ -1203,3 +1203,147 @@ fn the_undo_jobs_touch_both_ends() {
         [PathBuf::from(r"C:\a")]
     );
 }
+
+/// One browsed archive in the sandbox, with a real file beside it — the fixture the two tests below
+/// share.
+///
+/// Really written and really read, because the guards are a cache lookup: a path that was never
+/// listed is not an archive whatever it is called, so a fixture that skipped the read would pass
+/// against the bug.
+#[cfg(windows)]
+fn browsed_archive(name: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+    let root = crate::sandbox::fresh(name);
+    let pkg = root.join("pkg.zip");
+    crate::archive::tests::zip_at(&pkg, &[("a.txt", "first")]);
+    std::fs::write(root.join("real.txt"), b"a file on the disk").expect("sandbox");
+    crate::fs::scan::scan(&pkg);
+    assert!(crate::archive::indexed(&pkg), "the fixture left no cached index");
+    (root, pkg)
+}
+
+/// Start one job and take back what it said, `None` for a job the guard let through.
+///
+/// `FOR_REAL` is off in a test run, so the guard is the only thing that can produce a sentence and
+/// a job that gets past it reports back having touched nothing. See [`FOR_REAL`].
+#[cfg(windows)]
+fn refusal(ops: &mut Operations, ctx: &egui::Context, job: Job) -> Option<String> {
+    ops.start(job, Owner::default(), ctx);
+    let done = ops.drain();
+    assert_eq!(done.len(), 1, "the job never reported back");
+    done[0].error.clone()
+}
+
+/// **A browsed archive can still be deleted**, which is the guard above read the right way round.
+///
+/// The funnel is where the regression belongs: the Delete key, `Ctrl+X`, a rename and a drag all
+/// arrive here. The bug is told once, on
+/// `archive::tests::a_browsed_archive_is_still_a_file_that_can_be_deleted`.
+#[cfg(windows)]
+#[test]
+fn a_browsed_archive_can_still_be_deleted() {
+    let (_root, pkg) = browsed_archive("ops-delete-archive");
+    let ctx = egui::Context::default();
+    let mut ops = Operations::new();
+
+    // What must still be refused, first — because the delete below drops the cached index, which is
+    // deliberate (see [`Job::emptied`]) and would make this half pass for the wrong reason after.
+    let why = refusal(
+        &mut ops,
+        &ctx,
+        Job::Delete {
+            items: vec![pkg.join("a.txt")],
+            to_bin: true,
+        },
+    );
+    assert!(
+        why.as_deref().is_some_and(|why| why.contains("inside an archive")),
+        "a file inside an archive must not be handed to IFileOperation: {why:?}"
+    );
+
+    // And the archive itself, which is the bug.
+    assert_eq!(
+        refusal(
+            &mut ops,
+            &ctx,
+            Job::Delete {
+                items: vec![pkg.clone()],
+                to_bin: true,
+            },
+        ),
+        None,
+        "deleting the archive itself was refused as though it were a file inside one"
+    );
+
+    // **And the index is still here**, deliberately: dropping it is the window's business once the
+    // job has come back, not this funnel's, because a pane may still be showing the archive's rows
+    // and the guard above is what stands between one of those rows and `IFileOperation`. See
+    // [`Job::emptied`], and `app::tests::deleting_an_archive_stops_it_being_one` for the other end.
+    assert!(
+        crate::archive::indexed(&pkg),
+        "the funnel dropped the index while the archive was still there"
+    );
+}
+
+/// **And nothing can be written *into* an archive**, which is the other side of the same split.
+///
+/// `pkg.zip` is a real file, so the item guard says nothing about it — that being the whole point
+/// of [`crate::archive::is_virtual_item`]. A paste, a drop, a shortcut or a new folder aimed at the
+/// archive's *root* therefore has to be caught by its destination instead, or `IFileOperation` is
+/// handed a folder that is a file. Both refusals are asserted, because a fix for either one alone
+/// reads like a fix for both.
+#[cfg(windows)]
+#[test]
+fn nothing_can_be_written_into_a_browsed_archive() {
+    let (root, pkg) = browsed_archive("ops-into-archive");
+    let real = root.join("real.txt");
+    let ctx = egui::Context::default();
+    let mut ops = Operations::new();
+
+    // A paste into the archive's root: every item is real, and the destination is the archive. Then
+    // a new folder in it, which names no items at all.
+    for job in [
+        Job::Copy {
+            items: vec![real.clone()],
+            into: pkg.clone(),
+        },
+        Job::NewFolder {
+            parent: pkg.clone(),
+            name: "made-up".to_owned(),
+        },
+    ] {
+        let what = job.describe();
+        let why = refusal(&mut ops, &ctx, job);
+        assert!(
+            why.as_deref()
+                .is_some_and(|why| why.contains("Nothing can be written into")),
+            "{what} into an archive reached the shell: {why:?}"
+        );
+    }
+
+    // While the same paste into the folder the archive is sitting in is nobody's business but the
+    // shell's — the fixture would prove nothing if the destination guard refused everything.
+    assert_eq!(
+        refusal(
+            &mut ops,
+            &ctx,
+            Job::Copy {
+                items: vec![real],
+                into: root.clone(),
+            },
+        ),
+        None,
+        "an ordinary paste was refused"
+    );
+
+    // And a copy empties nothing, which is why it leaves the index alone — the one arm of
+    // [`Job::emptied`] that the app-level test would otherwise need a whole window to state.
+    assert!(
+        Job::Copy {
+            items: vec![pkg],
+            into: root,
+        }
+        .emptied()
+        .is_empty(),
+        "a copy takes nothing away from where it was"
+    );
+}

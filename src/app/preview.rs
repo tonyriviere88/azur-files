@@ -126,7 +126,7 @@ impl App {
                     // Foundation would refuse the path anyway; refusing it here is the same outcome
                     // with a sentence that says what to do about it.
                     crate::preview::Ask::One(path, crate::preview::Kind::Video)
-                        if crate::archive::is_virtual(path) =>
+                        if crate::archive::is_virtual_item(path) =>
                     {
                         Some(Err(
                             "A video inside an archive cannot be played. Copy it out first."

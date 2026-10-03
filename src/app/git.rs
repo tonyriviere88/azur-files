@@ -44,7 +44,7 @@ impl App {
             if tab.git_asked
                 || tab.dir.is_none()
                 || tab.path.as_os_str().is_empty()
-                || crate::archive::is_virtual(&tab.path)
+                || crate::archive::is_virtual_location(&tab.path)
             {
                 continue;
             }

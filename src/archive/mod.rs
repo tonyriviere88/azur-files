@@ -67,7 +67,7 @@ pub mod extract;
 mod read;
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
 
 pub use extract::extracted;
 
@@ -266,20 +266,52 @@ pub fn browsable(path: &Path) -> bool {
     split(path).is_some_and(|inside| inside.is_root())
 }
 
-/// Whether this path is an archive or anything inside one — the test for "nothing here can be
-/// written to".
+/// Whether a path a program is about to **act on** is inside an archive — "there is no such file".
 ///
-/// Every guard in [`crate::app`] and [`crate::shell::ops`] is this function, so that a new one
-/// cannot be added to the wrong side of the boundary. `true` for the archive *file* as well as its
-/// contents, which is what the callers want: a pane showing `pkg.zip` is showing an archive's root.
+/// The guard over *items*: the delete, the rename, the clipboard, the drag, the preview's
+/// substitution. `true` for `pkg.zip\src\main.rs`, which no operating system call can be handed,
+/// and **`false` for `pkg.zip` itself**, which is a real file in a real folder that browsing does
+/// not stop being one.
+///
+/// # Named for the role, because the wrong pick is silent
+///
+/// This and [`is_virtual_location`] are the same question asked of the two kinds of path this
+/// program holds, and neither name is the unqualified one, so there is no default to fall into.
+/// That matters because both mistakes compile: this one asked of a location leaves an archive's
+/// root unguarded as a place, and [`is_virtual_location`] asked of an item is the bug in
+/// [`tests::a_browsed_archive_is_still_a_file_that_can_be_deleted`].
+pub fn is_virtual_item(path: &Path) -> bool {
+    inside_archive(path).is_some_and(|inside| !inside.is_root())
+}
+
+/// Whether a path a program is about to **list, watch or write into** is one this module answers
+/// for rather than the disk — an archive's own root, or a folder inside it.
+///
+/// The guard over *locations*: may a row here be renamed in place, may the shell's context menu come
+/// up over it, is it a folder to watch, is it a folder to ask [`crate::git`] about, may anything be
+/// pasted into it. All of those are `true` of `pkg.zip` itself, because a pane pointed at `pkg.zip`
+/// is showing the archive's root — there is no directory to watch, no repository to ask about, no
+/// name in it that can be changed, and the shell's menu for that path is the menu for the
+/// *archive*, whose Delete would take the whole thing rather than the row that was clicked.
+///
+/// See [`is_virtual_item`] for why the two are named as they are.
+pub fn is_virtual_location(path: &Path) -> bool {
+    inside_archive(path).is_some()
+}
+
+/// The archive this path is really inside, carrying the [`Inside`] for a caller that needs to name
+/// it rather than only know there is one.
+///
+/// What the status line's archive mark is drawn from, what tells Reveal which real file to point
+/// Explorer at, and the whole of both guards above.
 ///
 /// # Why an extension is not enough, and a `metadata` call is not allowed
 ///
 /// [`split`] answers by extension, so on its own it says `true` for a **real folder** somebody has
-/// named `stuff.zip`. That is not a cosmetic slip. This function gates the delete, the rename, the
-/// paste, the clipboard and the shell's context menu, so an extension-only answer turns such a
-/// folder into one the user can no longer work in — every write refused, with a sentence about
-/// archives over a perfectly ordinary directory.
+/// named `stuff.zip`. That is not a cosmetic slip. This gates the delete, the rename, the paste, the
+/// clipboard and the shell's context menu, so an extension-only answer turns such a folder into one
+/// the user can no longer work in — every write refused, with a sentence about archives over a
+/// perfectly ordinary directory.
 ///
 /// The obvious second half is a `metadata` call to ask whether the archive component is a file, and
 /// it is exactly the wrong thing here: these guards run **on the UI thread**, and a stat against a
@@ -291,24 +323,14 @@ pub fn browsable(path: &Path) -> bool {
 /// you cannot be looking inside an archive whose index was not read to draw the listing you are
 /// looking at. A real folder was never indexed, because [`listing`] stats it once, on a worker, and
 /// hands it to the ordinary scan. See [`tests::a_real_folder_named_like_an_archive_can_still_be_written_to`].
-pub fn is_virtual(path: &Path) -> bool {
-    inside_archive(path).is_some()
-}
-
-/// The archive this path is really inside, confirmed the way [`is_virtual`] confirms it — and
-/// carrying the [`Inside`] for a caller that needs to name the archive rather than only know there
-/// is one.
-///
-/// What the status line's archive mark is drawn from, and what tells Reveal which real file to point
-/// Explorer at.
 pub fn inside_archive(path: &Path) -> Option<Inside> {
     split(path).filter(|inside| indexed(&inside.file))
 }
 
 /// Whether this archive's index is in [`CACHE`] — that is, whether it has been read as an archive.
 ///
-/// The disk is not asked. See [`is_virtual`], which is the whole reason this exists.
-fn indexed(file: &Path) -> bool {
+/// The disk is not asked. See [`inside_archive`], which is the whole reason this exists.
+pub(crate) fn indexed(file: &Path) -> bool {
     CACHE
         .lock()
         .map(|cache| cache.iter().any(|(key, _)| key.file == file))
@@ -484,12 +506,27 @@ fn key_for(file: &Path) -> Option<Key> {
 /// Takes any path, archive or not, and takes the *containing* archive — pressing F5 inside
 /// `pkg.zip\src` has to invalidate `pkg.zip`, because that is the only thing there is to re-read.
 pub fn forget(path: &Path) {
-    let Some(inside) = split(path) else {
+    forget_each([path]);
+}
+
+/// The same for several paths at once, and **this is the one to call for a selection.**
+///
+/// One lock and no [`split`] at all for the ordinary case, which is what makes it safe to call on
+/// every path of a job: [`split`] allocates per path component, the lock is taken on the UI thread,
+/// and the cache is empty in any session that never opened an archive. `forget` in a loop over a
+/// 2,000-file delete paid both costs 2,000 times to be told "no".
+pub fn forget_each<'a>(paths: impl IntoIterator<Item = &'a Path>) {
+    let Ok(mut cache) = CACHE.lock() else {
         return;
     };
-    if let Ok(mut cache) = CACHE.lock() {
-        cache.retain(|(key, _)| key.file != inside.file);
+    if cache.is_empty() {
+        return;
     }
+    let archives: Vec<PathBuf> = paths
+        .into_iter()
+        .filter_map(|path| split(path).map(|inside| inside.file))
+        .collect();
+    cache.retain(|(key, _)| !archives.contains(&key.file));
 }
 
 /// Everything the cache is holding: archives, and entries across them. For `--trace`, and the same

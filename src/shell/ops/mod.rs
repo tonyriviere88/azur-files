@@ -279,24 +279,20 @@ impl Job {
 
     /// The folders this will change, so they can be re-read afterwards.
     pub fn touches(&self) -> Vec<PathBuf> {
-        let parents = |items: &Vec<PathBuf>| -> Vec<PathBuf> {
+        let parents = |items: &[PathBuf]| -> Vec<PathBuf> {
             items
                 .iter()
                 .filter_map(|p| p.parent().map(Path::to_path_buf))
                 .collect()
         };
         let mut touched = match self {
-            Self::Copy { items, into } | Self::Move { items, into } => {
-                let mut all = parents(items);
-                all.push(into.clone());
-                all
+            Self::Copy { items, .. } | Self::Move { items, .. } | Self::Delete { items, .. } => {
+                parents(items)
             }
-            Self::Delete { items, .. } => parents(items),
             Self::Rename { item, .. } => item.parent().map(Path::to_path_buf).into_iter().collect(),
-            Self::NewFolder { parent, .. } => vec![parent.clone()],
-            // Only the destination. What the shortcuts point at is not touched — that is the
-            // whole difference between this and a copy.
-            Self::Link { into, .. } => vec![into.clone()],
+            // The destination and nothing else, and it is added below. What a shortcut points at is
+            // not touched — that is the whole difference between this and a copy.
+            Self::NewFolder { .. } | Self::Link { .. } => Vec::new(),
             // Both ends of every pair: an item leaves one folder and arrives in another, and a
             // pane showing either has to be told.
             Self::PutBack { items } => items
@@ -312,9 +308,102 @@ impl Job {
                 .filter_map(|item| item.from.parent().map(Path::to_path_buf))
                 .collect(),
         };
+        // The folder written into, for the four jobs that have one — from [`Self::destination`], so
+        // that answer is written once rather than in an arm here and another in [`Self::every_path`].
+        touched.extend(self.destination().map(Path::to_path_buf));
         touched.sort();
         touched.dedup();
         touched
+    }
+
+    /// Every path this job acts **on**: the items, and both ends of an undo pair.
+    ///
+    /// The counterpart to [`Self::destination`], and the split matters — see
+    /// [`Self::archive_refusal`], which asks a different question of each.
+    pub(crate) fn sources(&self) -> Vec<&Path> {
+        match self {
+            Self::Copy { items, .. }
+            | Self::Move { items, .. }
+            | Self::Delete { items, .. }
+            | Self::Link { items, .. } => items.iter().map(PathBuf::as_path).collect(),
+            Self::Rename { item, .. } => vec![item.as_path()],
+            // Nothing yet exists to act on; the name is not a path until the shell has made it.
+            Self::NewFolder { .. } => Vec::new(),
+            Self::PutBack { items } => items
+                .iter()
+                .flat_map(|(from, to)| [from.as_path(), to.as_path()])
+                .collect(),
+            Self::Restore { items } => items.iter().map(|item| item.from.as_path()).collect(),
+        }
+    }
+
+    /// The folder this job writes **into**, for the jobs that have one.
+    ///
+    /// The counterpart to [`Self::sources`]. Distinct from [`Self::touches`], which is every folder
+    /// to re-read afterwards and takes in the sources' own parents as well.
+    pub(crate) fn destination(&self) -> Option<&Path> {
+        match self {
+            Self::Copy { into, .. } | Self::Move { into, .. } | Self::Link { into, .. } => {
+                Some(into)
+            }
+            Self::NewFolder { parent, .. } => Some(parent),
+            // A rename writes into the folder its item is already in, which the item test covers.
+            // A delete has no destination, and the two undo jobs name real paths at both ends:
+            // nothing was ever moved *into* an archive for them to put back.
+            Self::Delete { .. }
+            | Self::Rename { .. }
+            | Self::PutBack { .. }
+            | Self::Restore { .. } => None,
+        }
+    }
+
+    /// The paths this job **empties**: what is no longer there once it has worked.
+    ///
+    /// A subset of [`Self::sources`], and it is what the window drops [`crate::archive`]'s cached
+    /// index for — see [`crate::app::Explorer::collect_operations`].
+    ///
+    /// # Asked after the job, never before
+    ///
+    /// An index dropped while the archive is still on the disk takes
+    /// [`crate::archive::is_virtual_item`] out from under a pane that is still showing the archive's
+    /// rows, and a delete of one of those rows would then reach `IFileOperation` with a path that
+    /// is not a file. Afterwards there is nothing at the path for it to resolve to, which is what
+    /// makes the same call safe.
+    pub(crate) fn emptied(&self) -> Vec<&Path> {
+        match self {
+            Self::Delete { items, .. } | Self::Move { items, .. } => {
+                items.iter().map(PathBuf::as_path).collect()
+            }
+            Self::Rename { item, .. } => vec![item.as_path()],
+            Self::PutBack { items } => items.iter().map(|(from, _)| from.as_path()).collect(),
+            // A copy and a shortcut add something and take nothing, a new folder takes nothing, and
+            // a restore's source is the Recycle Bin — which is not a path this program shows.
+            Self::Copy { .. }
+            | Self::Link { .. }
+            | Self::NewFolder { .. }
+            | Self::Restore { .. } => Vec::new(),
+        }
+    }
+
+    /// The archive path that stops this job reaching the shell, if there is one.
+    ///
+    /// **Two questions, and the difference between them is `pkg.zip` itself.** An *item* must not be
+    /// inside an archive, because there is no such file; a *destination* must not be one, because
+    /// there is nothing to write into. Each is asked only of the paths that play that role, and
+    /// asking either of the other role reintroduces a bug — the item question over a destination
+    /// lets a paste into `pkg.zip` reach `IFileOperation`, and the location question over an item
+    /// is what once cost the archive its own delete. See [`crate::archive::is_virtual_item`].
+    pub(crate) fn archive_refusal(&self) -> Option<Refused> {
+        if let Some(item) = self
+            .sources()
+            .into_iter()
+            .find(|path| crate::archive::is_virtual_item(path))
+        {
+            return Some(Refused::Item(item.to_path_buf()));
+        }
+        self.destination()
+            .filter(|folder| crate::archive::is_virtual_location(folder))
+            .map(|into| Refused::Destination(into.to_path_buf()))
     }
 
     /// Every path this job could write to, for the sandbox guard in [`Operations::start_then`].
@@ -322,31 +411,44 @@ impl Job {
     /// The folders from [`Self::touches`] are not enough: a delete names the items, and it is
     /// the items that go. Kept here beside them so a job added later has one obvious place to
     /// say what it would touch, rather than a `match` in the middle of a guard nobody reads
-    /// until it is too late.
-    /// No longer test-only: [`Jobs::start_then`] asks the same question of every job, to refuse one
-    /// that names a path inside an archive. Which is the same argument the doc above makes for this
-    /// existing at all — one place that can say what a job would touch, rather than a `match` in the
-    /// middle of a guard nobody reads until it is too late.
+    /// until it is too late — which is why this is the union of the accessors above and not a
+    /// fourth `match` over the same variants.
+    #[cfg(test)]
     pub(crate) fn every_path(&self) -> Vec<PathBuf> {
         let mut paths = self.touches();
-        match self {
-            Self::Copy { items, into } | Self::Move { items, into } => {
-                paths.extend(items.iter().cloned());
-                paths.push(into.clone());
-            }
-            Self::Delete { items, .. } => paths.extend(items.iter().cloned()),
-            Self::Rename { item, .. } => paths.push(item.clone()),
-            Self::NewFolder { parent, .. } => paths.push(parent.clone()),
-            Self::Link { items, into } => {
-                paths.extend(items.iter().cloned());
-                paths.push(into.clone());
-            }
-            Self::PutBack { items } => {
-                paths.extend(items.iter().flat_map(|(from, to)| [from.clone(), to.clone()]))
-            }
-            Self::Restore { items } => paths.extend(items.iter().map(|item| item.from.clone())),
-        }
+        paths.extend(self.sources().into_iter().map(Path::to_path_buf));
         paths
+    }
+}
+
+/// Why a job cannot be handed to the shell: the path that stops it, and which role it played.
+///
+/// From [`Job::archive_refusal`], which is where the two questions are set out.
+pub(crate) enum Refused {
+    /// An item that is inside an archive, so there is no such file to act on.
+    Item(PathBuf),
+    /// A destination that this program only reads, so there is nothing to write into.
+    Destination(PathBuf),
+}
+
+impl Refused {
+    /// The sentence for the status line, beside the case it is about.
+    fn why(&self) -> String {
+        match self {
+            Self::Item(path) => {
+                let what = crate::fs::display_name(path);
+                format!(
+                    "{what} is inside an archive, which this program only reads. \
+                     Copy it out first."
+                )
+            }
+            // Not "is an archive": the destination may be a folder *inside* one, and a sentence
+            // that names the kind would be wrong for one of the two.
+            Self::Destination(path) => {
+                let what = crate::fs::display_name(path);
+                format!("Nothing can be written into {what}: this program only reads archives.")
+            }
+        }
     }
 }
 
@@ -429,25 +531,18 @@ impl Operations {
         // writes into an archive at all: see [`crate::archive`], where that is scope and format
         // both, a `.tar.gz` having no way to change one member without being rebuilt whole.
         //
-        // Here rather than at the arms in [`crate::app::App::perform`] for the same reason the two
-        // guards below are here: this is the one funnel every copy, move, delete, rename, shortcut
-        // and new folder passes through, and a rule at the call sites is a rule the next call site
-        // forgets. Refused through the same channel a failure comes back on, so the words reach the
-        // status line by the route that was already built for them — and with `job: None`, so a
-        // refusal cannot be offered to `Ctrl+Z` as something to undo.
-        if let Some(refused) = job
-            .every_path()
-            .iter()
-            .find(|path| crate::archive::is_virtual(path))
-        {
-            let what = crate::fs::display_name(refused);
+        // Which of its paths, and which sentence, is [`Job::archive_refusal`] — asked here rather
+        // than at the arms in [`crate::app::App::perform`] for the same reason the two guards below
+        // are here: this is the one funnel every copy, move, delete, rename, shortcut and new folder
+        // passes through, and a rule at the call sites is a rule the next call site forgets. Refused
+        // through the same channel a failure comes back on, so the words reach the status line by
+        // the route that was already built for them — and with `job: None`, so a refusal cannot be
+        // offered to `Ctrl+Z` as something to undo.
+        if let Some(refused) = job.archive_refusal() {
             let _ = tx.send(Done {
                 job: None,
                 touched,
-                error: Some(format!(
-                    "{what} is inside an archive, which this program only reads. \
-                     Copy it out first."
-                )),
+                error: Some(refused.why()),
                 aborted: false,
                 after,
                 outcome: Outcome::default(),
