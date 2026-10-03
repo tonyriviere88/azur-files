@@ -759,3 +759,316 @@ fn the_filter_survives_a_listing_with_no_folder_of_its_own() {
     assert_eq!(order.len(), 1);
     assert_eq!(dir.name(order[0] as usize), "Windows (C:)");
 }
+
+/// Where a keystroke's time actually goes: matching, ranking, or the sort itself.
+///
+/// ```text
+/// cargo test --release -- --ignored --nocapture order_phases
+/// ```
+///
+/// [`filter_speed`] says what one pass costs. This says which part of it to attack, which is a
+/// different question and the one worth asking first: a pass whose time is all in the comparator
+/// wants a cheaper comparator, and a pass whose time is all in the match wants a cheaper match.
+/// Measured on the same listing, so the two are directly comparable.
+#[test]
+#[ignore = "a benchmark, not a test"]
+fn order_phases() {
+    let root = std::env::var("YAFE_FLATTEN_ROOT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"));
+    if !root.is_dir() {
+        println!("no {}; skipping", root.display());
+        return;
+    }
+    let dir = crate::fs::scan::scan_deep(
+        &root,
+        crate::fs::scan::FLATTEN_BUDGET,
+        std::time::Duration::from_secs(600),
+    );
+    println!("{} entries from {}", dir.len(), root.display());
+
+    let best = |label: &str, f: &mut dyn FnMut() -> usize| {
+        let mut took = std::time::Duration::MAX;
+        let mut rows = 0;
+        for _ in 0..5 {
+            let at = std::time::Instant::now();
+            rows = f();
+            took = took.min(at.elapsed());
+        }
+        println!("  {label:<34} {:>8.2} ms  ({rows} rows)", took.as_secs_f64() * 1000.0);
+        took
+    };
+
+    // The whole pass, for the total the other rows have to add up to.
+    let mut order = Vec::new();
+    best("build_order, Name, no filter", &mut || {
+        build_order(&dir, &mut order, Column::Name, true, false, "", None);
+        order.len()
+    });
+    best("build_order, Type, no filter", &mut || {
+        build_order(&dir, &mut order, Column::Type, true, false, "", None);
+        order.len()
+    });
+
+    // The filter half on its own: every row visited, every name matched, nothing sorted.
+    let query = azur_egui_theme::filter::Query::parse("exe");
+    best("the match alone, over every row", &mut || {
+        let mut path = String::new();
+        let base = prefix(&dir, &mut path);
+        let mut kept = 0;
+        for i in 0..dir.len() {
+            path.truncate(base);
+            path.push_str(dir.name(i));
+            if query.matches(&path) {
+                kept += 1;
+            }
+        }
+        kept
+    });
+
+    // And the sort half on its own, over an order that is already built.
+    let full: Vec<u32> = (0..dir.len() as u32).collect();
+    let mut scratch = full.clone();
+    best("sort_order, Name", &mut || {
+        scratch.copy_from_slice(&full);
+        sort_order(&dir, &mut scratch, Column::Name, true);
+        scratch.len()
+    });
+    best("sort_order, Type", &mut || {
+        scratch.copy_from_slice(&full);
+        sort_order(&dir, &mut scratch, Column::Type, true);
+        scratch.len()
+    });
+    best("type_ranks alone", &mut || type_ranks(&dir, &full).len());
+
+    // The comparator, called the number of times a sort of this many rows calls it — so the
+    // figure is per-comparison rather than per-row and can be compared against a change to it.
+    let rounds = 2_000_000usize;
+    let ranks = Vec::new();
+    let at = std::time::Instant::now();
+    let mut sink = 0usize;
+    for k in 0..rounds {
+        let a = (k * 7919) % dir.len();
+        let b = (k * 104_729 + 13) % dir.len();
+        if compare(&dir, &ranks, Column::Name, true, a as u32, b as u32) == std::cmp::Ordering::Less
+        {
+            sink += 1;
+        }
+    }
+    let per = at.elapsed().as_nanos() as f64 / rounds as f64;
+    println!("  compare, Name                      {per:>8.1} ns per call  ({sink} less)");
+
+    // How long the names are, because that is what the comparator walks.
+    let total: usize = (0..dir.len()).map(|i| dir.name(i).len()).sum();
+    println!(
+        "  names average {:.1} bytes; a sort of {} rows is about {} comparisons",
+        total as f64 / dir.len() as f64,
+        dir.len(),
+        dir.len() * (usize::BITS - dir.len().leading_zeros()) as usize
+    );
+}
+
+/// The unskipped walk, kept so the skip can be checked against it.
+///
+/// A copy of [`natural_cmp`] as it was before [`shared_head`] existed: byte at a time from zero,
+/// no fast path. Only the test below calls it, and its whole job is to be obviously right.
+fn natural_cmp_plain(a: &str, b: &str) -> Ordering {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    let (mut i, mut j) = (0, 0);
+    while i < a.len() && j < b.len() {
+        let (ca, cb) = (a[i], b[j]);
+        if ca.is_ascii_digit() && cb.is_ascii_digit() {
+            let (za, ia) = skip_zeros(a, i);
+            let (zb, jb) = skip_zeros(b, j);
+            let (ea, eb) = (digits_end(a, ia), digits_end(b, jb));
+            let (la, lb) = (ea - ia, eb - jb);
+            match la.cmp(&lb) {
+                Ordering::Equal => match a[ia..ea].cmp(&b[jb..eb]) {
+                    Ordering::Equal => {}
+                    unequal => return unequal,
+                },
+                unequal => return unequal,
+            }
+            if za != zb {
+                return za.cmp(&zb);
+            }
+            i = ea;
+            j = eb;
+            continue;
+        }
+        let (la, lb) = (lower(ca), lower(cb));
+        if la != lb {
+            return la.cmp(&lb);
+        }
+        i += 1;
+        j += 1;
+    }
+    match (a.len() - i).cmp(&(b.len() - j)) {
+        Ordering::Equal => a.cmp(b),
+        unequal => unequal,
+    }
+}
+
+/// The word-at-a-time skip in [`natural_cmp`] answers exactly what the plain walk answers.
+///
+/// **Generated pairs rather than a list of cases**, because the argument for the skip is about a
+/// class of inputs — anything where the first differing byte falls inside a run of digits — and a
+/// handful of hand-written examples is precisely how a reader convinces themselves of a rule that
+/// is not quite true. The alphabet is chosen to make the awkward cases frequent: digits and zeros
+/// far more often than letters, separators that produce long shared prefixes, mixed case, and
+/// bytes past ASCII so the fold's own boundary is covered too.
+///
+/// Deterministic: the generator is a fixed-seed LCG, so a failure is reproducible and a pair that
+/// once broke this stays broken until it is fixed.
+#[test]
+fn natural_cmp_agrees_with_the_plain_walk() {
+    // Weighted so that digits and zeros dominate: `0` and the digits are what the skip has to
+    // reason about, and `\\` and `_` are what make two names share a long head.
+    const ALPHABET: &[u8] = b"0000011223456789aAbB_zZ..\\\\\\\\";
+    let mut seed = 0x2545_F491_4F6C_DD1Du64;
+    let mut next = move || {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed
+    };
+
+    let mut checked = 0usize;
+    for round in 0..40_000u64 {
+        // A shared head some of the time, so the skip is exercised over a real prefix as well
+        // as over names that differ at once.
+        let head_len = (next() % 24) as usize;
+        let head: Vec<u8> = (0..head_len)
+            .map(|_| ALPHABET[(next() % ALPHABET.len() as u64) as usize])
+            .collect();
+        let mut pair: Vec<String> = Vec::with_capacity(2);
+        for _ in 0..2 {
+            let tail_len = (next() % 14) as usize;
+            let mut bytes = head.clone();
+            for _ in 0..tail_len {
+                bytes.push(ALPHABET[(next() % ALPHABET.len() as u64) as usize]);
+            }
+            // Every byte in the alphabet is ASCII, so this cannot fail; the occasional
+            // non-ASCII name is added below instead, where it can be a whole character.
+            pair.push(String::from_utf8(bytes).expect("ascii"));
+        }
+        if round % 7 == 0 {
+            pair[0].push('é');
+            pair[1].push_str("e\u{301}");
+        }
+
+        let (x, y) = (pair[0].as_str(), pair[1].as_str());
+        for (p, q) in [(x, y), (y, x), (x, x)] {
+            let got = natural_cmp(p, q);
+            let want = natural_cmp_plain(p, q);
+            assert_eq!(got, want, "natural_cmp({p:?}, {q:?}) said {got:?}, the plain walk said {want:?}");
+            checked += 1;
+        }
+    }
+    assert!(checked > 100_000, "only {checked} pairs");
+}
+
+/// And the skip has not broken the ordering's own contract: it is still a total order.
+///
+/// Sorting with a comparator that is not consistent is undefined behaviour in the standard
+/// library's own words, so this is worth its own check rather than being implied by the one above.
+#[test]
+fn natural_cmp_is_a_total_order() {
+    let names = [
+        "a", "A", "a0", "a00", "a1", "a01", "a001", "a2", "a10", "a09", "a9", "a9a", "a10a",
+        "release/deps/x-1.rs", "release/deps/x-2.rs", "release/deps/x-10.rs", "release\\deps\\x.rs",
+        "", "0", "00", "000", "1", "01", "z", "Z", "é", "e",
+    ];
+    for &p in &names {
+        assert_eq!(natural_cmp(p, p), Ordering::Equal, "{p:?} against itself");
+        for &q in &names {
+            let (pq, qp) = (natural_cmp(p, q), natural_cmp(q, p));
+            assert_eq!(pq, qp.reverse(), "{p:?} vs {q:?} is not antisymmetric");
+            for &r in &names {
+                if pq == Ordering::Less && natural_cmp(q, r) == Ordering::Less {
+                    assert_eq!(
+                        natural_cmp(p, r),
+                        Ordering::Less,
+                        "{p:?} < {q:?} < {r:?} but not {p:?} < {r:?}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The skip in [`natural_cmp`], measured against the walk it replaced — same data, same process.
+///
+/// ```text
+/// cargo test --release -- --ignored --nocapture the_skip_is_worth_having
+/// ```
+///
+/// [`natural_cmp_plain`] is that walk, kept for [`natural_cmp_agrees_with_the_plain_walk`], so the
+/// comparison costs nothing to keep honest: both sort the same order, in the same run, on the same
+/// machine. Which matters more than it sounds — the listing this reads is whatever `target`
+/// currently holds, so a figure from one run is not comparable with a figure from another, and a
+/// ratio measured inside one run is.
+#[test]
+#[ignore = "a benchmark, not a test"]
+fn the_skip_is_worth_having() {
+    let root = std::env::var("YAFE_FLATTEN_ROOT")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target"));
+    if !root.is_dir() {
+        println!("no {}; skipping", root.display());
+        return;
+    }
+    let dir = crate::fs::scan::scan_deep(
+        &root,
+        crate::fs::scan::FLATTEN_BUDGET,
+        std::time::Duration::from_secs(600),
+    );
+    let full: Vec<u32> = (0..dir.len() as u32).collect();
+    let mut scratch = full.clone();
+    let total: usize = (0..dir.len()).map(|i| dir.name(i).len()).sum();
+    println!(
+        "{} rows from {}, names averaging {:.1} bytes",
+        dir.len(),
+        root.display(),
+        total as f64 / dir.len() as f64
+    );
+
+    let mut timed = |label: &str, cmp: &dyn Fn(&str, &str) -> Ordering| {
+        let mut best = std::time::Duration::MAX;
+        for _ in 0..5 {
+            scratch.copy_from_slice(&full);
+            let at = std::time::Instant::now();
+            scratch.sort_unstable_by(|&a, &b| {
+                cmp(dir.name(a as usize), dir.name(b as usize))
+            });
+            best = best.min(at.elapsed());
+        }
+        println!("  sort by name, {label:<26} {:>7.2} ms", best.as_secs_f64() * 1000.0);
+        best
+    };
+
+    let was = timed("byte at a time", &natural_cmp_plain);
+    let now = timed("skipping the shared head", &natural_cmp);
+    println!(
+        "  ------------------------------------\n  {:.1}x",
+        was.as_secs_f64() / now.as_secs_f64().max(f64::MIN_POSITIVE)
+    );
+
+    // The same pair over short names with little in common, which is the case the skip cannot
+    // help with — worth stating so the ratio above is not read as applying to every listing.
+    let names: Vec<String> = (0..40_000).map(|i| format!("{}_{i}.rs", (i * 7919) % 9973)).collect();
+    let mut order: Vec<u32> = (0..names.len() as u32).collect();
+    let base = order.clone();
+    let mut flat = |label: &str, cmp: &dyn Fn(&str, &str) -> Ordering| {
+        let mut best = std::time::Duration::MAX;
+        for _ in 0..5 {
+            order.copy_from_slice(&base);
+            let at = std::time::Instant::now();
+            order.sort_unstable_by(|&a, &b| cmp(&names[a as usize], &names[b as usize]));
+            best = best.min(at.elapsed());
+        }
+        println!("  {} short names, {label:<21} {:>7.2} ms", names.len(), best.as_secs_f64() * 1000.0);
+    };
+    flat("byte at a time", &natural_cmp_plain);
+    flat("skipping", &natural_cmp);
+}

@@ -15,7 +15,6 @@ use super::*;
 pub(super) const GIT_WRITE_SETTLE: f64 = 2.0;
 
 impl App {
-
     /// Ask git about whatever each pane is showing, and hand the answers back.
     ///
     /// **Only the active tab of each pane**, because only that one is on screen: a window with twelve

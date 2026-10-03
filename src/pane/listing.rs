@@ -4,7 +4,6 @@
 use super::*;
 
 impl Tab {
-
     /// Take a finished listing and build the view over it.
     ///
     /// A *re-read* of the folder already being shown keeps the selection, by name. This is what

@@ -221,7 +221,6 @@ impl Settling {
 }
 
 impl App {
-
     /// `--walk=<dir>`: browse subfolder after subfolder by itself. See [`Walk`].
     pub fn walking(mut self, from: Option<PathBuf>) -> Self {
         self.walk = from.as_deref().map(Walk::collect);

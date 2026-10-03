@@ -3,7 +3,6 @@
 use super::*;
 
 impl Tab {
-
     /// Go somewhere, recording it in the history.
     pub fn navigate(&mut self, path: impl Into<PathBuf>) {
         let path = path.into();

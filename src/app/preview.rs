@@ -6,7 +6,6 @@
 use super::*;
 
 impl App {
-
     /// Hand finished reads to the panels that asked, and keep each one pointed at its own
     /// keyboard.
     ///

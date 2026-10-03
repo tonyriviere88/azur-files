@@ -77,11 +77,21 @@ use std::path::{Path, PathBuf};
 mod win;
 #[cfg(windows)]
 use win::picture;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
 use egui::{ColorImage, TextureHandle, TextureOptions};
+
+/// The shell call on its own, for the benchmark in `app::click_tests::memory`.
+///
+/// The service around it is what a grid uses and what the tests here drive; this is the floor
+/// underneath it — the one cost nothing in this program can make smaller, only ask for less often.
+#[cfg(test)]
+pub(crate) fn picture_for_tests(path: &Path) -> bool {
+    matches!(picture(path), Got::Picture(_))
+}
 
 /// One atlas cell, in pixels — and the size a thumbnail is asked for.
 ///

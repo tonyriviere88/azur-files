@@ -7,7 +7,6 @@
 use super::*;
 
 impl App {
-
     pub fn frame(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
         if !self.installed {

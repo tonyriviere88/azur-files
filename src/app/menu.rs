@@ -7,7 +7,6 @@
 use super::*;
 
 impl App {
-
     /// Raise the context menu: ask the shell for it, and open it when the answer comes.
     ///
     /// The shell's entries take 130 ms for a folder and up to most of a second for a file --

@@ -6,7 +6,6 @@
 use super::*;
 
 impl App {
-
     /// Put the selection on the clipboard, as a cut or as a copy.
     pub(super) fn put_on_clipboard(&mut self, pane: PaneId, cutting: bool) {
         let paths = self

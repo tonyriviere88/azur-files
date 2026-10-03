@@ -3,7 +3,6 @@
 use super::*;
 
 impl Tab {
-
     #[inline]
     pub fn is_selected(&self, position: usize) -> bool {
         self.entry_at(position)

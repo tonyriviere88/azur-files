@@ -7,7 +7,6 @@
 use super::*;
 
 impl App {
-
     /// Hand every finished scan to the tab that asked for it.
     pub(super) fn collect_scans(&mut self) {
         // Collected first so the loader is not borrowed while the panes are.

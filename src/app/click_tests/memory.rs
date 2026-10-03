@@ -400,3 +400,232 @@ fn closing_a_tab_gives_its_listing_back() {
         (closed - before) / 1024
     );
 }
+
+/// What starting up costs, phase by phase.
+///
+/// ```text
+/// cargo test --release -- --ignored --nocapture startup_phases
+/// ```
+///
+/// The window's own creation is eframe's and the graphics device is wgpu's, so neither is
+/// reachable from here — what *is* reachable is everything this program does between being handed
+/// a context and having a listing on screen, which is the part it can do something about. Four
+/// phases, and they are separated because they fail differently: fonts are a fixed cost paid once,
+/// [`App::opening`] is where the settings, the theme, the dock and the workers come from, the
+/// first frame is layout with no listing in it, and the wait afterwards is the disk.
+///
+/// Run against this crate's own root, which is a folder of a few dozen entries — deliberately, so
+/// the figure is the *fixed* cost of coming up rather than the cost of whatever folder was last
+/// open. `what_a_very_large_folder_costs` is the other end of that.
+#[test]
+#[ignore = "a benchmark, not a test"]
+fn startup_phases() {
+    let here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    // Fonts, once per process: every run after the first would report zero, so it is measured
+    // on its own context rather than inside the loop below.
+    let fresh = egui::Context::default();
+    let at = std::time::Instant::now();
+    azur_egui_theme::fonts::install(&fresh);
+    let fonts = at.elapsed();
+
+    let mut opening = std::time::Duration::MAX;
+    let mut first = std::time::Duration::MAX;
+    let mut listing = std::time::Duration::MAX;
+    let mut frames_waited = 0;
+    let mut steady = std::time::Duration::MAX;
+
+    for _ in 0..5 {
+        let ctx = egui::Context::default();
+        azur_egui_theme::fonts::install(&ctx);
+
+        let at = std::time::Instant::now();
+        let app = App::opening(&ctx, Config::default(), vec![here.clone()], Side::Right);
+        opening = opening.min(at.elapsed());
+
+        let mut h = Harness {
+            app,
+            ctx,
+            size: vec2(1024.0, 650.0),
+            time: 1.0,
+            modifiers: Modifiers::NONE,
+            focused: true,
+            cursor: egui::CursorIcon::Default,
+            commands: Vec::new(),
+            shapes: Vec::new(),
+        };
+
+        let at = std::time::Instant::now();
+        h.frame(Vec::new());
+        first = first.min(at.elapsed());
+
+        // Until the listing is on screen, which is when the window is worth looking at.
+        let at = std::time::Instant::now();
+        let mut waited = 1;
+        for _ in 0..400 {
+            if h.app.panes[0].tab().dir.is_some() {
+                break;
+            }
+            h.frame(Vec::new());
+            waited += 1;
+        }
+        listing = listing.min(at.elapsed());
+        frames_waited = waited;
+
+        // And a frame once everything has arrived, which is what every frame after startup costs.
+        h.settle();
+        let at = std::time::Instant::now();
+        for _ in 0..20 {
+            h.frame(Vec::new());
+        }
+        steady = steady.min(at.elapsed() / 20);
+    }
+
+    let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.0;
+    println!("  install the fonts            {:>8.2} ms  (once per process)", ms(fonts));
+    println!("  App::opening                 {:>8.2} ms", ms(opening));
+    println!("  the first frame              {:>8.2} ms", ms(first));
+    println!("  until the listing is on it   {:>8.2} ms  ({frames_waited} frames)", ms(listing));
+    println!("  a frame once settled         {:>8.2} ms", ms(steady));
+    println!(
+        "  ------------------------------------\n  to a listing on screen       {:>8.2} ms  (+ fonts, once)",
+        ms(opening) + ms(first) + ms(listing)
+    );
+}
+
+/// What a grid of thumbnails costs, and where the time goes.
+///
+/// ```text
+/// cargo test --release -- --ignored --nocapture thumbnail_speed
+/// ```
+///
+/// Point `YAFE_THUMBS` at a folder of pictures; without it this builds one in the sandbox, which
+/// measures the *machinery* rather than the shell's decoder and is worth having either way — a
+/// regression in the queue, the cache or the atlas shows up in it just as well.
+///
+/// Three numbers, because they are three different problems. **The shell call** is
+/// `IShellItemImageFactory` per file and is the floor: nothing here can make it quicker, only ask
+/// for it less. **The wait for a screenful** is what somebody switching to tiles actually sees.
+/// **A frame while they arrive** is the one that must stay under a frame's budget, because the
+/// alternative is a grid that stutters as it fills.
+///
+/// **Windows caches thumbnails, so read the first figure knowing which side of that cache it is
+/// on.** Measured on files it had never been asked about, the shell's call came to **12.95 ms** a
+/// picture; on the same files afterwards, **2.1 ms**. Both are real — the first is what somebody
+/// opening a folder of holiday photographs waits for, the second is what they get on the way back
+/// to it — and a run of this benchmark reports whichever applies to the sandbox as it stands. To
+/// see the cold number again, point `YAFE_THUMBS` at a folder of pictures nothing has browsed.
+#[test]
+#[ignore = "a benchmark, not a test"]
+fn thumbnail_speed() {
+    let _serialised = crate::shell::serialised();
+    crate::shell::init();
+
+    let folder = match std::env::var_os("YAFE_THUMBS") {
+        Some(given) => PathBuf::from(given),
+        None => {
+            // A folder of real PNGs in the sandbox, each a different size so no two thumbnails
+            // are the same piece of work.
+            let root = crate::sandbox::dir("thumbs-bench");
+            for i in 0..96u32 {
+                let path = root.join(format!("picture_{i:03}.png"));
+                if path.exists() {
+                    continue;
+                }
+                let side = 64 + (i % 8) * 32;
+                let mut pixels = Vec::with_capacity((side * side * 3) as usize);
+                for y in 0..side {
+                    for x in 0..side {
+                        pixels.push((x ^ y) as u8);
+                        pixels.push((x.wrapping_add(i)) as u8);
+                        pixels.push((y.wrapping_mul(3)) as u8);
+                    }
+                }
+                let _ = image::save_buffer(
+                    &path,
+                    &pixels,
+                    side,
+                    side,
+                    image::ExtendedColorType::Rgb8,
+                );
+            }
+            root
+        }
+    };
+    if !folder.is_dir() {
+        println!("no {}; skipping", folder.display());
+        return;
+    }
+
+    let pictures: Vec<PathBuf> = std::fs::read_dir(&folder)
+        .expect("readable")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| crate::preview::kind_of("x", e, false) == Some(crate::preview::Kind::Picture))
+        })
+        .collect();
+    println!("{} pictures in {}", pictures.len(), folder.display());
+    if pictures.is_empty() {
+        return;
+    }
+
+    // 1. The shell call itself, on the thread this test is on, one file at a time.
+    let want = pictures.len().min(48);
+    let at = std::time::Instant::now();
+    let mut drawn = 0;
+    for path in pictures.iter().take(want) {
+        if crate::shell::thumbs::picture_for_tests(path) {
+            drawn += 1;
+        }
+    }
+    let each = at.elapsed().as_secs_f64() * 1000.0 / want as f64;
+    println!("  the shell's own call         {each:>8.2} ms per picture  ({drawn}/{want} drawn)");
+
+    // 2. And through the service, which is what the grid uses: a screenful asked for at once,
+    //    fetched on workers, with a frame run while they land.
+    //
+    // **Warm**, and it has to be said out loud: the loop above has just asked the shell for these
+    // same files, and the shell keeps a thumbnail cache of its own. So this figure is the
+    // machinery — the queue, the cache, the atlas, the frame — over answers that come back
+    // quickly, which is the right thing to watch for a regression and *not* what somebody
+    // switching to tiles on a cold folder waits for. That number is the line above times the
+    // number of pictures, divided by however many workers the fetch runs on.
+    let mut h = Harness::new();
+    let pane = h.app.panes[0].id;
+    let ctx = h.ctx.clone();
+    h.app.perform(&ctx, Action::Navigate { pane, path: folder.clone() });
+    h.settle();
+    h.app.show_tiles_here();
+
+    let at = std::time::Instant::now();
+    let mut frames = 0u32;
+    let mut worst = std::time::Duration::ZERO;
+    for _ in 0..4000 {
+        let frame_at = std::time::Instant::now();
+        h.frame(Vec::new());
+        worst = worst.max(frame_at.elapsed());
+        frames += 1;
+        if !h.app.thumbs_pending() && frames > 4 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+    println!(
+        "  a screenful through the grid  {:>7.1} ms  ({frames} frames, worst {:.2} ms, warm)",
+        at.elapsed().as_secs_f64() * 1000.0,
+        worst.as_secs_f64() * 1000.0
+    );
+
+    // 3. A frame with the grid full and nothing left to fetch, which is the steady state.
+    let at = std::time::Instant::now();
+    for _ in 0..30 {
+        h.frame(Vec::new());
+    }
+    println!(
+        "  a settled frame of tiles      {:>7.2} ms",
+        at.elapsed().as_secs_f64() * 1000.0 / 30.0
+    );
+}

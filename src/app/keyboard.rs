@@ -6,7 +6,6 @@
 use super::*;
 
 impl App {
-
     pub(super) fn keyboard(&mut self, ctx: &egui::Context) {
         use egui::Key as K;
 

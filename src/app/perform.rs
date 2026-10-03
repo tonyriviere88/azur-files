@@ -7,7 +7,6 @@
 use super::*;
 
 impl App {
-
     pub(super) fn apply(&mut self, ctx: &egui::Context) {
         let actions = std::mem::take(&mut self.actions);
         for action in actions {

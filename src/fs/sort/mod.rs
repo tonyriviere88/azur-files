@@ -568,9 +568,32 @@ fn type_ranks(dir: &Dir, order: &[u32]) -> Vec<u32> {
 /// to comparing UTF-8 bytes, which is code-point order — so accented names sort
 /// consistently but not by the locale's collation rules. Doing that properly needs
 /// ICU, and the sort would no longer be free.
+///
+/// # The shared head is skipped eight bytes at a time
+///
+/// The loop below does two digit tests and two case folds per byte, which is the right shape
+/// for a pair of names that differ early — and the wrong one for a **flattened** listing, where
+/// the rows are relative paths averaging 99 bytes and thousands of them begin
+/// `release\deps\`. Measured by [`tests::order_phases`] on 38,239 such rows: sorting them was
+/// **51 ms of a 53 ms** filter pass, at 56 ns per comparison, nearly all of it spent walking
+/// prefixes that were going to turn out equal.
+///
+/// So [`shared_head`] finds the first byte that differs, a machine word at a time, and the loop
+/// starts there instead of at zero.
+///
+/// **Why it then backs up over a run of digits.** The loop enters its digit branch at the first
+/// position where *both* names have a digit, and that position can be earlier than the first
+/// byte that differs: for `file10` against `file1x` the first difference is at `0` against `x`,
+/// but the comparison the reader expects is `10` against `1`. Resuming at the difference would
+/// compare `'0'` with `'x'` as characters and answer the other way round. Backing up to the
+/// start of the digit run puts the loop exactly where it would have been — everything before
+/// that run is identical in both names, so no earlier digit branch can have been pending.
+/// [`tests::natural_cmp_agrees_with_the_plain_walk`] checks that against the unskipped walk
+/// over a few hundred thousand generated pairs rather than taking the argument on trust.
 pub fn natural_cmp(a: &str, b: &str) -> Ordering {
     let (a, b) = (a.as_bytes(), b.as_bytes());
-    let (mut i, mut j) = (0, 0);
+    let start = resume_at(a, b);
+    let (mut i, mut j) = (start, start);
 
     while i < a.len() && j < b.len() {
         let (ca, cb) = (a[i], b[j]);
@@ -614,6 +637,65 @@ pub fn natural_cmp(a: &str, b: &str) -> Ordering {
         Ordering::Equal => a.cmp(b),
         unequal => unequal,
     }
+}
+
+/// Where [`natural_cmp`]'s walk can start: the first byte that differs, backed up over any run
+/// of digits it lands inside. See the note there for why the backing up is not optional.
+///
+/// **Two gates, and they are not micro-optimisation.** Ungated, this was measured *23% slower*
+/// on forty thousand short unrelated names: the scan finds a mismatch in the first byte or two,
+/// the walk then covers those same bytes again, and the whole apparatus is paid for to skip
+/// nothing. So the skip is only attempted when it can plausibly pay.
+///
+/// The first gate is a **length** test, because it is free — both lengths are already in hand —
+/// and because a name shorter than two machine words cannot have enough shared head to be worth
+/// leaving the walk for. That alone is what takes a folder of short names back to the cost it had
+/// before. The second is one **word** compared up front, which separates two long names that
+/// differ immediately from two that share a directory; it costs about a nanosecond and only long
+/// names ever pay it. Either way a pair that differs early is handed straight back to the walk at
+/// zero, exactly as before. [`tests::the_skip_is_worth_having`] measures both cases in one run.
+#[inline]
+fn resume_at(a: &[u8], b: &[u8]) -> usize {
+    const W: usize = std::mem::size_of::<usize>();
+    // Two words: below that there is no head worth skipping, and the test is free.
+    if a.len() < W * 2 || b.len() < W * 2 || a[..W] != b[..W] {
+        return 0;
+    }
+    let at = shared_head(a, b);
+    // Bytes before `at` are identical in both, so one name's run start is the other's.
+    let mut start = at;
+    while start > 0 && a[start - 1].is_ascii_digit() {
+        start -= 1;
+    }
+    start
+}
+
+/// How many leading bytes two slices have in common, a machine word at a time.
+///
+/// Exact equality rather than case-folded: folding would need the bytes examined one by one,
+/// which is the cost being avoided. A pair of names differing only in the case of an early
+/// letter therefore gets no benefit from this and is handled by the loop as before — which is
+/// the right trade, because that pair is rare and `release\deps\…` is not.
+#[inline]
+fn shared_head(a: &[u8], b: &[u8]) -> usize {
+    let n = a.len().min(b.len());
+    let mut at = 0;
+    const W: usize = std::mem::size_of::<usize>();
+    while at + W <= n {
+        // `try_into` on a slice of known length compiles to one unaligned load.
+        let (x, y) = (
+            usize::from_ne_bytes(a[at..at + W].try_into().unwrap()),
+            usize::from_ne_bytes(b[at..at + W].try_into().unwrap()),
+        );
+        if x != y {
+            break;
+        }
+        at += W;
+    }
+    while at < n && a[at] == b[at] {
+        at += 1;
+    }
+    at
 }
 
 #[inline]
