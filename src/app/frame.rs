@@ -236,13 +236,9 @@ impl App {
         self.collect_sizes(&ctx, now);
 
         // Swapped out rather than borrowed, because the drawing code needs `&Theme`
-        // and `&mut self` at the same time. The placeholder is the same side of the
-        // palette, so nothing can read the wrong one.
-        let placeholder = if self.theme.dark {
-            Theme::dark()
-        } else {
-            Theme::light()
-        };
+        // and `&mut self` at the same time. The placeholder is the *same* palette, so
+        // nothing can read the wrong one.
+        let placeholder = Theme::of(self.theme.palette);
         let theme = std::mem::replace(&mut self.theme, placeholder);
 
         // ---- Geometry, before anything is drawn -------------------------
@@ -450,8 +446,11 @@ impl App {
         // one-pixel ring and the content had to start inside it; with the ring gone it was a
         // point of nothing, on all four sides of both panels.
         //
-        // `background-layer-alt`, not `self.surface`'s `background-layer`: the sidebar reads
-        // as the same surface as the title bar and the status bar, not as a pane.
+        // `surfaces.sidebar`, not `self.surface`'s `surfaces.panel`: the sidebar reads as
+        // chrome rather than as a pane. In the dark palette that is `background-layer-alt`,
+        // the same surface the status bar and the column headers take; a palette with chrome of
+        // its own can give the three of them three colours, which is what
+        // `crate::theme::Surfaces` exists for.
         //
         // **All of it is behind the switch**, the splitter below included: a grip beside a panel that
         // is not there would be four points of window that set a resize cursor and dragged nothing.
@@ -463,7 +462,7 @@ impl App {
             self.bookmark_rows.clear();
         } else {
             ui.painter()
-                .rect_filled(sidebar, egui::CornerRadius::ZERO, t.bg.layer_alt);
+                .rect_filled(sidebar, egui::CornerRadius::ZERO, t.surfaces.sidebar);
             {
                 let mut child = ui.new_child(
                     egui::UiBuilder::new()
@@ -552,11 +551,15 @@ impl App {
 
         // ---- The tab bands, for the rows the title bar cannot reach --------
         //
-        // Painted like the title bar, because that is what they are for the row below
-        // them: `background-layer-alt` and a hairline along the bottom.
+        // Painted like the title bar, because that is what they are for the row below them —
+        // so `surfaces.titlebar` and a hairline along the bottom, and not the
+        // `background-layer-alt` this used to name. The two are the same colour in the dark
+        // palette and were never the same *decision*: a band standing in for the title bar
+        // has to follow it, and in a palette with chrome surfaces of its own the role it used to
+        // borrow is 3.9 ΔL* away.
         for row in &plan.rows {
             ui.painter()
-                .rect_filled(row.band, egui::CornerRadius::ZERO, t.bg.layer_alt);
+                .rect_filled(row.band, egui::CornerRadius::ZERO, t.surfaces.titlebar);
             crate::ui::rule_below(ui.painter(), row.band, t);
         }
 
@@ -958,6 +961,6 @@ impl App {
     /// the one line between two panels is a line neither of them draws.
     pub(super) fn surface(&self, ui: &Ui, t: &Theme, rect: Rect) {
         ui.painter()
-            .rect_filled(rect, egui::CornerRadius::ZERO, t.bg.layer);
+            .rect_filled(rect, egui::CornerRadius::ZERO, t.surfaces.panel);
     }
 }

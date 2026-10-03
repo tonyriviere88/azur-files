@@ -274,7 +274,7 @@ pub fn show(
     // The bar's own surface, and the colour of a selected tab: the tab in the strip above is
     // welded to the bar directly under it, so the two are one surface with the pane's listing
     // hanging off it. `crate::ui::seam` is where that colour is decided, once.
-    let surface = crate::ui::seam(t);
+    let surface = crate::ui::bar(t);
     ui.painter().rect_filled(rect, CornerRadius::ZERO, surface);
 
     let center = rect.center().y;
@@ -382,6 +382,20 @@ pub fn show(
                 field,
                 azur_egui_theme::components::TextField::new(&mut tab.filter)
                     .placeholder("Filter")
+                    // **The bar it sits in, not `background-control`.** A field two points in
+                    // from each end of a bar, painted a different colour from it, reads as a hole
+                    // in the bar rather than as a control on it — and in a palette where the bar
+                    // is the lightest surface in the window there is nothing lighter for the
+                    // field to be. `crate::ui::bar` is the one place that colour is decided, so
+                    // the tab, the bar and this box cannot drift apart.
+                    .fill(crate::ui::bar(t))
+                    // **And outlined in the seam's colour, where that reads against the bar.**
+                    // With the fill matching the bar the border is the whole of what makes the box
+                    // a box, so which colour it takes is not a detail —
+                    // `crate::ui::field_outline` is where that is decided and why. Only at rest:
+                    // hover, focus and a bad regex still say so in Azur's own colours. See
+                    // `azur::components::FieldLook::border`.
+                    .border(crate::ui::field_outline(t))
                     // The funnel's room, and the funnel itself drawn further down rather than here:
                     // it is a *button* now. See [`funnel_menu`], and the block that puts it there.
                     .prefix_room(true)

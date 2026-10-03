@@ -190,9 +190,12 @@ fn a_rename_selects_the_name_and_not_the_extension() {
 fn every_ink_on_the_status_line_can_be_read() {
     use azur_egui_theme::contrast::{ratio, SHAPE, TEXT};
 
-    for t in [Theme::dark(), Theme::light()] {
-        let name = if t.dark { "dark" } else { "light" };
-        let bar = t.bg.layer_alt;
+    for t in Theme::all() {
+        let name = t.palette.key();
+        // The region rather than the role it used to borrow: the light palette gives the status
+        // bar a colour of its own, and measuring these inks on `background-layer-alt` would then
+        // be measuring them on the popover surface instead of on the bar they are drawn in.
+        let bar = t.surfaces.status;
         for (what, ink) in [
             ("the selected count", t.bar.counted),
             ("the total", t.text.secondary),

@@ -46,7 +46,7 @@ pub(crate) fn segments(
     // straight off the theme: the bar these sit on is `crate::ui::seam`, not `background-layer`,
     // and in the light theme where the seam and `control-active` are the same grey a pressed
     // segment was the same colour as the bar, so the press showed as the fill going away.
-    let (_, pressed_fill) = crate::ui::control_fills(t, crate::ui::seam(t));
+    let (_, pressed_fill) = crate::ui::control_fills(t, crate::ui::bar(t));
 
     const CHEVRON: f32 = 16.0;
     const OVERFLOW: f32 = 22.0;
@@ -170,7 +170,7 @@ pub(crate) fn segments(
             "",
             true,
             false,
-            crate::ui::seam(t),
+            crate::ui::bar(t),
         );
         if response.clicked() {
             clicked = true;

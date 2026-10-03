@@ -237,7 +237,7 @@ pub enum Action {
     UngroupBookmarks(usize),
     /// Remove a group, and the bookmarks in it with it.
     RemoveBookmarkGroup(usize),
-    SetTheme { dark: bool },
+    SetTheme(crate::theme::Palette),
     /// Claim `Win+E` — Windows' own folder key — or give it back to Explorer. In the application
     /// menu under the mark, and nowhere else.
     ///

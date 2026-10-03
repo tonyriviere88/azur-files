@@ -46,6 +46,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::theme::Palette;
 use crate::ui::sidebar::{Bookmarks, Entry, Sections};
 
 /// One pane's worth of tabs, as it was left.
@@ -194,8 +195,9 @@ pub struct Config {
     /// one space where "1920, -8" is a place. See `main::restore_position`.
     pub position: Option<[f32; 2]>,
     pub maximized: bool,
-    /// Azur ships both sides of the palette; this one opens on the dark side.
-    pub dark: bool,
+    /// Which palette the window opens on. Azur ships both sides and this program adds
+    /// coloured variants of the light one; see [`crate::theme::Palette`].
+    pub palette: Palette,
 }
 
 /// How wide the sidebar is until somebody drags it, and what a double click on its splitter
@@ -246,7 +248,7 @@ impl Default for Config {
             window: None,
             position: None,
             maximized: false,
-            dark: true,
+            palette: Palette::default(),
         }
     }
 }
@@ -472,7 +474,14 @@ impl Config {
                     }
                 }
                 "maximized" => config.maximized = value == "1",
-                "theme" => config.dark = !value.eq_ignore_ascii_case("light"),
+                // An unreadable name leaves the default rather than refusing to start: a
+                // settings file written by a *newer* build, naming a palette this one has never
+                // heard of, is the ordinary way this line meets a word it does not know.
+                "theme" => {
+                    if let Some(palette) = Palette::parse(value) {
+                        config.palette = palette;
+                    }
+                }
                 _ => {}
             }
         }
@@ -599,11 +608,7 @@ impl Config {
             text.push_str(&format!("position={x:.0},{y:.0}\n"));
         }
         text.push_str(&format!("maximized={}\n", flag(self.maximized)));
-        text.push_str(if self.dark {
-            "theme=dark\n"
-        } else {
-            "theme=light\n"
-        });
+        text.push_str(&format!("theme={}\n", self.palette.key()));
         // The bookmarks, in the order the sidebar shows them — a group's own line, then the
         // folders in it, so the file reads the way the panel looks. See [`Self::bookmarks`].
         for entry in self.bookmarks.entries() {

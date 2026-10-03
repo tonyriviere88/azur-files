@@ -856,11 +856,11 @@ impl App {
                 self.bookmark_edit.rename = None;
                 self.config_dirty |= self.bookmarks.remove_group(group);
             }
-            Action::SetTheme { dark } => {
-                if dark == self.theme.dark {
+            Action::SetTheme(palette) => {
+                if palette == self.theme.palette {
                     return;
                 }
-                self.theme = if dark { Theme::dark() } else { Theme::light() };
+                self.theme = Theme::of(palette);
                 // The style has to be reinstalled, and only then — installing it every
                 // frame would throw away egui's galley and shape caches.
                 self.installed = false;

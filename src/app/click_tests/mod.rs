@@ -39,6 +39,7 @@ mod flatten;
 mod grid;
 mod memory;
 mod menu;
+mod palette;
 mod panes;
 mod path_bar;
 mod path_field;

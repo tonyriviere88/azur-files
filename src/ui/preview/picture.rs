@@ -290,13 +290,17 @@ pub(super) const CHECKER: f32 = 8.0;
 
 /// The two-by-two texture the checkerboard is tiled from.
 ///
-/// Built once per theme and kept in the context's own cache: it is one 2×2 image, it never
+/// Built once per **palette** and kept in the context's own cache: it is one 2×2 image, it never
 /// changes, and a texture uploaded per frame would be a texture uploaded per frame.
+///
+/// Keyed on the palette rather than on which side of the design system it is, because the two
+/// surfaces below are ones a palette can give values of its own — so two palettes on the same
+/// side would be handed each other's board.
 ///
 /// `Repeat` is the whole trick — it is what lets one quad with a `uv` of many tiles stand in for
 /// a grid of rectangles.
 pub(super) fn checkerboard(ctx: &egui::Context, t: &Theme) -> egui::TextureHandle {
-    let id = Id::new(("preview-checker", t.dark));
+    let id = Id::new(("preview-checker", t.palette));
     if let Some(cached) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(id)) {
         return cached;
     }

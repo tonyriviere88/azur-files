@@ -208,9 +208,16 @@ fn main() -> eframe::Result {
                 frame: 0,
             });
         } else if arg == "--light" {
-            config.dark = false;
+            config.palette = crate::theme::Palette::Light;
         } else if arg == "--dark" {
-            config.dark = true;
+            config.palette = crate::theme::Palette::Dark;
+        } else if let Some(name) = arg.strip_prefix("--theme=") {
+            // Every palette by name, which `--light` and `--dark` above are shorthands for. An
+            // unrecognised word leaves the run as it was for the reason `--flat=` does: a capture
+            // flag should not be the thing that refuses to start. `Palette::key` is the spelling.
+            if let Some(palette) = crate::theme::Palette::parse(name) {
+                config.palette = palette;
+            }
         } else if let Some(name) = arg.strip_prefix("--reveal=") {
             reveal = Some(name.to_owned());
         } else if let Some(text) = arg.strip_prefix("--filter=") {

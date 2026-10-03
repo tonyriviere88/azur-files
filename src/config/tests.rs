@@ -25,7 +25,7 @@ fn the_window_comes_back_the_way_it_was_left() {
         sidebar_width: 260.0,
         // Away from its default, which is the panel showing.
         sidebar_shown: false,
-        dark: false,
+        palette: crate::theme::Palette::Light,
         preview: crate::ui::preview::Layout {
             at: crate::ui::preview::Where::Bottom,
             share: 0.615,
@@ -76,7 +76,10 @@ fn the_window_comes_back_the_way_it_was_left() {
     // key rather than a width of zero, so bringing it back finds the width it was dragged to.
     assert!(!back.sidebar_shown);
     assert_eq!(back.sidebar_width, saved.sidebar_width);
-    assert!(!back.dark);
+    // Not `dark: false` any more but a palette by name. `Palette::parse`'s own test covers the
+    // words — including the retired ones — and what this adds is that the name survives the *file*:
+    // written by `Config::save`, read back by `Config::load`, through everything else in it.
+    assert_eq!(back.palette, crate::theme::Palette::Light);
     // The preview panel's four preferences. Worth pinning together with the window's shape,
     // because they are the same kind of thing — how the window comes back — and because a
     // value that is written and not read is the failure this round trip is for: `preview=` was
@@ -329,7 +332,11 @@ fn a_broken_line_costs_only_itself() {
     assert_eq!(back.focus, 0);
     assert_eq!(back.panes.len(), 1);
     assert_eq!(back.panes[0].active, 0);
-    assert!(!back.dark, "and the line after the mess still applies");
+    assert_eq!(
+        back.palette,
+        crate::theme::Palette::Light,
+        "and the line after the mess still applies"
+    );
 }
 
 /// The context-menu entries the user has moved survive a write and a read, and are written in an

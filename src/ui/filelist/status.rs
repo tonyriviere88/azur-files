@@ -141,7 +141,7 @@ pub(crate) fn status_line(
 
     let (band, line, baseline) = status_geometry(ui.painter(), t, rect);
     ui.painter()
-        .rect_filled(band, CornerRadius::ZERO, t.bg.layer_alt);
+        .rect_filled(band, CornerRadius::ZERO, t.surfaces.status);
     ui.painter().line_segment(
         [band.left_top(), band.right_top()],
         Stroke::new(1.0, t.stroke.subtle),
@@ -188,7 +188,7 @@ pub(crate) fn status_line(
         },
         true,
         console_open,
-        t.bg.layer_alt,
+        t.surfaces.status,
     )
     .clicked()
     {
@@ -210,7 +210,7 @@ pub(crate) fn status_line(
         },
         true,
         tiles,
-        t.bg.layer_alt,
+        t.surfaces.status,
     );
     if switched.clicked() {
         out.push(Action::SetView {
@@ -249,7 +249,7 @@ pub(crate) fn status_line(
         "Measure each folder, and bar the share of what is on show (Ctrl+2)",
         !tab.path.as_os_str().is_empty(),
         tab.sizes.on,
-        t.bg.layer_alt,
+        t.surfaces.status,
     )
     .clicked()
     {
@@ -828,7 +828,7 @@ pub(crate) fn git_summary(
     // click does would never appear. It is the same ordering the filter box's ✕ relies on.
     if let Some((hit, slot)) = button {
         let response = ui.interact(hit, Id::new(("status-changed", pane)), Sense::click());
-        let (hover, pressed) = crate::ui::control_fills(t, t.bg.layer_alt);
+        let (hover, pressed) = crate::ui::control_fills(t, t.surfaces.status);
         let fill = if response.is_pointer_button_down_on() {
             Some(pressed)
         } else if response.hovered() {

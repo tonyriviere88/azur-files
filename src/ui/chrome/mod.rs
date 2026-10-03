@@ -311,10 +311,13 @@ pub fn title_bar(
     let bar = ui
         .allocate_exact_size(vec2(ui.available_width(), HEIGHT), Sense::hover())
         .0;
-    // `background-layer`, which is `#14171A` in the dark theme — the design system's
-    // `tokens::palette::GRAY_2`. Named by its role rather than by the hex so the light theme still
-    // gets `paper::SHEET` instead of a near-black bar.
-    ui.painter().rect_filled(bar, CornerRadius::ZERO, t.bg.layer);
+    // The title bar is a *region*, so it names one — `surfaces.titlebar`, which is
+    // `background-layer` in the dark palette (`#14171A`, the design system's
+    // `tokens::palette::GRAY_2`) and a blue of its own in the light one.
+    // Named by its region rather than by the role so that a palette which wants the strip a step
+    // off the panels can say so; see `crate::theme::Surfaces`.
+    ui.painter()
+        .rect_filled(bar, CornerRadius::ZERO, t.surfaces.titlebar);
 
     // ---- Dragging and maximising, over the whole bar --------------------
     //
@@ -352,7 +355,7 @@ pub fn title_bar(
         ui.painter(),
         Rect::from_center_size(mark.center(), vec2(16.0, 16.0)),
     );
-    app_menu(ui, &mark_response, t.dark, sidebar, win_key, out);
+    app_menu(ui, &mark_response, t.palette, sidebar, win_key, out);
     x = mark.right() + space::S2;
 
     // ---- Window buttons, from the right ---------------------------------
@@ -550,7 +553,7 @@ pub fn tab_strip(
             true,
             false,
             // The strip it sits in, whether that is the title bar or a band of its own.
-            t.bg.layer,
+            t.surfaces.titlebar,
         )
         .clicked()
     {
@@ -645,13 +648,13 @@ fn paint_tab(
             },
             corner,
             if pane_focused {
-                crate::ui::seam(t)
+                crate::ui::bar(t)
             } else {
                 t.bg.layer_alt
             },
         );
     } else if response.is_pointer_button_down_on() {
-        ui.painter().rect_filled(rect, corner, crate::ui::seam(t));
+        ui.painter().rect_filled(rect, corner, crate::ui::bar(t));
     } else if response.hovered() {
         ui.painter().rect_filled(rect, corner, t.bg.layer_alt);
     } else {
@@ -800,7 +803,7 @@ fn paint_tab(
 fn app_menu(
     ui: &mut Ui,
     trigger: &egui::Response,
-    dark: bool,
+    palette: crate::theme::Palette,
     sidebar: bool,
     win_key: bool,
     out: &mut Vec<Action>,
@@ -880,10 +883,13 @@ fn app_menu(
             out.push(Action::Window(WindowAction::ResetSize));
         }
         azur_egui_theme::components::menu_divider(ui);
-        // The two themes, behind one entry rather than side by side in the open. They are a *choice
-        // between* two things and not two switches, which a submenu says by shape: one row naming
-        // the question, and the answer a level in. Out here they were the first thing the menu said,
-        // which is a great deal of prominence for something set once.
+        // The themes, behind one entry rather than side by side in the open. They are a *choice
+        // between* things and not a row of switches, which a submenu says by shape: one row naming
+        // the question, and the answers a level in. Out here they were the first thing the menu
+        // said, which is a great deal of prominence for something set once.
+        //
+        // **Driven by `Palette::ALL`**, so a new palette appears here by existing. This used to be
+        // a literal pair, which is the kind of list that gets forgotten the one time it matters.
         //
         // The parent carries the same `dot` its options do, rather than for want of a better glyph:
         // there is no appearance icon in either set, and a row that opens a choice reading in the
@@ -892,16 +898,16 @@ fn app_menu(
         // `ui.close()` after the push, per this helper's own documentation — a click in a nested menu
         // has to bring the whole stack down and not just the level it landed in.
         submenu(ui, MenuItem::new("Theme").icon(&azur_icons::dot), |ui| {
-            for (label, wants_dark) in [("Dark theme", true), ("Light theme", false)] {
+            for wants in crate::theme::Palette::ALL {
                 if ui
                     .add(
-                        MenuItem::new(label)
-                            .selected(dark == wants_dark)
+                        MenuItem::new(wants.label())
+                            .selected(palette == wants)
                             .icon(&azur_icons::dot),
                     )
                     .clicked()
                 {
-                    out.push(Action::SetTheme { dark: wants_dark });
+                    out.push(Action::SetTheme(wants));
                     ui.close();
                 }
             }

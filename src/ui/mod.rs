@@ -48,19 +48,62 @@ pub const GUTTER: f32 = space::S2;
 /// them — and read as a row of loose cards rather than as one window divided up.
 pub const SEAM: f32 = azur_egui_theme::desktop::SEAM;
 
-/// The colour a panel boundary shows, and the fill of the surfaces welded to it.
+/// The colour a panel boundary shows: the line between two panes, behind the sidebar's edge,
+/// and along the top of a preview or console panel.
 ///
-/// One colour doing three jobs on purpose: the selected tab, the path bar directly under it,
-/// and the seams between panels are the frame the panels sit in, so they are the same surface
-/// seen in three places rather than three decisions that happen to agree.
+/// **The line only.** This and [`bar`] were one function until a palette wanted a pale path bar
+/// and a seam you can see — see [`crate::theme::Surfaces::separator`], which is where that split
+/// is argued. In the dark palette the two still return the same colour, so nothing there moved;
+/// what changed is that a palette can now answer them differently.
 ///
-/// `stroke-subtle`, and the design system's decision now — see `azur::desktop::seam`, which
+/// `stroke-subtle` there, and the design system's decision — see `azur::desktop::seam`, which
 /// carries the measurements and the floor the column header puts under it. It was
 /// `background-control-active` here, and came down a step because as a filled band across the top
 /// of every pane that was too loud in the dark theme; the dark frame is deliberately the quieter
-/// of the two sides, at ΔL\* 6.1 against the light theme's unchanged `GRAY_14`.
+/// of the two sides, at ΔL\* 6.1 against `paper::SLATE_7` — the rung Azur's cool light ramp put
+/// where `GRAY_14` used to be, half a ΔL\* away, so this figure is the one it always was.
 pub fn seam(t: &Theme) -> Color32 {
-    azur_egui_theme::desktop::seam(t)
+    t.surfaces.separator
+}
+
+/// The fill of the bar across the top of a pane, and of the tab welded to it.
+///
+/// One colour doing three jobs on purpose: the focused pane's active tab, the path bar directly
+/// under it, and the filter field at that bar's right-hand end are one surface seen in three
+/// places rather than three decisions that happen to agree. That is why no hairline is drawn
+/// between the tab and the bar — a `stroke-subtle` line through a weld cuts it in half — and why
+/// the filter field takes this rather than `background-control`: a field that is a different
+/// colour from the two points of bar around it reads as a hole in it.
+///
+/// The same value as [`seam`] in the dark palette, and a pale surface of its own in the light
+/// one.
+pub fn bar(t: &Theme) -> Color32 {
+    t.surfaces.bar
+}
+
+/// What outlines a field that sits *in* the path bar, at rest: the filter box.
+///
+/// **[`seam`] when it reads against [`bar`], and `stroke-control` when it does not.**
+///
+/// The seam's colour is what this wants to be. With the field's fill matching the bar — see
+/// [`bar`] — the outline is the whole of what makes the box a box, and Azur's `stroke-control` is
+/// sized to separate a field from `background-layer`: against a pale bar it lands as a hard dark
+/// rectangle where the window's other boundaries are all one quiet line.
+///
+/// The condition is not defensive coding, it is the dark palette. There the bar *is* the seam —
+/// one value, `stroke-subtle`, because the tab, the path bar and the panel boundaries are one
+/// surface — so an outline in the seam's colour would be an outline the colour of its own fill,
+/// and the filter box would have no edge at all. Measured in ΔL\* rather than assumed, because
+/// that is the question being asked: do these two read as different surfaces. A palette that
+/// gives the bar a colour of its own gets the seam; one that does not keeps what it always had,
+/// to the byte.
+pub fn field_outline(t: &Theme) -> Color32 {
+    use azur_egui_theme::contrast::{apart, SAME};
+    if apart(seam(t), bar(t)) >= SAME {
+        seam(t)
+    } else {
+        t.stroke.control
+    }
 }
 
 /// Draw the widgets `add` puts up with square corners.
@@ -83,7 +126,7 @@ pub fn squared<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
 /// a control on `background-layer`, so a control on a surface that is *itself* one of those steps
 /// had nowhere to go and painted the surface's own colour onto the surface — the fill vanished at
 /// the moment of the press instead of deepening. That was the path bar in the **light** theme,
-/// where [`seam`] and `control-active` are the same `GRAY_14`.
+/// where [`seam`] and `control-active` are the same `paper::SLATE_7`.
 ///
 /// Both rungs are `azur::desktop`'s now, and so is the check that they step away from every
 /// surface in both themes. `control_active` is left to the two places here that use it as an
@@ -1349,12 +1392,52 @@ mod tests {
     /// up a rung and a half off everything around them; and the two hover tokens parting
     /// company, so a hovered row and a hovered button are different greys.
     ///
+    /// **The filter box has an edge, in every palette.**
+    ///
+    /// Its fill is the bar it sits in — see [`bar`] — so the outline is the whole of what makes it
+    /// a box, and an outline that has drifted onto its own fill is a field you cannot see. That is
+    /// not hypothetical: pointing the border straight at [`seam`] does it wherever the bar and
+    /// the seam are one value, which is the dark palette — and the box did disappear there before
+    /// this measured it. [`field_outline`] is the rule; this is the floor under it.
+    ///
+    /// Held to `SAME` rather than to a WCAG figure, because the question is whether two surfaces
+    /// read as two — the case `azur::contrast`'s own header is about.
+    #[test]
+    fn the_filter_box_has_an_edge_in_every_palette() {
+        use azur_egui_theme::contrast::{apart, SAME};
+
+        for t in crate::theme::Theme::all() {
+            let name = t.palette.key();
+            let got = apart(field_outline(&t), bar(&t));
+            assert!(
+                got >= SAME,
+                "{name}: the filter box's outline is {got:.1} ΔL* from the bar it is drawn on, so \
+                 the box has no visible edge"
+            );
+            // And where the palette gives the bar a colour of its own, the outline really is the
+            // seam — the whole point of the rule, and the half a `>=` cannot say.
+            if apart(seam(&t), bar(&t)) >= SAME {
+                assert_eq!(
+                    field_outline(&t),
+                    seam(&t),
+                    "{name}: the bar reads off the seam, so the outline should be the seam"
+                );
+            } else {
+                assert_eq!(
+                    field_outline(&t),
+                    t.stroke.control,
+                    "{name}: the bar *is* the seam here, so the outline has to stay Azur's"
+                );
+            }
+        }
+    }
+
     /// What the values *are*, and that they step away from every surface in both themes,
     /// is `azur_egui_theme::desktop`'s to hold — it is the one that knows why.
     #[test]
     fn the_window_wears_the_desktop_preset() {
-        for t in [Theme::dark(), Theme::light()] {
-            let name = if t.dark { "dark" } else { "light" };
+        for t in Theme::all() {
+            let name = t.palette.key();
             let (hover, pressed) = control_fills(&t, seam(&t));
             assert_eq!(
                 hover,

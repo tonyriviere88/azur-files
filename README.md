@@ -133,14 +133,14 @@ Counting tokens gives the wrong answer about what that did, which is worth recor
 `control-active` is four *names* up the ladder from `background-layer` in the dark theme and two
 in the light one, so it looks like the same token was doing very different things on the two
 sides. It was not: the dark gray ramp is perceptually finer than the light paper ladder, and
-measured in CIELAB the old pairing was nearly symmetric — **ΔL\* 15.4 dark against 13.9 light**.
+measured in CIELAB the old pairing was nearly symmetric — **ΔL\* 15.4 dark against 14.0 light**.
 Nothing was broken. It was simply more contrast than wanted.
 
 | | frame vs panel | | |
 | --- | --- | --- | --- |
 | dark, `control-active` `#33373f` | ΔL\* 15.4 | | was |
 | dark, `stroke-subtle` `#202329` | ΔL\* 6.1 | | is |
-| light, `stroke-subtle` `#ccd1d9` | ΔL\* 13.9 | | unchanged — `GRAY_14` is what `control-active` already was there |
+| light, `stroke-subtle` `#c1cde2` | ΔL\* 14.0 | | unchanged — `paper::SLATE_7` is what `control-active` already was there |
 
 So the dark frame is now deliberately the quieter of the two rather than matching it. The floor on
 how far it can go is the column header, `background-layer-alt`, which the bar has to read as a
@@ -162,7 +162,7 @@ barely a change. So the label carries the distinction too, `text-secondary` agai
 And one thing that was a bug: **a pressed control on the path bar was invisible.** A control
 sitting on a surface that is itself one of the control steps has nowhere to step to, and paints
 the surface's own colour onto the surface. That is the light theme, where the seam and
-`control-active` are the same `GRAY_14`; in the dark theme they are two apart and the ordinary
+`control-active` are the same `paper::SLATE_7`; in the dark theme they are two apart and the ordinary
 ladder is right. Nothing was wrong with any of that code — two tokens simply met.
 `ui::control_fills` takes the surface a control sits on and steps *away* from it, so hover and
 press stay distinct from the surface and from each other and go the same direction on either bar.
@@ -5117,7 +5117,7 @@ shared version got its numbers.
   while looking at the dark theme, which puts near-black body text on a hovered row at **3.26:1** —
   under AA. A hover band is not an inverted row, so the fill has to stay on the ink's side of the
   palette; the shared version mirrors the dark move *by measurement* instead, 2.5× the distance the
-  token asks for on each side's own ramp, and lands on `GRAY_13` at 9.8:1.
+  token asks for on each side's own ramp, and lands on `paper::SLATE_6` at 7.3:1.
 
 - **A selected row is `accent.active` in the dark theme** — `AZURE_40`, `#184e80` — with
   `accent.default` under the pointer as well, rather than the `accent-subtle` navy the design
@@ -5265,6 +5265,98 @@ fully-lit from 31% to 37%. What remains between this and Explorer is that Azur's
 14px where Explorer's list is 9pt (12px at 96 DPI), and that Explorer uses ClearType's
 subpixel rendering where egui antialiases in grayscale.
 
+## Two palettes, and the regions a palette varies
+
+Dark and light, chosen by name in the menu under the mark, in `config.ini`, or with `--theme=`.
+
+|  | title bar | tab & path bar | panel & headers | sidebar | status bar | seam |
+| --- | --- | --- | --- | --- | --- | --- |
+| dark | `#14171a` | `#202329` | `#14171a` / `#191b1f` | `#191b1f` | `#191b1f` | `#202329` |
+| light | `#d8e6f7` | `#f2f8ff` | `#e6f1ff` / `#e6f1ff` | `#d8e6f7` | `#ebf4ff` | `#c0d8f4` |
+
+**A palette varies regions, not roles**, and that is the part worth reading. The dark palette takes
+every one of those surfaces from an Azur role — the sidebar, the column headers and the status bar
+are all `background-layer-alt`, and the title bar and the panels are both `background-layer`. The
+light palette gives those four surfaces three *different* colours and makes the panel and its
+headers the same one, which no remapping of `layer` / `layer_alt` can express: the question a region
+answers is "which part of the window is this", and the question an Azur role answers is "how far
+from the surface is this".
+
+So `theme::Surfaces` is one field per region the window paints, and `Surfaces::from_azur` is the
+mapping every region had before regions were named — which is what the dark palette still uses, to
+the byte, and it is a test (`a_palette_with_no_surfaces_of_its_own_paints_what_it_always_did`)
+rather than a claim. What stays Azur's is anything about *state*: one hover, one press, one selected
+row, whatever is wearing them.
+
+**There were two light palettes for a while** — this one, and a plainer one taking every surface
+straight from an Azur role. The plain one is gone: two light themes a few ΔL\* apart is a choice
+nobody wants to make. `theme=light-blue`, which is what this one used to be called, still parses —
+see `Palette::ALIASES`, which is the compatibility record and the reason a rename here is not a
+setting somebody loses.
+
+Two things came apart to make it possible.
+
+- **The seam and the path bar.** `ui::seam` was one function returning `stroke-subtle`, used both
+  for the line between two panels and for the surface of the path bar and the tab welded to it.
+  The light palette wants a pale bar and a seam you can see, which one colour cannot be, so there
+  is now `ui::seam` for the line and `ui::bar` for the surface. In the dark palette they return the
+  same colour; they are simply no longer the same decision. Where they *do* coincide the filter box
+  would lose its outline entirely, which is what `ui::field_outline` measures and answers.
+- **The tab band follows the title bar.** The bands of tabs below the title bar, when panes are
+  stacked, are painted "like the title bar, because that is what they are for the row below them" —
+  and were reading `background-layer-alt`, which is the same colour as the title bar in the dark
+  palette and 3.9 ΔL\* away in a palette with chrome of its own. A band that stands in for the
+  title bar has to follow it, so it does.
+- **The rule under the column headers**, which is the same decision as the seam — a boundary
+  between two surfaces — and is now the same value. It had been a **hard-coded `#202329`**: that is
+  `GRAY_4`, the *dark* theme's `stroke-subtle`, so the one line that divides a header strip from
+  the listing under it was drawing a near-black hairline across every pane of the light palette.
+  It looked right in the dark theme by coincidence, which is why nothing caught it — the value was
+  correct for the palette it was written in and had no way of following the palette anywhere else.
+  A literal in a painting routine is a palette that only works once.
+
+**The filter field takes the bar it sits in**, in every palette, and is outlined in the seam's
+colour where that reads against it. Its fill was `background-control` — what Azur gives a field on
+a panel — and a field two points in from each end of a bar, painted a different colour from it,
+reads as a hole in the bar rather than as a control on it. In the dark palette the fill was already
+the same value, so this is visible only in the light one. It needed `TextField::fill` and
+`TextField::border` in the design system, which is the honest place for them: a field in a toolbar
+is not a case a fill *token* can answer.
+
+Everything the six colours do not name is carried back into the same six rather than invented — a
+context menu, a popover, a code block, a zebra stripe and a dragged row all take the title bar's
+`#d8e6f7`, and every border takes the seam's `#c0d8f4`. Two rungs, which is the same two-rung shape
+Azur's own light theme has, read off this palette's colours. The side panel is the title bar's
+colour too: it is chrome, and Azur groups it the same way — with the popovers and the status bar, a
+step *down* from the listing rather than up from it.
+
+**Why the blue ones are also slightly darker than the request.** A near-white cannot be made much
+bluer where it stands, because the chroma sRGB has runs out as a colour approaches white — at Lab
+hue 262 the ceiling is `C*` 3.4 at `L*` 98, 5.1 at 97 and 7.9 at 95, and the first pass was already
+spending 61–76% of it. So the four content surfaces came down 0.46 `L*` together, keeping the
+ladder's shape exactly, and each then takes 95% of the chroma its new lightness allows: 1.3× to 1.8×
+the colour for about half a point of lightness. The seam went further down again, to `L*` 85.4,
+because the preview's checkerboard wants 8 ΔL\* between the panel and it — and it can hold `C*` 16.5
+there, which suits the one surface whose whole job is to be a boundary.
+
+The **hover** band is in the palette's hue too, and it is the one place "as blue as sRGB allows"
+had to be refused: the ceiling explodes away from white, so 95% of it at the hover's lightness is a
+saturated sky blue rather than a tinted neutral. It keeps `L*` 74.50 to the hundredth — that is a
+measured position, not a preference, and holding it means every figure already taken on the band
+still holds — and takes `C*` 18.2, just past the seam's.
+
+And it is measured like everything else: `every_region_carries_the_windows_text` puts body text and
+metadata on all seven regions of every palette, and
+`the_separator_reads_against_everything_it_divides` holds the seam ΔL\* 3 clear of every surface it
+meets. The light palette's tightest figures are 10.03:1 for a name on the seam and ΔL\* 5.3 for the
+seam against the title bar.
+
+One test earned its keep twice over and is worth knowing about:
+`every_colour_on_screen_belongs_to_the_palette_it_is_set_to` paints the window in each palette and
+checks that nothing on screen is a surface belonging to a *different* one. Contrast tests measure
+roles, so none of them can see a painter call that never asked the theme anything — which is exactly
+what the hard-coded header rule was. It catches that class by provenance rather than by ratio.
+
 ## What it does not do
 
 Deliberately:
@@ -5290,7 +5382,7 @@ Deliberately:
 | `--filter=<text>` | put a line in the first pane's filter box before anything is drawn |
 | `--lens=git\|images` | open the first pane showing one of [the funnel's listings](#the-funnel-is-a-button), which is otherwise behind a menu and out of reach of a run with no pointer. It brings what the menu entry brings — the flatten, and the tiles for pictures — because those are the listing rather than side effects of it |
 | `--size=WxH` | pin the window size |
-| `--light` / `--dark` | override the remembered palette for this launch |
+| `--theme=<name>` | override the remembered palette for this launch: `dark` or `light`. `--light` and `--dark` are shorthands for the two |
 | `--shot=<file>` | write the frame as a PNG and exit, for regenerating the images above |
 | `--menu` | raise the folder's context menu, so `--shot` can capture one |
 | `--rename` | open the selected name for editing, for the same reason |
@@ -5394,6 +5486,12 @@ A file written before groups existed is nothing but `bookmark=` lines, which is 
 reads back as exactly that. A `bookmark_in=` with no group above it means somebody edited the
 file by hand; the folder is worth more than the line it was written on, so it lands at the top
 level rather than nowhere.
+
+`theme=` is the palette, by name: `dark` or `light` — and `light-blue`, which is what the light one
+used to be called and still reads. A name this build has never heard of leaves the default rather
+than refusing to start, which is what makes a settings file written by a *newer* build harmless
+here. The two words a file has always used still mean what they meant, so nothing written before
+the palette became a name reads differently.
 
 `line_numbers=1` numbers the lines in the text view, `diff=1` shows what changed in a previewed file —
 the bands on a text file, the three views on a picture — and `diff_collapse=0` leaves the unchanged

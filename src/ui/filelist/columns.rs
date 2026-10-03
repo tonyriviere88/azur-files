@@ -153,7 +153,7 @@ pub(crate) fn header_strip(
     widths: &[f32; 4],
     out: &mut Vec<Action>,
 ) {
-    ui.painter().rect_filled(rect, CornerRadius::ZERO, t.bg.layer_alt);
+    ui.painter().rect_filled(rect, CornerRadius::ZERO, t.surfaces.header);
     let edges = column_x(rect, widths);
 
     for (index, column) in Column::ALL.into_iter().enumerate() {
@@ -246,10 +246,21 @@ pub(crate) fn header_strip(
 
     // A rule under the header, which is what separates a header strip from the
     // rows in Azur's table.
+    //
+    // **`surfaces.separator`, and it was a hard-coded `#202329` — a bug in both light palettes.**
+    // That hex is `tokens::palette::GRAY_4`, which is the *dark* theme's `stroke-subtle`, so the
+    // one line in the window that is supposed to divide the header from the listing was drawing a
+    // near-black hairline across every pane on a near-white panel. It looked right in the dark
+    // theme by coincidence, which is exactly why nothing caught it: the value was correct for the
+    // palette it was written in and had no way of following the palette anywhere else.
+    //
+    // It is the same colour and the same decision as the seam between two panes — a boundary
+    // between two surfaces — so it reads the region rather than a literal. See
+    // [`crate::theme::Surfaces::separator`].
     ui.painter().rect_filled(
         Rect::from_min_size(rect.left_bottom() - vec2(0.0, 1.0), vec2(rect.width(), 1.0)),
         CornerRadius::ZERO,
-        Color32::from_rgb(0x20, 0x23, 0x29),
+        t.surfaces.separator,
     );
 }
 

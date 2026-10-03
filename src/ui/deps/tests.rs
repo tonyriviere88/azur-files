@@ -51,15 +51,15 @@ fn every_ink_in_the_tree_can_be_read() {
     const RESTING: f32 = 4.0;
     const HOVERED: f32 = 2.0;
 
-    for t in [Theme::dark(), Theme::light()] {
-        let name = if t.dark { "dark" } else { "light" };
+    for t in Theme::all() {
+        let name = t.palette.key();
         let hovered = crate::ui::hover_fill(&t);
         let picked = crate::ui::row_fill(&t, true, false).expect("a picked row has a fill");
         let both = crate::ui::row_fill(&t, true, true).expect("so does a hovered picked row");
 
         // The ink every surface has to carry, because a picked row is drawn in nothing else.
         for (surface, fill, floor) in [
-            ("a row", t.bg.layer, RESTING),
+            ("a row", t.surfaces.panel, RESTING),
             ("a hovered row", hovered, HOVERED),
             ("a picked row", picked, RESTING),
             ("a hovered picked row", both, HOVERED),
@@ -76,7 +76,7 @@ fn every_ink_in_the_tree_can_be_read() {
             ("status-danger", t.status.danger),
         ] {
             for (surface, fill, floor) in [
-                ("a row", t.bg.layer, RESTING),
+                ("a row", t.surfaces.panel, RESTING),
                 ("a hovered row", hovered, HOVERED),
             ] {
                 let got = ratio(ink, fill);
@@ -90,11 +90,11 @@ fn every_ink_in_the_tree_can_be_read() {
         // glyph keeps its own colour on a picked row, which is the one ink besides `text-primary`
         // that survives there — 4.9:1, and 3.8:1 hovered.
         for (what, ink, fill, surface) in [
-            ("the module glyph", t.executable, t.bg.layer, "a row"),
+            ("the module glyph", t.executable, t.surfaces.panel, "a row"),
             ("the module glyph", t.executable, hovered, "a hovered row"),
             ("the module glyph", t.executable, picked, "a picked row"),
             ("the module glyph", t.executable, both, "a hovered picked row"),
-            ("the missing mark", t.status.danger, t.bg.layer, "a row"),
+            ("the missing mark", t.status.danger, t.surfaces.panel, "a row"),
         ] {
             let got = ratio(ink, fill);
             assert!(
@@ -136,9 +136,8 @@ fn every_ink_in_the_tree_can_be_read() {
     // shape — and **2.33:1** in the dark one, which is not. A rule derived from the light side alone
     // would have left the one row you most need to notice invisible on the side this window opens on.
     {
-        let worst = [Theme::dark(), Theme::light()]
-            .iter()
-            .map(|t| ratio(t.status.danger, crate::ui::row_fill(t, true, false).unwrap()))
+        let worst = Theme::all()
+            .map(|t| ratio(t.status.danger, crate::ui::row_fill(&t, true, false).unwrap()))
             .fold(f32::INFINITY, f32::min);
         assert!(
             worst < azur_egui_theme::contrast::SHAPE,
@@ -157,11 +156,10 @@ fn every_ink_in_the_tree_can_be_read() {
         ("text-disabled", |t: &Theme| t.text.disabled),
         ("status-warning", |t: &Theme| t.status.warning),
     ] {
-        let worst = [Theme::dark(), Theme::light()]
-            .iter()
+        let worst = Theme::all()
             .flat_map(|t| {
-                let ink = pick(t);
-                [t.bg.layer, crate::ui::hover_fill(t)].map(|fill| ratio(ink, fill))
+                let ink = pick(&t);
+                [t.surfaces.panel, crate::ui::hover_fill(&t)].map(|fill| ratio(ink, fill))
             })
             .fold(f32::INFINITY, f32::min);
         assert!(

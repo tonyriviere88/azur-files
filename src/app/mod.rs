@@ -471,11 +471,7 @@ impl App {
     /// gets a stacked layout on screen, which is the one arrangement whose tab strips do
     /// not live in the title bar, and so the one a screenshot has to be able to show.
     pub fn opening(ctx: &egui::Context, config: Config, open: Vec<PathBuf>, side: Side) -> Self {
-        let theme = if config.dark {
-            Theme::dark()
-        } else {
-            Theme::light()
-        };
+        let theme = Theme::of(config.palette);
         let loader = Loader::new(ctx);
         // Letters now, labels and free space in the background. Asking for a volume
         // label on the startup path is what makes a file manager take twenty seconds
@@ -727,7 +723,7 @@ impl App {
             window: self.window_size,
             position: self.window_position,
             maximized: self.maximized,
-            dark: self.theme.dark,
+            palette: self.theme.palette,
         };
 
         // In layout order, because that is the order [`dock::Node::encode`] numbers the panes

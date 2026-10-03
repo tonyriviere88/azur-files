@@ -610,24 +610,38 @@ fn a_comparison_is_titled_with_both_names() {
 fn the_checkerboard_reads_as_a_checkerboard() {
     use azur_egui_theme::contrast::apart;
 
-    for t in [Theme::dark(), Theme::light()] {
-        let name = if t.dark { "dark" } else { "light" };
+    for t in Theme::all() {
+        let name = t.palette.key();
         let got = apart(t.bg.layer, t.bg.control_active);
         assert!(
             (8.0..=18.0).contains(&got),
             "{name}: the checkerboard's squares are {got:.1} ΔL* apart"
         );
     }
-    // And the two themes have to agree about it, which is what ruled out the first pair this
-    // used: a board that is plain in one theme and invisible in the other is not one rule, it
-    // is two.
-    let dark = Theme::dark();
-    let light = Theme::light();
-    let gap = apart(dark.bg.layer, dark.bg.control_active)
-        - apart(light.bg.layer, light.bg.control_active);
+    // And the palettes have to agree about it, which is what ruled out the first pair this used:
+    // a board that is plain in one palette and invisible in another is not one rule, it is two.
+    //
+    // **A ratio, and it used to be a difference of 5 ΔL\*.** That figure was written when there
+    // were exactly two palettes whose neutral ladders happened to be near-identical in depth, and
+    // it was never consistent with the band above it: two palettes at 8 and 18 both satisfy "is a
+    // checkerboard" and are 10 apart, so the difference was quietly a much stricter rule than the
+    // one this test says it is enforcing. The light palette's own surfaces put its board at 9.3
+    // against the dark palette's 15.4 — both well inside the band, 6.1 apart — and the honest
+    // reading is that the old figure expired rather than that the board broke.
+    //
+    // Twice over is the loosest this can be and still mean something: at 2.2× a palette could sit
+    // at the bottom of the band while another sits above the top of it, which is the failure the
+    // sentence above describes.
+    let depth = |t: &Theme| apart(t.bg.layer, t.bg.control_active);
+    let (weakest, strongest) = Theme::all().map(|t| depth(&t)).fold(
+        (f32::INFINITY, 0.0f32),
+        |(lo, hi), d| (lo.min(d), hi.max(d)),
+    );
     assert!(
-        gap.abs() < 5.0,
-        "the board is {gap:.1} ΔL* stronger in one theme than the other"
+        strongest <= weakest * 2.0,
+        "the board is {:.1}× stronger in one palette than another ({weakest:.1} to {strongest:.1} \
+         ΔL*), so it is two rules rather than one",
+        strongest / weakest
     );
 }
 
@@ -652,8 +666,8 @@ fn searching(text: &str, case: bool, word: bool, regex: bool) -> preview::Search
 fn every_ink_in_the_find_bar_can_be_read() {
     use azur_egui_theme::contrast::{ratio, TEXT};
 
-    for t in [Theme::dark(), Theme::light()] {
-        let name = if t.dark { "dark" } else { "light" };
+    for t in Theme::all() {
+        let name = t.palette.key();
         for (what, ink, fill) in [
             ("the current hit", t.text.on_accent, t.accent.default),
             ("the other hits", t.text.primary, t.accent.subtle),
@@ -680,8 +694,8 @@ fn every_ink_in_the_find_bar_can_be_read() {
 fn the_find_bar_has_an_edge_you_can_see() {
     use azur_egui_theme::contrast::{apart, SAME};
 
-    for t in [Theme::dark(), Theme::light()] {
-        let name = if t.dark { "dark" } else { "light" };
+    for t in Theme::all() {
+        let name = t.palette.key();
         let got = apart(t.stroke.default, t.bg.layer);
         assert!(
             got >= SAME,

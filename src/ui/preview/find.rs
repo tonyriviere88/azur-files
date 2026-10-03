@@ -324,6 +324,11 @@ pub(super) fn find_bar(ui: &mut Ui, t: &Theme, canvas: Rect, spot: Spot, find: &
                     focused: edit.has_focus(),
                     hovered: field_hovered(ui, field, true),
                     error: find.bad,
+                    // `background-control` and `stroke-control`, which is what a field floating
+                    // on a panel wants. The filter box at the end of a path bar is the other case
+                    // — see `crate::ui::bar`.
+                    fill: None,
+                    border: None,
                 },
             );
             if std::mem::take(&mut find.grab) {
