@@ -101,6 +101,9 @@ eframe = { version = "0.35", default-features = false, features = [
 # change nothing would be churn in the one place that must not regress.
 windows = { version = "0.62", features = [
     "Win32_Foundation",
+    # `DwmSetWindowAttribute`, for one attribute: the cloak that keeps the compositor from
+    # showing this window before anything has been drawn into it. See `main::cloak`.
+    "Win32_Graphics_Dwm",
     "Win32_Graphics_Gdi",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",

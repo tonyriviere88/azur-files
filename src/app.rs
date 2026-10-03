@@ -823,9 +823,15 @@ impl App {
             flat_mode: config.flat_mode,
             regroup: config.regroup,
             forward_slashes: config.forward_slashes,
-            maximized: false,
-            window_size: None,
-            window_position: None,
+            // The window as the settings file describes it, and not as this program is about to
+            // find it: a maximised window never writes the other two — see `Self::frame` — so
+            // starting them empty threw away the size and the place the window would go back to
+            // the moment a session was left maximised, and the next launch had nothing to restore
+            // to but the default. What the platform actually did with them is
+            // `main::open_maximized`'s business; this is only what is remembered.
+            maximized: config.maximized,
+            window_size: config.window,
+            window_position: config.position,
             actions: Vec::new(),
             scratch: String::with_capacity(64),
             pane_rects: Vec::new(),

@@ -244,17 +244,21 @@ fn main() -> eframe::Result {
     }
 
     let size = config.window.unwrap_or(config::WINDOW_SIZE);
-    // Only for a restored window. A maximised one is described by the flag — the platform
-    // maximises it onto the monitor it opens it on — and asking for a position as well would
-    // un-maximise it on the way, which is exactly what `Reset window size` relies on.
-    let position = config.position.filter(|_| !config.maximized).filter(reachable);
+    // Where the window last sat at a size of its own. That setting is only ever written while
+    // the window is restored, which makes it the answer to two questions: where a restored
+    // window opens, and where a maximised one goes when the restore button is pressed.
+    let placed = config.position.filter(reachable);
+    // The first of the two, and only for a restored window. A maximised one is described by the
+    // flag — the platform maximises it onto the monitor it opens it on — and asking for a
+    // position as well would un-maximise it on the way, which is exactly what `Reset window
+    // size` relies on. `open_maximized` is handed `placed` for the second.
+    let position = placed.filter(|_| !config.maximized);
 
     let options = eframe::NativeOptions {
         viewport: {
             let viewport = egui::ViewportBuilder::default()
                 .with_inner_size(size)
                 .with_min_inner_size([720.0, 420.0])
-                .with_maximized(config.maximized)
                 // The window's own taskbar button and its Alt-Tab entry, which is a different
                 // slot from the `.ico` in the executable's resources — `build.rs` fills that
                 // one. Without this egui supplies a white `e` — "for egui or eframe", says its
@@ -265,15 +269,19 @@ fn main() -> eframe::Result {
                 // second one. `ui::chrome::resize_borders` puts the edge grips back.
                 .with_decorations(false)
                 .with_title(brand::NAME);
-            // Where the window *goes* is not set here — see `restore_position`. The builder
-            // takes points, and points are not a coordinate space a desktop of mixed scale
-            // factors has one of. Except on a platform where the handle this program would
-            // reach for is not an `HWND`, where approximately is better than not at all.
+            // Neither where the window *goes* nor whether it opens maximised is set here — see
+            // `restore_position` and `open_maximized`. The builder takes points, and points are
+            // not a coordinate space a desktop of mixed scale factors has one of; and
+            // `with_maximized` on this platform shows the window three times before anything has
+            // been drawn into it. Except where the handle this program would reach for is not an
+            // `HWND`, where the builder is all there is.
             #[cfg(not(windows))]
             let viewport = match position {
                 Some([x, y]) => viewport.with_position(egui::pos2(x, y)),
                 None => viewport,
             };
+            #[cfg(not(windows))]
+            let viewport = viewport.with_maximized(config.maximized);
             viewport
         },
         // A file listing is text and rectangles; there is nothing to gain from
@@ -299,8 +307,15 @@ fn main() -> eframe::Result {
         brand::NAME,
         options,
         Box::new(move |cc| {
+            // Before anything else, and before the window has been shown even once: nothing
+            // this program draws is on screen yet, and the compositor has a white surface
+            // ready to show in its place. See `cloak`.
+            cloak(cc, true);
             azur_egui_theme::fonts::install(&cc.egui_ctx);
             restore_position(cc, position);
+            if config.maximized {
+                open_maximized(cc, placed);
+            }
             Ok(Box::new(Window {
                 app: App::opening(
                     &cc.egui_ctx,
@@ -330,6 +345,7 @@ fn main() -> eframe::Result {
                 waited: 0,
                 frames: 0,
                 owned: false,
+                cloaked: true,
                 // trace,
             }))
         }),
@@ -385,6 +401,183 @@ fn restore_position(cc: &eframe::CreationContext<'_>, position: Option<[f32; 2]>
 
 #[cfg(not(windows))]
 fn restore_position(_cc: &eframe::CreationContext<'_>, _position: Option<[f32; 2]>) {}
+
+/// Open maximised without the window being seen on the way up.
+///
+/// **`ViewportBuilder::with_maximized` cannot be used for this on Windows.** It flashes the
+/// window on screen *three times*, unpainted, before eframe reveals it: a white rectangle the
+/// size of the screen, then one the size of the last session's window, then a screen-sized one
+/// again — measured at 51, 169 and 243 ms into a run whose first frame was not drawn until
+/// 1478, so all three are over and gone before the graphics device even exists.
+///
+/// The cause is one habit of winit's: every state change it makes to a window goes through
+/// `ShowWindow`, and `SW_MAXIMIZE` and `SW_RESTORE` *show* a window as well as resize it. It
+/// hides the window again immediately afterwards — but the compositor has already been handed a
+/// window with nothing drawn in it, and it draws that white. Three of those calls happen before
+/// this program is given the handle:
+///
+/// 1. winit maximises the freshly created window, because the builder asked for it.
+/// 2. `egui-winit` then applies the builder's *size* to the same window, and winit un-maximises
+///    any window whose size is set — so `SW_RESTORE`, at the size in the settings file.
+/// 3. `egui-winit` then applies the builder's maximised flag, so `SW_MAXIMIZE` again.
+///
+/// None of the three can be stopped from here, so none of them is asked for: the builder is told
+/// nothing about maximising, and this puts the window into the state those calls were trying to
+/// reach — without `ShowWindow`, which is the only part of them that shows it.
+///
+/// **What it does instead**, on the window eframe has created and is still keeping hidden:
+///
+/// - Records where a restore should land, since a maximised window has to have somewhere to go
+///   back to. The platform keeps that rectangle itself, and the only call that sets it is
+///   `SetWindowPlacement` — which would show the window too, at whatever `showCmd` it is
+///   handed, so it is handed `SW_HIDE`: the state the window is already in.
+/// - Sets `WS_MAXIMIZE` and moves the window onto the work area of the monitor it was created
+///   on — the same monitor the platform would have maximised it onto. With the style bit set
+///   first, the move is a *maximise*: `WM_SIZE` arrives as `SIZE_MAXIMIZED`, which is where
+///   winit learns the state it no longer set itself, so egui reports a maximised window from
+///   the first frame on and the title bar draws the right button. The platform then adjusts the
+///   rectangle the way it adjusts any maximised window's, so the client area is the work area
+///   exactly rather than approximately.
+///
+/// The window is still hidden through all of it. eframe reveals it once, after the first frame
+/// has been drawn, already maximised — which is the whole point.
+#[cfg(windows)]
+fn open_maximized(cc: &eframe::CreationContext<'_>, position: Option<[f32; 2]>) {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongW, GetWindowPlacement, GetWindowRect, SetWindowLongW, SetWindowPlacement,
+        SetWindowPos, GWL_STYLE, SWP_NOACTIVATE, SWP_NOZORDER, SW_HIDE, WINDOWPLACEMENT,
+        WS_MAXIMIZE,
+    };
+
+    let window = shell::Owner::from_handle(cc);
+    if window.0 == 0 {
+        return;
+    }
+    let hwnd = window.hwnd();
+
+    // The monitor first, and nothing is changed until it has answered: half of this — a window
+    // wearing `WS_MAXIMIZE` at the size of the last session — would be worse than none of it.
+    let monitor = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
+    let mut screen = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: a pure query about a monitor handle, into a struct whose size is declared.
+    if !unsafe { GetMonitorInfoW(monitor, &mut screen) }.as_bool() {
+        return;
+    }
+    let work = screen.rcWork;
+
+    // Where the restore button will put it: the size the window has *right now*, at the place the
+    // settings file remembers. Reading the size off the window rather than out of the settings is
+    // what keeps a scale factor out of this — eframe has already turned the remembered size into
+    // pixels, with the scale factor of the monitor the window actually opened on, which is the
+    // one conversion nothing here could do as well.
+    let mut rect = RECT::default();
+    let mut placement = WINDOWPLACEMENT {
+        length: std::mem::size_of::<WINDOWPLACEMENT>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: a window this process owns, read into two structs, one of whose size is declared.
+    // `rcNormalPosition` as it stands is the rectangle the window was *created* at rather than
+    // the one it was then sized to, which is why it is replaced rather than moved.
+    if unsafe { GetWindowRect(hwnd, &mut rect) }.is_ok()
+        && unsafe { GetWindowPlacement(hwnd, &mut placement) }.is_ok()
+    {
+        let [x, y] = position
+            .map(|[x, y]| [x as i32, y as i32])
+            .unwrap_or([rect.left, rect.top]);
+        placement.showCmd = SW_HIDE.0 as u32;
+        placement.rcNormalPosition = RECT {
+            left: x,
+            top: y,
+            right: x + (rect.right - rect.left),
+            bottom: y + (rect.bottom - rect.top),
+        };
+        // SAFETY: as above, with `SW_HIDE` for a window that is hidden — so the only thing this
+        // call changes is the rectangle a restore reads.
+        let _ = unsafe { SetWindowPlacement(hwnd, &placement) };
+    }
+
+    // SAFETY: a window this process owns. `GetWindowLongW` is a read; the style it is given
+    // back differs by one bit, the one the platform reads to mean "maximised".
+    let style = unsafe { GetWindowLongW(hwnd, GWL_STYLE) } as u32;
+    unsafe { SetWindowLongW(hwnd, GWL_STYLE, (style | WS_MAXIMIZE.0) as i32) };
+    // SAFETY: a window this process owns, resized and not restacked or activated.
+    let _ = unsafe {
+        SetWindowPos(
+            hwnd,
+            None,
+            work.left,
+            work.top,
+            work.right - work.left,
+            work.bottom - work.top,
+            SWP_NOZORDER | SWP_NOACTIVATE,
+        )
+    };
+}
+
+#[cfg(not(windows))]
+fn open_maximized(_cc: &eframe::CreationContext<'_>, _position: Option<[f32; 2]>) {}
+
+/// Keep the compositor from showing this window, or stop keeping it.
+///
+/// **The last white frame, and why hiding the window was not enough to stop it.** eframe keeps a
+/// new window hidden until it has painted into it, and then shows it — which is the right idea and
+/// a frame short of working. Showing the window is not the same event as the compositor having
+/// something of this program's to put on the screen, and in between it puts up white: for a
+/// maximised window that is the whole screen, which is why it is far more obvious than the same
+/// frame in a window covering a fifth of it.
+///
+/// Nothing about the *window* can fix that, because by the time this program is given the handle
+/// the window is already the one eframe will reveal. What can be fixed is what the compositor does
+/// with it: `DWMWA_CLOAK` is the compositor's own "this window exists but is not to be drawn",
+/// which — unlike hiding — leaves a window that paints, presents and is composed as usual. So the
+/// window is cloaked before it is ever shown, eframe reveals it into the cloak, and this program
+/// decides when it can be looked at.
+///
+/// **Which is on the third frame, and one is measurably not enough.** `examples/flash.rs` reads
+/// nine points of the composited desktop thousands of times a second while the window opens, and
+/// counts the runs that put white on any of them. Over five launches of a maximised window, each:
+///
+/// | | white frames |
+/// | --- | --- |
+/// | as eframe leaves it, no cloak | 10 |
+/// | cloaked, revealed after one frame | 5 |
+/// | **cloaked, revealed after two** | **0** |
+///
+/// Two frames rather than one is not a guess about the compositor's internals — from inside the
+/// process the first frame is presented and the screen is white anyway, and this program cannot
+/// see why. It is the smallest number that measured clean, and the cost of it is one frame of a
+/// window nobody can see yet. A `DwmFlush` before the uncloak was tried on the same instrument and
+/// made no difference at all, so it is not here: waiting on the compositor without a reason to is
+/// still a blocked frame.
+#[cfg(windows)]
+fn cloak(handle: &impl raw_window_handle::HasWindowHandle, hidden: bool) {
+    use windows::Win32::Graphics::Dwm::{DwmSetWindowAttribute, DWMWA_CLOAK};
+
+    let window = shell::Owner::from_handle(handle);
+    if window.0 == 0 {
+        return;
+    }
+    let flag = windows::core::BOOL::from(hidden);
+    // SAFETY: a window this process owns, and one `BOOL` of the size declared.
+    let _ = unsafe {
+        DwmSetWindowAttribute(
+            window.hwnd(),
+            DWMWA_CLOAK,
+            (&raw const flag).cast(),
+            std::mem::size_of::<windows::core::BOOL>() as u32,
+        )
+    };
+}
+
+#[cfg(not(windows))]
+fn cloak(_handle: &impl raw_window_handle::HasWindowHandle, _hidden: bool) {}
 
 /// Whether a remembered position still has a screen under it.
 ///
@@ -555,6 +748,8 @@ struct Window {
     frames: u32,
     /// Whether the window handle has been handed to the shell layer yet.
     owned: bool,
+    /// Whether the compositor is still being kept from showing this window.
+    cloaked: bool,
     // `--trace`: name the adapter and backend the window actually got, once.
     //
     // Which GPU a window ends up on cannot be told reliably from outside the process. The
@@ -571,6 +766,18 @@ impl eframe::App for Window {
     }
 
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        // Two frames have been drawn and presented, so the window can be looked at — see `cloak`,
+        // which has been holding the compositor off until this point, and has the measurements for
+        // why it is two and not one. The repaint is asked for because nothing else has: a window
+        // this program forgets to uncloak is a window that never appears at all.
+        if self.cloaked {
+            if self.frames >= 2 {
+                self.cloaked = false;
+                cloak(frame, false);
+            } else {
+                ui.ctx().request_repaint();
+            }
+        }
         if !self.owned {
             // eframe is the only thing that knows the window handle, and only once the
             // platform has actually made a window.
