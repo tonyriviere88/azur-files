@@ -50,6 +50,16 @@
 //! call supplies the status and the dead ones are dropped before either list is built; see
 //! `win::unavailable`, which is where that costs its 0.2 ms and why it is not the letters' problem.
 //!
+//! **A dropped connection is not the end of that story, though.** It says the *connection* is gone;
+//! it says very little about the machine, which may well be answering — what dropped could have been
+//! a sleep, a VPN, or Windows pruning an idle deviceless connection out from under a server that
+//! never moved. So the machines those dead entries name are collected by [`down_servers`] and asked,
+//! one detached thread each, by [`reachable`]: a bounded socket to the SMB port, milliseconds for a
+//! machine that is there. The ones that answer come back as *found* rows rather than connected ones
+//! — see [`crate::loader::Volumes::found`] — which is the honest ink for a machine that is there
+//! and is not mounted. None of this is on the startup path's critical section: the listing is 0 ms
+//! and the asking happens on threads nothing waits for.
+//!
 //! Volumes and connections both come back as a [`Drive`], because the rest of the program has no
 //! reason to care: a network location has a name, a capacity, an icon and somewhere it goes,
 //! exactly as `C:` does. The one place the difference shows is [`Drive::display_name`], since a
@@ -58,13 +68,15 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[cfg(windows)]
 #[path = "../windows/drives.rs"]
 mod win;
 #[cfg(windows)]
-pub use win::{connect, describe, list_letters, list_servers, list_shares, shares_on};
+pub use win::{
+    connect, describe, down_servers, list_letters, list_servers, list_shares, shares_on,
+};
 
 /// Machines the network has announced, which is a different question from what is mounted — and
 /// the only one here that is asked on request rather than answered from a local table. See
@@ -241,6 +253,150 @@ pub fn split_unc(path: &Path) -> Option<(String, String)> {
     (!host.is_empty() && !share.is_empty()).then(|| (host.to_owned(), share.to_owned()))
 }
 
+/// Whether `list` already names `path`, compared the way a UNC path has to be.
+///
+/// **Case-insensitively**, because `\\FileServer` and `\\fileserver` are one machine — and a panel
+/// showing both would be naming one place twice, which is the fault this guards against everywhere
+/// it is used. Spelled out here once because half a dozen places were each spelling it out for
+/// themselves, and a comparison rule that is copied is a comparison rule that drifts.
+///
+/// Whole paths, never [`Path::starts_with`]: that matches by component, and `\\fileserver` is not a
+/// component of `\\fileserver\web` — the server and the share arrive welded into one UNC prefix.
+pub fn holds(list: &[PathBuf], path: &Path) -> bool {
+    list.iter()
+        .any(|had| had.as_os_str().eq_ignore_ascii_case(path.as_os_str()))
+}
+
+// ---------------------------------------------------------------------------
+// Is that machine still there?
+// ---------------------------------------------------------------------------
+
+/// Which machines are worth asking about, out of the connections that are down and the ones that
+/// are up.
+///
+/// The whole of [`down_servers`]' judgement, out here where synthetic input can reach it: that
+/// function reads this machine's two connection tables, and the state this rule most needs checking
+/// against — a dead connection to a machine that is nevertheless answering — is one a machine is
+/// only sometimes in. Same reason [`machine_of`] is not buried in [`list_servers`].
+///
+/// | a connection that is down | asked about | why |
+/// | --- | --- | --- |
+/// | `\\fileserver\web` | `fileserver` | the machine may be there even though the connection is not |
+/// | `\\fileserver` | `fileserver` | a sign-in that lapsed, which is the same question |
+/// | `\\fileserver\web`, with `\\fileserver` **up** | nothing | one down and one up is a machine that is *connected* |
+/// | `\\lgs-net.com\alyo\alyodata\Common` | nothing | a DFS namespace: the first component is a domain |
+/// | three dead shares on one machine | that machine, once | one probe, not three |
+pub fn candidates(dead: &[PathBuf], live: &[PathBuf]) -> Vec<PathBuf> {
+    let mut asking: Vec<PathBuf> = Vec::new();
+    for connection in dead {
+        // The same rule [`list_servers`] applies, so the two cannot disagree about what a machine
+        // is — and `None` here is a DFS path, whose first component is a domain. Probing that would
+        // report a domain controller answering on 445 and say nothing whatever about whether the
+        // namespace resolves.
+        let Some(host) = machine_of(connection) else {
+            continue;
+        };
+        let path = PathBuf::from(format!("\\\\{host}"));
+        if !holds(live, &path) && !holds(&asking, &path) {
+            asking.push(path);
+        }
+    }
+    asking
+}
+
+/// How long [`reachable`] gets, across every address one name resolves to.
+///
+/// **A second, where 300 ms looks generous and is not.** The budget is not there to catch the fast
+/// case — a live machine on this LAN answers in **3 ms** warm and 53 ms cold — it is there to
+/// cover a *slow name*. A machine with no DNS record is found by LLMNR or NBNS instead, which is a
+/// second or two, and a 300 ms budget calls that machine unreachable while it is sitting there
+/// answering. Nothing waits on this, so a second costs one detached thread and no frames.
+const REACH_BUDGET: Duration = Duration::from_millis(1000);
+
+/// The port an SMB server listens on, which is the whole of the question [`reachable`] asks.
+///
+/// **445 only.** Every Windows server since 2000 and every NAS worth naming listens there. The
+/// NetBIOS-era 139 would add a second to every machine that has genuinely gone away, to catch one
+/// old enough to have neither.
+const SMB_PORT: u16 = 445;
+
+/// Whether a machine is answering on the SMB port right now.
+///
+/// # Why this is cheap where a browse is not
+///
+/// Finding machines costs **14.3 seconds** (see [`discover::machines`]) and this costs
+/// milliseconds, and the difference is not the network — it is the shape of the question. A browse
+/// asks *who is out there*, into a multicast group where no reply means "that was everyone", so the
+/// only way to finish is to wait out a fixed window: measured here, 14 334 ms of waiting around
+/// 12 ms of work. Asking whether a **named** machine is there is closed, so it costs one round trip
+/// on a deadline of our choosing. Measured on this machine:
+///
+/// | target | resolve | answer |
+/// | --- | --- | --- |
+/// | a live machine on this LAN | 23 ms | **53 ms** cold, **3 ms** warm |
+/// | `lgs-net.com`, off the VPN | 0 ms | closed, at the budget |
+/// | a machine that is switched off | 2.7 s, fails | not there |
+/// | a name with no record | 1.3 s, fails | not there |
+/// | an unrouted address, **no deadline** | — | **21.1 s** |
+///
+/// That last row is the whole reason the budget exists: 21 seconds is the stack's SYN retry
+/// schedule, not a floor, and every failure above returns within 15 ms of whatever deadline it is
+/// given.
+///
+/// # What it costs nothing to ask
+///
+/// **This never touches the redirector.** A socket to 445 does not go through `mup.sys` or
+/// `mrxsmb`, so it cannot trip the 22-second reconnect that a volume query walks into — see the
+/// note at the top of this module. It also sends no SMB negotiate, so there is no session, no
+/// authentication, and nothing that could put a failed logon against a domain account or count
+/// towards locking one out. It is a handshake and a close.
+///
+/// # What the answer means
+///
+/// That something is listening on the SMB port at that name, and no more: not that a particular
+/// share exists, not that these credentials open it, and not that a DFS referral resolves. That is
+/// the right confidence for putting a row back — clicking it is what does the real work, and the
+/// credential path is already there. See [`crate::app::connect`].
+pub fn reachable(host: &str) -> bool {
+    reachable_on(host, SMB_PORT)
+}
+
+/// The port is a parameter so the true path can be tested against a listener on this machine,
+/// which is a test that needs no network and no other computer. Nothing else passes anything but
+/// [`SMB_PORT`].
+fn reachable_on(host: &str, port: u16) -> bool {
+    use std::net::{TcpStream, ToSocketAddrs};
+
+    // **Unbounded, and deliberately.** `ToSocketAddrs` takes no deadline and there is no resolver
+    // in `std` that does — but the system one has its own, measured at 1.3 s for a name with no
+    // record and 2.7 s for one whose lookup fails outright. A name that will not resolve is a
+    // machine that is not there, so reaching that answer slowly is still reaching the right one.
+    let Ok(addresses) = (host, port).to_socket_addrs() else {
+        return false;
+    };
+
+    // The clock starts *after* the name, so a slow lookup cannot eat the connect's budget and turn
+    // a machine that is there into one that is not.
+    let deadline = Instant::now() + REACH_BUDGET;
+    for address in addresses {
+        // **Every address the name gave, not the first of them.** The NAS here resolves to a
+        // link-local IPv6 *before* its IPv4, so a probe that tried only the head of that list
+        // would report a machine down while it was answering. One deadline across all of them,
+        // rather than one each, so a name with six addresses cannot cost six budgets.
+        let left = deadline.saturating_duration_since(Instant::now());
+        // `connect_timeout` rejects a zero duration rather than reading it as "already too late",
+        // so the budget running out has to end the loop rather than fall through to a call that
+        // would fail for the wrong reason.
+        if left.is_zero() {
+            break;
+        }
+        if TcpStream::connect_timeout(&address, left).is_ok() {
+            return true;
+        }
+    }
+    false
+}
+
 /// Mount points, for the platforms that have no drive letters.
 #[cfg(not(windows))]
 pub fn list_letters() -> Vec<Drive> {
@@ -267,6 +423,12 @@ pub fn list_shares() -> Vec<Drive> {
 /// a directory.
 #[cfg(not(windows))]
 pub fn list_servers() -> Vec<PathBuf> {
+    Vec::new()
+}
+
+/// And nothing whose connection could have dropped, since there are no connections to enumerate.
+#[cfg(not(windows))]
+pub fn down_servers() -> Vec<PathBuf> {
     Vec::new()
 }
 
@@ -525,6 +687,247 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// The candidate list is built from two local tables and belongs on the startup path with them.
+    ///
+    /// It is [`win::unavailable`] and [`list_servers`] and nothing else, so it gets the same bound
+    /// they do. If this ever fails, something has started asking the *network* which machines to ask
+    /// — which is the probe's job, on a thread, and the symptom in the window would be a startup
+    /// that hangs.
+    #[test]
+    #[cfg(windows)]
+    fn listing_probe_candidates_does_no_io() {
+        let started = Instant::now();
+        let candidates = down_servers();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(150),
+            "down_servers took {elapsed:?} -- it runs on the startup path and something in it \
+             has started waiting on the network"
+        );
+        for machine in &candidates {
+            assert!(
+                unc_server(machine).is_some(),
+                "a candidate is a bare `\\\\machine` and nothing else, because that is what a \
+                 socket and a found row both want: {machine:?}"
+            );
+        }
+    }
+
+    /// Which dead connections are worth a probe — against input, because this machine is usually
+    /// not in the state that matters.
+    ///
+    /// The measured reason this test exists rather than leaning on the two above it: the only
+    /// disconnected connection here is `H:` → `\\lgs-net.com\alyo\alyodata\Common`, and it is
+    /// invisible twice over. It is a DFS namespace, so the rule excludes it by design; and it is
+    /// mapped through the Windows network provider rather than the SMB redirector, so `NetUseEnum`
+    /// does not carry it at all — see [`win::unavailable`], where that was already measured. So
+    /// `down_servers()` is empty here whatever the rule says, and only synthetic input can show that
+    /// the rule is right.
+    #[test]
+    fn which_dead_connections_are_worth_asking_about() {
+        let paths = |list: &[&str]| list.iter().map(PathBuf::from).collect::<Vec<_>>();
+
+        // A share on a machine, and a lapsed sign-in to the machine itself. Both name a machine that
+        // may well still be there.
+        assert_eq!(
+            candidates(&paths(&["\\\\fileserver\\web", "\\\\other"]), &[]),
+            paths(&["\\\\fileserver", "\\\\other"])
+        );
+
+        // **One connection down and another up is a machine that is connected.** Its row is already
+        // in the panel in full ink, and a probe could only add a second row saying the same thing
+        // more weakly.
+        assert!(candidates(
+            &paths(&["\\\\fileserver\\web"]),
+            &paths(&["\\\\fileserver"])
+        )
+        .is_empty());
+
+        // A DFS namespace contributes nothing: `lgs-net.com` is a domain, so 445 answering there
+        // would be a domain controller and would say nothing about the namespace. This is the case
+        // this machine is actually in.
+        assert!(candidates(
+            &paths(&["\\\\lgs-net.com\\alyo\\alyodata\\Common"]),
+            &[]
+        )
+        .is_empty());
+
+        // Three dead shares on one machine is one probe, and the case of the name is not a second
+        // machine.
+        assert_eq!(
+            candidates(
+                &paths(&[
+                    "\\\\fileserver\\web",
+                    "\\\\FILESERVER\\photos",
+                    "\\\\fileserver"
+                ]),
+                &[]
+            ),
+            paths(&["\\\\fileserver"])
+        );
+        // Nor is it a second machine when the live list is the one spelling it differently.
+        assert!(candidates(
+            &paths(&["\\\\fileserver\\web"]),
+            &paths(&["\\\\FILESERVER"])
+        )
+        .is_empty());
+
+        // And nothing at all out of nothing, which is the state of a machine with no network on it.
+        assert!(candidates(&[], &[]).is_empty());
+    }
+
+    /// A machine that is already connected is never probed.
+    ///
+    /// One connection down and another up is a machine that *is* connected: its row is already
+    /// there in full ink, and a probe could only add a second row saying the same thing more
+    /// weakly. Checked against this machine's real connection table, so on one with nothing dead
+    /// in it this passes with nothing to say — honest rather than weak, for the reason on
+    /// [`a_disconnected_connection_gets_no_row`].
+    #[test]
+    #[cfg(windows)]
+    fn a_connected_machine_is_not_a_candidate() {
+        let servers = list_servers();
+        for machine in down_servers() {
+            assert!(
+                !holds(&servers, &machine),
+                "{machine:?} is connected and is being probed as though it were not"
+            );
+            // A DFS namespace contributes no candidate: probing the domain would report a domain
+            // controller and say nothing about whether the namespace resolves.
+            assert!(
+                machine_of(&machine).is_some(),
+                "{machine:?} is not a machine anything should be asked about"
+            );
+        }
+    }
+
+    /// The true path, against a listener on this machine — so it needs no network and no second
+    /// computer, and it cannot go stale when a NAS is switched off.
+    #[test]
+    fn a_listening_port_is_reachable() {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("loopback is always bindable");
+        let port = listener.local_addr().expect("a bound listener has an address").port();
+        let started = Instant::now();
+        assert!(
+            reachable_on("127.0.0.1", port),
+            "a socket that is listening right here did not answer"
+        );
+        // The point of the whole design: a machine that is there answers in milliseconds, and the
+        // budget is never spent on the case that works.
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(150),
+            "a live host took {:?} -- the fast path is what makes this affordable at startup",
+            started.elapsed()
+        );
+    }
+
+    /// A closed port on a host that is definitely up is not reachable, and says so at once.
+    ///
+    /// The other half of the true path: the probe is asking about *SMB*, not about whether the
+    /// address exists. A machine answering `RST` is a machine with nothing listening, and the stack
+    /// reports that immediately rather than waiting out the budget.
+    #[test]
+    fn a_closed_port_is_not_reachable() {
+        // Bound and dropped, so the port was real a moment ago and is refusing now — which is more
+        // reliably closed than any number picked out of the air.
+        let port = {
+            let listener =
+                std::net::TcpListener::bind("127.0.0.1:0").expect("loopback is always bindable");
+            listener.local_addr().expect("a bound listener has an address").port()
+        };
+        assert!(!reachable_on("127.0.0.1", port));
+    }
+
+    /// **The 21-second hang, which is what the budget is for.**
+    ///
+    /// `192.0.2.0/24` is reserved for documentation (RFC 5737) and is routed to the gateway and
+    /// dropped, which is the address class that takes the stack's full SYN retry schedule — measured
+    /// at **21.1 s** with no deadline. This is the regression test for that: five seconds is far
+    /// above the one-second budget and far below the hang, so it fails loudly if the deadline is
+    /// ever lost and does not flake on a loaded machine.
+    ///
+    /// One SYN to a black hole, and nothing else leaves this machine.
+    #[test]
+    fn an_unroutable_address_gives_up_on_the_budget() {
+        let started = Instant::now();
+        assert!(!reachable_on("192.0.2.1", SMB_PORT));
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "an unrouted address took {elapsed:?} -- the connect deadline is gone and the panel \
+             is back to waiting 21 seconds per machine"
+        );
+    }
+
+    /// A name that cannot resolve is not reachable, and the resolver's own timeout is the bound.
+    ///
+    /// `.invalid` is reserved by RFC 2606 and never resolves. A DNS server that answers `NXDOMAIN`
+    /// with a search page instead would give an address whose port 445 is shut, so the verdict is
+    /// the same either way — which is why this asserts the answer and not the mechanism.
+    #[test]
+    fn a_name_that_does_not_resolve_is_not_reachable() {
+        let started = Instant::now();
+        assert!(!reachable_on("yafe-no-such-machine.invalid", SMB_PORT));
+        // Measured at 1.3-2.7 s for a name the resolver gives up on. Resolution is the one part
+        // with no deadline of ours, so this bound is loose on purpose: it is here to catch a hang,
+        // not to hold the resolver to a number.
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "an unresolvable name took {elapsed:?} -- something is waiting far past the \
+             resolver's own timeout"
+        );
+    }
+
+    /// What the probe actually costs on this machine, and against what.
+    ///
+    /// `cargo test probe_reachability -- --ignored --nocapture`. Ignored because it reaches the
+    /// network and its answers are this machine's rather than anything a suite can assert — and
+    /// because the state it is most interesting about, a dropped connection to a machine that is
+    /// still there, is one a machine is only sometimes in.
+    ///
+    /// Prints the dead connections, what [`down_servers`] makes of them, and a timed [`reachable`]
+    /// for every machine involved — connected ones included, since those are the only place a
+    /// *true* answer against a real server can be seen on a machine with nothing dropped.
+    #[test]
+    #[ignore = "reaches the network; run it deliberately"]
+    #[cfg(windows)]
+    fn probe_reachability() {
+        let timed = |host: &str| {
+            let started = Instant::now();
+            let answer = reachable(host);
+            println!(
+                "  {host:<40} {:>8.1} ms  {}",
+                started.elapsed().as_secs_f64() * 1000.0,
+                if answer { "ANSWERS" } else { "no" }
+            );
+        };
+
+        let candidates = down_servers();
+        println!("connections Windows reports as down:");
+        for dead in win::unavailable() {
+            println!("  {}", dead.display());
+        }
+        println!("machines worth asking about (down_servers):");
+        for machine in &candidates {
+            println!("  {}", machine.display());
+        }
+
+        println!("probed:");
+        // The candidates first, which is what the stage in `Volumes::confirm` asks.
+        for machine in candidates.iter().chain(list_servers().iter()) {
+            if let Some(host) = unc_server(machine) {
+                timed(&host);
+            }
+        }
+        // And the two references that say whether the numbers above mean anything: a name that
+        // cannot resolve, and an address routed into a black hole. Both must come back inside the
+        // budget rather than in twenty-one seconds.
+        timed("yafe-no-such-machine.invalid");
+        timed("192.0.2.9");
     }
 
     #[test]

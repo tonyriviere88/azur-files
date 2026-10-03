@@ -422,13 +422,21 @@ pub struct Volumes {
     shares: Vec<Drive>,
     /// The machines those connections are to. See [`Volumes::servers`].
     servers: Vec<std::path::PathBuf>,
-    /// Machines the network has announced, found by a browse **and only ever by one**. See
-    /// [`Volumes::discover`].
+    /// Machines that are there but not connected to, from either of the two things that can find
+    /// one: a browse ([`Volumes::discover`]) and a probe of a dropped connection
+    /// ([`Volumes::confirm`]). One list, because the row they earn is the same row — see
+    /// [`Volumes::found`].
     found: Vec<std::path::PathBuf>,
-    /// Whether a browse is in flight, so the button can say so.
+    /// Whether a browse is in flight, so the button can say so. **A probe is not a browse** and
+    /// deliberately does not touch this: a confirmation landing while the button is spinning would
+    /// pop it back up with the browse still running.
     finding: bool,
     discovered: Receiver<Vec<std::path::PathBuf>>,
     discoveries: Sender<Vec<std::path::PathBuf>>,
+    /// Machines whose dropped connection turned out to still answer, one per probe thread. Its own
+    /// channel rather than a second sender on `discoveries`, for the reason on `finding` above.
+    confirmed: Receiver<std::path::PathBuf>,
+    confirmations: Sender<std::path::PathBuf>,
     arrivals: Receiver<Drive>,
     /// Kept so the channel stays open while probes are still running, and so a
     /// refresh can replace it.
@@ -440,21 +448,26 @@ impl Volumes {
     pub fn new(ctx: &egui::Context) -> Self {
         let (sender, arrivals) = channel();
         let (discoveries, discovered) = channel();
+        let (confirmations, confirmed) = channel();
         let volumes = Self {
             drives: drives::list_letters(),
             shares: drives::list_shares(),
             servers: drives::list_servers(),
-            // Empty, and it stays empty until somebody presses the button. A browse reaches the
-            // network and answers about other people's machines; nothing about opening a window
-            // asks for that.
+            // Empty on this frame, and nothing here presses the browse button: that one reaches the
+            // network to ask about other people's machines, and opening a window does not ask for
+            // that. What [`Volumes::confirm`] fills it with is the opposite question — machines this
+            // program had its own connections to, asked whether they still answer.
             found: Vec::new(),
             finding: false,
             discovered,
             discoveries,
+            confirmed,
+            confirmations,
             arrivals,
             sender,
         };
         volumes.probe(ctx);
+        volumes.confirm(ctx);
         volumes
     }
 
@@ -485,6 +498,11 @@ impl Volumes {
         self.sender = sender;
         self.arrivals = arrivals;
         self.probe(ctx);
+        // **The confirmation channel is not replaced**, unlike the one above. A description is
+        // about a volume that is still in the list and a late one would land on the wrong round; a
+        // confirmation says "this machine answered a moment ago", which is exactly the claim its row
+        // makes and is no less true for arriving after an F5. See [`Volumes::found`].
+        self.confirm(ctx);
     }
 
     /// Merge in anything that has been described since the last frame.
@@ -501,15 +519,15 @@ impl Volumes {
         // it is *there* — that is what its ink says, and what clicking it settles.
         while let Ok(found) = self.discovered.try_recv() {
             for machine in found {
-                if !self
-                    .found
-                    .iter()
-                    .any(|had| had.as_os_str().eq_ignore_ascii_case(machine.as_os_str()))
-                {
-                    self.found.push(machine);
-                }
+                self.remember_found(machine);
             }
             self.finding = false;
+        }
+        // A dropped connection whose machine still answers. Merged the same way and into the same
+        // list, because it earns the same row — and **without touching `finding`**, which belongs to
+        // the browse button alone.
+        while let Ok(machine) = self.confirmed.try_recv() {
+            self.remember_found(machine);
         }
         while let Ok(described) = self.arrivals.try_recv() {
             // By path, which is the key both lists share — every network location has an empty
@@ -522,6 +540,14 @@ impl Volumes {
             {
                 *existing = described;
             }
+        }
+    }
+
+    /// Add a machine to the found list unless it is already there. See [`drives::holds`] for why the
+    /// comparison is the one it is.
+    fn remember_found(&mut self, machine: std::path::PathBuf) {
+        if !drives::holds(&self.found, &machine) {
+            self.found.push(machine);
         }
     }
 
@@ -565,11 +591,26 @@ impl Volumes {
         self.servers = drives::list_servers();
     }
 
-    /// Machines the network has announced that this one is not connected to.
+    /// Machines that are there, which this one is not connected to.
     ///
-    /// Empty until [`Volumes::discover`] has been asked for and has answered. Kept apart from
-    /// [`Volumes::servers`] because the two are not equally certain: a server in that list is one
-    /// this machine has a connection to, and one in this list has only said it exists.
+    /// Kept apart from [`Volumes::servers`] because the two are not equally certain: a server in
+    /// that list is one this machine has a live connection to, and one in this list has only been
+    /// *seen*. The panel says that difference in the ink rather than with a badge, and clicking a
+    /// row is what settles it either way.
+    ///
+    /// Two things put a machine here, and they are not equally strong:
+    ///
+    /// | source | evidence | when |
+    /// | --- | --- | --- |
+    /// | [`Volumes::confirm`] | a TCP handshake on the SMB port, to a machine this program had a connection to | startup and F5 |
+    /// | [`Volumes::discover`] | an SSDP or WSD announcement, and nothing more | the browse button |
+    ///
+    /// One list all the same, because the *row* is the same: a machine that is there and is not
+    /// connected. Grading the ink twice over would be asking the panel to explain a distinction
+    /// that clicking either row resolves in the same way.
+    ///
+    /// **A machine found in this session stays for the session**, whichever found it — see
+    /// [`Volumes::poll`] for why replacing rather than merging was wrong.
     pub fn found(&self) -> &[std::path::PathBuf] {
         &self.found
     }
@@ -587,6 +628,25 @@ impl Volumes {
     #[cfg(test)]
     pub(crate) fn pretend_found(&mut self, machines: Vec<std::path::PathBuf>) {
         self.found = machines;
+    }
+
+    /// Put a machine on the wire [`Volumes::confirm`] reports down, so a test can drive the merge
+    /// without a machine to probe.
+    ///
+    /// **Through the real channel and not by writing `found`**, which is what [`pretend_found`] does
+    /// and would skip the very step this is for. Needed because the state it stands in for — a
+    /// connection Windows says is down whose machine is nevertheless answering — is one this machine
+    /// may simply not be in, and usually is not.
+    #[cfg(test)]
+    pub(crate) fn pretend_confirmed(&mut self, machine: std::path::PathBuf) {
+        let _ = self.confirmations.send(machine);
+    }
+
+    /// Pretend a browse is in flight, so a test can show that a confirmation landing does not put
+    /// the button back up. Starting one for real would take 14 seconds and reach the network.
+    #[cfg(test)]
+    pub(crate) fn pretend_finding(&mut self) {
+        self.finding = true;
     }
 
     /// Go and look for machines on the network. **Only ever from the button.**
@@ -619,6 +679,54 @@ impl Volumes {
         // up rather than staying pressed for ever.
         if spawned.is_err() {
             self.finding = false;
+        }
+    }
+
+    /// Ask each machine whose connection has dropped whether it still answers.
+    ///
+    /// **The row this restores is one that used to vanish.** A connection Windows reports as down is
+    /// filtered out before the panel ever sees it — it has to be, or a laptop that slept would show a
+    /// Network group full of rows in the full ink that says *connected* — and the machine went with
+    /// it. But a dropped connection is weak evidence about a *machine*: what dropped may have been
+    /// the VPN, the sleep, or Windows pruning an idle deviceless connection out from under a server
+    /// that never moved. So the machine is asked, and if it answers it comes back as a found row.
+    ///
+    /// **On the startup path, and that is not the contradiction it looks like** next to
+    /// [`Volumes::discover`], which is forbidden there. A browse asks *who is out there*, costs
+    /// 14.3 seconds because a multicast group has no way to say "that was everyone", and answers
+    /// about other people's computers. This asks whether a **named** machine out of this machine's
+    /// own connection table still answers: closed, so it costs one round trip — 3 ms warm, 53 ms
+    /// cold — and it is nobody else's business but this program's. See
+    /// [`crate::fs::drives::reachable`] for the measurements and for why a socket to 445 cannot trip
+    /// the 22-second reconnect a volume query would.
+    ///
+    /// One detached thread each, like [`Volumes::probe`] beside it and for the same two reasons: a
+    /// machine that has genuinely gone away holds its own thread for a second and nothing else, and a
+    /// probe still waiting when the window closes has nothing left to say. Only the machines that
+    /// answer ever report, so a dead one costs a thread and no row.
+    fn confirm(&self, ctx: &egui::Context) {
+        for machine in drives::down_servers() {
+            // The name out of the path, since that is what a socket needs. `down_servers` only ever
+            // yields `\\host`, so this cannot fail — but reading it back rather than carrying the
+            // string keeps `\\host` the one form the found list holds.
+            let Some(host) = drives::unc_server(&machine) else {
+                continue;
+            };
+            let confirmations = self.confirmations.clone();
+            let ctx = ctx.clone();
+            // Named after the machine, which is the only place this name is ever read.
+            let _ = std::thread::Builder::new()
+                .name(format!("reach-{host}"))
+                .spawn(move || {
+                    // **Nothing is sent for a machine that did not answer.** An absent row is
+                    // already the right rendering of "not there", so there is no verdict to report
+                    // and no state for one to go stale in.
+                    if drives::reachable(&host) && confirmations.send(machine).is_ok() {
+                        ctx.request_repaint();
+                    }
+                });
+            // A machine that will not give us a thread simply gets no row, which is exactly what it
+            // had before this stage existed. There is nothing to undo and nobody to tell.
         }
     }
 

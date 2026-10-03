@@ -339,6 +339,30 @@ Explorer's, which is still the best version of this control:
   [`fs::typed_folder`](src/fs/mod.rs), which is `resolve_input` with that one step left out, and
   exists for exactly that reason.
 
+  **`Enter` on a network path does not ask either, and that was a bug for as long as it did.**
+  `is_dir` hands back a *bool*, so *there is no such share* and *the server will not say who is
+  asking* arrive as the same `false` — and only one of them is a reason to stay put. Measured against
+  a real share on a NAS answering on port 445 in 3 ms: it fails with **1265**,
+  `ERROR_DOWNGRADE_DETECTED`, "cannot contact a domain controller to service the authentication
+  request" — because the machine is joined to a domain and away from its network, so Windows tries
+  the domain before it ever asks the NAS. Flattened to `false`, `resolve_input`
+  answered `None`, and the `None` arm reopens the field: **nothing navigated, no listing was read,
+  and the credential prompt that 1265 exists to raise was never reached, because nothing had yet
+  asked a question that could fail.** Typing a network path did nothing whatever.
+
+  So a path beginning `\\` is handed straight to the loader. A refusal there becomes a listing that
+  says why, and a sign-in when one would help; a dead server costs one worker instead of the window.
+  It fixed a bare `\\machine` at the same time, which had never worked from the bar — a server is not
+  a file, so `is_dir` is false for every one of them. And `\\machine\shrae` now navigates and reports
+  *The network path was not found* rather than sitting there silently, which is both what Explorer
+  does and the better of the two answers.
+
+  The classification comes back *with* the path — [`fs::Typed`](src/fs/mod.rs) — because it used to
+  be asked three times for one press: `is_dir`, then `is_file`, then `is_file` again in the
+  breadcrumb. Three stats of one path inside a single frame, each of them able to block for
+  twenty-two seconds. It is one `metadata` now, which is also what keeps the error alive long enough
+  to be reasoned about.
+
   Folders only, and hidden ones only once a name is being typed: with nothing after the
   separator this is the chevron menu's question and gets its answer, which keeps
   `$Recycle.Bin` off the top of every drive. With a name half typed it is a different question,
@@ -673,6 +697,64 @@ in its bottom byte, so both halves have to be asked — `IPC$` is `STYPE_IPC | S
 `C$` is `STYPE_DISKTREE | STYPE_SPECIAL`. A server that refuses comes back as a listing carrying
 the reason rather than as an empty folder: those two look identical on screen and only one of them
 is something you can act on.
+
+### Asking whether a machine is there, which is not the same question as finding one
+
+A connection Windows reports as down has to be filtered out before the panel sees it, or a laptop
+that slept shows a Network group full of rows in the full ink that says *connected*. But the machine
+goes out with the connection, and that throws away more than it should: a dropped connection is
+strong evidence about the connection and weak evidence about the server. What dropped may have been
+the sleep, the VPN, or Windows pruning an idle deviceless connection out from under a machine that
+never moved.
+
+So the machines those dead entries name get asked. That sounds expensive next to the browse button,
+which takes **14.3 seconds**, and it is not — the difference is not the network but the shape of the
+question. A browse asks *who is out there*, into a multicast group where no reply means "that was
+everyone", so the only way to finish is to wait out a fixed window. Timed on the shell's Network
+folder here, that is 14 334 ms of waiting wrapped around 12 ms of work, and the second walk of the
+same folder costs **165 ms** because Function Discovery had cached the announcements by then.
+
+Asking whether a **named** machine answers is closed, so it costs one round trip on a deadline of our
+choosing — a bounded TCP connect to 445:
+
+| target | resolve | answer |
+| --- | --- | --- |
+| a live machine on this LAN | 23 ms | **53 ms** cold, **3 ms** warm |
+| `lgs-net.com` off the VPN | 0 ms | closed, at the budget |
+| a machine that is switched off | 2.7 s, fails | not there |
+| a name with no record | 1.3 s, fails | not there |
+| an unrouted address, **no deadline** | — | **21.1 s** |
+
+That last row is the 22-second trap wearing its third hat, and the budget is what removes it: every
+failure above returns within 15 ms of whatever deadline it is given. The budget is **a second** and
+not the 300 ms that looks generous — a machine with no DNS record is found by LLMNR or NBNS instead,
+which is a second or two, and 300 ms calls that machine unreachable while it sits there answering.
+Nothing waits on any of it: one detached thread each, and only the machines that answer ever report.
+
+Two things this deliberately does not do. It **never touches the redirector** — a socket to 445 goes
+nowhere near `mup.sys`, so it cannot trip the 22-second reconnect a volume query walks into — and it
+sends no SMB negotiate, so there is no session, no authentication, and nothing that could put a
+failed logon against a domain account or count towards locking one out. It is a handshake and a
+close.
+
+A machine that answers comes back as a **found** row: the muted ink, the same row the browse button
+earns, and deliberately not a fourth kind of row. The two are not equally strong evidence — a
+handshake beats an SSDP announcement — but they make the same claim, *this machine is there and you
+are not connected to it*, and clicking either resolves it the same way. Grading the ink twice would
+ask the panel to explain a distinction that the click erases.
+
+Two exclusions, both borrowed from the rules that were already there rather than written a second
+time. A machine with one connection down and another up **is** connected, and already has its row.
+And a DFS namespace contributes nothing, because 445 answering on `lgs-net.com` is a domain
+controller and says nothing whatever about whether `\alyo\alyodata\Common` resolves.
+
+Which is also why the rule lives in `candidates` rather than inside the function that reads the two
+connection tables: the state it matters in — a dead connection to a machine that is still answering —
+is one a machine is only sometimes in. This one never is. Its single disconnected connection is `H:`
+→ `\\lgs-net.com\alyo\alyodata\Common`, invisible twice over: a DFS namespace, so the rule excludes
+it by design, and mapped through the Windows network provider rather than the SMB redirector, so
+`NetUseEnum` does not carry it at all. A rule that can only be exercised by the machine it runs on is
+a rule that cannot be tested, so it takes its two lists as arguments.
 
 ### A machine is a level `Path` does not have
 

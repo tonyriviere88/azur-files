@@ -101,17 +101,44 @@ pub(crate) fn error_text(code: u32) -> String {
 ///   there would be a credential dialog raised over a file this account is simply not allowed to
 ///   read — a prompt that cannot succeed, in front of the one message that explained why.
 ///
+/// # The one a domain-joined machine gets, which is not any of the obvious ones
+///
+/// **`ERROR_DOWNGRADE_DETECTED` (1265)** has a name about nothing relevant and a message that says
+/// what actually happened: *the system cannot contact a domain controller to service the
+/// authentication request*. It is what a machine joined to a domain returns for **any** share on
+/// **any** server while it is off the corporate network — the domain is tried first, there is no
+/// controller to reach, and the attempt ends there without ever asking the server. Measured against
+/// a NAS on the same LAN, answering on port 445 in 3 ms:
+///
+/// | attempt at a share on it | code | meaning |
+/// | --- | --- | --- |
+/// | as the signed-in account | **1265** | never got as far as the server |
+/// | with a username and password | **86** | reached it, and the password was wrong |
+///
+/// So a prompt is exactly the fix, and the second row is the proof: explicit credentials skip the
+/// domain path altogether and get a real answer out of the server. Without 1265 in this list the
+/// typed path failed with a number and no prompt, which is the whole bug — and it is not an edge
+/// case, it is *every* share on a laptop away from the office.
+///
+/// `ERROR_NO_LOGON_SERVERS` (1311) is the same wall reached one stage earlier and is here for the
+/// same reason, though the machine this was found on returned 1265.
+///
 /// Codes left out on purpose: `ERROR_ACCOUNT_DISABLED`, `ERROR_ACCOUNT_LOCKED_OUT` and
 /// `ERROR_PASSWORD_EXPIRED` name an account that cannot be used at all, and
 /// `ERROR_SESSION_CREDENTIAL_CONFLICT` (1219) is the one where Windows itself refuses a second
 /// identity for a server already connected under another — a prompt for any of them fails again
 /// with the same answer, which is worse than the sentence they came with.
+///
+/// `ERROR_NETWORK_ACCESS_DENIED` (65) is left out as unmeasured rather than as decided: it would
+/// belong if it turns out to be what a share-level refusal returns here, and every other entry in
+/// this list was put there by having been seen.
 pub(crate) fn wants_credentials(code: u32, path: &Path) -> bool {
-    /// `ERROR_ACCESS_DENIED`, and the four that say so outright:
-    /// `ERROR_INVALID_PASSWORD`, `ERROR_NOT_AUTHENTICATED`, `ERROR_LOGON_FAILURE`,
-    /// `ERROR_BAD_USERNAME`.
-    const ASKING: [u32; 5] = [5, 86, 1244, 1326, 2202];
-    ASKING.contains(&code) && path.to_string_lossy().starts_with("\\\\")
+    /// `ERROR_ACCESS_DENIED`, the four that say so outright — `ERROR_INVALID_PASSWORD`,
+    /// `ERROR_NOT_AUTHENTICATED`, `ERROR_LOGON_FAILURE`, `ERROR_BAD_USERNAME` — and the two where
+    /// the sign-in could not even be attempted: `ERROR_DOWNGRADE_DETECTED`,
+    /// `ERROR_NO_LOGON_SERVERS`.
+    const ASKING: [u32; 7] = [5, 86, 1244, 1265, 1311, 1326, 2202];
+    ASKING.contains(&code) && super::is_unc(path)
 }
 
 // ---------------------------------------------------------------------------

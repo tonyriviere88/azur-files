@@ -602,10 +602,14 @@ pub(crate) fn edit_field(
         out.push(Action::Navigate { pane, path });
     } else if enter {
         tab.editing_path = false;
+        // **No `is_file` here.** `resolve_input` already stat'ed the path and says which it is; a
+        // second question of the disk from inside the frame is a second chance to block on a share
+        // that has gone away. See [`fs::Typed`].
         match fs::resolve_input(&tab.edit_text) {
-            Some(path) if path.is_file() => out.push(Action::Open(path)),
-            Some(path) => out.push(Action::Navigate { pane, path }),
-            // Nothing there. Leave the text as typed so it can be corrected.
+            Some(fs::Typed::File(path)) => out.push(Action::Open(path)),
+            Some(fs::Typed::Folder(path)) => out.push(Action::Navigate { pane, path }),
+            // Nothing there. Leave the text as typed so it can be corrected. **Never a UNC path**,
+            // which is handed on whether it answered or not — see [`fs::resolve_input`].
             None => tab.editing_path = true,
         }
     }

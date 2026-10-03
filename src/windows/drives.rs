@@ -193,10 +193,7 @@ fn connections() -> Vec<(String, PathBuf, u32)> {
             // A connection Windows says is down is not a place to offer. Dropped here, at the one
             // door both [`list_shares`] and [`list_servers`] come through, so that a share and the
             // machine it is on cannot disagree about whether it is there.
-            if down
-                .iter()
-                .any(|dead| dead.as_os_str().eq_ignore_ascii_case(path.as_os_str()))
-            {
+            if super::holds(&down, &path) {
                 continue;
             }
             if found
@@ -338,10 +335,7 @@ pub fn list_shares() -> Vec<Drive> {
             let Some(host) = machine_of(path) else {
                 return true;
             };
-            let machine = PathBuf::from(format!("\\\\{host}"));
-            !browsable
-                .iter()
-                .any(|had| had.as_os_str().eq_ignore_ascii_case(machine.as_os_str()))
+            !super::holds(&browsable, &PathBuf::from(format!("\\\\{host}")))
         })
         .map(|(_, path, _)| Drive {
             // The share rather than the volume label: see `describe`, which does not overwrite
@@ -388,14 +382,46 @@ pub fn list_servers() -> Vec<PathBuf> {
             continue;
         };
         let path = PathBuf::from(format!("\\\\{host}"));
-        if !servers
-            .iter()
-            .any(|had| had.as_os_str().eq_ignore_ascii_case(path.as_os_str()))
-        {
+        if !super::holds(&servers, &path) {
             servers.push(path);
         }
     }
     servers
+}
+
+/// The machines named by a connection Windows says is **down** — what is worth probing.
+///
+/// The other half of [`unavailable`]'s answer, and the one [`connections`] throws away: that filter
+/// drops a dead connection so it cannot put a row in the panel claiming to be connected, which is
+/// right, but the *machine* it names may be perfectly reachable — the connection dropped because
+/// a laptop slept, a VPN went down, or Windows pruned an idle deviceless connection out from under
+/// a server that never went anywhere. Asking is [`crate::fs::drives::reachable`]'s job and it costs
+/// milliseconds; this is the list to ask about.
+///
+/// **Not other people's computers.** This is the one thing that separates a probe of these from a
+/// network browse, and it is why one may run at startup and the other may not: every name here came
+/// out of *this* machine's own connection table. Nothing is being discovered — a machine this
+/// program was talking to a moment ago is being asked whether it still answers.
+///
+/// Two exclusions, both borrowed rather than reinvented so that no two lists here can disagree:
+///
+/// - **A machine [`list_servers`] already has.** One connection down and another up is a machine
+///   that *is* connected, and its row is already there in full ink. Nothing to confirm.
+/// - **A DFS namespace**, which [`machine_of`] answers `None` for. Probing `lgs-net.com` would
+///   report a domain controller answering on 445 and say nothing whatever about whether
+///   `\alyo\alyodata\Common` resolves — and [`shares_on`] against it is still the 22-second trap.
+///
+/// **0 ms and no network I/O**, being [`unavailable`] and [`list_servers`] and nothing else. Which
+/// is what lets it sit on the startup path and hand its answer to a worker, rather than being the
+/// worker.
+///
+/// The rule itself is [`crate::fs::drives::candidates`] and lives out there rather than in here, for
+/// the same reason [`machine_of`] does: this function reads the machine's own two tables, so a rule
+/// buried in it has nowhere to be checked — and the state it most needs checking against, a dead
+/// connection to a machine that is still answering, is one a machine is only sometimes in.
+#[cfg(windows)]
+pub fn down_servers() -> Vec<PathBuf> {
+    super::candidates(&unavailable(), &list_servers())
 }
 
 /// Sign in to a machine or a share, with Windows' own credential dialog.

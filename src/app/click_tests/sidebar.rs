@@ -191,6 +191,76 @@ fn a_machine_the_browse_found_is_dimmer_than_one_we_are_connected_to() {
     );
 }
 
+/// A machine whose connection dropped but which still answers gets its row back.
+///
+/// The row a dead connection used to take with it: the connection is filtered out because a laptop
+/// that slept must not show a Network group full of rows claiming to be connected, and the machine
+/// went too — even though what dropped may have been the sleep rather than the server. So the
+/// machine is probed and comes back as a *found* row, which is the same row a browse earns and is
+/// deliberately not a fourth kind: see [`crate::loader::Volumes::found`].
+///
+/// Driven through the probe's own channel, because the state this is about — a connection Windows
+/// reports as down whose machine is answering — is one the machine running the test is usually not
+/// in.
+#[test]
+fn a_machine_that_still_answers_comes_back_as_a_found_row() {
+    let mut h = Harness::new();
+    let machine = PathBuf::from("\\\\nowhere-confirmed");
+    // A browse in flight, so the assertion about the button below is not vacuously true.
+    h.app.volumes.pretend_finding();
+    h.app.volumes.pretend_confirmed(machine.clone());
+    h.settle();
+
+    assert!(
+        h.app.volumes.found().contains(&machine),
+        "a confirmed machine never reached the found list: {:?}",
+        h.app.volumes.found()
+    );
+    // **The browse button is still down.** A confirmation is not a browse answering, and sending one
+    // through the browse's channel would have popped the button up with the browse still running —
+    // which is the whole reason the two have channels of their own.
+    assert!(
+        h.app.volumes.finding(),
+        "a confirmation cleared the browse button while the browse was still running"
+    );
+
+    // Confirmed again, in the other case, which is what a second F5 does — and a UNC path is
+    // case-insensitive, so this is one machine and must stay one row. Two rows would read as two
+    // places.
+    h.app
+        .volumes
+        .pretend_confirmed(PathBuf::from("\\\\NOWHERE-CONFIRMED"));
+    h.settle();
+    assert_eq!(
+        h.app
+            .volumes
+            .found()
+            .iter()
+            .filter(|had| had
+                .as_os_str()
+                .eq_ignore_ascii_case(machine.as_os_str()))
+            .count(),
+        1,
+        "the same machine confirmed twice earned two rows: {:?}",
+        h.app.volumes.found()
+    );
+
+    // And it opens like the browsed one, which is what asks for the connection. The ink is the same
+    // too, and has its own test above — there is one kind of found row, not two.
+    let at = h
+        .find(
+            Id::new(("server", machine.as_path())),
+            crate::ui::GUTTER + 100.0,
+            30..760,
+        )
+        .expect("the confirmed machine's row is not reachable by the pointer");
+    let done = h.click_at(at);
+    assert!(
+        done.contains(&"Navigate"),
+        "clicking a confirmed machine did not open it, got {done:?}"
+    );
+}
+
 /// And a connection that no machine row reaches keeps a row of its own.
 ///
 /// Normally empty — a connection to `\\server\share` is one click away through the machine, so it

@@ -30,11 +30,109 @@ fn a_typed_path_is_normalised_on_the_way_in() {
     let temp = crate::sandbox::dir("typed-path");
     let slashed = temp.to_string_lossy().replace('\\', "/");
     let resolved = resolve_input(&slashed).expect("the sandbox directory exists");
+    let Typed::Folder(resolved) = resolved else {
+        panic!("the sandbox directory is a folder, got {resolved:?}");
+    };
     assert!(
         !resolved.to_string_lossy().contains('/'),
         "`{}` still has a forward slash in it",
         resolved.display()
     );
+}
+
+/// **A network path is handed on even when it cannot be asked about**, which is the bug this fixes.
+///
+/// `is_dir` answers `false` both for a share that is not there and for one the server will not
+/// describe without credentials, and only the first is a reason not to go — see [`resolve_input`] for
+/// what answering `None` to both cost.
+///
+/// Checked against `\\localhost\...`, which fails immediately and without a name to resolve or a
+/// packet to send: the *shape* of the path is what the rule turns on, not which server it names.
+#[test]
+#[cfg(windows)]
+fn a_network_path_is_handed_on_even_when_it_will_not_answer() {
+    let share = r"\\localhost\yafe-no-such-share";
+    assert_eq!(
+        resolve_input(share),
+        Some(Typed::Folder(PathBuf::from(share))),
+        "a share that would not answer has to reach the loader, or nothing can raise a prompt"
+    );
+
+    // Typed with the other slash, which is the reason the path is normalised before the rule looks
+    // at it: `//localhost/...` names the same place and used to fail the `\\` test.
+    assert_eq!(
+        resolve_input("//localhost/yafe-no-such-share"),
+        Some(Typed::Folder(PathBuf::from(share)))
+    );
+
+    // A bare machine, which had never worked from the bar for the same reason — a server is not a
+    // file, so `is_dir` is false for every one of them.
+    assert_eq!(
+        resolve_input(r"\\localhost"),
+        Some(Typed::Folder(PathBuf::from(r"\\localhost")))
+    );
+
+    // And a local path that is not there is still `None`: the field stays open to be corrected,
+    // because there is no server to ask and nothing a listing could say that the field cannot.
+    assert_eq!(resolve_input(r"Z:\definitely-not-here\9d3f"), None);
+}
+
+/// What a real typed path does, all the way to the flag that raises the credential dialog.
+///
+/// `YAFE_PROBE_TYPED='\\machine\share' cargo test probe_typed_path -- --ignored --nocapture`.
+/// Ignored because it reaches the network and its answer is the running machine's.
+///
+/// The three steps a press of `Enter` is, in order, so a break can be seen where it is rather than
+/// as "nothing happened": what [`resolve_input`] made of the text, what the scanner got back, and
+/// whether that came out marked as wanting credentials — which is the one bit
+/// [`crate::app::App::ask_credentials`] acts on. Everything past it is Windows' own dialog.
+#[test]
+#[ignore = "reaches the network; run it deliberately"]
+#[cfg(windows)]
+fn probe_typed_path() {
+    let typed = std::env::var("YAFE_PROBE_TYPED")
+        .expect("set YAFE_PROBE_TYPED to the path to type, e.g. '\\\\machine\\share'");
+    println!("typed:    {typed}");
+
+    let started = std::time::Instant::now();
+    let resolved = resolve_input(&typed);
+    println!("resolved: {resolved:?}   in {:?}", started.elapsed());
+    let Some(Typed::Folder(path)) = resolved else {
+        panic!("nothing to navigate to -- this is where the bug was: the field would just reopen");
+    };
+
+    let started = std::time::Instant::now();
+    let dir = crate::fs::scan::scan(&path);
+    println!(
+        "scanned:  {} entries, error {:?}, credentials {}   in {:?}",
+        dir.len(),
+        dir.error,
+        dir.credentials,
+        started.elapsed()
+    );
+    if dir.error.is_some() {
+        assert!(
+            dir.credentials,
+            "the read failed and nothing will ask about it -- a code is missing from \
+             `wants_credentials`"
+        );
+        println!("=> a credential dialog would be raised for this path");
+    }
+}
+
+/// A file out of the bar is opened, not navigated into — and **the classification comes back with
+/// the path** rather than being asked for a second time. See [`Typed`].
+#[test]
+#[cfg(windows)]
+fn a_typed_file_comes_back_as_a_file() {
+    let dir = crate::sandbox::dir("typed-file");
+    let file = dir.join("readme.txt");
+    std::fs::write(&file, b"x").expect("the sandbox is writable");
+    assert_eq!(
+        resolve_input(&file.to_string_lossy()),
+        Some(Typed::File(file.clone()))
+    );
+    assert_eq!(resolve_input(&dir.to_string_lossy()), Some(Typed::Folder(dir)));
 }
 
 /// The completion's half of the door: the same expansion and the same slashes, and **no
@@ -166,8 +264,14 @@ fn unknown_variables_survive_expansion() {
 
 #[test]
 fn resolve_understands_this_pc_and_bare_drives() {
-    assert_eq!(resolve_input("  This PC "), Some(PathBuf::new()));
+    assert_eq!(
+        resolve_input("  This PC "),
+        Some(Typed::Folder(PathBuf::new()))
+    );
     assert_eq!(resolve_input(""), None);
     #[cfg(windows)]
-    assert_eq!(resolve_input("C:"), Some(PathBuf::from("C:\\")));
+    assert_eq!(
+        resolve_input("C:"),
+        Some(Typed::Folder(PathBuf::from("C:\\")))
+    );
 }

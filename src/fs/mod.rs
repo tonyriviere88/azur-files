@@ -93,36 +93,88 @@ pub fn normalize(path: &Path) -> PathBuf {
     path.to_path_buf()
 }
 
+/// Whether a path is a UNC path — `\\server`, `\\server\share`, and everything under it.
+///
+/// Named rather than spelled out where it is used, because it is load-bearing in two places that
+/// must not drift: [`resolve_input`], which hands a network path to the loader instead of asking the
+/// disk about it, and [`scan::wants_credentials`], which will only offer a sign-in for one.
+///
+/// **Backslashes only, and the callers see to that.** Every path in this program has been through
+/// [`normalize`] at the door, so `//server/share` is already `\\server\share` by the time anything
+/// asks — the same guarantee [`drives::unc_server`] documents for itself.
+pub fn is_unc(path: &Path) -> bool {
+    path.to_string_lossy().starts_with(r"\\")
+}
+
+/// What a typed path turned out to name.
+///
+/// Two things happen to a path out of the bar — a folder is opened in the pane and a file is opened
+/// with its program — and **which one is decided here rather than by the caller asking again.** It
+/// used to ask: `resolve_input` called `is_dir` and then `is_file`, handed back a bare path, and the
+/// breadcrumb called `is_file` on it a third time. Three stats of one path, each of them a syscall
+/// that can block for twenty-two seconds on a share that has gone away, all inside one frame.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Typed {
+    /// Somewhere to navigate to. Also what a UNC path that would not answer comes back as — see
+    /// [`resolve_input`].
+    Folder(PathBuf),
+    /// A file, to be opened with whatever opens it.
+    File(PathBuf),
+}
+
 /// Resolve what the user typed in the breadcrumb into somewhere to go.
 ///
 /// Expands `%VARS%` and `~`, accepts either slash, and tolerates a trailing one.
-/// Returns `None` if there is nothing there — the caller shows that as a message
-/// rather than navigating into a void.
-pub fn resolve_input(text: &str) -> Option<PathBuf> {
+/// `None` means there is nothing there and nothing to do, and the caller leaves the text in the
+/// field to be corrected.
+///
+/// # A UNC path is never answered `None`
+///
+/// `Path::is_dir` hands back a **bool**, so *there is no such share* and *the server will not say
+/// who is asking* arrive as the same `false` — and only one of them is a reason to stay put. This
+/// used to answer `None` for both, and the caller's `None` arm reopens the field: **typing a network
+/// path did nothing whatever, and the sign-in the failure should have raised was never reached,
+/// because nothing had yet asked a question that could fail.** See [`scan::wants_credentials`] for
+/// the error code that made that the *normal* case on a domain-joined machine rather than a corner.
+///
+/// So a UNC path is handed on regardless — [`is_unc`] is the test. Whether it is really there is
+/// [`crate::loader`]'s question, asked on a worker, where a refusal becomes a listing that says why
+/// and a dead server costs that worker rather than the window: the same argument [`typed_folder`] is
+/// built on, applied to the one press that was still asking. It fixes a bare `\\machine` too, which
+/// had never worked from the bar, since a server is not a file and `is_dir` is false for every one
+/// of them. A mistyped share now navigates and the pane says *The network path was not found*, which
+/// is what Explorer does and better than a field that sits there.
+pub fn resolve_input(text: &str) -> Option<Typed> {
     let text = text.trim().trim_matches('"');
     if text.is_empty() {
         return None;
     }
     if text.eq_ignore_ascii_case("this pc") {
-        return Some(PathBuf::new());
+        return Some(Typed::Folder(PathBuf::new()));
     }
 
     let expanded = expand(text);
-    let path = PathBuf::from(&expanded);
 
     // A drive letter on its own means its root: `D:` is where `D:\` is.
     if expanded.len() == 2 && expanded.as_bytes()[1] == b':' {
-        return Some(PathBuf::from(format!("{expanded}\\")));
+        return Some(Typed::Folder(PathBuf::from(format!("{expanded}\\"))));
     }
 
-    if path.is_dir() {
-        return Some(normalize(&path));
+    // Normalised *before* anything is asked about it, so the UNC test below sees `\\server`
+    // whichever slash was typed — `//server/share` names the same place.
+    let path = normalize(&PathBuf::from(&expanded));
+
+    // **One `metadata`, where this used to be `is_dir` and then `is_file`.** Those are two stats of
+    // the same path, on the UI thread, inside a frame — and each of them throws the error away,
+    // which is exactly what has to survive here.
+    match std::fs::metadata(&path) {
+        Ok(found) if found.is_dir() => Some(Typed::Folder(path)),
+        // A file: the caller opens it.
+        Ok(_) => Some(Typed::File(path)),
+        // Could not be asked, or was refused. For a UNC path that is not an answer — see above.
+        Err(_) if is_unc(&path) => Some(Typed::Folder(path)),
+        Err(_) => None,
     }
-    // A file: go to its folder and let the caller select it.
-    if path.is_file() {
-        return Some(normalize(&path));
-    }
-    None
 }
 
 /// The folder a half-typed path names, worked out **without asking the disk anything**.

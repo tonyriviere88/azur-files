@@ -275,11 +275,15 @@ pub fn show(
             // - **A machine this window is connected to** — `fileserver`. Opening it lists every
             //   share the server offers; see [`crate::fs::drives::server_dir`]. One line, no gauge,
             //   because a machine has no capacity.
-            // - **A machine the network has merely announced**, found by the refresh button on the
-            //   heading and drawn in `text-tertiary` to say so — it has said it exists and nothing
-            //   more. Clicking one opens it, which is what asks for a connection: a machine that
-            //   wants credentials refuses the share list, and refusing the share list is what
-            //   raises Windows' credential prompt. See [`crate::app::connect`].
+            // - **A machine that is merely *there*** — drawn in `text-tertiary` to say so, because
+            //   it has been seen and nothing more. Two things put one here and the row does not
+            //   distinguish them, since clicking either resolves it the same way: the refresh button
+            //   on the heading, which is an SSDP or WSD announcement; and a machine whose connection
+            //   dropped but which still answers on the SMB port, probed at startup. See
+            //   [`crate::loader::Volumes::found`]. Clicking one opens it, which is what asks for a
+            //   connection: a machine that wants credentials refuses the share list, and refusing
+            //   the share list is what raises Windows' credential prompt. See
+            //   [`crate::app::connect`].
             // - **A network location that no machine here can reach** — a connection to a DFS path,
             //   whose first component is a domain rather than a server. Drawn by the same
             //   [`drive_row`] a disk gets, because it is a mount with the same capacity to show.

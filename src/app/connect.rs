@@ -186,6 +186,18 @@ mod tests {
         assert!(wants_credentials(1326, unc), "ERROR_LOGON_FAILURE");
         assert!(wants_credentials(86, unc), "ERROR_INVALID_PASSWORD");
         assert!(wants_credentials(1244, unc), "ERROR_NOT_AUTHENTICATED");
+        // **The one a domain-joined machine off its network gets, for every share on every
+        // server.** `ERROR_DOWNGRADE_DETECTED` is a name about nothing to do with it; the message is
+        // "cannot contact a domain controller to service the authentication request", and the domain
+        // is tried before the server is ever asked. Measured against a NAS on the same LAN: 1265 as
+        // this account, and 86 the moment a username and password were supplied — so the prompt is
+        // precisely what gets past it. Its absence here is why typing `\\machine\share` failed with
+        // a number and no dialog.
+        assert!(wants_credentials(1265, unc), "ERROR_DOWNGRADE_DETECTED");
+        assert!(wants_credentials(1311, unc), "ERROR_NO_LOGON_SERVERS");
+        // And not on a local path, like every other code in the list: there is no domain controller
+        // in `C:\`, so whatever 1265 means there, a credential dialog is not the answer.
+        assert!(!wants_credentials(1265, local));
         // And the failures no sign-in fixes. 1219 is the one worth naming: Windows refuses a
         // second identity for a server already connected under another, so a prompt returns the
         // same error with a dialog in front of it.

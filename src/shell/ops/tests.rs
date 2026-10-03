@@ -322,7 +322,7 @@ fn the_sink_reports_what_the_shell_actually_did() {
 /// is not up there, and it is the case where the shell gives `win::landed` neither an item with a
 /// path nor a name: nothing is newly created by writing over a file that already exists.
 ///
-/// It crashed. Replacing a file on `\\SephiStation\web` faulted at `ucrtbase!wcslen`, called from
+/// It crashed. Replacing a file on `\\fileserver\web` faulted at `ucrtbase!wcslen`, called from
 /// `PostCopyItem` through `landed` and out of `PCWSTR::to_string`, which is `wcslen` on whatever
 /// pointer it is given and checks nothing:
 ///

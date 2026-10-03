@@ -177,6 +177,11 @@ pub(crate) fn error_text(code: u32) -> String {
         15 => "The drive is not available".to_owned(),
         21 => "The device is not ready".to_owned(),
         53 | 67 => "The network path was not found".to_owned(),
+        // What is left on screen when the credential prompt these raise is cancelled — so it has to
+        // say something the person who cancelled it can act on. Windows' own words for 1265 blame a
+        // domain controller, which is true and useless to somebody typing the path of a NAS on the
+        // same desk: the sign-in is what did not happen. See [`super::wants_credentials`].
+        1265 | 1311 => "Windows could not sign in to this share".to_owned(),
         1223 => "Cancelled".to_owned(),
         other => format!("Could not read this folder (error {other})"),
     }
