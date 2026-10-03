@@ -12,13 +12,27 @@ impl App {
         for action in actions {
             self.perform(ctx, action);
         }
-        if self.config_dirty {
-            // Written on the way out rather than on every drag frame; the cost of
-            // losing the last few points of a sidebar width is nothing, and the cost
-            // of a file write per frame is a stutter.
+        // Written on the way out rather than on every drag frame; the cost of losing the last few
+        // points of a sidebar width is nothing, and the cost of a file write per frame is a
+        // stutter.
+        //
+        // **Rate-limited here rather than trusted to the call sites, because there are twenty-two
+        // of them.** Two set the flag on every frame of a splitter drag — the sidebar's used
+        // `dragged()`, which is true for frames with no movement at all — and each one is a read
+        // plus up to two writes on the UI thread, on a path that may be a redirected `%APPDATA%`
+        // on a share. One choke point cannot be forgotten by the next gesture that marks the
+        // settings dirty; a rule at the sites can, and was.
+        //
+        // Nothing is lost by waiting: the flag stays set, so the next frame past the interval
+        // writes it, and `on_exit` saves unconditionally whether or not one ever comes.
+        const AT_MOST_EVERY: f64 = 0.5;
+        let now = ctx.input(|i| i.time);
+        if self.config_dirty && now - self.config_saved_at >= AT_MOST_EVERY {
             self.config_dirty = false;
-            self.config = self.settings();
-            self.config.save();
+            self.config_saved_at = now;
+            // Through [`App::save_settings`], which is also what the exit save goes through: it
+            // writes nothing when nothing this window holds has actually changed.
+            self.save_settings();
         }
     }
 
@@ -574,6 +588,13 @@ impl App {
                 // flattened listing the entry's *name* is a relative path, and comparing
                 // against that would make every rename look like a change.
                 if name.is_empty() || name == dir.leaf(entry) {
+                    return;
+                }
+                // Checked here rather than left to the shell. See [`crate::fs::why_not_a_name`] —
+                // the separator is the one that matters, because a name containing one is a path
+                // and asks for something other than a rename.
+                if let Some(why) = crate::fs::why_not_a_name(&name) {
+                    self.notice = Some(why);
                     return;
                 }
                 let item = dir.target(entry);

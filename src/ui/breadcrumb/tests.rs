@@ -53,6 +53,68 @@ fn the_filter_tooltip_is_the_design_systems_and_the_lenses_are_the_funnels() {
     assert_ne!(labels[0], labels[1]);
 }
 
+/// **The chevron's folder is asked of the loader and never read here**, and the menu holds nothing
+/// until the answer lands.
+///
+/// The freeze this is about: [`fs::scan::scan`] says of itself that it only ever runs on a
+/// [`crate::loader`] worker, because a bare `\\server` is answered by `NetShareEnum` — 22.1 seconds
+/// for a name that does not resolve, and a share that has just gone away costs the same wait. This
+/// menu called it from inside the popup body, which is the UI thread on the frame the dropdown
+/// opens, and the trail `\\server\share\a` hands it exactly that path from the chevron between
+/// `server` and `share`. The window stopped painting for the whole of it, once per chevron the
+/// pointer crossed.
+///
+/// So the first ask **must** come back empty-handed, whatever the folder is: the answer cannot be
+/// there yet, because nothing on this thread went to look. A cache probe is a hash lookup and a
+/// worker has a directory to read, so there is no race to lose here.
+///
+/// Driven against a real [`crate::loader::Loader`] rather than through the window, because what is
+/// being checked is the one call — `click_tests::breadcrumb` is where the popup itself is opened and
+/// waited on.
+#[test]
+fn the_chevron_menu_asks_the_loader_and_reads_nothing_itself() {
+    let ctx = egui::Context::default();
+    let mut loader = crate::loader::Loader::new(&ctx);
+    let mut menu = CrumbMenu::default();
+
+    let here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    loader.invalidate(&here);
+    assert!(
+        !menu.ensure(&here, &mut loader),
+        "the menu answered on the frame it was asked, so it read the folder itself"
+    );
+    assert_eq!(menu.listing(), None, "it has rows nothing has read yet");
+
+    // The worker answers, and the next probe — an ordinary frame, drawn because the loader woke
+    // the window — is what fills the menu.
+    for _ in 0..200 {
+        if loader.cached(&here).is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    assert!(
+        menu.ensure(&here, &mut loader),
+        "the listing landed in the loader and the menu did not take it"
+    );
+    let (path, count) = menu.listing().expect("the menu has the folder it asked for");
+    assert_eq!(path, here);
+    assert!(count > 0, "this crate's own folder has subfolders in it");
+
+    // And the rows go the moment the pointer moves to another chevron, rather than when that
+    // folder's answer arrives: they are the last folder's, and offering them under this one's name
+    // is the one wrong answer this menu can give. The folder is the whole of the staleness check —
+    // nothing is ever handed to this menu, it looks up the one key it wants.
+    let other = here.join("src");
+    loader.invalidate(&other);
+    assert!(!menu.ensure(&other, &mut loader), "{other:?} cannot be read yet");
+    assert_eq!(
+        menu.listing(),
+        None,
+        "the rows for the chevron before it survived the move"
+    );
+}
+
 #[test]
 fn the_bold_segment_is_the_folder_being_shown() {
     let trail = fs::breadcrumb_segments(Path::new(r"C:\a\b\c"));

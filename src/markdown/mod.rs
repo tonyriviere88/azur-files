@@ -283,7 +283,11 @@ fn split(source: &str) -> Vec<Raw> {
                 kind: Kind::Item(marker),
                 text,
                 quote,
-                indent: ((lead / 2) as u8).min(DEEP),
+                // **Clamped before the cast and not after.** `(lead / 2) as u8` wraps, so 512 leading
+                // spaces came out as 0 and a bullet nested deeper than a `u8` can count was drawn
+                // flush left — under the wrong parent, which for a list is the whole of what an indent
+                // says.
+                indent: (lead / 2).min(DEEP as usize) as u8,
             });
             open = Some(out.len() - 1);
             i += 1;

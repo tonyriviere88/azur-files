@@ -147,7 +147,15 @@ impl Find {
         } else if self.bad {
             "Bad pattern".to_owned()
         } else if self.hits.is_empty() {
-            "No results".to_owned()
+            // **"No results" is a claim, and a search that stopped early cannot make it.** A literal
+            // walk gives up once it has spent its comparison budget — see [`preview::search`] — so an
+            // empty answer is either "there are none" or "there were none in the part I got through",
+            // and saying the first about the second is the quiet lie the `+` below exists to avoid.
+            if self.capped {
+                "Stopped".to_owned()
+            } else {
+                "No results".to_owned()
+            }
         } else if self.capped {
             format!("{} of {}+", self.at + 1, self.hits.len())
         } else {

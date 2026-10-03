@@ -179,7 +179,7 @@ fn probe_icon_costs() {
 fn a_bitmap_is_fetched_off_the_ui_thread() {
     crate::shell::init();
     let ctx = egui::Context::default();
-    let mut icons = Icons::new();
+    let mut icons = Icons::new(&ctx);
 
     // A real image-list index to ask about: the folder icon.
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -217,7 +217,7 @@ fn a_bitmap_is_fetched_off_the_ui_thread() {
 fn leaving_a_folder_cancels_its_questions() {
     crate::shell::init();
     let ctx = egui::Context::default();
-    let mut icons = Icons::new();
+    let mut icons = Icons::new(&ctx);
     let exe = std::env::current_exe().expect("this test binary is an executable");
 
     // View 1 asks, and then goes away before the worker gets to it.
@@ -253,10 +253,44 @@ fn leaving_a_folder_cancels_its_questions() {
     );
 }
 
+/// **A view the live set has not heard of yet is still asked about, and this is a regression test.**
+///
+/// The frame publishes its live views near the top and applies a landed listing further down, and a
+/// listing being applied is what gives a tab a new view. So on the frame a folder's rows first
+/// appear, they ask with a view `only` has never seen. The worker used to drop exactly those jobs —
+/// silently, because `request_file` had already answered `true` and the caller had already written
+/// `ASKED` into the row. A row holding `ASKED` is never asked again, so **no executable, shortcut or
+/// `.dll` in a freshly read folder ever got its own icon**; they all kept the generic glyph for their
+/// type for the rest of the session.
+///
+/// `only` is deliberately never called here. That is the situation.
+#[test]
+fn a_view_that_asks_before_the_live_set_knows_it_is_still_answered() {
+    crate::shell::init();
+    let ctx = egui::Context::default();
+    let mut icons = Icons::new(&ctx);
+    let exe = std::env::current_exe().expect("this test binary is an executable");
+
+    assert!(icons.request_file(7, 0, exe));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut got = Vec::new();
+    while Instant::now() < deadline && got.is_empty() {
+        icons.poll(&ctx);
+        got = icons.answers();
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(
+        got.iter().any(|(view, row, _)| *view == 7 && *row == 0),
+        "the question was dropped for a view nothing had declared live yet, so the row keeps the \
+         generic icon for ever: {got:?}"
+    );
+}
+
 #[test]
 fn the_cache_asks_once_per_type() {
     crate::shell::init();
-    let mut icons = Icons::new();
+    let ctx = egui::Context::default();
+    let mut icons = Icons::new(&ctx);
 
     // First sighting: nothing yet, and a request queued.
     assert!(icons.kind("", true).is_none());

@@ -173,17 +173,6 @@ impl App {
                     let Some(asking) = self.asking.take_if(|a| a.token == token) else {
                         continue;
                     };
-                    // A short menu is worth admitting to. Somebody who right-clicks an
-                    // executable on a share and finds 7-Zip missing should be told why rather
-                    // than left to wonder whether the program is broken.
-                    // Short enough for the status line to show all of it — the first version of
-                    // this was cut off at "and thi…", which tells nobody anything.
-                    if depth == crate::shell::menu::Depth::Fast {
-                        self.notice = Some(
-                            "Short menu: Windows' extras read the whole file over the network"
-                                .to_owned(),
-                        );
-                    }
                     // An empty selection is the folder's *background* menu, and that is the one
                     // menu the shell hands over with a gap in it: it carries no Paste, and
                     // Explorer's own is synthesised by its view rather than read out of the

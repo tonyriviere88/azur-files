@@ -20,22 +20,24 @@
 //! | **performing the inverse** | `IFileOperation` again for a move or a rename back, and the binned item's own `undelete` verb for a delete — see [`crate::shell::ops::bin`] |
 
 use super::*;
-use crate::shell::ops::{Outcome, Recycled};
+use crate::shell::ops::{Outcome, Ran, Recycled};
 
 /// Do the work. Runs on its own thread, with its own apartment.
 #[cfg(windows)]
-pub(crate) fn run(job: &Job, owner: Owner) -> (Option<String>, Outcome) {
+pub(crate) fn run(job: &Job, owner: Owner) -> Ran {
     use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
 
     // SAFETY: this thread exists for this call, initialises its own apartment, and
     // uninitialises it before returning. Nothing else here touches COM.
     unsafe {
         if CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_err() {
-            return (
-                Some("Could not talk to the shell".to_owned()),
-                Outcome::default(),
-            );
+            return Ran {
+                error: Some("Could not talk to the shell".to_owned()),
+                outcome: Outcome::default(),
+                aborted: false,
+            };
         }
+        let mut aborted = false;
         let recorded = Recorder::default();
         // Two jobs are not `IFileOperation` at all, and each says so where it is implemented:
         //
@@ -45,16 +47,33 @@ pub(crate) fn run(job: &Job, owner: Owner) -> (Option<String>, Outcome) {
         // - a **link**, because there is no create-shortcut operation to ask for. It records what
         //   it wrote, which is what makes an Alt-drag undoable like everything else.
         let error = match job {
-            Job::Restore { items } => super::bin::restore(items, owner),
+            Job::Restore { items } => {
+                let error = super::bin::restore(items, owner);
+                // **Asked of the filesystem, because the bin cannot be asked.** A restore is the
+                // `undelete` verb rather than `IFileOperation`, so there is no
+                // `GetAnyOperationsAborted` to call and no `HRESULT` for a user who answered the
+                // shell's own name-clash dialog with Cancel — `restore` documents that it returns
+                // success either way. Nothing arriving back where it came from is the one
+                // observation left, and it is enough to keep the entry on the undo stack for the
+                // Ctrl+Z the user is about to press again.
+                if error.is_none() && !items.iter().any(|item| item.from.exists()) {
+                    aborted = true;
+                }
+                error
+            }
             Job::Link { items, into } => {
                 let (error, made) = crate::shell::links::shortcuts_into(items, into);
                 recorded.with(|outcome| outcome.created = made);
                 error
             }
-            _ => perform(job, owner, &recorded),
+            _ => perform(job, owner, &recorded, &mut aborted),
         };
         CoUninitialize();
-        (error, recorded.take())
+        Ran {
+            error,
+            outcome: recorded.take(),
+            aborted,
+        }
     }
 }
 
@@ -364,8 +383,18 @@ fn path_of(item: Option<&windows::Win32::UI::Shell::IShellItem>) -> Option<PathB
 }
 
 /// The body, split out so the apartment is torn down on every path out.
+///
+/// `aborted` is written rather than returned because every early exit here is already an *error*,
+/// and an error makes the question moot — [`crate::shell::ops::Done::worked`] is false either way.
+/// It is only the path where `PerformOperations` reports success that has to tell doing all of it
+/// apart from the user having stopped it.
 #[cfg(windows)]
-unsafe fn perform(job: &Job, owner: Owner, recorded: &Recorder) -> Option<String> {
+unsafe fn perform(
+    job: &Job,
+    owner: Owner,
+    recorded: &Recorder,
+    aborted: &mut bool,
+) -> Option<String> {
     use windows::core::{HSTRING, PCWSTR};
     use windows::Win32::Storage::FileSystem::FILE_ATTRIBUTE_DIRECTORY;
     use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
@@ -524,6 +553,13 @@ unsafe fn perform(job: &Job, owner: Owner, recorded: &Recorder) -> Option<String
     // Blocks on *this* thread while the shell shows its progress, asks about conflicts
     // and does the work.
     let outcome = op.PerformOperations();
+    // **The one call that can tell a finished operation from a stopped one.** `PerformOperations`
+    // answers `S_OK` for a job the user cancelled at the progress dialog or at a conflict prompt,
+    // and the cancel `HRESULT` it does sometimes give is turned into no message at all by
+    // [`friendly`] — deliberately, since the shell has already said it. So neither the result nor
+    // the error can be read as "it did all of it", and everything that needs to know asks this
+    // instead. See [`crate::shell::ops::Done::worked`] for the two bugs that came of guessing.
+    *aborted = op.GetAnyOperationsAborted().is_ok_and(|yes| yes.as_bool());
     // Said explicitly rather than left to the drop. Releasing `op` releases the sink with it, so
     // nothing leaks either way — but the sink writes into a `Recorder` this thread is about to
     // read, and "the shell has stopped calling it" is worth being a statement rather than a

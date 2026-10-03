@@ -789,9 +789,10 @@ fn outcome_of(job: Job) -> Outcome {
 
 #[cfg(all(test, windows))]
 fn finish(job: Job) -> (Option<String>, Outcome) {
-    std::thread::spawn(move || super::run(&job, Owner::default()))
+    let ran = std::thread::spawn(move || super::run(&job, Owner::default()))
         .join()
-        .expect("the operation thread panicked")
+        .expect("the operation thread panicked");
+    (ran.error, ran.outcome)
 }
 
 /// What the shell actually puts on screen, and for which operation.
@@ -851,7 +852,7 @@ fn what_the_shell_puts_on_screen() {
         ),
     ] {
         let before = windows_of_this_process();
-        let handle = std::thread::spawn(move || super::run(&job, Owner::default()).0);
+        let handle = std::thread::spawn(move || super::run(&job, Owner::default()).error);
 
         // Watch for anything new for a couple of seconds, then shut it.
         let mut seen: Vec<(String, String)> = Vec::new();
@@ -890,7 +891,7 @@ fn run_watching(job: Job) -> (Option<String>, Vec<(String, String)>) {
     use std::time::{Duration, Instant};
 
     let before = windows_of_this_process();
-    let handle = std::thread::spawn(move || super::run(&job, Owner::default()).0);
+    let handle = std::thread::spawn(move || super::run(&job, Owner::default()).error);
     let mut seen: Vec<(String, String)> = Vec::new();
     // Watched for a while before anything is closed. A shell operation raises a progress
     // window of its own accord and finishes behind it; closing that on sight cancels work

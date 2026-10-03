@@ -301,6 +301,15 @@ unsafe fn name_of(
     which: windows::Win32::UI::Shell::SIGDN,
 ) -> Option<PathBuf> {
     let wide = item.GetDisplayName(which).ok()?;
+    // An `S_OK` with nothing at the pointer, which is the one shape of answer that takes the process
+    // with it: `to_string` is `wcslen` on whatever it is handed and there is no check inside it. Not
+    // a theory here — `crate::windows::ops::landed` carries the stack from a real crash of exactly
+    // this, faulting in `ucrtbase!wcslen` on a replace over a network share, and [`read_string`] ten
+    // lines below has guarded it since. This is the one call the lesson had not reached, and it runs
+    // once or twice per item on every restore out of the Recycle Bin.
+    if wide.is_null() {
+        return None;
+    }
     let text = wide.to_string().ok();
     windows::Win32::System::Com::CoTaskMemFree(Some(wide.0 as *const std::ffi::c_void));
     text.map(PathBuf::from)

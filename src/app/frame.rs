@@ -130,7 +130,7 @@ impl App {
         // high-water mark until the window closes.
         self.loader.sweep();
         self.clipboard_has_files = crate::shell::clipboard::has_files();
-        self.collect_operations();
+        self.collect_operations(now);
         // Registered on the window rather than at startup, because the handle does not
         // exist until the platform has made one.
         self.drops.attach(self.owner, &ctx);
@@ -457,6 +457,15 @@ impl App {
             if response.dragged() {
                 self.sidebar_width =
                     (self.sidebar_width + response.drag_delta().x).clamp(140.0, 520.0);
+            }
+            // **On the way out, not on every frame of the drag.** Which is what
+            // `crate::app::perform::apply` says it does, and it did not: `dragged()` is true for
+            // every frame the button is held, including the ones with no pointer movement, so
+            // holding the grip still for five seconds rewrote `config.ini` about three hundred
+            // times — each one a truncate on the UI thread. Worse, the text is identical on those
+            // frames, so the `.bak` was skipped every time, leaving the one backup of the file
+            // being repeatedly truncated with nothing behind it.
+            if response.drag_stopped() {
                 self.config_dirty = true;
             }
             // Double-clicking a splitter puts it back where it started, which is the same gesture

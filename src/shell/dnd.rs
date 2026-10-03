@@ -792,24 +792,53 @@ pub fn default_effect(source: Option<&std::path::Path>, target: &std::path::Path
 /// Only the *default* is decided here. `Shift` still asks for a move and still gets one, if
 /// the source allows one.
 pub fn under_temp(path: &std::path::Path) -> bool {
-    use std::path::{Path, PathBuf};
+    Temp::current().is_some_and(|temp| temp.holds(path))
+}
 
-    let temp = temp_root();
-    if temp.as_os_str().is_empty() {
-        return false;
+/// `%TEMP%` in both the forms a path can arrive in, worked out once.
+///
+/// Split out of [`under_temp`] so that [`claim`] can ask the question of *every* item it was
+/// handed without paying for the resolution below once per item — the directory's own resolved
+/// form is the same for all of them, and it is only the per-item `canonicalize` that is
+/// unavoidable.
+struct Temp {
+    /// The directory itself, case-folded.
+    folded: PathBuf,
+    /// And with every link and 8.3 name resolved. `None` when it does not resolve, which makes
+    /// [`Self::holds`] answer from the cheap test alone rather than answer `true`.
+    resolved: Option<PathBuf>,
+}
+
+impl Temp {
+    /// `None` when there is no temporary directory to compare against — which makes every
+    /// answer `false` rather than every answer `true`.
+    fn current() -> Option<Self> {
+        let temp = temp_root();
+        if temp.as_os_str().is_empty() {
+            return None;
+        }
+        Some(Self {
+            folded: folded(&temp),
+            // `%TEMP%` is an 8.3 short path on some machines while `CF_HDROP` carries the long
+            // form. They are the same directory and only resolving both shows it.
+            resolved: std::fs::canonicalize(&temp).ok().map(|temp| folded(&temp)),
+        })
     }
-    // Case-folded, because `starts_with` is not; and still component-wise through it, so
-    // `C:\Temporary` is not taken for something inside `C:\Temp`.
-    let fold = |path: &Path| PathBuf::from(path.to_string_lossy().to_lowercase());
-    if fold(path).starts_with(fold(&temp)) {
-        return true;
-    }
-    // `%TEMP%` is an 8.3 short path on some machines while `CF_HDROP` carries the long form.
-    // They are the same directory and only resolving both shows it. Worth a pair of syscalls
-    // because this runs once per drag, on `DragEnter`, and not once per mouse move.
-    match (std::fs::canonicalize(path), std::fs::canonicalize(&temp)) {
-        (Ok(path), Ok(temp)) => fold(&path).starts_with(fold(&temp)),
-        _ => false,
+
+    /// Whether `path` is inside it.
+    fn holds(&self, path: &std::path::Path) -> bool {
+        // Case-folded and component-wise, through [`folded`], so `C:\Temporary` is not taken for
+        // something inside `C:\Temp`.
+        if folded(path).starts_with(&self.folded) {
+            return true;
+        }
+        // Only now, and only for this one path: the syscall is worth it because a drag whose
+        // `%TEMP%` is a short path fails the test above for every item, and calling that a drag
+        // of the user's own files is the mistake this exists to stop.
+        let Some(resolved) = self.resolved.as_ref() else {
+            return false;
+        };
+        std::fs::canonicalize(path).is_ok_and(|path| folded(&path).starts_with(resolved))
     }
 }
 
@@ -877,8 +906,23 @@ const STAGING: &str = "yafe-drop-";
 /// Non-temporary items are returned untouched — the same rename applied to a drag from
 /// Explorer would move the user's actual files into a scratch folder. That is the whole reason
 /// the test is narrow.
+///
+/// **And the test is per item, not per drop.** It was the first item's answer applied to all of
+/// them, on the grounds that no source offers files from two places at once. Explorer does: a
+/// drag out of a search result, or out of Recent files, is one `CF_HDROP` spanning as many folders
+/// as it matched. Searching `C:\` for a name that a program also has open — the autosave in
+/// `%TEMP%` sorting above the real one in `Documents` — and dragging both here staged the pair,
+/// which moved `Documents\report.docx` out of `Documents`, and then [`crate::shell::ops::Scratch`]
+/// removed the staging directory when the copy was done. A copy the user asked for became a move,
+/// and a copy that failed or was cancelled took the only remaining name for the file with it.
 pub(crate) fn claim(items: Vec<PathBuf>) -> Vec<PathBuf> {
-    if !items.first().is_some_and(|first| under_temp(first)) {
+    let Some(temp) = Temp::current() else {
+        return items;
+    };
+    // Asked once per item and kept, rather than asked again inside the map below: the answer can
+    // cost a `canonicalize` and it cannot change under us in a way that would help.
+    let materialised: Vec<bool> = items.iter().map(|item| temp.holds(item)).collect();
+    if !materialised.iter().any(|&temporary| temporary) {
         return items;
     }
     let Some(staging) = staging() else {
@@ -886,8 +930,15 @@ pub(crate) fn claim(items: Vec<PathBuf>) -> Vec<PathBuf> {
     };
     let claimed: Vec<PathBuf> = items
         .into_iter()
+        .zip(materialised)
         .enumerate()
-        .map(|(index, item)| claim_one(&staging, index, item))
+        .map(|(index, (item, temporary))| {
+            if temporary {
+                claim_one(&staging, index, item)
+            } else {
+                item
+            }
+        })
         .collect();
     // A claim that got nothing leaves an empty directory in `%TEMP%` that nothing will ever come
     // back for: the job only takes one with it when its items are *in* it — see
@@ -1091,9 +1142,19 @@ pub fn sweep() {
 ///
 /// A handle that opens means yes, and a recycled id means yes as well — both answers keep the
 /// directory, which is the harmless mistake to make. Only an id nothing answers to gets swept.
+///
+/// **Which is why a failure to open is not an answer of "no".** `OpenProcess` says
+/// `ERROR_INVALID_PARAMETER` for an id that belongs to nothing, and that one alone means the
+/// process is gone. `ERROR_ACCESS_DENIED` means the opposite: there *is* a process and it is out of
+/// this one's reach — another instance running elevated, which is a thing a user does to get at a
+/// protected folder. Reading that as dead let the plain instance's startup sweep `remove_dir_all`
+/// the elevated one's staging directory, which is the exact failure the whole claim exists to
+/// prevent: a copy running out of a folder somebody else deletes underneath it. So anything that is
+/// not a positive "no such process" keeps the directory, and the worst that costs is a folder in
+/// `%TEMP%` until the next launch.
 #[cfg(windows)]
 fn running(pid: u32) -> bool {
-    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER};
     use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
 
     // SAFETY: a query for a handle that is closed again immediately.
@@ -1103,7 +1164,7 @@ fn running(pid: u32) -> bool {
                 let _ = CloseHandle(handle);
                 true
             }
-            Err(_) => false,
+            Err(why) => why.code() != ERROR_INVALID_PARAMETER.to_hresult(),
         }
     }
 }
@@ -1345,6 +1406,49 @@ mod tests {
             std::fs::read_dir(&temp).unwrap().count(),
             0,
             "a staging directory was made for a drop that had nothing to claim"
+        );
+    }
+
+    /// **One drop carrying a source's temporary *and* one of the user's own files.**
+    ///
+    /// The test above is the same claim with nothing in `%TEMP%`, and it passed throughout: the
+    /// decision was the *first* item's, applied to all of them, so a drop that began with a
+    /// materialisation staged everything behind it as well. That is not a hypothetical shape of
+    /// drop — Explorer's search results are one `CF_HDROP` spanning every folder that matched, so
+    /// searching `C:\` for a name a program also has open and dragging both here is exactly this
+    /// list. The user's file was renamed out of its folder, the copy ran from the staging
+    /// directory, and `crate::shell::ops::Scratch` then deleted that directory: a copy became a
+    /// move, and a copy that failed took the file's only remaining name with it.
+    #[test]
+    fn a_drop_mixing_a_temporary_with_the_user_s_own_files_claims_only_the_temporary() {
+        let (temp, _temp) = sandboxed_temp("claim-a-mixed-drop");
+
+        let extracted = temp.join("7zE436F3BDA");
+        std::fs::create_dir_all(&extracted).unwrap();
+        let autosave = extracted.join("report.docx");
+        std::fs::write(&autosave, b"autosave").unwrap();
+
+        let documents = temp.with_file_name("documents");
+        std::fs::create_dir_all(&documents).unwrap();
+        let theirs = documents.join("report.docx");
+        std::fs::write(&theirs, b"theirs").unwrap();
+
+        // The materialisation first, which is the order that used to decide it for both.
+        let claimed = claim(vec![autosave.clone(), theirs.clone()]);
+
+        assert_eq!(claimed.len(), 2);
+        assert!(
+            claimed[0].parent().is_some_and(is_staging),
+            "the source's own temporary was left with the source, at {}",
+            claimed[0].display()
+        );
+        assert_eq!(
+            claimed[1], theirs,
+            "the user's file was staged, so the copy became a move"
+        );
+        assert!(
+            theirs.exists() && std::fs::read_to_string(&theirs).unwrap() == "theirs",
+            "the user's file was moved out of its own folder"
         );
     }
 

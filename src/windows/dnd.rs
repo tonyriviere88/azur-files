@@ -273,8 +273,13 @@ struct Incoming {
     /// above.
     items: Vec<PathBuf>,
     /// Whether those paths are a temporary the source is going to take back — see
-    /// [`super::under_temp`]. Decided from the first path: a data object carrying files
-    /// from two places at once is not a thing any source produces.
+    /// [`super::under_temp`].
+    ///
+    /// True if *any* of them is. A data object carrying files from two places at once is not
+    /// something an archiver produces, but Explorer does: a drag out of a search result spans
+    /// every folder it matched. Deciding this from the first path alone would offer such a drag
+    /// as a move, and a move reported to a source is an instruction to delete what it handed
+    /// over. `any` errs towards a copy, which is the answer that destroys nothing.
     temporary: bool,
     /// Whether *every* one of them is a folder, which is what decides whether the sidebar will
     /// take this drag at all — see [`super::refuses`].
@@ -287,7 +292,7 @@ struct Incoming {
 impl Incoming {
     fn read(data: Option<&IDataObject>) -> Self {
         let items = data.and_then(paths_of).unwrap_or_default();
-        let temporary = items.first().is_some_and(|first| super::under_temp(first));
+        let temporary = items.iter().any(|item| super::under_temp(item));
         let all_folders = items.iter().all(|item| item.is_dir());
         Self {
             items,

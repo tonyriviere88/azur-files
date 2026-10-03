@@ -397,6 +397,63 @@ fn output_with_no_newline_on_it_does_not_swallow_the_sentinel() {
     assert_eq!(shown(&session), vec!["a".to_owned()], "and kept the output");
 }
 
+/// A program that never ends a line has its line ended for it, and the sentinel still closes the block.
+///
+/// `cat` of a file with no line endings in it, or one long JSON document: nothing capped how much a
+/// partial line could hold, so it grew by every read for as long as the command ran and the panel became
+/// the reason this process ran out of memory. The half that must survive the fix is the close — the
+/// sentinel arrives stuck to the end of whatever line was open, so a cap that *dropped* the excess would
+/// eventually drop the sentinel and leave a block saying "running" for ever.
+#[test]
+fn a_line_that_never_ends_is_broken_rather_than_held_for_ever() {
+    let mut session = offline();
+    session.dispatch_with(None, "cat one-long-line.json".to_owned());
+    let id = session.blocks[0].id;
+    for _ in 0..3 {
+        session.absorb(&"x".repeat(CHUNK), false);
+    }
+    let lines = shown(&session);
+    assert_eq!(lines.len(), 3, "the partial line was never broken");
+    assert!(
+        lines.iter().all(|line| line.len() == LINE_CAP),
+        "broken somewhere other than the cap: {:?}",
+        lines.iter().map(String::len).collect::<Vec<_>>()
+    );
+
+    // And the tail of it, with the sentinel behind it on the same line.
+    session.absorb(&format!("tail[AZUR:{id}:0:D:/x]\n"), false);
+    assert_eq!(
+        session.blocks.last().expect("a block").code,
+        Some(0),
+        "the block never closed"
+    );
+    assert_eq!(shown(&session).last().map(String::as_str), Some("tail"));
+}
+
+/// A line carrying the marker thousands of times is thousands of lines, not thousands of stack frames.
+///
+/// [`split_sentinel`] finds the *last* marker in a line, so splitting the front off and handing it back
+/// to [`Session::line`] recursed once per marker — on the UI thread, with nothing bounding how long a
+/// line could be. That is a stack overflow, which is not a panic anybody can catch and takes the window
+/// with it. The count here is well past what a 1 MB stack holds at a frame apiece.
+#[test]
+fn a_line_full_of_markers_does_not_recurse() {
+    let mut session = offline();
+    session.dispatch_with(None, "printf x".to_owned());
+    let id = session.blocks[0].id;
+    let mut line = "printed".to_owned();
+    for _ in 0..20_000 {
+        line.push_str(&format!("[AZUR:{id}:0:D:/x]"));
+    }
+    session.line(line, false, false);
+    assert_eq!(shown(&session), vec!["printed".to_owned()]);
+    assert_eq!(
+        session.blocks.last().expect("a block").code,
+        Some(0),
+        "the sentinels went unread"
+    );
+}
+
 /// The OEM code page on the same pipe as UTF-8, which is every `net use` on a French machine.
 ///
 /// **The regression is the hang, not the accents.** `\x82` is a continuation byte, so it can never
@@ -554,6 +611,19 @@ fn a_command_that_would_swallow_the_closing_statement_does_not_get_the_chance() 
     // and the closing statement runs straight after it, on the same line, with no `;` in between.
     assert!(!Kind::Bash.needs_its_own_line("sleep 5 &"));
     assert_eq!(Kind::Bash.joiner("sleep 5 &"), " ", "a second separator is a syntax error");
+
+    // **The `rem` test used to be `text[..3]`, and byte 3 is not always a character boundary.** `ab°`
+    // is four bytes with the third of them inside the `°`, so typing it with `cmd` selected panicked
+    // in the middle of deciding how to send it. Every one of these is a command somebody can type.
+    for command in ["ab°", "é", "°°°", "剖", "cd ..", ""] {
+        assert!(
+            !Kind::Cmd.needs_its_own_line(command),
+            "{command:?} is not a comment"
+        );
+    }
+    // And it still means what it meant for anything ASCII, in either case.
+    assert!(Kind::Cmd.needs_its_own_line("REM off"));
+    assert!(Kind::Cmd.needs_its_own_line("rem"));
 }
 
 /// Typing at a running command, which is the whole point of the line above.

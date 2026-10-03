@@ -1092,9 +1092,15 @@ fn a_rebuilt_order_does_not_owe_itself_a_second_rebuild() {
 /// **This is the one way this feature could put a real number on the wrong file.** A total names a
 /// *row*, and a row is an index into the listing that was on screen when it was asked for — so after
 /// an `F5`, a file operation, or [`crate::watch`] noticing a write, entry 40 is very likely a
-/// different file. The generation is what makes that impossible, and it is deliberately not
-/// [`Tab::view`]: a view survives a re-read of its own folder, which is exactly the case that has to
-/// be told apart.
+/// different file. The generation is what makes that impossible.
+///
+/// It is a key of its own rather than [`Tab::view`] because the two answer different questions, and
+/// the shape of that has changed since this was written: a view used to survive a re-read of its own
+/// folder, and the assertion at the end of this test was the proof. It no longer does — the per-file
+/// icons are keyed on the view and were landing on the wrong row for exactly that reason — so what
+/// separates them now is the other direction. The measurement takes a new generation when the button
+/// is turned off and on, when a folder is forgotten, and when a tab is duplicated, none of which
+/// replaces a listing. Both ends are asserted below.
 #[test]
 fn a_re_read_will_not_take_an_answer_meant_for_the_listing_it_replaced() {
     use crate::fs::dir::{DirBuilder, FLAG_DIR};
@@ -1130,12 +1136,35 @@ fn a_re_read_will_not_take_an_answer_meant_for_the_listing_it_replaced() {
         None,
         "a total from the previous listing survived the read that replaced it"
     );
-    // The view is *not* what tells the two listings apart, which is why the generation exists.
+    // **The generation is not the view, and it is still not the view now that both move here.**
+    //
+    // `Tab::view` used to survive a re-read, and this assertion was the other half of that: proof
+    // that the measurement needed a key of its own because the view could not tell two listings of
+    // one folder apart. It now takes a fresh value on every `apply`, because the icons are keyed on
+    // it and they had the very bug this test is about — an answer for entry 412 landing on whatever
+    // entry 412 had become. See the note in `Tab::apply`.
+    //
+    // So what is left of the distinction is the direction that was always the real one: the
+    // measurement changes generation for reasons that are *not* a new listing — the button being
+    // turned off and on again, a `forget`, a tab being duplicated — and none of those replace the
+    // listing or touch the view. Two keys, still, for two different questions.
     let view = tab.view;
+    let gen = tab.sizes.gen();
     tab.apply(listing(&["aaa", "one", "two"]));
+    assert_ne!(
+        tab.view, view,
+        "a re-read has to be a new view, or an icon answered for the listing it replaced lands on \
+         the wrong row of this one"
+    );
+    assert_ne!(tab.sizes.gen(), gen, "and a new measurement with it");
+
+    // The other direction: the measurement's own generation moves where the view does not.
+    let view = tab.view;
+    tab.set_sizes(false);
+    tab.set_sizes(true);
     assert_eq!(
         tab.view, view,
-        "a re-read is the same view of the same folder"
+        "turning the measurement off and on is not a new listing"
     );
 }
 

@@ -72,6 +72,26 @@ const BLOCKS: usize = 200;
 /// How much text one read hands over. 8 KiB is a pipe buffer's worth.
 const CHUNK: usize = 8 << 10;
 
+/// How long one line may get before it is broken in two.
+///
+/// [`LINES`] caps how many lines a block keeps and nothing capped how long one of them could be, which
+/// left the same hole one level down: a program that writes without ever ending a line — `cat` of a
+/// file with no line endings, one long JSON document, a tool drawing its own progress with neither
+/// `\n` nor `\r` — grew [`Session::partial`] by every read for as long as it ran, until this process
+/// was the reason the machine ran out of memory.
+///
+/// **Broken and not dropped**, which is the part that matters: the sentinel that closes a block arrives
+/// on the end of whatever line was open when the command finished, so a cap that threw the excess away
+/// would eventually throw away the sentinel — and a block that never closes is the failure this whole
+/// file is arranged to prevent. A forced break is also what a terminal does with a line longer than its
+/// window, and it keeps every byte.
+///
+/// One pipe read's worth ([`CHUNK`]) — longer than any line anybody reads, and small enough that the
+/// number it really decides stays reasonable: a block can hold [`LINES`] of these, so this is what puts
+/// a ceiling of 40 MB on one runaway command. Only one [`Piece::Part`] can arrive per read, so a broken
+/// line is at most a chunk over the cap.
+const LINE_CAP: usize = CHUNK;
+
 /// Which of the two slots in [`Session::partial`] and [`Session::redrawing`] is standard error.
 ///
 /// `usize::from(err)` is how [`Session::absorb`] picks between them, so this is `usize::from(true)`
@@ -208,7 +228,15 @@ impl Kind {
             // lines for no reason, which costs it nothing — it is not a command anybody types at.
             Kind::Bash | Kind::PowerShell => text.contains('#'),
             // `rem` is `cmd`'s comment and swallows the `&` as well.
-            Kind::Cmd => text.len() >= 3 && text[..3].eq_ignore_ascii_case("rem"),
+            //
+            // Compared as **bytes**, because `text[..3]` panics when byte 3 falls inside a character:
+            // `ab°` is four bytes and the third of them is half of the `°`, so typing that into the
+            // console with `cmd` selected took the window out. The answer is the same for anything
+            // ASCII — if the first three bytes *are* `rem` then byte 3 is a boundary anyway.
+            Kind::Cmd => text
+                .as_bytes()
+                .get(..3)
+                .is_some_and(|head| head.eq_ignore_ascii_case(b"rem")),
         }
     }
 
@@ -665,8 +693,16 @@ impl Session {
             let (rest, redraw) = match piece {
                 // No line ending yet: hold it and leave the redraw flag where it is, so a partial
                 // arriving after a `carriage return` still overwrites when it is finally completed.
+                //
+                // Unless it has grown past [`LINE_CAP`], in which case it is ended here as though a
+                // newline had arrived — the flag going with it, exactly as it would have.
                 Piece::Part(part) => {
                     self.partial[slot].push_str(part);
+                    if self.partial[slot].len() >= LINE_CAP {
+                        let line = std::mem::take(&mut self.partial[slot]);
+                        let over = std::mem::replace(&mut self.redrawing[slot], false);
+                        self.line(line, err, over);
+                    }
                     continue;
                 }
                 Piece::Line(rest) => (rest, false),
@@ -692,15 +728,45 @@ impl Session {
             return;
         }
         // Output with the sentinel stuck to the end of it, because the command's last line had no
-        // newline on it. Split into the two lines it should have been and handled as such.
+        // newline on it. Split into the lines it should have been and handled as such.
+        //
+        // **Iteratively, and that is a fix rather than a preference.** This used to hand the front of
+        // the line back to itself, which is one stack frame per marker in it — and [`split_sentinel`]
+        // takes the *last* marker, so a line carrying it a thousand times recursed a thousand deep on
+        // the UI thread. With nothing capping how long a line could get (see [`LINE_CAP`], which now
+        // does) that was a stack overflow, and a stack overflow is not a panic anybody can catch.
+        //
+        // The cuts come out right to left, which is the order they are found in, and are then walked
+        // left to right, which is the order the lines were printed in. The echo check above is over
+        // the whole line and is not repeated per piece: an echo is a line `cmd` read back to us and it
+        // arrives with its own ending, so it is never one of these pieces.
         if !err {
-            if let Some((printed, _)) = split_sentinel(&line) {
-                let (printed, rest) = (printed.to_owned(), line[printed.len()..].to_owned());
-                self.line(printed, false, over);
-                self.line(rest, false, false);
+            let mut cuts: Vec<usize> = Vec::new();
+            let mut head = line.as_str();
+            while let Some((printed, _)) = split_sentinel(head) {
+                cuts.push(printed.len());
+                head = printed;
+            }
+            if !cuts.is_empty() {
+                let mut from = 0;
+                for to in cuts.iter().rev().copied().chain(std::iter::once(line.len())) {
+                    // Only the first of them can overwrite the block's last line. The rest are lines
+                    // that follow it, and a `\r` does not reach past the line it was on.
+                    self.one(line[from..to].to_owned(), false, over && from == 0);
+                    from = to;
+                }
                 return;
             }
         }
+        self.one(line, err, over);
+    }
+
+    /// One line with nothing stuck to the end of it: the sentinel handled if that is what it is, and
+    /// otherwise the line put in the open block.
+    ///
+    /// Split out from [`Session::line`] so that the splitting up there can be a loop over the pieces
+    /// rather than a call back into itself — see the note on it.
+    fn one(&mut self, line: String, err: bool, over: bool) {
         // Only stdout carries sentinels, and only for the block that is actually open.
         if !err {
             if let Some((id, code, cwd)) = sentinel(&line) {

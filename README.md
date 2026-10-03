@@ -5211,8 +5211,9 @@ about what you are doing right now. See [A console in a pane](#a-console-in-a-pa
 
 `flatten=list` or `flatten=tree` is which of the two views the flatten button produces, as a word for
 the same reason. The same kind of preference again — and *whether* a tab is flattened is not here,
-for the same reason its preview being open is not. A file without the line comes back as the list,
-which is what the button produced before there was a choice. See
+for the same reason its preview being open is not. A file without the line comes back as the **tree**,
+which is the default now; it was the list, on the grounds that the list is what the button produced
+before there was a choice, and that stopped being the right trade once the tree existed. See
 [Flattening a folder](#flattening-a-folder).
 
 `regroup=1` is whether a tree shows a chain of folders with nothing in them but each other as one row

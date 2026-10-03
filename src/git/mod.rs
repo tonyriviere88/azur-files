@@ -279,22 +279,45 @@ pub fn changes(file: &Path) -> Option<Changes> {
     // `--no-ext-diff` because a configured `diff.external` would answer in its own format, and
     // `--no-color` because a configured `color.diff` would answer in escape codes. Both are somebody
     // else's preference about reading a diff, and neither survives being parsed.
-    let out = finish_git(start_git(
-        dir,
-        &[
-            "--no-optional-locks",
-            "diff",
-            "HEAD",
-            "-U0",
-            "--no-color",
-            "--no-ext-diff",
-            "--ignore-submodules",
-            "--",
-            &file.to_string_lossy(),
-        ],
-    ))?;
+    //
+    // And read with a ceiling on it, because the file being bounded does not bound this — see
+    // [`DIFF_CAP`].
+    let out = finish_capped(
+        start_git(
+            dir,
+            &[
+                "--no-optional-locks",
+                "diff",
+                "HEAD",
+                "-U0",
+                "--no-color",
+                "--no-ext-diff",
+                "--ignore-submodules",
+                "--",
+                &file.to_string_lossy(),
+            ],
+        ),
+        DIFF_CAP,
+    )?;
     Some(parse_diff(&out))
 }
+
+/// How much of a diff is read.
+///
+/// **The body a preview shows is capped and the diff of it was not**, which is the same oversight in
+/// the other half of one feature. `git diff HEAD -U0` runs over the whole file whatever
+/// [`crate::preview::TEXT_CAP`] the panel read of it, the output was buffered entire by
+/// `wait_with_output`, `from_utf8_lossy` then had a second copy of it, and every removed line was kept
+/// after that as a `String` of its own. A 500 MB text file that a build regenerates is about a
+/// gigabyte of diff, so previewing one file could cost more memory than the whole of the rest of the
+/// window.
+///
+/// Four times the body's cap, and the arithmetic is the previewed megabyte's own worst case: a
+/// megabyte in which every line changed is that megabyte twice over — once as `-`, once as `+` — plus
+/// one `@@` header per changed run, and `-U0` makes every isolated line a run of its own. Four times
+/// leaves room for that and stops well short of trouble. Past it the diff is describing a part of the
+/// file the panel is not showing anyway.
+const DIFF_CAP: u64 = 4 * crate::preview::TEXT_CAP as u64;
 
 /// The file as it would be **on disk** at the last commit — not as the object database holds it.
 ///
@@ -396,7 +419,9 @@ fn parse_diff(out: &[u8]) -> Changes {
 /// `-a[,b] +c[,d] @@ …` into a hunk.
 fn parse_hunk(rest: &str) -> Option<Hunk> {
     let mut fields = rest.split(' ');
-    let (old_at, old_count) = span_of(fields.next()?.strip_prefix('-')?)?;
+    // The old side's count is parsed to check the field is a field and then thrown away — the removed
+    // lines that follow are what say how many there were.
+    let (old_at, _) = span_of(fields.next()?.strip_prefix('-')?)?;
     let (new_at, new_count) = span_of(fields.next()?.strip_prefix('+')?)?;
     Some(Hunk {
         added: new_at,
@@ -406,7 +431,11 @@ fn parse_hunk(rest: &str) -> Option<Hunk> {
         } else {
             new_at.saturating_sub(1)
         },
-        removed: Vec::with_capacity(old_count as usize),
+        // **Not `with_capacity(old_count)`**, which reserves whatever number the header happens to
+        // carry before a single line of the hunk has been read. `4000000000` in a header is ten
+        // characters and 96 GB of reservation, and there is nothing to gain by trusting it: the lines
+        // are pushed as they are parsed, so the vector grows to exactly what actually arrived.
+        removed: Vec::new(),
         removed_at: old_at,
     })
 }
@@ -718,6 +747,40 @@ fn finish_git(child: Option<std::process::Child>) -> Option<Vec<u8>> {
     out.status.success().then_some(out.stdout)
 }
 
+/// The same, for a command whose answer has no natural size: at most `cap` bytes of it, and the child
+/// ended rather than waited for once that is reached.
+///
+/// **Killed and not drained**, which is the whole point: a child whose pipe fills up stops writing and
+/// sits there, so reading the first `cap` bytes and then waiting for it to exit is a deadlock, and
+/// draining the rest to be polite is paying for the gigabyte this exists to refuse.
+///
+/// What comes back is then a *prefix* of a text format, cut back to the last complete line — because
+/// half an `@@` header parses as a different hunk rather than as no hunk at all. The exit status is
+/// only asked for when the pipe reached its own end: git's failure is what says `HEAD` has no such
+/// path, and a git this killed has failed for a reason of this program's own making.
+fn finish_capped(child: Option<std::process::Child>, cap: u64) -> Option<Vec<u8>> {
+    use std::io::Read as _;
+    let mut child = child?;
+    let mut out = Vec::new();
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    };
+    // One byte past the cap, so an answer that lands exactly on it is not read as "there was more".
+    let read = stdout.take(cap + 1).read_to_end(&mut out).is_ok();
+    if out.len() as u64 > cap {
+        out.truncate(cap as usize);
+        let whole = out.iter().rposition(|byte| *byte == b'\n');
+        out.truncate(whole.map_or(0, |at| at + 1));
+        let _ = child.kill();
+        let _ = child.wait();
+        return Some(out);
+    }
+    let status = child.wait().ok()?;
+    (read && status.success()).then_some(out)
+}
+
 /// Read `git status --porcelain=v2 --branch -z`.
 ///
 /// The format, one record per NUL-terminated string:
@@ -748,7 +811,13 @@ fn parse_status(out: &[u8], prefix: &str, repo: &mut Repo) {
             repo.changed += 1;
             continue;
         };
-        let (kind, rest) = record.split_at(1);
+        // `split_at_checked`, because `split_at(1)` panics on a record whose first character is more
+        // than one byte long. Every record git writes begins with an ASCII byte it chose itself, so
+        // this is a guard against a format nobody has seen rather than a fix for one — but a parser
+        // that can panic on the output of a program it does not control is not worth the argument.
+        let Some((kind, rest)) = record.split_at_checked(1) else {
+            continue;
+        };
         let rest = rest.trim_start_matches(' ');
         match kind {
             "#" => header(rest, repo),
@@ -819,7 +888,12 @@ fn header(rest: &str, repo: &mut Repo) {
         "branch.upstream" => repo.upstream = Some(value.to_owned()),
         "branch.ab" => {
             for part in value.split(' ') {
-                let (sign, count) = part.split_at(1);
+                // `split_at_checked` for the same reason as in [`parse_status`], and here the shape
+                // that would reach it is duller still: `split(' ')` over a value with two spaces in it
+                // hands back an empty part, and `split_at(1)` on an empty string is a panic.
+                let Some((sign, count)) = part.split_at_checked(1) else {
+                    continue;
+                };
                 let Ok(count) = count.parse::<u32>() else {
                     continue;
                 };

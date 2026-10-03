@@ -512,9 +512,12 @@ fn the_funnel_in_the_filter_box_opens_on_a_left_click_and_its_listings_take() {
     h.settle();
     let mut shown = shown_names(&h, 0);
     shown.sort();
+    // `shots` is in there because the flatten default is the **tree**, and a tree that showed
+    // `shots\b.jpg` without the folder holding it would not be one. The list mode was the default
+    // when this was written, and then the picture rows were the whole of it.
     assert_eq!(
         shown,
-        ["a.png", r"shots\b.jpg"],
+        ["a.png", "shots", r"shots\b.jpg"],
         "the listing is not the pictures under this folder"
     );
 
@@ -565,14 +568,17 @@ fn switching_flatten_modes_reorders_the_listing_it_already_has() {
     h.settle();
     assert_eq!(
         h.app.panes[0].tab().flat_mode,
-        FlatMode::List,
-        "the default is the list"
+        FlatMode::Tree,
+        "the default is the tree"
     );
 
     let listing = h.app.panes[0].tab().dir.clone().expect("the walk's answer");
-    let as_list = shown_names(&h, 0);
+    // The default's order, which is the tree's. It was the list's when this was written, and the
+    // switch below asked for the tree — so once the default moved, the test switched to the mode it
+    // was already in and asserted that the order had changed. It had not, because nothing had.
+    let as_tree = shown_names(&h, 0);
 
-    h.app.perform(&ctx, Action::SetFlatMode(FlatMode::Tree));
+    h.app.perform(&ctx, Action::SetFlatMode(FlatMode::List));
     h.frame(Vec::new());
     let after = h.app.panes[0].tab().dir.clone().expect("still a listing");
     assert!(
@@ -581,8 +587,8 @@ fn switching_flatten_modes_reorders_the_listing_it_already_has() {
     );
 
     // The same rows, differently arranged — which is the other half of "one listing".
-    let as_tree = shown_names(&h, 0);
-    assert_ne!(as_list, as_tree, "the order did not change");
+    let as_list = shown_names(&h, 0);
+    assert_ne!(as_tree, as_list, "the order did not change");
     let (mut sorted_list, mut sorted_tree) = (as_list.clone(), as_tree.clone());
     sorted_list.sort();
     sorted_tree.sort();

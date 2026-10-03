@@ -40,6 +40,13 @@ struct Watched {
     /// `u32` so the buffer is `DWORD`-aligned, which the API requires even though nothing
     /// here ever reads it.
     buffer: Box<[u32; 256]>,
+    /// Whether a read is in flight — so [`Drop`] knows whether there is a completion to wait for
+    /// before it frees the two boxes the kernel is writing into.
+    ///
+    /// Tracked rather than assumed because both answers are common: a folder that has been deleted
+    /// fails to re-arm and is dropped with nothing pending, and waiting on that would cost the
+    /// grace period below for nothing.
+    armed: bool,
 }
 
 impl Watched {
@@ -81,6 +88,7 @@ impl Watched {
             event,
             overlapped,
             buffer: Box::new([0u32; 256]),
+            armed: false,
         };
         watched.arm().then_some(watched)
     }
@@ -91,7 +99,7 @@ impl Watched {
         // SAFETY: the buffer and the `OVERLAPPED` are boxed, so their addresses stand still
         // until the read completes — which is what makes this sound at all. The kernel
         // writes into the buffer and nothing here reads it while the read is in flight.
-        unsafe {
+        self.armed = unsafe {
             ReadDirectoryChangesW(
                 self.dir,
                 self.buffer.as_mut().as_mut_ptr().cast(),
@@ -103,7 +111,10 @@ impl Watched {
                 None,
             )
             .is_ok()
-        }
+        };
+        // Recorded rather than returned alone, because [`Drop`] is the other reader of it: from here
+        // until the completion, the kernel owns the two boxes.
+        self.armed
     }
 
     /// Complete the read that just signalled, and ask for the next.
@@ -115,19 +126,81 @@ impl Watched {
         unsafe {
             let _ = GetOverlappedResult(self.dir, self.overlapped.as_ref(), &mut written, false);
         }
+        // That read is finished with the buffer, whatever it reported. The next one is not yet
+        // asked for.
+        self.armed = false;
         self.arm()
     }
 }
 
 impl std::ops::Drop for Watched {
+    /// **`CancelIoEx` asks; it does not finish.** The comment that used to be here said the cancel
+    /// came first "or the kernel would complete into a buffer this is about to free", which is the
+    /// right worry and was not what the code did: nothing waited for the completion, so the boxed
+    /// `OVERLAPPED` and its kilobyte of buffer were freed while a cancellation was still outstanding.
+    /// A driver that defers it then writes the `IO_STATUS_BLOCK` and up to a kilobyte of
+    /// `FILE_NOTIFY_INFORMATION` into heap this process has handed back and very likely reused.
+    ///
+    /// Usually it lands before `CancelIoEx` returns, which is why this never showed. **The case that
+    /// defers is the network redirector**, and this program watches shares — reached whenever a
+    /// watch is retired: the folder left the wanted set, the list overflowed, or the window is
+    /// closing.
+    ///
+    /// So the completion is waited for, and the wait is *bounded*. An unbounded one is the other
+    /// failure this file already knows about — see [`finished`], which leaks the wake event rather
+    /// than close it under a thread stuck in the redirector. The same trade is made here: if the
+    /// completion has not landed in time, the memory the kernel may still write into is **leaked**
+    /// rather than freed. A kilobyte per abandoned watch on a share that has stopped answering is a
+    /// far better outcome than a heap the kernel writes into afterwards, and it is bounded by
+    /// [`MAX_WATCHED`].
     fn drop(&mut self) {
-        // SAFETY: cancel the read *before* closing anything, or the kernel would complete
-        // into a buffer this is about to free.
-        unsafe {
+        if !self.armed {
+            // Nothing in flight — a folder that was deleted and failed to re-arm. Nothing to wait
+            // for, and nothing the kernel still holds.
+            // SAFETY: opened by `open` and not handed anywhere else.
+            unsafe {
+                let _ = CloseHandle(self.dir);
+                let _ = CloseHandle(self.event);
+            }
+            return;
+        }
+
+        /// Long enough for a cancellation to be noticed, short enough not to be a hang. A
+        /// cancelled read completes almost at once even across a redirector; this is the ceiling
+        /// on being wrong about that, and it is paid once per watch being retired.
+        const GRACE: u32 = 1_000;
+
+        // SAFETY: the read was issued by `arm` on this same handle and `OVERLAPPED`. The event is
+        // the one in that `OVERLAPPED`, so it signals when the read completes however it completes
+        // — including with `ERROR_OPERATION_ABORTED`, which is the answer being waited for.
+        let completed = unsafe {
+            use windows::Win32::System::Threading::WaitForSingleObject;
+
             let _ = CancelIoEx(self.dir, Some(self.overlapped.as_ref()));
-            let _ = CloseHandle(self.dir);
-            let _ = CloseHandle(self.event);
+            WaitForSingleObject(self.event, GRACE) == WAIT_OBJECT_0
         };
+        if completed {
+            // The kernel is done with both boxes; they drop with the struct as usual.
+            // SAFETY: no I/O outstanding on either handle now.
+            unsafe {
+                let _ = CloseHandle(self.dir);
+                let _ = CloseHandle(self.event);
+            }
+            return;
+        }
+
+        // Still outstanding. The directory handle is closed anyway — that is what stops the watch,
+        // and a completion arriving afterwards writes only into what is leaked below. The *event*
+        // is left open with them, because the kernel may still signal it.
+        // SAFETY: closing a handle with I/O pending is allowed; it completes the read as aborted.
+        unsafe {
+            let _ = CloseHandle(self.dir);
+        }
+        let _ = Box::leak(std::mem::replace(
+            &mut self.overlapped,
+            Box::new(OVERLAPPED::default()),
+        ));
+        let _ = Box::leak(std::mem::replace(&mut self.buffer, Box::new([0u32; 256])));
     }
 }
 

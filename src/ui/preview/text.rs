@@ -323,12 +323,23 @@ pub(super) fn text_canvas(
             // next-match arrow is a view you cannot read while you step through it. A hit already on
             // screen does not move the text at all.
             if find.reveal {
-                if let Some(hit) = find.hits.get(find.at) {
+                // **Counted over `body` and not over the file**, because that is the string the
+                // search ran over — see [`Text::shown`], which hands the find bar the diff's own body
+                // whenever a diff is up. That body is *longer* than the file wherever a hunk took a
+                // line away, since [`super::diff`] puts the removed lines back into it: a hit in the
+                // last third of a diffed file is therefore a byte index past the end of the file, and
+                // slicing the file with it panicked with "byte index out of bounds" — or with "not a
+                // char boundary" as soon as anything above the hit was not ASCII.
+                //
+                // `get` rather than a slice, and no scroll at all when it answers `None`: a byte
+                // index that came from another string must not be able to panic the panel, whatever
+                // else goes out of step upstream.
+                if let Some(front) = find.hits.get(find.at).and_then(|hit| body.get(..hit.start)) {
                     // A `CCursor` counts characters and a hit is a range of bytes, because a layout
                     // section is a range of bytes. Counted here rather than carried: it is one pass
                     // over the front of the file when the current hit changes, against a second
                     // vector the length of the hits on every keystroke.
-                    let chars = text.body[..hit.start].chars().count();
+                    let chars = front.chars().count();
                     let at = galley.pos_from_cursor(egui::text::CCursor::new(chars));
                     let mut want = at.translate(shown.rect.min.to_vec2());
                     // **Grown upwards by the height of the bar**, because the bar is floating over

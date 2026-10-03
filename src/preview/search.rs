@@ -39,12 +39,27 @@ pub const HITS: usize = 4096;
 /// timeout. A megabyte is far above any pattern typed into a find bar and far below trouble.
 const PATTERN_LIMIT: usize = 1 << 20;
 
+/// How many character comparisons a literal search may spend before it stops looking.
+///
+/// The other half of [`PATTERN_LIMIT`]'s argument, for the path that is not the engine's. [`literal`]
+/// compares the needle against the body at every position of the body, so its cost is the **product**
+/// of the two — and while a needle is normally a word, nothing stops one being pasted in: a
+/// thousand-character needle over a one-megabyte minified line is 10^9 comparisons, on the UI thread,
+/// on every keystroke.
+///
+/// Ten million, which an ordinary search does not come near however long the needle is: a needle that
+/// fails on its own first character costs one comparison per position, so a full
+/// [`crate::preview::TEXT_CAP`] body is about a million of them whatever is being looked for. Reaching
+/// this takes a body that nearly matches nearly everywhere, and what comes back then is the hits found
+/// so far, marked as the floor they are — the same way [`HITS`] marks its own.
+const COMPARES: usize = 10_000_000;
+
 /// Where a search matched.
 #[derive(Default)]
 pub struct Hits {
     /// Byte ranges into the body, in the order they occur. Never overlapping, never empty.
     pub at: Vec<std::ops::Range<usize>>,
-    /// Stopped at [`HITS`], so `at.len()` is a floor and not a count.
+    /// Stopped at [`HITS`], or at [`COMPARES`] — either way `at.len()` is a floor and not a count.
     pub capped: bool,
     /// The pattern is not a pattern. Only reachable with [`Search::regex`] on.
     pub bad: bool,
@@ -115,11 +130,20 @@ fn literal(body: &str, search: &Search, found: &mut Hits) {
     // not two overlapping ones. A find bar steps through matches, and two that share a character
     // are not two places to go.
     let mut next = 0;
+    // What the walk has spent, counted rather than bounded by the needle's length — see [`COMPARES`].
+    // Charged per comparison actually made, because charging the needle's length per position would
+    // stop a long needle a few thousand characters into the body and answer "no results" about the
+    // rest of it, which is a wrong answer rather than a slow one.
+    let mut spent = 0usize;
     for (at, _) in body.char_indices() {
         if at < next {
             continue;
         }
-        let Some(end) = ends_at(body, at, &needle, search.case) else {
+        if spent > COMPARES {
+            found.capped = true;
+            return;
+        }
+        let Some(end) = ends_at(body, at, &needle, search.case, &mut spent) else {
             continue;
         };
         if search.word && !whole_word(body, at, end) {
@@ -135,11 +159,15 @@ fn literal(body: &str, search: &Search, found: &mut Hits) {
 }
 
 /// Where the needle ends if it starts at `at`, or `None` if it does not.
-fn ends_at(body: &str, at: usize, needle: &[char], case: bool) -> Option<usize> {
+///
+/// `spent` counts what this cost, so the walk above can stop before the product of two unbounded
+/// numbers does — see [`COMPARES`].
+fn ends_at(body: &str, at: usize, needle: &[char], case: bool, spent: &mut usize) -> Option<usize> {
     let mut chars = body[at..].char_indices();
     let mut end = at;
     for &want in needle {
         let (offset, c) = chars.next()?;
+        *spent += 1;
         if fold(c, case) != want {
             return None;
         }

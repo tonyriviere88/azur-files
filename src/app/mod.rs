@@ -322,6 +322,12 @@ pub struct App {
     /// Settings worth writing back, and whether they have changed.
     config: Config,
     config_dirty: bool,
+    /// When the settings were last written, so a gesture that marks them dirty on every frame
+    /// costs one write rather than one per frame. See [`Self::apply`].
+    config_saved_at: f64,
+    /// When the cut list was last checked against the disk, for the same reason: `exists()` is a
+    /// syscall per item. See [`Self::collect_operations`].
+    cut_checked_at: f64,
 
     /// Keeps frames coming while the window is being resized, rescaled or restored.
     settling: Settling,
@@ -488,7 +494,7 @@ impl App {
             watch: crate::watch::Watch::new(ctx),
             crumbs: CrumbMenu::default(),
             complete: PathComplete::default(),
-            icons: crate::shell::icons::Icons::new(),
+            icons: crate::shell::icons::Icons::new(ctx),
             thumbs: crate::shell::thumbs::Thumbs::new(ctx),
             links: crate::shell::links::Links::new(ctx),
             sizes: crate::sizes::Sizes::new(ctx),
@@ -548,6 +554,8 @@ impl App {
             pane_order: vec![first],
             config,
             config_dirty: false,
+            config_saved_at: f64::NEG_INFINITY,
+            cut_checked_at: f64::NEG_INFINITY,
             settling: Settling::default(),
             walk: None,
             scrolling: Scrolling::default(),
@@ -566,6 +574,36 @@ impl App {
     /// The colour eframe clears the window to, so a resize does not flash.
     pub fn clear_color(&self) -> [f32; 4] {
         self.theme.bg.canvas.to_normalized_gamma_f32()
+    }
+
+    /// Write the settings out, but only if *this window* has changed any of them.
+    ///
+    /// **Because a second window is not a second copy of the settings.** They are written whole, so
+    /// a save is this window's entire idea of them replacing whatever is on disk — including the
+    /// parts another window put there. Open one window in the morning, add a bookmark in a second
+    /// one during the day, and closing the first wrote its morning state back over the new bookmark:
+    /// the exit save ran unconditionally, whether or not the window closing had touched anything.
+    /// One `.bak` deep is not a fix for that.
+    ///
+    /// So the test is what this window last persisted, held on [`Self::config`] — set when the file
+    /// was read at startup and again on every save. Comparing the *text* rather than the fields
+    /// covers every setting at once, including the ones that reach the file through an encoding of
+    /// their own, and cannot be forgotten by a field added later. A window that has genuinely
+    /// changed something still writes all of it; this makes the untouched window stop overwriting.
+    ///
+    /// It does not make two windows *merge* — the one that changed something still wins for
+    /// everything. That needs re-reading the file and reconciling it, which is a bigger decision
+    /// than a guard.
+    pub fn save_settings(&mut self) {
+        let settings = self.settings();
+        // Nothing this window would write differs from what it already wrote. Which also quietly
+        // removes the no-op saves a gesture can ask for — a splitter dragged back to where it
+        // started marks the settings dirty and has changed nothing.
+        if settings.to_text() == self.config.to_text() {
+            return;
+        }
+        self.config = settings;
+        self.config.save();
     }
 
     /// Settings to write back on the way out.

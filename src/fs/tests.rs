@@ -275,3 +275,66 @@ fn resolve_understands_this_pc_and_bare_drives() {
         Some(Typed::Folder(PathBuf::from("C:\\")))
     );
 }
+
+/// **The names a rename box has to refuse, and the one it must not.**
+///
+/// The separator is the reason this exists: the field had no validation whatsoever, so `F2` and
+/// `..\report.txt` handed the shell a path where it wanted a name. Everything else here is a name
+/// Explorer refuses in its own box with a message, and refusing it silently — or handing it over to
+/// come back as a bare `HRESULT` — is the same bug in a smaller size.
+#[test]
+fn a_rename_refuses_what_windows_refuses() {
+    for bad in [
+        r"..\evil.txt",
+        r"sub\one.txt",
+        "sub/one.txt",
+        "..",
+        ".",
+        "a<b",
+        "a>b",
+        "a:b",
+        "a\"b",
+        "a|b",
+        "a?b",
+        "a*b",
+        "one.txt.",
+        "one.txt ",
+        "CON",
+        "con",
+        "CON.txt",
+        "NUL",
+        "COM1",
+        "lpt9.log",
+        "\u{7}bell.txt",
+    ] {
+        assert!(
+            why_not_a_name(bad).is_some(),
+            "`{bad}` was accepted as a file name"
+        );
+    }
+
+    // And the names that are fine, which is the half that makes the check worth having rather than
+    // merely strict. A trailing dot is refused; a dot anywhere else is most file names there are.
+    for good in [
+        "one.txt",
+        "README",
+        "a.tar.gz",
+        ".gitignore",
+        "CONSOLE.txt",
+        "COM10",
+        "not a device.CON",
+        "café — résumé.pdf",
+        "one (2).txt",
+        "#hash & ampersand!.txt",
+        &"a".repeat(255),
+    ] {
+        assert_eq!(
+            why_not_a_name(good),
+            None,
+            "`{good}` was refused as a file name"
+        );
+    }
+
+    // Measured in UTF-16 units, because that is what the filesystem's limit counts.
+    assert!(why_not_a_name(&"a".repeat(256)).is_some());
+}

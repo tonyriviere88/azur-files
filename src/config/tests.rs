@@ -93,11 +93,13 @@ fn the_window_comes_back_the_way_it_was_left() {
     // is what a video did the first time anybody previewed one.
     assert!(!older.preview.muted);
     // Which flatten mode the button produces, written as a word for the same reason the shell
-    // is — and a file without the line comes back as the list, which is the view the button
-    // produced before there was a choice.
+    // is — and a file without the line comes back as the **tree**, which is the default the button
+    // produces now. It was the list, and a settings file from before the key existed used to come
+    // back that way on the grounds that it was what the button had always done; that reasoning was
+    // dropped when the default moved, and this assertion is the last place still saying otherwise.
     assert_eq!(back.flat_mode, crate::pane::FlatMode::Tree);
     assert!(saved.to_text().contains("flatten=tree"));
-    assert_eq!(older.flat_mode, crate::pane::FlatMode::List);
+    assert_eq!(older.flat_mode, crate::pane::FlatMode::Tree);
     // And whether that tree merges its chains of single folders, which is the other flag whose
     // default is *on* — so the older file has to come back with it set, and the saved one, which
     // turned it off, has to come back off.

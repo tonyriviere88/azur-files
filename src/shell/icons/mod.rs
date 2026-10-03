@@ -266,12 +266,15 @@ pub struct Icons {
     /// worker before it costs anything — which is what makes changing folder cancel the old
     /// folder's questions rather than queue behind them.
     live: Arc<Mutex<std::collections::HashSet<u64>>>,
+    /// To wake the window when an answer lands. See [`Self::nudge`].
+    ctx: egui::Context,
 }
 
 impl Icons {
-    pub fn new() -> Self {
+    pub fn new(ctx: &egui::Context) -> Self {
         let (tx, rx) = channel();
         Self {
+            ctx: ctx.clone(),
             kinds: HashMap::new(),
             places_seen: HashMap::new(),
             answers: Vec::new(),
@@ -389,6 +392,24 @@ impl Icons {
         const QUEUE_CAP: usize = 64;
         if self.queued.load(std::sync::atomic::Ordering::Relaxed) >= QUEUE_CAP {
             return false;
+        }
+        // **A view that is asking is live, by definition, and saying so here is what makes the
+        // question survive the frame it was asked in.**
+        //
+        // The worker drops a job whose view is not in [`Self::only`]'s set — that is what makes
+        // leaving a folder cancel its questions instead of queueing behind them. But `only` is
+        // published near the top of the frame and a listing is applied further down it, so on the
+        // frame a folder's listing lands, the view the rows are about to ask with does not yet
+        // exist in that set. Every per-file question in that frame was therefore thrown away by the
+        // worker — and thrown away *silently*, because `request_file` had already answered `true`
+        // and the caller had already marked the row as asked. A row holding `ASKED` is never asked
+        // again, so no executable, shortcut or `.dll` in a freshly read folder ever got its own icon.
+        //
+        // Registering it here rather than reordering the frame: the frame's order is not this
+        // module's to depend on, and "asking about a view keeps it alive" is true whatever that
+        // order becomes. `only` still prunes it the moment no tab holds it.
+        if let Ok(mut live) = self.live.lock() {
+            live.insert(view);
         }
         let jobs = self.worker().clone();
         self.queued
@@ -591,7 +612,9 @@ impl Icons {
         }
         let worker = self
             .places
-            .get_or_insert_with(|| place_worker(self.tx.clone(), self.pending.clone()));
+            .get_or_insert_with(|| {
+                place_worker(self.tx.clone(), self.pending.clone(), self.ctx.clone())
+            });
         let _ = worker.send(path.to_path_buf());
     }
 
@@ -606,6 +629,9 @@ impl Icons {
         let pending = self.pending.clone();
         let queued = self.queued.clone();
         let live = self.live.clone();
+        // Its own clone: the closure outlives this borrow. See [`nudge`] for why a worker that does
+        // not ask for a frame is a worker whose answers are not drawn.
+        let ctx = self.ctx.clone();
         self.jobs.get_or_insert_with(|| {
             let (send, receive) = channel::<Job>();
             let _ = std::thread::Builder::new()
@@ -631,6 +657,7 @@ impl Icons {
                                         key: key.clone(),
                                         index,
                                     });
+                                    nudge(&ctx);
                                 }
                                 if let Ok(mut pending) = pending.lock() {
                                     pending.remove(&key);
@@ -651,6 +678,7 @@ impl Icons {
                                     // that the icon is inside the file, so it has to be opened.
                                     if let Some(index) = index_of(&path, false, false) {
                                         let _ = tx.send(Ready::File { view, row, index });
+                                        nudge(&ctx);
                                     }
                                 }
                                 queued.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
@@ -670,6 +698,7 @@ impl Icons {
     /// process frees shell state other threads are still using.
     fn pixels(&mut self) -> &Sender<Wanted> {
         let tx = self.tx.clone();
+        let ctx = self.ctx.clone();
         self.pixels.get_or_insert_with(|| {
             let (send, receive) = channel::<Wanted>();
             let _ = std::thread::Builder::new()
@@ -680,6 +709,9 @@ impl Icons {
                     while let Ok(Wanted(index)) = receive.recv() {
                         if let Some(image) = bitmap(index) {
                             let _ = tx.send(Ready::Bitmap { index, image });
+                            // See [`nudge`]: the bitmap is what a row actually draws, so an answer
+                            // nothing comes to collect is a generic glyph on screen.
+                            nudge(&ctx);
                         }
                     }
                 });
@@ -696,10 +728,23 @@ impl Icons {
     }
 }
 
-impl Default for Icons {
-    fn default() -> Self {
-        Self::new()
-    }
+/// Ask for a frame, because an answer that lands with nothing to draw it is not an answer.
+///
+/// **This was missing, and these were the one background service in the program with no way to wake
+/// the window.** Every sibling does it — the loader, git, sizes, thumbs, links, the preview and the
+/// console all book a repaint when they have something. The case it shows in is Back, or re-entering
+/// a folder: that takes the loader's synchronous cache path, so the frame is drawn without anything
+/// having been asked for asynchronously and nothing books a repaint. The rows then ask for their
+/// per-file icons *during* that frame, the answers arrive a few milliseconds later, and every `.exe`
+/// and `.lnk` kept its generic type glyph until the pointer happened to move.
+///
+/// A free function rather than a method on [`Icons`], because the callers are the worker threads:
+/// each holds a `Context` of its own and none of them can reach the `Icons` that started it.
+///
+/// Delayed rather than immediate, as `crate::shell::thumbs::Thumbs::nudge` does it: answers arrive
+/// in bursts of up to sixty-four, and one frame after the burst is worth sixty-four during it.
+fn nudge(ctx: &egui::Context) {
+    ctx.request_repaint_after(std::time::Duration::from_millis(100));
 }
 
 /// The key a place lookup is claimed under.
@@ -729,6 +774,7 @@ fn place_key(path: &Path) -> String {
 fn place_worker(
     tx: Sender<Ready>,
     pending: Arc<Mutex<std::collections::HashSet<String>>>,
+    ctx: egui::Context,
 ) -> Sender<PathBuf> {
     let (send, requests) = channel::<PathBuf>();
     let spawned = std::thread::Builder::new()
@@ -742,6 +788,9 @@ fn place_worker(
                         path: path.clone(),
                         index,
                     });
+                    // See [`nudge`]. The sidebar's own rows are what this answers for, and they sat
+                    // with a painted glyph until unrelated input produced a frame.
+                    nudge(&ctx);
                 }
                 if let Ok(mut pending) = pending.lock() {
                     pending.remove(&place_key(&path));

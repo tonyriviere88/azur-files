@@ -423,6 +423,124 @@ fn a_removed_line_is_laid_out_like_the_rest() {
     assert_eq!(changes.hunks[0].removed, vec!["    indented".to_owned()]);
 }
 
+/// **A diff has no size the file's own cap implies**, so it is read with a ceiling — see [`DIFF_CAP`].
+///
+/// Two halves, both against a real git. The ordinary one is that [`changes`] still answers: it is the
+/// only path a preview of a changed file takes, and it is now the one call here that does not simply
+/// wait for the process to finish. The other is the ceiling itself, which means killing a git that has
+/// not finished writing — and a child whose pipe is full and will never be read again is a deadlock
+/// waiting to be written. So the cap is an argument rather than the constant, and sixty-four bytes of a
+/// diff longer than that asks the question without a four-megabyte fixture.
+#[test]
+fn a_diff_is_read_with_a_ceiling_and_still_answers() {
+    // Its own folder, for the reason [`what_head_has_of_a_file`] gives.
+    let root = crate::sandbox::dir("diffcap");
+    crate::sandbox::remove(&root);
+    std::fs::create_dir_all(&root).expect("a temp folder");
+
+    let run = |args: &[&str]| {
+        let mut command = Command::new("git");
+        command.args(args).current_dir(&root);
+        crate::shell::no_window(&mut command);
+        command
+            .output()
+            .map(|out| out.status.success())
+            .unwrap_or(false)
+    };
+    if !run(&["init", "--quiet"]) {
+        eprintln!("no git: skipping");
+        return;
+    }
+    assert!(run(&["config", "user.email", "test@example.invalid"]));
+    assert!(run(&["config", "user.name", "Test"]));
+    assert!(run(&["config", "commit.gpgsign", "false"]));
+
+    // The fixture [`DIFFED`] was captured from: `a b c d e f g h` becoming `a B c NEW1 NEW2 d e h`.
+    let file = root.join("lines.txt");
+    std::fs::write(&file, b"a\nb\nc\nd\ne\nf\ng\nh\n").unwrap();
+    assert!(run(&["add", "-A"]));
+    assert!(run(&["commit", "--quiet", "-m", "base"]));
+    std::fs::write(&file, b"a\nB\nc\nNEW1\nNEW2\nd\ne\nh\n").unwrap();
+
+    let changed = changes(&file).expect("a diff of a changed file");
+    assert_eq!(changed.hunks.len(), 3, "{changed:?}");
+    assert_eq!(changed.hunks[0].removed, vec!["b".to_owned()]);
+    assert_eq!(
+        changed.hunks[2].removed,
+        vec!["f".to_owned(), "g".to_owned()]
+    );
+
+    // And with a ceiling low enough to reach: what fitted, cut back to a whole line, and back at all.
+    let out = finish_capped(
+        start_git(
+            &root,
+            &[
+                "--no-optional-locks",
+                "diff",
+                "HEAD",
+                "-U0",
+                "--no-color",
+                "--",
+                "lines.txt",
+            ],
+        ),
+        64,
+    )
+    .expect("the front of a diff");
+    assert!(out.len() <= 64, "{} bytes came back", out.len());
+    assert!(
+        out.ends_with(b"\n"),
+        "cut mid-line, so half a hunk header could parse as a whole one: {:?}",
+        String::from_utf8_lossy(&out)
+    );
+    assert!(
+        out.starts_with(b"diff --git"),
+        "not the front of the diff: {:?}",
+        String::from_utf8_lossy(&out)
+    );
+
+    crate::sandbox::remove(&root);
+}
+
+/// **A number in a hunk header is not a promise about memory.** `-1,4000000000` is fourteen
+/// characters, and reserving the removed lines from it — which is what `with_capacity(old_count)` did —
+/// is 96 GB of `String` asked for before a single line of the hunk has been read. The lines themselves
+/// are what say how many there were.
+#[test]
+fn a_hunk_header_is_not_a_capacity() {
+    let changes = parse_diff(b"@@ -1,4000000000 +1 @@\n-a\n+b\n");
+    assert_eq!(changes.hunks.len(), 1);
+    assert_eq!(changes.hunks[0].removed, vec!["a".to_owned()]);
+}
+
+/// Two places in the status parser took the first character of a string by *byte*, which panics on a
+/// multi-byte character and, for the empty string, on nothing at all.
+///
+/// Neither shape comes out of a real git — every record it writes begins with an ASCII letter it chose
+/// itself — so this pins the guard rather than a bug that was seen. What it must not do is stop reading
+/// the rest of the records.
+#[test]
+fn a_record_that_starts_with_anything_at_all_is_survived() {
+    let mut repo = Repo::default();
+    parse_status(
+        concat!(
+            "°not a record git would write\0",
+            "# branch.head main\0",
+            "? untracked.txt\0",
+        )
+        .as_bytes(),
+        "",
+        &mut repo,
+    );
+    assert_eq!(repo.head, "main", "the records after it were not read");
+    assert_eq!(repo.state("untracked.txt"), Some(State::Untracked));
+
+    // And the ahead/behind line, where an empty field is one space too many rather than anything exotic.
+    let mut spaced = Repo::default();
+    parse_status(b"# branch.ab +2  -1\0", "", &mut spaced);
+    assert_eq!((spaced.ahead, spaced.behind), (2, 1));
+}
+
 /// The tracked names from `ls-tree` only fill in what `status` said nothing about: a file that is
 /// both tracked and changed keeps the change.
 #[test]

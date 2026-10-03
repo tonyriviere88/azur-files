@@ -78,11 +78,50 @@ pub struct Done {
     pub touched: Vec<PathBuf>,
     /// Empty when it worked — including when the user cancelled, which is an answer
     /// rather than a failure.
+    ///
+    /// So this is **not** the test for whether the operation happened. See [`Self::worked`].
     pub error: Option<String>,
+    /// Whether the user stopped it — the shell's own `GetAnyOperationsAborted`.
+    ///
+    /// The third value the rest of the program was missing. See [`Self::worked`].
+    pub aborted: bool,
     /// What still has to happen now that it has.
     pub after: After,
     /// What the shell says it actually did, item by item. See [`Outcome`].
     pub outcome: Outcome,
+}
+
+impl Done {
+    /// Whether the operation did the whole of what it was asked for.
+    ///
+    /// **Not `error.is_none()`, and that distinction was a bug in two places.** A cancel is a
+    /// decision rather than a fault, so [`win::friendly`] deliberately turns both cancel codes into
+    /// no message at all — the shell's own dialog has already said everything there is to say, and
+    /// the status line has nothing to add. Which left "did all of it" and "the user stopped it"
+    /// indistinguishable to everything downstream, and two callers were computing
+    /// `error.is_none()` for themselves and calling it success:
+    ///
+    /// - [`history::History::settle`], whose own documentation promises that "a cancel counts as
+    ///   not working — which is the case this exists for". It did the opposite. Cut 500 photos,
+    ///   Ctrl+Z, answer the conflict dialog with Cancel, and the entry moved to the *redo* stack:
+    ///   Ctrl+Z then said "Nothing to undo" and the move could never be reversed again.
+    /// - [`After::FinishCut`], which told the clipboard the cut had been honoured and emptied it,
+    ///   for a paste that moved nothing. The comment where the call was moved to the end of the
+    ///   frame says it was written for exactly this case; the end of the frame cannot see a cancel
+    ///   either.
+    ///
+    /// So the shell is asked instead of guessed at — `GetAnyOperationsAborted`, on [`Self::aborted`].
+    pub fn worked(&self) -> bool {
+        self.error.is_none() && !self.aborted
+    }
+}
+
+/// What the shell reported, once a job is over. See [`Done::worked`] for why `aborted` is not
+/// merely the absence of an error.
+pub struct Ran {
+    pub error: Option<String>,
+    pub outcome: Outcome,
+    pub aborted: bool,
 }
 
 /// What an operation actually did, item by item, as the shell reported it.
@@ -390,6 +429,7 @@ impl Operations {
                 job: Some(job),
                 touched,
                 error: None,
+                aborted: false,
                 after,
                 outcome: Outcome::default(),
             });
@@ -410,18 +450,32 @@ impl Operations {
         // into goes when the job that consumes it is done — and goes there rather than on the
         // UI thread, because removing a staged archive is real work. Built after the guard
         // above so a test can never make one.
-        let scratch = claimed(&job).map(Scratch);
+        let scratch = claimed(&job).map(Scratch::at);
+        // Kept back from the closure below, because the failure path needs it. See there.
+        let unstarted = after.clone();
         let spawned = std::thread::Builder::new()
             .name("file-operation".to_owned())
             .spawn(move || {
-                let _scratch = scratch;
-                let (error, outcome) = run(&job, owner);
+                let mut scratch = scratch;
+                let ran = run(&job, owner);
+                // **The staging directory goes only if the job that consumed it worked.** It holds
+                // the *only* copy of whatever the drop claimed — the claim is a rename, so the
+                // source no longer has it — and removing it after a copy that failed or was
+                // cancelled destroyed the lot. A source's own extraction is no loss; a file of the
+                // user's that legitimately lives under `%TEMP%` is, and nothing here can tell them
+                // apart. So a failure leaves it where it is: the next launch's
+                // [`crate::shell::dnd::sweep`] is then the one that clears it, which is late but
+                // is not the middle of the user asking for a copy.
+                if let Some(scratch) = &mut scratch {
+                    scratch.keep = ran.error.is_some() || ran.aborted;
+                }
                 let _ = tx.send(Done {
                     job: Some(job),
                     touched,
-                    error,
+                    error: ran.error,
+                    aborted: ran.aborted,
                     after,
-                    outcome,
+                    outcome: ran.outcome,
                 });
                 ctx.request_repaint();
             });
@@ -433,7 +487,13 @@ impl Operations {
                 job: None,
                 touched: Vec::new(),
                 error: Some("Could not start the operation".to_owned()),
-                after: After::Nothing,
+                aborted: false,
+                // **The job's own `after`, and not `Nothing`.** A thread that never started still
+                // has to be reported as the thing it was: dropping `After::Settle` here left
+                // [`history::History`] with a reversal permanently in flight, so `undo` and `redo`
+                // both answered `None` and every Ctrl+Z for the rest of the session was told
+                // "Still undoing the last one…". The entry went with it.
+                after: unstarted,
                 outcome: Outcome::default(),
             });
         }
@@ -474,24 +534,48 @@ fn claimed(job: &Job) -> Option<PathBuf> {
         Job::Copy { items, .. } | Job::Move { items, .. } => items,
         _ => return None,
     };
-    let dir = items.first()?.parent()?;
-    if crate::shell::dnd::is_staging(dir) {
-        return Some(dir.to_path_buf());
-    }
-    // One level up as well, for an item that had to be nested to keep its name.
-    let up = dir.parent()?;
-    crate::shell::dnd::is_staging(up).then(|| up.to_path_buf())
+    // Every item, and not just the first. A drop can mix a source's materialisation with the
+    // user's own files — see [`crate::shell::dnd::claim`], which stages the one and leaves the
+    // other where it is — so the staged items are not necessarily at the front of the list.
+    // Asking only the first left the directory sitting in `%TEMP%` until the next startup sweep.
+    items.iter().find_map(|item| {
+        let dir = item.parent()?;
+        if crate::shell::dnd::is_staging(dir) {
+            return Some(dir.to_path_buf());
+        }
+        // One level up as well, for an item that had to be nested to keep its name.
+        let up = dir.parent()?;
+        crate::shell::dnd::is_staging(up).then(|| up.to_path_buf())
+    })
 }
 
-/// A directory that goes when this does.
+/// A directory that goes when this does — unless the job it was claimed for did not work.
 ///
 /// A guard rather than a statement so that a panic in the job, or a thread that never starts,
-/// cannot leak an extracted archive into `%TEMP%`.
-struct Scratch(PathBuf);
+/// cannot leak an extracted archive into `%TEMP%`. Those are the cases [`Self::keep`] is *not*
+/// for: nothing was copied anywhere, so there is nothing to be recovered from the staging
+/// directory and leaving it would be litter. It is a failed or cancelled *copy* that has to keep
+/// it, because then the staged items are the only ones left.
+struct Scratch {
+    dir: PathBuf,
+    /// Set by the job's thread once the shell has answered. See [`Operations::start_then`].
+    keep: bool,
+}
+
+impl Scratch {
+    /// Removed by default: a claim that is never settled one way or the other is a panic or an
+    /// abandoned thread, and neither leaves anything worth keeping.
+    fn at(dir: PathBuf) -> Self {
+        Self { dir, keep: false }
+    }
+}
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
+        if self.keep {
+            return;
+        }
+        let _ = std::fs::remove_dir_all(&self.dir);
     }
 }
 
@@ -500,11 +584,12 @@ impl Drop for Scratch {
 // ---------------------------------------------------------------------------
 
 #[cfg(not(windows))]
-fn run(_job: &Job, _owner: Owner) -> (Option<String>, Outcome) {
-    (
-        Some("File operations are implemented against the Windows shell only".to_owned()),
-        Outcome::default(),
-    )
+fn run(_job: &Job, _owner: Owner) -> Ran {
+    Ran {
+        error: Some("File operations are implemented against the Windows shell only".to_owned()),
+        outcome: Outcome::default(),
+        aborted: false,
+    }
 }
 
 #[cfg(test)]

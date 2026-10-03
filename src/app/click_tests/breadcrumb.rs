@@ -2,6 +2,24 @@
 
 use super::*;
 
+/// Run frames until the open dropdown has a listing in it, and say what it is listing.
+///
+/// **The chevron's folder is read on a [`crate::loader`] worker**, so it arrives by channel a frame
+/// or more after the click rather than during it — the same wait [`Harness::settle`] does for a
+/// pane's listing, for the same reason. It used to be a `fs::scan::scan` inside the popup body, on
+/// the UI thread, which is where the 22-second freeze on a chevron over a bare `\\server` came from.
+fn settle_dropdown(h: &mut Harness) -> (PathBuf, usize) {
+    for _ in 0..200 {
+        if let Some((path, count)) = h.app.crumbs.listing() {
+            return (path.to_path_buf(), count);
+        }
+        h.frame(Vec::new());
+        // Frames are free here; the disk is not.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    panic!("the dropdown never got a listing");
+}
+
 #[test]
 fn a_breadcrumb_chevron_opens_the_folder_it_points_at() {
     // It could not, and nothing about the code said so: the dropdown was built only
@@ -24,6 +42,11 @@ fn a_breadcrumb_chevron_opens_the_folder_it_points_at() {
         .find(|at| h.hovers(id, *at))
         .expect("the chevron before the current folder is not reachable");
 
+    // Nothing of that folder left in the loader, so anything the menu shows can only have come
+    // from a read the loader did — which is what the assertions after the wait rest on.
+    let parent = crumbs[index - 1].1.clone();
+    h.app.loader.invalidate(&parent);
+
     h.wait();
     h.click_at(at);
     h.frame(Vec::new());
@@ -33,13 +56,28 @@ fn a_breadcrumb_chevron_opens_the_folder_it_points_at() {
         Some((pane, index)),
         "clicking the chevron did not open anything"
     );
-    let (read, count) = h
-        .app
-        .crumbs
-        .listing()
-        .expect("the dropdown never read a folder");
-    assert_eq!(read, crumbs[index - 1].1, "it read the wrong folder");
+    // **Nothing was read on this thread**, which is the whole reason the menu goes through the
+    // loader: the same code path with `\\server` in front of it froze the window for 22 seconds.
+    //
+    // Two states are allowed here and the third is the bug. Either the worker has answered by now,
+    // or the menu is still waiting — but a listing in the menu with the loader's cache *empty* can
+    // only have come from the popup body scanning the folder itself, and that is what this rules
+    // out. Stated as a pair rather than as "the listing is not there yet" because whether a local
+    // folder comes back inside the click's own frames is a race, and the claim is not about timing.
+    if h.app.loader.cached(&parent).is_none() {
+        assert!(
+            h.app.crumbs.listing().is_none(),
+            "the dropdown has a listing the loader never read, so it read the folder itself"
+        );
+    }
+
+    let (read, count) = settle_dropdown(&mut h);
+    assert_eq!(read, parent, "it read the wrong folder");
     assert!(count > 0, "this crate's parent has subfolders in it");
+    assert!(
+        h.app.loader.cached(&parent).is_some(),
+        "the rows in the menu did not come from the loader"
+    );
 }
 
 /// An open chevron is welded to the segment before it: one fill over both.
@@ -127,11 +165,19 @@ fn with_a_dropdown_open_hovering_the_bar_moves_it() {
         Some((pane, target + 1)),
         "the dropdown did not follow the pointer to the name at {target}"
     );
-    let (read, _) = h
-        .app
-        .crumbs
-        .listing()
-        .expect("the dropdown that moved never read a folder");
+    // **What it must not be showing is the folder it was showing a moment ago.** The rows for the
+    // new chevron arrive from a worker, so there is a wait, and a menu that kept the old rows
+    // through it would offer the last folder's subfolders under this one's name — every row real,
+    // none of them where the pointer is. This is the staleness check, and the folder is the key it
+    // is made on: see [`crate::ui::breadcrumb::CrumbMenu`].
+    if let Some((read, _)) = h.app.crumbs.listing() {
+        assert_ne!(
+            read,
+            crumbs[index - 1].1.as_path(),
+            "the dropdown that moved is still showing the chevron it came from"
+        );
+    }
+    let (read, _) = settle_dropdown(&mut h);
     assert_eq!(
         read, crumbs[target].1,
         "it moved to the chevron of the wrong name"

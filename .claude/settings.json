@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cd \"D:/Sources/MyTools/yet-another-file-explorer\" && grep -n \"fn run\" src/shell/ops/mod.rs && sed -n '/^fn run/,/^}/p' src/shell/ops/mod.rs | head -60)",
+      "Bash(cd \"D:/Sources/MyTools/yet-another-file-explorer\" && sed -n '/fn retire/,/fn fill/p' src/shell/menu/mod.rs | head -70)",
+      "Bash(cd \"D:/Sources/MyTools/yet-another-file-explorer\" && sed -n '/^pub\\(crate\\) fn claim\\\\|^pub fn claim/,/^}/p' src/shell/dnd.rs)",
+      "Bash(sed -i 's/crate::shell::icons::Icons::new\\(\\)/crate::shell::icons::Icons::new\\(ctx\\)/' src/app/mod.rs)",
+      "Bash(sed -i 's/let mut icons = Icons::new\\(\\);/let mut icons = Icons::new\\(\\\\&ctx\\);/' src/shell/icons/tests.rs)"
+    ],
+    "additionalDirectories": [
+      "D:\\Sources\\MyTools\\yet-another-file-explorer\\src\\shell\\ops",
+      "D:\\Sources\\MyTools\\yet-another-file-explorer\\src\\shell\\menu",
+      "D:\\Sources\\MyTools\\yet-another-file-explorer\\src\\shell"
+    ]
+  }
+}

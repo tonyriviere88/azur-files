@@ -337,9 +337,11 @@ impl App {
     }
 
     /// Take delivery of finished file operations and re-read what they changed.
-    pub(super) fn collect_operations(&mut self) {
+    pub(super) fn collect_operations(&mut self, now: f64) {
         for done in self.ops.drain() {
-            let worked = done.error.is_none();
+            // [`Done::worked`] rather than `error.is_none()`: a cancel reports no error, and
+            // taking it for success emptied the clipboard for a cut that moved nothing.
+            let worked = done.worked();
             // Borrowed rather than taken, because the history is handed the whole `Done` at the
             // end of this body — deciding what Ctrl+Z does next needs both what the operation did
             // and whether it worked.
@@ -386,7 +388,22 @@ impl App {
             self.history.record(done);
         }
         // A cut whose sources have gone is a cut that has been honoured.
-        self.cut.retain(|path| path.exists());
+        //
+        // **Not on every frame**, which is what this was: `exists()` is a syscall per cut item, and
+        // `collect_operations` runs unconditionally each frame. Cut a few hundred files on a mapped
+        // drive and then lose the share, and a mouse move was enough to pay the redirector's
+        // timeout — again on the next frame, and the next. Everything else on this path is careful
+        // about exactly that; `Dragging::new` settles the ghost's types once at drag start rather
+        // than per frame, and says so.
+        //
+        // A second, because the answer only changes when something outside this window moves the
+        // files — a paste in another instance, or Explorer — and a row staying faded for up to a
+        // second after that is not something anybody can see.
+        const AT_MOST_EVERY: f64 = 1.0;
+        if !self.cut.is_empty() && now - self.cut_checked_at >= AT_MOST_EVERY {
+            self.cut_checked_at = now;
+            self.cut.retain(|path| path.exists());
+        }
     }
 
     /// Ask for anything nobody has asked for yet.

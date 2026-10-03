@@ -69,13 +69,47 @@ const FILTER_TEXT_LIFT: f32 = 2.0;
 
 /// Subfolders for whichever chevron dropdown is open.
 ///
-/// One at a time, so one cache is enough. Read on the frame the menu opens rather
-/// than on every frame it is showing — a popup body runs continuously, and reading
-/// `C:\Windows\System32` sixty times a second to draw the same list would be a
-/// self-inflicted stall.
+/// One at a time, so one cache is enough. Built on the frame an answer lands rather
+/// than on every frame the menu is showing — a popup body runs continuously, and
+/// filtering and sorting `C:\Windows\System32` sixty times a second to draw the same
+/// list would be a self-inflicted stall.
+///
+/// **Nothing here reads the disk.** The folder is asked of [`crate::loader`] — the same service
+/// the listings come from and the same one the path field's completions use, which reads on a
+/// worker — and the menu draws whatever has come back. See [`CrumbMenu::ensure`], which is a cache
+/// probe and an ask, never a scan.
+///
+/// That is not a refinement, it is the difference between a window that paints and one that does
+/// not. This used to call [`crate::fs::scan::scan`] from inside the popup body, which is the UI
+/// thread on the frame the dropdown opens, and that function documents about itself that it only
+/// ever runs on a loader worker: on the trail `\\server\share\a` the chevron between `server` and
+/// `share` hands it a bare `\\server`, which is answered by `NetShareEnum` rather than by a
+/// directory read — **22.1 seconds** for a name that does not resolve, measured in
+/// [`crate::fs::drives::shares_on`] — and a share that has just gone away costs the same wait
+/// through the redirector. The window stopped painting for all of it. Once per chevron the pointer
+/// crossed, too, because [`CrumbMenu::open`] makes the whole bar one tracking control.
 #[derive(Default)]
 pub struct CrumbMenu {
+    /// The folder [`Self::items`] were built from, and `None` while nothing has come back for the
+    /// folder the open chevron points at.
+    ///
+    /// **This is the staleness check, and it needs no token to be one.** What fills the menu is a
+    /// probe of the loader's cache for the folder *under the pointer* — an answer to any other
+    /// question is not something this can be handed, because it is never handed anything: it
+    /// looks up the one key it wants. A token would be re-checking that key. The loader's own
+    /// tokens are matched in `App::collect_scans`, against the tab that navigated and never
+    /// against this menu, which is also why a chevron on a share that wants credentials cannot
+    /// raise the sign-in dialog.
     path: Option<PathBuf>,
+    /// The folder already asked of the loader, so one it cannot read is asked for once.
+    ///
+    /// A failed read is deliberately not cached — see [`crate::loader::Loader`], and it is the
+    /// right rule, because a share can come back. But it means [`crate::loader::Loader::cached`]
+    /// keeps saying no, and an ask driven off that answer alone would queue a fresh scan of a dead
+    /// path on every frame the menu is up, each one waking the window to ask again. `PathComplete`
+    /// carries the same field for the same reason, and this menu asks about exactly the paths that
+    /// field does.
+    asked: Option<PathBuf>,
     items: Vec<(String, PathBuf)>,
     truncated: bool,
     /// Which of the bar's dropdowns is showing: the pane whose bar it is on, and the segment
@@ -95,14 +129,48 @@ pub struct CrumbMenu {
 }
 
 impl CrumbMenu {
-    /// Fill the cache for `path`, unless it already holds it.
-    fn ensure(&mut self, path: &Path) {
+    /// Fill the menu for `path` from the loader, asking for the folder if nobody has yet.
+    ///
+    /// Answers whether there is a listing to draw. While there is not — the answer is still out on
+    /// a worker — the dropdown says so rather than drawing an empty body, which is a different
+    /// claim; see where this is called.
+    ///
+    /// **[`crate::loader::Loader::prefetch`] rather than `request`**, which is what
+    /// `PathComplete::refresh` does for the same dropdown reached by typing, and for two reasons
+    /// beyond keeping the two halves of one control alike. It **does not queue a second scan of a
+    /// folder already being read**, which matters here more than anywhere: the bar tracks, so the
+    /// pointer can ask for a dozen folders in a second and cross the same chevron twice on the way
+    /// back. And a chevron is a *guess* — a place somebody may be about to go — so it has no
+    /// business jumping the queue in front of the folder a pane is waiting to show.
+    fn ensure(&mut self, path: &Path, loader: &mut crate::loader::Loader) -> bool {
         if self.path.as_deref() == Some(path) {
-            return;
+            return true;
         }
+        // **The rows in it belong to the last chevron, and they go now** rather than when the next
+        // answer lands. A dropdown that kept them would spend the wait offering `MyTools`'
+        // subfolders under `Sources` — every row a real folder, none of them in the folder the
+        // pointer is on, which is a worse answer than saying nothing yet.
+        //
+        // The folder goes with them, and not only for tidiness: this field is what says *whose*
+        // rows these are, so leaving it on the folder the menu is no longer showing would be the
+        // staleness check itself reporting the stale answer.
+        self.path = None;
+        self.items.clear();
+        self.truncated = false;
+        // Asked once per folder, and once only for one that cannot be read. See [`Self::asked`].
+        if self.asked.as_deref() != Some(path) {
+            self.asked = Some(path.to_path_buf());
+            loader.prefetch(path);
+        }
+        // Whatever the loader already has, which for a folder on the trail is usually everything:
+        // walking down through it is what put it in the cache. A miss leaves the menu waiting, and
+        // the worker wakes the window when it lands — see [`crate::loader::Loader::new`], which
+        // holds the context for exactly that.
+        let Some(dir) = loader.cached(path) else {
+            return false;
+        };
         // A directory of subdirectories is the only thing this menu shows, so the
         // listing is filtered as it is read rather than after.
-        let dir = fs::scan::scan(path);
         let mut items: Vec<(String, PathBuf)> = Vec::new();
         for i in 0..dir.len() {
             let entry = &dir.entries[i];
@@ -119,11 +187,34 @@ impl CrumbMenu {
 
         self.path = Some(path.to_path_buf());
         self.items = items;
+        true
+    }
+
+    /// Ask for the open chevron's folder again the next time the menu is drawn.
+    ///
+    /// For a click on a chevron, which is somebody asking afresh: the folder may have gained a
+    /// subfolder since the last time it was used. Both fields, and the second is the one that does
+    /// any work — clearing [`Self::path`] only rebuilds the rows from what the loader holds, and a
+    /// folder whose read *failed* is not in the loader at all, so without clearing [`Self::asked`]
+    /// a second click on a share that has come back would never try it again.
+    ///
+    /// What this deliberately does **not** do is [`crate::loader::Loader::invalidate`] the folder.
+    /// How stale a listing may get is the loader's business — the watcher drops the copy of a
+    /// folder that changed under it, and so does every file operation this program performs — and
+    /// the alternative is a menu that reads the disk on every click of the one control whose
+    /// dropdowns open by the dozen, with a `Reading…` in it each time where the rows used to be
+    /// instant. F5 is the gesture for "read it all again", here as everywhere else.
+    fn reopen(&mut self) {
+        self.path = None;
+        self.asked = None;
     }
 
     /// What the open dropdown is listing: the folder it read, and how many subfolders it
     /// found. For the tests, which is how "the chevron opens and has content in it" is
     /// checked without hunting for a menu row's rect.
+    ///
+    /// `None` while the read is still out, which is what a test has to wait through now that the
+    /// folder is read on a worker — the same wait `Harness::settle` does for a pane's listing.
     #[cfg(test)]
     pub fn listing(&self) -> Option<(&Path, usize)> {
         self.path.as_deref().map(|path| (path, self.items.len()))
@@ -492,7 +583,9 @@ pub fn show(
         // No field on this pane, so nothing it was offering is still wanted. A no-op for the
         // pane that does have one open — see [`PathComplete::close`].
         complete.close(pane);
-        segments(ui, t, path_rect, pane, tab, menu, icons_cache, slashes, out);
+        segments(
+            ui, t, path_rect, pane, tab, menu, loader, icons_cache, slashes, out,
+        );
     }
 }
 

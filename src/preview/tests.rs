@@ -124,6 +124,52 @@ fn the_search_stops_counting_at_its_budget() {
     assert!(!exact.capped);
 }
 
+/// **And it stops walking as well as counting**, because the walk's cost is the product of two numbers
+/// and only one of them is bounded.
+///
+/// The literal search compares the needle at every position of the body, so a needle that nearly matches
+/// nearly everywhere costs `body × needle` — which for a pasted thousand-character needle over a
+/// megabyte of minified source is 10^9 comparisons, on the UI thread, on every keystroke. This body and
+/// needle are that shape: every position matches for a thousand characters and then fails.
+#[test]
+fn a_literal_search_stops_walking_as_well_as_counting() {
+    let body = "a".repeat(200_000);
+    let needle = format!("{}b", "a".repeat(1_000));
+    let stopped = hits(
+        &body,
+        &Search {
+            text: needle,
+            ..Search::default()
+        },
+    );
+    assert!(stopped.at.is_empty(), "the needle is not in there");
+    assert!(
+        stopped.capped,
+        "it walked the whole 2×10^8 rather than stopping"
+    );
+
+    // The budget is nowhere near an ordinary search, which is what makes it invisible: a needle that
+    // fails on its first character costs one comparison per position, and a short one that keeps failing
+    // late costs a handful. Neither of these is capped, and the second still finds what is there.
+    let plain = hits(
+        &body,
+        &Search {
+            text: "b".to_owned(),
+            ..Search::default()
+        },
+    );
+    assert!(!plain.capped && plain.at.is_empty());
+    let late = hits(
+        &format!("{body}aaab"),
+        &Search {
+            text: "aaab".to_owned(),
+            ..Search::default()
+        },
+    );
+    assert!(!late.capped, "an ordinary needle ran out of budget");
+    assert_eq!(late.at.len(), 1);
+}
+
 #[test]
 fn an_empty_search_finds_nothing_rather_than_everything() {
     let nothing = hits("some text", &Search::default());

@@ -303,5 +303,70 @@ pub fn breadcrumb_segments(path: &Path) -> Vec<(String, PathBuf)> {
     out
 }
 
+/// Why Windows will not have this as the name of a file, or `None` if it will.
+///
+/// **The rename box had no validation at all**, and the one that matters is the separator: a name
+/// with a `\` or a `/` in it is not a name, it is a path, and `F2` then `..\report.txt` asked the
+/// shell to rename a file to somewhere else entirely. `IFileOperation::RenameItem` is documented to
+/// refuse that — "you cannot use this method to move an item to a different location" — so what was
+/// actually shipping was very likely a refusal with a raw `HRESULT` in the status line rather than a
+/// moved file. That is not a thing to leave resting on somebody else's contract when the check is
+/// this cheap, and the codebase already names the hazard: the flattened listing seeds the field with
+/// `Dir::leaf` rather than the entry's name precisely so that accepting it unchanged cannot ask for
+/// this.
+///
+/// The rest are the rules Explorer's own rename box enforces, and each is refused here for a reason
+/// beyond tidiness:
+///
+/// | | |
+/// | --- | --- |
+/// | `< > : " \| ? *` | the shell answers with an `HRESULT` and no explanation of which character |
+/// | a control character | the same, and invisible in the field |
+/// | ending in a dot or a space | **Win32 strips it**, so `a.txt.` is a rename to `a.txt` — a silent no-op, or a rename *onto* the `a.txt` already there |
+/// | `.` or `..` | not names at all |
+/// | `CON`, `NUL`, `COM1`, and the same with any extension | reserved for devices; the shell refuses, having first looked like it might not |
+/// | over 255 characters | past what NTFS holds in a directory entry |
+///
+/// Returned as the sentence to show rather than as a bool, because a rename that is refused with no
+/// reason reads as a rename that is broken.
+pub fn why_not_a_name(name: &str) -> Option<String> {
+    // The separator first, so the message names the actual mistake rather than listing characters.
+    if name.contains('\\') || name.contains('/') {
+        return Some("A name cannot contain \\ or /".to_owned());
+    }
+    if name == "." || name == ".." {
+        return Some(format!("`{name}` is not a name"));
+    }
+    if let Some(bad) = name.chars().find(|c| "<>:\"|?*".contains(*c)) {
+        return Some(format!("A name cannot contain {bad}"));
+    }
+    if name.chars().any(|c| c.is_control()) {
+        return Some("A name cannot contain control characters".to_owned());
+    }
+    if name.ends_with('.') || name.ends_with(' ') {
+        return Some("A name cannot end in a dot or a space".to_owned());
+    }
+    // Counted in UTF-16 units, which is what the filesystem's 255 is measured in — an emoji is two
+    // of them and a `char` is one.
+    if name.encode_utf16().count() > 255 {
+        return Some("That name is too long".to_owned());
+    }
+    // The device names, which are reserved with *and* without an extension: `CON.txt` is as
+    // refused as `CON`. Compared against the stem, case-insensitively, which is how Windows
+    // compares them.
+    const DEVICES: [&str; 22] = [
+        "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+        "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+    ];
+    let stem = name.split('.').next().unwrap_or(name);
+    if let Some(device) = DEVICES
+        .iter()
+        .find(|device| stem.eq_ignore_ascii_case(device))
+    {
+        return Some(format!("`{device}` is a name Windows reserves"));
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests;

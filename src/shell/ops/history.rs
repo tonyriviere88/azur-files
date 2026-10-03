@@ -192,7 +192,10 @@ impl History {
     /// two — makes a Ctrl+Y that means half of something, which is harder to reason about than a
     /// history that is one operation behind.
     fn settle(&mut self, done: Done) {
-        let worked = done.error.is_none();
+        // [`Done::worked`] and not `error.is_none()`, which is what this used to ask and which is
+        // never false for a cancel — so the promise three paragraphs up was the opposite of what
+        // the code did. See there.
+        let worked = done.worked();
         match (self.running.take(), worked) {
             (Some(Running::Undoing(entry)), true) => self.undone.push(entry),
             (Some(Running::Redoing(entry)), true) => self.keep(Entry {
@@ -326,6 +329,7 @@ mod tests {
             job: Some(job),
             touched: Vec::new(),
             error: None,
+            aborted: false,
             after: After::Nothing,
             outcome,
         }
@@ -342,8 +346,27 @@ mod tests {
             job: None,
             touched: Vec::new(),
             error: (!worked).then(|| "no".to_owned()),
+            aborted: false,
             after: After::Settle,
             outcome,
+        }
+    }
+
+    /// **A reversal the user stopped, in the shape the shell really reports it.**
+    ///
+    /// Which is the whole point of it being a separate helper from `settled(false)`: that one
+    /// fakes an *error*, and a cancel is not one. `friendly` turns both cancel codes into no
+    /// message at all, so `error` is `None` and only `aborted` says what happened — see
+    /// [`Done::worked`]. Every test here used the faked error, which is why the stack spent two
+    /// rounds of review looking correct while a real cancel did the opposite.
+    fn cancelled() -> Done {
+        Done {
+            job: None,
+            touched: Vec::new(),
+            error: None,
+            aborted: true,
+            after: After::Settle,
+            outcome: Outcome::default(),
         }
     }
 
@@ -600,6 +623,48 @@ mod tests {
         assert!(
             !history.can_redo(),
             "a cancelled undo offered a redo of something that was never undone"
+        );
+    }
+
+    /// **The same thing again, reported the way the shell actually reports it.**
+    ///
+    /// [`a_refused_undo_keeps_the_entry`] passed throughout the bug this is for, because it fakes
+    /// an error and a cancel is not an error: `PerformOperations` answers `S_OK` for a job the user
+    /// stopped, and the cancel `HRESULT` it does sometimes give is deliberately turned into no
+    /// message. So `error.is_none()` — which is what `settle` used to ask — was true, and a
+    /// cancelled Ctrl+Z moved its entry to the *redo* stack. Cut 500 photos into another folder,
+    /// press Ctrl+Z, answer the conflict dialog with Cancel, and 498 files stayed where they were
+    /// while Ctrl+Z reported "Nothing to undo" and the only key left re-ran the move.
+    #[test]
+    fn an_undo_the_user_cancelled_keeps_the_entry() {
+        let mut history = History::default();
+        history.record(copy(r"C:\into", &[r"C:\into\one.txt"]));
+        assert!(history.undo().is_some());
+        history.record(cancelled());
+        assert!(
+            history.can_undo(),
+            "a cancelled undo was taken for a successful one, so the operation can never be \
+             reversed again"
+        );
+        assert!(
+            !history.can_redo(),
+            "a cancelled undo offered a redo of something that was never undone"
+        );
+    }
+
+    /// And a cancelled *redo* stays on the redo stack, for the same reason read the other way.
+    #[test]
+    fn a_redo_the_user_cancelled_keeps_the_entry() {
+        let mut history = History::default();
+        history.record(copy(r"C:\into", &[r"C:\into\one.txt"]));
+        history.undo();
+        history.record(settled(true));
+        assert!(history.redo().is_some());
+        history.record(cancelled());
+        assert!(history.can_redo(), "a cancelled redo threw the entry away");
+        assert!(
+            !history.can_undo(),
+            "a cancelled redo offered an undo of work it never did"
         );
     }
 

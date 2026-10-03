@@ -709,8 +709,12 @@ impl eframe::App for Window {
         // The window size, the sidebar, the bookmarks and every open tab, so the
         // next launch opens where this one left off. Skipped for a capture run,
         // which should not rewrite the user's settings.
+        //
+        // And skipped when this window has not changed any of them, which is what
+        // `App::save_settings` decides: an unconditional save here is how a window left open all
+        // day overwrote a bookmark added in another one.
         if self.shot.is_none() {
-            self.app.settings().save();
+            self.app.save_settings();
         }
     }
 }

@@ -313,13 +313,20 @@ impl Config {
                     if let Some(at) = crate::ui::preview::Where::parse(at.trim()) {
                         config.preview.at = at;
                     }
+                    // `is_finite` before the clamp, for the reason `crate::dock` sets out where it
+                    // refuses one: `"nan".parse::<f32>()` succeeds and `f32::clamp` passes a NaN
+                    // straight through, so the guard cannot be the clamp.
                     if let Ok(share) = share.trim().parse::<f32>() {
-                        config.preview.share = share.clamp(0.1, 0.9);
+                        if share.is_finite() {
+                            config.preview.share = share.clamp(0.1, 0.9);
+                        }
                     }
                 }
                 "console_share" => {
                     if let Ok(share) = value.trim().parse::<f32>() {
-                        config.console_share = share.clamp(0.1, 0.9);
+                        if share.is_finite() {
+                            config.console_share = share.clamp(0.1, 0.9);
+                        }
                     }
                 }
                 "console_shell" => {
@@ -371,8 +378,16 @@ impl Config {
                 "diff_collapse" => config.preview.collapse = value == "1",
                 "video_muted" => config.preview.muted = value == "1",
                 "sidebar_width" => {
+                    // `is_finite` first — see `preview` above. This is the one of the three where a
+                    // NaN could not be recovered from inside the program: the sidebar rect would be
+                    // NaN, so the grip derived from its right edge never hit-tests, and neither the
+                    // drag nor the double-click that puts the width back can be reached. It also
+                    // round-trips, `format!("{:.0}", f32::NAN)` being `NaN`, so every launch came up
+                    // the same way until the file was edited by hand.
                     if let Ok(width) = value.parse::<f32>() {
-                        config.sidebar_width = width.clamp(140.0, 520.0);
+                        if width.is_finite() {
+                            config.sidebar_width = width.clamp(140.0, 520.0);
+                        }
                     }
                 }
                 // "Anything but 0", like `regroup` above: the panel showing is the default, so a file
@@ -455,6 +470,29 @@ impl Config {
             if !existing.is_empty() && existing != text.as_bytes() {
                 let _ = std::fs::write(path.with_extension("ini.bak"), &existing);
             }
+        }
+
+        // **Written beside the file and then renamed over it, never into it.** `fs::write` is a
+        // truncate followed by a write, so there is a window in which `config.ini` is zero bytes
+        // or half a file — and this is called on the UI thread from the frame loop, so the window
+        // is real rather than theoretical. What made it worse than losing one save is the order of
+        // [`Self::to_text`]: the scalars come first and the bookmarks and the session come *last*,
+        // so a torn write keeps the theme and the sidebar width and loses every bookmark. The next
+        // save then copies that truncated file over the `.bak` and both are gone.
+        //
+        // A rename onto an existing file is atomic on NTFS: the entry points at the old contents
+        // or the new one, never at part of either. So a crash mid-save leaves the previous
+        // settings, which is the answer the user would ask for.
+        let staged = path.with_extension("ini.new");
+        if std::fs::write(&staged, &text).is_ok() {
+            if std::fs::rename(&staged, &path).is_ok() {
+                return;
+            }
+            // The rename is the part that can fail on Windows for a reason that has nothing to do
+            // with this program — a scanner or a backup agent holding the destination open. Falling
+            // back to the plain write keeps the setting rather than dropping it silently, and the
+            // staged file is cleared so the next launch does not find a stray one.
+            let _ = std::fs::remove_file(&staged);
         }
         let _ = std::fs::write(path, text);
     }

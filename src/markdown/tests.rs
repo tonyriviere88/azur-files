@@ -117,6 +117,17 @@ fn a_list_keeps_its_markers_and_its_depth() {
             (Kind::Item(None), "\u{2610} not"),
         ]
     );
+
+    // **Deeper than the cast, which is where the clamp has to happen.** `(lead / 2) as u8` wraps:
+    // 512 leading spaces came out as 256, which is 0 in a `u8`, so the most deeply indented bullet
+    // in the file was drawn flush left — under the wrong parent, which is the whole of what an
+    // indent says. Clamped before the cast it is simply as deep as this renderer goes.
+    let deep = parse(&format!("- top\n{}- lost\n", " ".repeat(512)));
+    assert_eq!(
+        deep.blocks.iter().map(|b| b.indent).collect::<Vec<_>>(),
+        [0, DEEP],
+        "an indent past `DEEP` wrapped instead of clamping"
+    );
 }
 
 /// A fence, its language, and the fact that nothing inside it is markup.

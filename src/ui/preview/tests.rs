@@ -124,6 +124,107 @@ fn collapsing_keeps_the_changes_and_counts_what_it_hides() {
     assert_eq!(hidden + kept, 21, "twenty lines and the empty last row");
 }
 
+/// **The find bar's offsets are offsets into the string on screen, and that is not the file.**
+///
+/// [`Text::shown`] is what the search runs over, and while a diff is up that is the diff's own body —
+/// which is *longer* than the file wherever a hunk took a line away, because the removed lines are put
+/// back into it. So a hit in the last part of a diffed file is a byte index past the end of the file, and
+/// the canvas used to count the characters up to it in `text.body`: "byte index out of bounds" on a late
+/// match, or "not a char boundary" as soon as anything above the hit was not ASCII. Preview any file in
+/// this repository with a removed line in it, `Ctrl+F`, step to the end.
+#[test]
+fn a_hit_in_a_diff_is_an_offset_into_the_diff() {
+    let (body, changes) = changed();
+    let mut text = Text {
+        body,
+        truncated: false,
+        code: true,
+        lang: syntax::Lang::None,
+        spans: Vec::new(),
+        doc: None,
+        changes: Some(changes),
+        view: None,
+        view_for: None,
+    };
+    assert!(text.follow(true, false), "no diff view to search over");
+    let shown = text.shown(false);
+    assert!(
+        shown.len() > text.body.len(),
+        "the fixture has no removed lines in it, so there is nothing to be out of step"
+    );
+
+    // `h` is the file's last line and the view's, with three put-back lines above it.
+    let hit = preview::hits(shown, &searching("h", false, false, false))
+        .at
+        .pop()
+        .expect("a hit");
+    assert!(
+        shown.get(..hit.start).is_some(),
+        "the hit is not an offset into what was searched"
+    );
+    assert!(
+        text.body.get(..hit.start).is_none(),
+        "the hit still lands inside the file, so this fixture no longer pins the panic"
+    );
+}
+
+/// **The build is a walk over the body and a walk over the hunks, not one of each per line.**
+///
+/// `git diff -U0` gives every isolated changed line a hunk of its own and runs over the *whole* file,
+/// while the body it is matched against here is the first [`preview::TEXT_CAP`] of that file. A large
+/// mostly-rewritten file is therefore tens of thousands of lines against tens of thousands of hunks, and
+/// the nested walk this used to do was their product: 10^9 iterations on the UI thread, inside
+/// [`Text::follow`], on the frame the diff toggle was pressed.
+#[test]
+fn a_diff_of_a_rewritten_file_is_not_the_product_of_its_two_lengths() {
+    // Forty thousand lines, every one of them replaced — one hunk each, which is what `-U0` gives.
+    const ROWS: u32 = 40_000;
+    let mut body = String::new();
+    let mut hunks = Vec::new();
+    for at in 1..=ROWS {
+        body.push_str(&format!("new {at}\n"));
+        hunks.push(crate::git::Hunk {
+            added: at,
+            added_count: 1,
+            after: at - 1,
+            removed: vec![format!("old {at}")],
+            removed_at: at,
+        });
+    }
+    let changes = crate::git::Changes { hunks };
+
+    let started = std::time::Instant::now();
+    let view = Diffed::build(&body, &changes, false, syntax::Lang::None);
+    let took = started.elapsed();
+
+    // The output is the same output: every removed line in front of the line that replaced it, and the
+    // row a body ending in a newline has.
+    assert_eq!(view.lines.len() as u32, ROWS * 2 + 1);
+    let head: Vec<(&str, Mark, Option<u32>)> = view
+        .body
+        .split('\n')
+        .zip(&view.lines)
+        .take(4)
+        .map(|(text, line)| (text, line.mark, line.number))
+        .collect();
+    assert_eq!(
+        head,
+        vec![
+            ("old 1", Mark::Removed, Some(1)),
+            ("new 1", Mark::Added, Some(1)),
+            ("old 2", Mark::Removed, Some(2)),
+            ("new 2", Mark::Added, Some(2)),
+        ]
+    );
+    assert_eq!(view.lines[view.lines.len() - 2].number, Some(ROWS));
+    // Generous by a wide margin — the walk itself is milliseconds — and still an order of magnitude
+    // under what the nested version took for this file.
+    assert!(
+        took < std::time::Duration::from_secs(5),
+        "{ROWS} lines against {ROWS} hunks took {took:?}"
+    );
+}
+
 /// A file with nothing changed in it has no diff view at all, whatever the toggles say — which is
 /// what makes the default costless for most files.
 #[test]
@@ -787,6 +888,13 @@ fn the_counter_says_which_of_how_many() {
     find.search = searching("a", false, false, false);
     find.against(&"a".repeat(preview::search::HITS + 10));
     assert_eq!(find.counter(), format!("1 of {}+", preview::search::HITS));
+
+    // And a search that gave up before it found anything cannot claim there is nothing there. Set by
+    // hand rather than provoked: the walk's budget is ten million comparisons, and the shape that
+    // reaches it belongs in the search's own tests.
+    find.hits.clear();
+    find.capped = true;
+    assert_eq!(find.counter(), "Stopped");
 }
 
 #[test]

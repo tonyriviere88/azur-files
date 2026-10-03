@@ -26,6 +26,9 @@ pub(crate) fn segments(
     pane: PaneId,
     tab: &mut Tab,
     menu: &mut CrumbMenu,
+    // What the chevrons' dropdowns read their folder from. Never [`crate::fs::scan::scan`], which
+    // is a worker's call and can take 22 seconds on a bare `\\server` — see [`CrumbMenu`].
+    loader: &mut crate::loader::Loader,
     icons_cache: &mut crate::shell::icons::Icons,
     slashes: bool,
     out: &mut Vec<Action>,
@@ -240,9 +243,10 @@ pub(crate) fn segments(
                 // A click on the chevron whose dropdown is already up closes it, which is what
                 // clicking an open menu's button does everywhere.
                 menu.open = (menu.open != Some((pane, index))).then_some((pane, index));
-                // Re-read on each open: the folder may have gained a subfolder since the
-                // last time this chevron was used.
-                menu.path = None;
+                // Ask again on each open: the folder may have gained a subfolder since the
+                // last time this chevron was used. See [`CrumbMenu::reopen`] for what that
+                // means now that the answer comes from the loader.
+                menu.reopen();
             } else if tracking && response.hovered() {
                 wanted = Some(index);
             }
@@ -296,14 +300,38 @@ pub(crate) fn segments(
             // when the popup has closed itself — an entry clicked, a click outside, `Escape` —
             // which is how the bar learns to stop tracking.
             //
-            // The folder is read inside the closure, which egui runs only while the popup
-            // is showing, and [`CrumbMenu`] holds the result — so the scan happens on the
+            // The folder is asked for inside the closure, which egui runs only while the popup
+            // is showing, and [`CrumbMenu`] holds the answer — so the loader is asked on the
             // frame it opens rather than sixty times a second while it is up.
             azur_egui_theme::components::Menu::new(&response)
             .open(&mut open)
             .show(ui.ctx(), |ui| {
-                menu.ensure(&parent);
-                if menu.items.is_empty() {
+                let listed = menu.ensure(&parent, loader);
+                // **`Reading…` while the answer is out, and it is not the same word as
+                // `No subfolders`.** An empty menu is a claim — that the folder has nothing in
+                // it — and a dropdown that made it before the folder had been read would be
+                // wrong about every share and every sleeping drive, which are the two cases the
+                // wait exists for.
+                //
+                // Said straight away rather than after [`crate::pane::SLOW_SCAN`], which is the
+                // opposite of what the *listing* does, because what the delay buys there is not
+                // available here. A pane already fills the room the rows will take, so its
+                // alternative to silence is a word flashing in the middle of it on every
+                // navigation; a popup is only as big as what is in it, so the alternative here is
+                // a frame with nothing in it at all — which is `No subfolders` drawn in
+                // whitespace. A folder in the loader's cache, which is most of them on the trail,
+                // shows its rows on this same frame and never reaches this line.
+                //
+                // The word stays if the read *fails*: the reason is on the answer, and the answer
+                // goes to whoever holds its token, which is a tab and never this menu. Clicking
+                // the segment itself is what puts the folder — and its error — in the pane, in
+                // the one place with room to word it.
+                if !listed {
+                    ui.add(
+                        azur_egui_theme::components::Text::new("Reading…")
+                            .color(azur_egui_theme::components::TextColor::Tertiary),
+                    );
+                } else if menu.items.is_empty() {
                     ui.add(
                         azur_egui_theme::components::Text::new("No subfolders")
                             .color(azur_egui_theme::components::TextColor::Tertiary),

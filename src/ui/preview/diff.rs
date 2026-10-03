@@ -54,6 +54,25 @@ pub(super) struct Line {
     pub(super) number: Option<u32>,
 }
 
+/// Where a walk over a hunk's added lines should stop for a body of `lines` lines: the exclusive end,
+/// which is `lines + reach` or where the hunk's own count runs out, whichever comes first.
+///
+/// **A hunk header is not to be trusted for the length of a loop.** `added_count` is a number git
+/// printed about the whole file, and it arrives here beside a body that is the first
+/// [`crate::preview::TEXT_CAP`] of that file — so on a large file most of what the headers describe is
+/// past the end of what is being shown, and walking it line by line is a million no-ops per toggle. It
+/// is also a number this program did not work out for itself, which is reason enough on its own not to
+/// size a loop with it.
+///
+/// `reach` is how far past the end of the body a line can still matter: one for marking a line as
+/// added, and [`CONTEXT`] more than that for opening a window around a change, since a change just
+/// beyond the cut still has context inside the body.
+fn in_body(hunk: &crate::git::Hunk, lines: usize, reach: u32) -> u32 {
+    hunk.added
+        .saturating_add(hunk.added_count)
+        .min((lines as u32).saturating_add(reach))
+}
+
 impl Diffed {
     /// Build the view of `body` that `changes` describes.
     pub(super) fn build(body: &str, changes: &crate::git::Changes, collapse: bool, lang: syntax::Lang) -> Self {
@@ -63,9 +82,15 @@ impl Diffed {
         let file: Vec<&str> = body.split('\n').collect();
 
         // Which of the file's lines the working tree gained, and where the lines it lost belong.
+        //
+        // **The counts are clamped to the body rather than walked** — see [`in_body`]: a hunk that added
+        // a million lines past the cut used to be a million `get_mut`s that could only answer `None`.
+        // `max(1)` guards the other end of the same arithmetic, since the line number below is an index:
+        // git writes `+0` where a removal sits above the first line, and a count beside that nought
+        // would make `line as usize - 1` a panic in a debug build.
         let mut added = vec![false; file.len()];
         for hunk in &changes.hunks {
-            for line in hunk.added..hunk.added.saturating_add(hunk.added_count) {
+            for line in hunk.added.max(1)..in_body(hunk, file.len(), 1) {
                 if let Some(flag) = added.get_mut(line as usize - 1) {
                     *flag = true;
                 }
@@ -86,8 +111,11 @@ impl Diffed {
                 }
             };
             for hunk in &changes.hunks {
-                // A changed line, and [`CONTEXT`] lines either side of *it*.
-                for line in hunk.added..hunk.added.saturating_add(hunk.added_count) {
+                // A changed line, and [`CONTEXT`] lines either side of *it*. Clamped for the reason
+                // above, and to [`CONTEXT`] lines *past* the body rather than to the body: a change
+                // just beyond the cut still opens the window at the end of what is being shown, which
+                // is what the unclamped walk did.
+                for line in hunk.added.max(1)..in_body(hunk, lines, CONTEXT as u32 + 1) {
                     let at = line as usize;
                     window(at.saturating_sub(CONTEXT + 1), at + CONTEXT);
                 }
@@ -107,15 +135,39 @@ impl Diffed {
             lines: Vec::new(),
             spans: Vec::new(),
         };
+
+        // Which hunks put lines back in front of which line of the file, in line order.
+        //
+        // **This walk used to be nested inside the one below, and that was the hang.** The outer loop
+        // is the previewed body — bounded, at [`crate::preview::TEXT_CAP`] a shade under fifteen
+        // thousand lines — but `changes.hunks` is bounded by nothing the body knows about: it comes
+        // from `git diff -U0` over the *whole* file, and `-U0` gives every isolated changed line a
+        // hunk of its own. A large mostly-rewritten file is on the order of a hundred thousand hunks,
+        // so the two together were 10^9 iterations — on the UI thread, inside [`Text::follow`], on the
+        // frame the diff toggle was pressed.
+        //
+        // One ordered walk instead, against a cursor that only moves forward. Sorted rather than
+        // assumed sorted, since git's own order is the file's and this is then one pass over a list
+        // already in order — and **stably**, so several hunks landing in front of the same line are
+        // still put back in the order git gave them.
+        let mut removals: Vec<(u32, usize)> = changes
+            .hunks
+            .iter()
+            .enumerate()
+            .filter(|(_, hunk)| !hunk.removed.is_empty())
+            .map(|(which, hunk)| (hunk.after.saturating_add(1), which))
+            .collect();
+        removals.sort_by_key(|(line, _)| *line);
+        let mut next = 0;
+
         let mut skipped = 0u32;
         for (at, line) in file.iter().enumerate() {
             let number = at as u32 + 1;
             // The lines `HEAD` had here, in front of whatever replaced them — or after the line they
             // followed, for a hunk that only took lines away.
-            for hunk in &changes.hunks {
-                if hunk.after + 1 != number || hunk.removed.is_empty() {
-                    continue;
-                }
+            while let Some(&(_, which)) = removals.get(next).filter(|(line, _)| *line == number) {
+                next += 1;
+                let hunk = &changes.hunks[which];
                 out.flush(&mut skipped);
                 for (which, gone) in hunk.removed.iter().enumerate() {
                     out.push(gone, Mark::Removed, Some(hunk.removed_at + which as u32));
