@@ -31,6 +31,7 @@ use crate::ui::{filelist, GUTTER};
 
 mod action;
 mod capture;
+mod connect;
 mod frame;
 mod git;
 mod keyboard;
@@ -212,6 +213,9 @@ pub struct App {
     previews: crate::preview::Previews,
     /// The window the shell parents its own dialogs to.
     owner: crate::shell::Owner,
+    /// Sign-ins to shares that would not open, and which paths have already been asked about.
+    /// See [`connect`].
+    connecting: connect::Connecting,
     /// Shell file operations in flight.
     ops: crate::shell::ops::Operations,
     /// The ones that have finished, so Ctrl+Z can take them back.
@@ -454,6 +458,7 @@ impl App {
             git_waiting: 0,
             previews: crate::preview::Previews::new(ctx),
             owner: crate::shell::Owner::default(),
+            connecting: connect::Connecting::default(),
             ops: crate::shell::ops::Operations::new(),
             history: crate::shell::ops::history::History::default(),
             cut: Vec::new(),

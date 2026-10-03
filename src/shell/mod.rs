@@ -144,6 +144,14 @@ impl Owner {
     pub(crate) fn hwnd(self) -> windows::Win32::Foundation::HWND {
         windows::Win32::Foundation::HWND(self.0 as *mut std::ffi::c_void)
     }
+
+    /// The same handle for the flat `windows-sys` calls, whose `HWND` is a bare pointer rather
+    /// than the `windows` crate's newtype. Two spellings of one number, which is the price of
+    /// keeping both crates — see `Cargo.toml`.
+    #[cfg(windows)]
+    pub(crate) fn raw(self) -> windows_sys::Win32::Foundation::HWND {
+        self.0 as windows_sys::Win32::Foundation::HWND
+    }
 }
 
 /// Whether reading this path means going over a network.

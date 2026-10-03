@@ -156,8 +156,19 @@ impl Drop for Watch {
                 shared.quit = true;
             }
             win::signal(self.wake);
-            if let Some(thread) = self.thread.take() {
-                let _ = thread.join();
+            // **Waited for, but not indefinitely.** A thread sitting in `WaitForMultipleObjects` is
+            // released by the signal above and gone before this is read, which is every case but
+            // one: opening a folder on a share that has gone away blocks inside `CreateFileW` for a
+            // redirector timeout, and an unbounded join there holds the process open for twenty
+            // seconds after the window has closed. See [`win::finished`], which also explains why
+            // the event is left open in that case rather than closed under a live thread.
+            const GRACE: std::time::Duration = std::time::Duration::from_millis(50);
+            match self.thread.take() {
+                Some(thread) if !win::finished(&thread, GRACE) => return,
+                Some(thread) => {
+                    let _ = thread.join();
+                }
+                None => {}
             }
             win::close(self.wake);
         }

@@ -382,12 +382,21 @@ impl Drop for Loader {
             self.queue.shutdown.store(true, Atomic::Release);
         }
         self.queue.wake.notify_all();
-        for worker in self.workers.drain(..) {
-            // A worker parked in a slow `FindFirstFile` on a dead network share
-            // cannot be interrupted, and blocking the window's close on it would
-            // be worse than letting the process exit around it.
-            let _ = worker.join();
-        }
+        // **Detached, not joined**, and that is the whole of this function's cost.
+        //
+        // A worker parked in a slow call on a dead network share cannot be interrupted: the flag
+        // above is read between requests, and a thread 200 ms into a 21-second `NetShareEnum` will
+        // not look at it again until the redirector gives up. Joining meant the process outlived its
+        // own window by that timeout — measured at **22.4 seconds** from clicking close to the
+        // process going away, against 1.5 s once nothing waits. That is the freeze this comment
+        // used to describe while the code did the opposite of it.
+        //
+        // Dropping the handles is safe because a worker borrows nothing from here: the queue and the
+        // cache are `Arc`s it holds its own clones of, `send` on a dead receiver is an error it
+        // already handles, and the scan reads rather than writes, so a thread the process exit cuts
+        // off mid-syscall leaves nothing half-done. Same reason [`Volumes::probe`] has always
+        // detached its volume probes.
+        self.workers.clear();
     }
 }
 
@@ -402,8 +411,24 @@ impl Drop for Loader {
 /// currently reachable takes tens of seconds — so each volume is described on its own
 /// thread and merged in when it answers. One stalled share therefore delays one row
 /// rather than the window.
+///
+/// Two lists, because the panel shows them as two groups and nothing else about them differs:
+/// [`crate::fs::drives::list_shares`] is the volumes with no drive letter, which are as instant
+/// to list and as slow to describe as the lettered ones. Both go through the same probe and the
+/// same channel.
 pub struct Volumes {
     drives: Vec<Drive>,
+    /// The network locations with no letter of their own. See [`Volumes::shares`].
+    shares: Vec<Drive>,
+    /// The machines those connections are to. See [`Volumes::servers`].
+    servers: Vec<std::path::PathBuf>,
+    /// Machines the network has announced, found by a browse **and only ever by one**. See
+    /// [`Volumes::discover`].
+    found: Vec<std::path::PathBuf>,
+    /// Whether a browse is in flight, so the button can say so.
+    finding: bool,
+    discovered: Receiver<Vec<std::path::PathBuf>>,
+    discoveries: Sender<Vec<std::path::PathBuf>>,
     arrivals: Receiver<Drive>,
     /// Kept so the channel stays open while probes are still running, and so a
     /// refresh can replace it.
@@ -411,11 +436,21 @@ pub struct Volumes {
 }
 
 impl Volumes {
-    /// List the letters now and start describing them.
+    /// List the letters and the network locations now, and start describing them.
     pub fn new(ctx: &egui::Context) -> Self {
         let (sender, arrivals) = channel();
+        let (discoveries, discovered) = channel();
         let volumes = Self {
             drives: drives::list_letters(),
+            shares: drives::list_shares(),
+            servers: drives::list_servers(),
+            // Empty, and it stays empty until somebody presses the button. A browse reaches the
+            // network and answers about other people's machines; nothing about opening a window
+            // asks for that.
+            found: Vec::new(),
+            finding: false,
+            discovered,
+            discoveries,
             arrivals,
             sender,
         };
@@ -424,22 +459,27 @@ impl Volumes {
     }
 
     /// Re-list and re-describe. For F5, and for the window regaining focus after a
-    /// drive may have been plugged in or ejected.
+    /// drive may have been plugged in or ejected — or, for the network half, after a share
+    /// has been connected or dropped in another window, which is the same kind of event.
     pub fn refresh(&mut self, ctx: &egui::Context) {
         drives::forget_all();
-        let fresh = drives::list_letters();
-        // Keep whatever is already known for letters that are still there, so a
+        // Keep whatever is already known for volumes that are still there, so a
         // refresh does not blank every bar for as long as the probes take.
-        self.drives = fresh
-            .into_iter()
-            .map(|drive| {
-                self.drives
-                    .iter()
-                    .find(|d| d.letter == drive.letter && d.described)
-                    .cloned()
-                    .unwrap_or(drive)
-            })
-            .collect();
+        let keep = |had: &[Drive], fresh: Vec<Drive>| -> Vec<Drive> {
+            fresh
+                .into_iter()
+                .map(|drive| {
+                    had.iter()
+                        .find(|d| d.path == drive.path && d.described)
+                        .cloned()
+                        .unwrap_or(drive)
+                })
+                .collect()
+        };
+        self.drives = keep(&self.drives, drives::list_letters());
+        self.shares = keep(&self.shares, drives::list_shares());
+        // A machine has no description to lose, so this is rebuilt outright rather than merged.
+        self.servers = drives::list_servers();
         // A fresh channel, so answers from the previous round cannot arrive after it.
         let (sender, arrivals) = channel();
         self.sender = sender;
@@ -449,11 +489,36 @@ impl Volumes {
 
     /// Merge in anything that has been described since the last frame.
     pub fn poll(&mut self) {
+        // A browse that has answered. **Merged, not replaced.**
+        //
+        // Replacing was the first design and it was wrong in the way that matters: a browse is a
+        // snapshot of what happened to be announcing itself in the seconds it ran, and WSD and SSDP
+        // are chatty rather than reliable — the same machine is found by one press and missed by the
+        // next. Replacing meant a second press could empty the list, so a machine found once and
+        // then not found again vanished from the panel while still being perfectly reachable.
+        //
+        // So a machine found in this session stays for the session. Nothing about it is a claim that
+        // it is *there* — that is what its ink says, and what clicking it settles.
+        while let Ok(found) = self.discovered.try_recv() {
+            for machine in found {
+                if !self
+                    .found
+                    .iter()
+                    .any(|had| had.as_os_str().eq_ignore_ascii_case(machine.as_os_str()))
+                {
+                    self.found.push(machine);
+                }
+            }
+            self.finding = false;
+        }
         while let Ok(described) = self.arrivals.try_recv() {
+            // By path, which is the key both lists share — every network location has an empty
+            // letter, so a letter-keyed lookup would put the first share's answer on all of them.
             if let Some(existing) = self
                 .drives
                 .iter_mut()
-                .find(|d| d.letter == described.letter)
+                .chain(self.shares.iter_mut())
+                .find(|d| d.path == described.path)
             {
                 *existing = described;
             }
@@ -464,19 +529,120 @@ impl Volumes {
         &self.drives
     }
 
+    /// The network locations with no drive letter — what the Network group in the sidebar shows.
+    ///
+    /// Separate from [`Volumes::all`] rather than appended to it because they are a separate
+    /// group in the panel, and because a row with no letter among rows named after theirs would
+    /// have to explain itself.
+    pub fn shares(&self) -> &[Drive] {
+        &self.shares
+    }
+
+    /// The machines to browse — `\\fileserver` and the like.
+    ///
+    /// Not `Drive`s, and deliberately: a machine has no capacity, no label and nothing to
+    /// describe, so a row for one is a name and an icon. What it *does* have is shares, and those
+    /// are a listing rather than sidebar rows — see [`crate::fs::drives::server_dir`], which is
+    /// what asking a machine costs and why nothing here does it.
+    pub fn servers(&self) -> &[std::path::PathBuf] {
+        &self.servers
+    }
+
+    /// Read the connection table again, because something has just changed it.
+    ///
+    /// Called when a sign-in succeeds and when a listing on a machine comes back — the two moments a
+    /// connection appears that the panel has no other way to hear about, since the list is otherwise
+    /// only rebuilt by [`Volumes::refresh`] on F5 and on regaining focus. Costs what
+    /// [`crate::fs::drives::list_servers`] costs, which is a local table and no I/O.
+    ///
+    /// **The list is what is connected now, and nothing more.** An earlier version kept every
+    /// machine that had ever answered for the rest of the session, to survive Windows pruning an
+    /// idle deviceless connection out from under a machine that still worked. That is the wrong
+    /// trade: it also kept the row for a machine that had genuinely gone away, in the full ink that
+    /// says *this is connected*. A row that disappears when the connection does is the honest one,
+    /// and a machine that is merely *there* has the browse button and its muted rows to say so.
+    pub fn relist(&mut self) {
+        self.servers = drives::list_servers();
+    }
+
+    /// Machines the network has announced that this one is not connected to.
+    ///
+    /// Empty until [`Volumes::discover`] has been asked for and has answered. Kept apart from
+    /// [`Volumes::servers`] because the two are not equally certain: a server in that list is one
+    /// this machine has a connection to, and one in this list has only said it exists.
+    pub fn found(&self) -> &[std::path::PathBuf] {
+        &self.found
+    }
+
+    /// Whether a browse is still going.
+    pub fn finding(&self) -> bool {
+        self.finding
+    }
+
+    /// Put machines in the found list without going to the network.
+    ///
+    /// For the tests that are about the *rows* — that a found machine is drawn a step down the ink
+    /// ladder and that clicking one opens it. The browse itself takes 14 seconds and asks the
+    /// network about other people's computers, neither of which belongs in a test run.
+    #[cfg(test)]
+    pub(crate) fn pretend_found(&mut self, machines: Vec<std::path::PathBuf>) {
+        self.found = machines;
+    }
+
+    /// Go and look for machines on the network. **Only ever from the button.**
+    ///
+    /// Not from startup, not from focus, not from F5 — see [`Volumes::refresh`], which deliberately
+    /// leaves what was found alone. This is the one thing in this struct that goes to the network
+    /// rather than reading a local table, it takes as long as the network takes, and it answers
+    /// about other people's computers: all three are reasons for it to happen when it is asked for
+    /// and not otherwise.
+    ///
+    /// A second press while one is still running is ignored rather than queued.
+    pub fn discover(&mut self, ctx: &egui::Context) {
+        if self.finding {
+            return;
+        }
+        self.finding = true;
+        let discoveries = self.discoveries.clone();
+        let ctx = ctx.clone();
+        // Detached, like a volume probe: a browse still going when the window closes has nothing
+        // useful left to say.
+        let spawned = std::thread::Builder::new()
+            .name("network-browse".to_owned())
+            .spawn(move || {
+                let found = drives::discover::machines();
+                if discoveries.send(found).is_ok() {
+                    ctx.request_repaint();
+                }
+            });
+        // A machine that will not give us a thread simply finds nothing, and the button comes back
+        // up rather than staying pressed for ever.
+        if spawned.is_err() {
+            self.finding = false;
+        }
+    }
+
     fn probe(&self, ctx: &egui::Context) {
-        for drive in &self.drives {
+        for drive in self.drives.iter().chain(self.shares.iter()) {
             if drive.described {
                 continue;
             }
             let mut drive = drive.clone();
             let sender = self.sender.clone();
             let ctx = ctx.clone();
+            // Named after the volume rather than its letter, since a network location has not
+            // got one — and a thread called `volume-` with nothing after it says nothing in a
+            // debugger, which is the only place this name is ever read.
+            let name = if drive.letter.is_empty() {
+                format!("volume-{}", drive.path.display())
+            } else {
+                format!("volume-{}", drive.letter)
+            };
             // Detached: there is nothing useful to do with a probe that is still
             // waiting on SMB when the window closes, and joining it would hold the
             // process open for the whole timeout.
             let spawned = std::thread::Builder::new()
-                .name(format!("volume-{}", drive.letter))
+                .name(name)
                 .spawn(move || {
                     scan::silence_device_dialogs();
                     drives::describe(&mut drive);

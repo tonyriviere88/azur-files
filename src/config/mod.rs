@@ -341,12 +341,21 @@ impl Config {
                     }
                 }
                 "sections" => {
-                    let flags: Vec<bool> = value.split(',').map(|f| f.trim() == "1").collect();
-                    if flags.len() == 3 {
+                    // Read by position with a default per field rather than on an exact count,
+                    // so a file written before the Network group existed keeps the three
+                    // decisions it does record instead of losing all of them to a length check.
+                    // The group it says nothing about opens, which is what a new group does.
+                    let flags: Vec<&str> = value.split(',').map(str::trim).collect();
+                    let open = |at: usize, fallback: bool| match flags.get(at) {
+                        Some(&flag) => flag == "1",
+                        None => fallback,
+                    };
+                    if !flags.is_empty() {
                         config.sections = Sections {
-                            drives: flags[0],
-                            bookmarks: flags[1],
-                            places: flags[2],
+                            drives: open(0, true),
+                            network: open(3, true),
+                            bookmarks: open(1, true),
+                            places: open(2, true),
                         };
                     }
                 }
@@ -445,11 +454,15 @@ impl Config {
         text.push_str(&format!("markdown_source={}\n", flag(self.preview.markup)));
         text.push_str(&format!("diff={}\n", flag(self.preview.diff)));
         text.push_str(&format!("diff_collapse={}\n", flag(self.preview.collapse)));
+        // **Network last, out of panel order**, and deliberately: the first three positions are
+        // what every settings file already written means by this line, and moving one of them
+        // would silently reinterpret those files. A new group goes on the end.
         text.push_str(&format!(
-            "sections={},{},{}\n",
+            "sections={},{},{},{}\n",
             flag(self.sections.drives),
             flag(self.sections.bookmarks),
             flag(self.sections.places),
+            flag(self.sections.network),
         ));
         if let Some([w, h]) = self.window {
             text.push_str(&format!("window={w:.0},{h:.0}\n"));

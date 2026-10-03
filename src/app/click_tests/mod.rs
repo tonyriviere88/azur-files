@@ -18,7 +18,7 @@ use egui::{pos2, vec2, Event, Id, Modifiers, PointerButton, Pos2, RawInput, Rect
 // | [`path_bar`] | history, Up, Refresh, and the crumbs |
 // | [`breadcrumb`] | the chevrons and their dropdowns |
 // | [`title_bar`] | the mark, the tabs, the window buttons, the switches |
-// | [`sidebar`] | places, drives, bookmarks, the splitter |
+// | [`sidebar`] | places, drives, machines, bookmarks, the splitter |
 // | [`band`] | the rubber band |
 // | [`panes`] | the dock: focus, splits, seams |
 // | [`path_field`] | the path field and every other text field |

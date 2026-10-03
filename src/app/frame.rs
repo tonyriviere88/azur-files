@@ -154,7 +154,10 @@ impl App {
             }
         }
 
-        self.collect_scans();
+        self.collect_scans(&ctx);
+        // Before the next round of asking, so a share that has just been signed in to is re-read on
+        // this frame rather than the one after — this is what turns the dialog's OK into a listing.
+        self.collect_connections(&ctx);
         self.start_scans(&ctx, now);
         // After the scans, because a listing that landed this frame is a folder to ask about this
         // frame — the branch and the marks then arrive one answer later rather than one navigation
@@ -335,6 +338,10 @@ impl App {
                 &mut child,
                 t,
                 self.volumes.all(),
+                self.volumes.shares(),
+                self.volumes.servers(),
+                self.volumes.found(),
+                self.volumes.finding(),
                 &mut marks,
                 &self.places,
                 &current,

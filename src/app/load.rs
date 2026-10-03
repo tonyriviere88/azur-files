@@ -8,15 +8,41 @@ use super::*;
 
 impl App {
     /// Hand every finished scan to the tab that asked for it.
-    pub(super) fn collect_scans(&mut self) {
+    pub(super) fn collect_scans(&mut self, ctx: &egui::Context) {
         // Collected first so the loader is not borrowed while the panes are.
         let arrived: Vec<_> = self.loader.drain().collect();
         let auto = self.auto_tiles;
+        // Shares that came back refused, gathered in the loop and acted on after it: `self` is
+        // taken apart below, and raising a dialog needs the whole of it.
+        let mut refused: Vec<(crate::pane::PaneId, PathBuf)> = Vec::new();
+        // And whether any listing on a machine came back, which means a connection now exists that
+        // the panel's machine list predates. One flag rather than the machines themselves: what the
+        // list holds is read off the connection table, so all this has to decide is whether to read
+        // it again — once, after the loop, however many listings arrived in the same frame.
+        let mut connected = false;
         let Self { panes, providers, .. } = self;
         for loaded in arrived {
             for pane in panes.iter_mut() {
                 for tab in &mut pane.tabs {
                     if tab.awaiting == Some(loaded.token) {
+                        // **A server that wants to know who is asking.** Raised from here and
+                        // nowhere else, because `tab.awaiting` is what makes this a folder somebody
+                        // *navigated to*: a prefetch's answer matches no tab, so walking the cursor
+                        // down a listing of unreachable shares cannot put a modal dialog on screen.
+                        // See [`super::connect`].
+                        if loaded.dir.credentials {
+                            refused.push((pane.id, loaded.dir.path.clone()));
+                        }
+                        // A machine that answered. Any listing on it counts, not just the machine's
+                        // own share list: if `\\fileserver\web\owncloud` read, there is a connection
+                        // to the machine whether or not the panel has heard of it yet. `machine_of`
+                        // is what says there is a machine at all — it answers `None` for a local
+                        // path and for a DFS namespace, neither of which has a machine row.
+                        if loaded.dir.error.is_none()
+                            && crate::fs::drives::machine_of(&loaded.dir.path).is_some()
+                        {
+                            connected = true;
+                        }
                         tab.apply(loaded.dir.clone());
                         // And, if this is a folder being *opened*, whether it is one to open as
                         // tiles — which only the listing that just arrived can say. See
@@ -26,6 +52,12 @@ impl App {
                     }
                 }
             }
+        }
+        if connected {
+            self.volumes.relist();
+        }
+        for (pane, path) in refused {
+            self.ask_credentials(pane, &path, ctx);
         }
     }
 

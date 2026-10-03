@@ -193,6 +193,11 @@ pub enum Action {
     },
     RemoveBookmark(PathBuf),
     ToggleBookmark(PathBuf),
+    /// Go and look for machines on the network, once, because the button was pressed.
+    ///
+    /// The only thing that starts a browse — see [`crate::loader::Volumes::discover`]. Nothing
+    /// automatic produces this action: not startup, not the window regaining focus, not F5.
+    DiscoverNetwork,
     /// A new group, at the end of the list, with its name open for typing.
     AddBookmarkGroup,
     /// Fold a group away, or open it again. `usize` is a position in the bookmark list.
@@ -279,6 +284,7 @@ impl Action {
             Self::MoveBookmark { .. } => "MoveBookmark",
             Self::RemoveBookmark(_) => "RemoveBookmark",
             Self::ToggleBookmark(_) => "ToggleBookmark",
+            Self::DiscoverNetwork => "DiscoverNetwork",
             Self::AddBookmarkGroup => "AddBookmarkGroup",
             Self::ToggleBookmarkGroup(_) => "ToggleBookmarkGroup",
             Self::BeginRenameBookmarkGroup(_) => "BeginRenameBookmarkGroup",

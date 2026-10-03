@@ -1,7 +1,15 @@
-//! The left panel: drives, bookmarks, places.
+//! The left panel: drives, bookmarks, places, network locations.
 //!
-//! Three collapsible groups of rows, in the order they are worth scanning: the
-//! volumes on the machine, the folders you chose, and the ones the shell provides.
+//! Four collapsible groups of rows, in the order they are worth scanning: the volumes on this
+//! machine, the folders you chose, the ones the shell provides, and — last, because it is the only
+//! group whose contents this machine may know nothing about — the volumes on other machines.
+//!
+//! Network is its own group rather than more Drives rows because nothing in it has a drive letter
+//! — see [`crate::fs::drives::Drive::display_name`] — and a row named `fileserver` sitting among
+//! rows named `Windows (C:)` under one heading would have to explain itself. Mostly it holds
+//! *machines*, which are places to look rather than volumes; the exception is drawn by the same
+//! [`drive_row`] a disk gets, because a mount has a capacity, a gauge and a menu exactly as a disk
+//! does.
 //!
 //! Every row navigates the focused pane on a left click, opens in a new tab on a
 //! middle click, and offers "open in a new pane" from its context menu — so the
@@ -24,7 +32,7 @@
 use azur_egui_theme::components::{ContextMenu, MenuItem};
 use azur_egui_theme::icons as azur_icons;
 use azur_egui_theme::tokens::{radius, space, typography};
-use egui::{pos2, vec2, CornerRadius, Id, Rect, Sense, Ui};
+use egui::{pos2, vec2, CornerRadius, Id, Rect, Sense, Stroke, Ui};
 use std::path::Path;
 
 use crate::app::Action;
@@ -109,6 +117,7 @@ const CHILD: f32 = 12.0;
 #[derive(Clone, Copy, Debug)]
 pub struct Sections {
     pub drives: bool,
+    pub network: bool,
     pub bookmarks: bool,
     pub places: bool,
 }
@@ -117,6 +126,7 @@ impl Default for Sections {
     fn default() -> Self {
         Self {
             drives: true,
+            network: true,
             bookmarks: true,
             places: true,
         }
@@ -138,6 +148,12 @@ pub fn show(
     ui: &mut Ui,
     t: &Theme,
     drives: &[Drive],
+    shares: &[Drive],
+    servers: &[std::path::PathBuf],
+    // Machines a browse found, drawn muted, and whether that browse is still running. Empty until
+    // the button on the Network heading is pressed — see [`discover_button`].
+    found: &[std::path::PathBuf],
+    finding: bool,
     marks: &mut Marks<'_>,
     places: &[Place],
     current: &Path,
@@ -225,6 +241,7 @@ pub fn show(
                         Id::new(("place", &place.label)),
                         Sense::click(),
                         false,
+                        false,
                     );
                     if place.shell_only {
                         // Not a directory this program can list — hand it over.
@@ -247,12 +264,230 @@ pub fn show(
                 }
             }
 
+            // ---- Network --------------------------------------------------
+            //
+            // **Last**, after Places, because it is the only group whose contents this machine may
+            // know nothing about: the two above it are always there and always right, and a panel
+            // is scanned from the top.
+            //
+            // Three kinds of row, in descending certainty:
+            //
+            // - **A machine this window is connected to** — `fileserver`. Opening it lists every
+            //   share the server offers; see [`crate::fs::drives::server_dir`]. One line, no gauge,
+            //   because a machine has no capacity.
+            // - **A machine the network has merely announced**, found by the refresh button on the
+            //   heading and drawn in `text-tertiary` to say so — it has said it exists and nothing
+            //   more. Clicking one opens it, which is what asks for a connection: a machine that
+            //   wants credentials refuses the share list, and refusing the share list is what
+            //   raises Windows' credential prompt. See [`crate::app::connect`].
+            // - **A network location that no machine here can reach** — a connection to a DFS path,
+            //   whose first component is a domain rather than a server. Drawn by the same
+            //   [`drive_row`] a disk gets, because it is a mount with the same capacity to show.
+            //
+            // The group is drawn even when all three are empty, because an absent group answers
+            // "does this program see my share at all" with silence.
+            ui.add_space(space::S2);
+            let network_heading = ui.cursor().min;
+            let (network, network_open) =
+                group_header(ui, t, width, "Network", &mut sections.network, ADD);
+            if network_open {
+                if servers.is_empty() && shares.is_empty() && found.is_empty() {
+                    hint(ui, t, width, 0.0, "No network locations");
+                }
+                for server in servers {
+                    machine_row(
+                        ui, t, width, server, false, icons_cache, &mut queue, current, focused,
+                        out,
+                    );
+                }
+                // The found ones after the connected ones, and never a machine that is already
+                // above: a row drawn twice, once certain and once dimmed, would read as two places.
+                for machine in found {
+                    if servers
+                        .iter()
+                        .any(|had| had.as_os_str().eq_ignore_ascii_case(machine.as_os_str()))
+                    {
+                        continue;
+                    }
+                    machine_row(
+                        ui, t, width, machine, true, icons_cache, &mut queue, current, focused,
+                        out,
+                    );
+                }
+                for share in shares {
+                    let shell = shell_icon(ui, icons_cache, &share.path);
+                    drive_row(
+                        ui, t, width, share, shell, &mut queue, current, focused, scratch,
+                        out,
+                    );
+                }
+            }
+            // The area the button answers to the pointer within, which is the heading and the rows
+            // under it — the same span the `+` on Bookmarks uses, and for the same reason.
+            let network_area = Rect::from_min_max(
+                pos2(network_heading.x, network_heading.y),
+                pos2(network_heading.x + width, ui.cursor().min.y),
+            );
+            discover_button(ui, t, network, network_area, finding, out);
+
             ui.add_space(space::S3);
             // Every row's shell icon, in one run — see [`IconQueue`]. Inside the scroll area,
             // so they are clipped with the rows they belong to.
             flush_icons(ui, &queue);
         });
     bookmarks_rect
+}
+
+/// A machine: a name and an icon, and nothing else because a machine has nothing else.
+///
+/// `found` is whether it came out of a network browse rather than out of this machine's own
+/// connections, which is the whole difference between the two kinds of row — and it is said in the
+/// ink rather than with a badge or a second line. See [`row`]'s `muted`.
+#[allow(clippy::too_many_arguments)]
+fn machine_row(
+    ui: &mut Ui,
+    t: &Theme,
+    width: f32,
+    machine: &Path,
+    found: bool,
+    icons_cache: &mut crate::shell::icons::Icons,
+    queue: &mut IconQueue,
+    current: &Path,
+    focused: PaneId,
+    out: &mut Vec<Action>,
+) {
+    // **No shell icon for a machine nobody is connected to.** Asking the shell about a path is
+    // asking it to go and look at that path, and for an unreachable one that is a question with a
+    // network timeout in it — on the icon worker, which every row in the window shares. A connected
+    // machine has already answered, so it may as well wear its own icon.
+    let shell = if found {
+        None
+    } else {
+        shell_icon(ui, icons_cache, machine)
+    };
+    let response = row(
+        ui,
+        t,
+        width,
+        0.0,
+        ROW,
+        &icons::drive_network,
+        if found { t.text.tertiary } else { t.text.secondary },
+        shell,
+        queue,
+        &crate::fs::display_name(machine),
+        machine == current,
+        Id::new(("server", machine)),
+        Sense::click(),
+        false,
+        found,
+    );
+    navigate_on(&response, focused, machine, out);
+    ContextMenu::new(&response).show(ui.ctx(), |ui| {
+        menu_targets(ui, focused, machine, out);
+    });
+}
+
+/// The refresh on the Network heading: go and look for machines.
+///
+/// The `+` on Bookmarks in every respect that is about the panel — a hover control rather than
+/// permanent furniture, drawn after the heading so a click cannot fold the section on its way — and
+/// different in the one respect that is about the network: it says whether it is still looking.
+///
+/// **The only thing in this program that starts a browse.** See [`crate::loader::Volumes::discover`]
+/// for why nothing else does: it reaches the network, it takes as long as the network takes, and
+/// what it answers is a list of other people's computers.
+fn discover_button(
+    ui: &mut Ui,
+    t: &Theme,
+    heading: Rect,
+    area: Rect,
+    finding: bool,
+    out: &mut Vec<Action>,
+) {
+    // Shown while looking even with the pointer away, which is the one place this parts company
+    // with the `+`: a control that vanishes mid-answer takes the only sign that anything is
+    // happening with it.
+    let pointer = ui.ctx().pointer_interact_pos();
+    if !finding && !pointer.is_some_and(|at| area.contains(at)) {
+        return;
+    }
+    let rect = Rect::from_center_size(
+        pos2(heading.right() - space::S2 - ADD * 0.5, heading.center().y),
+        vec2(ADD, ADD),
+    );
+
+    // **A spinner in the button's place while it is looking**, rather than the refresh glyph in a
+    // pressed state. A browse takes 14 seconds on this machine — see
+    // [`crate::fs::drives::discover::machines`] — and for that long a latched button is
+    // indistinguishable from one that has stuck: it is the only thing on screen that could say
+    // work is happening, and a static glyph says the opposite.
+    //
+    // Drawn here rather than with Azur's `Spinner`, which allocates its own space in a layout and
+    // cannot be put at a rect on top of a heading. Its shape though: a `stroke-subtle` ring with
+    // one accent three-quarter arc, 0.8s a turn.
+    if finding {
+        let response = ui.interact(rect, Id::new("network-discover"), Sense::hover());
+        if response.hovered() {
+            azur_egui_theme::components::tooltip(
+                response,
+                "Looking for machines on the network…",
+            );
+        }
+        spinner(ui, t, rect);
+        return;
+    }
+
+    let response = crate::ui::tool_button(
+        ui,
+        t,
+        rect,
+        Id::new("network-discover"),
+        // The same glyph the path bar's Refresh wears, because it is the same verb: go and look
+        // again. See [`crate::ui::breadcrumb`].
+        &icons::refresh,
+        "Look for machines on the network",
+        true,
+        false,
+        t.bg.layer_alt,
+    );
+    if response.clicked() {
+        out.push(Action::DiscoverNetwork);
+    }
+}
+
+/// A turning ring, for as long as the browse runs.
+///
+/// The one animation in this panel, and it asks for the repaint that keeps it turning — without
+/// that, an idle window draws the arc once and leaves it stopped, which reads as a hang rather than
+/// as work.
+fn spinner(ui: &Ui, t: &Theme, rect: Rect) {
+    /// A turn every 0.8 seconds, which is Azur's `azur-spinner-spin`.
+    const PERIOD: f32 = 0.8;
+    let width = 2.0;
+    let radius = (rect.width() - width) * 0.5;
+    ui.painter().circle_stroke(
+        rect.center(),
+        radius,
+        Stroke::new(width, t.stroke.subtle),
+    );
+
+    let time = ui.input(|i| i.time) as f32;
+    let start = (time / PERIOD) * std::f32::consts::TAU;
+    let sweep = std::f32::consts::TAU * 0.75;
+    const STEPS: usize = 24;
+    let points: Vec<egui::Pos2> = (0..=STEPS)
+        .map(|step| {
+            let angle = start + sweep * (step as f32 / STEPS as f32);
+            rect.center() + vec2(angle.cos(), angle.sin()) * radius
+        })
+        .collect();
+    ui.painter().add(egui::Shape::line(
+        points,
+        Stroke::new(width, t.accent.mark),
+    ));
+    // It turns, so the next frame has to come.
+    ui.ctx().request_repaint();
 }
 
 /// The square the `+` on the Bookmarks heading takes, and what the label gives up for it.
@@ -380,6 +615,11 @@ fn row(
     id: Id,
     sense: Sense,
     dragging: bool,
+    // A row less certain than the rest of the panel: a machine the network has merely announced.
+    // One step down the text ladder, so it reads as "there, but not yet yours" — and it still
+    // lights to full contrast under the pointer, because it is as clickable as any other row and
+    // one that stayed dim under the hand would read as disabled.
+    muted: bool,
 ) -> egui::Response {
     let (rect, _) = ui.allocate_exact_size(vec2(width, height), Sense::hover());
     let response = ui.interact(rect, id, sense);
@@ -411,6 +651,8 @@ fn row(
     );
     let color = if current || response.hovered() {
         t.text.primary
+    } else if muted {
+        t.text.tertiary
     } else {
         t.text.secondary
     };
@@ -470,18 +712,13 @@ fn flush_icons(ui: &Ui, queue: &IconQueue) {
     }
 }
 
-/// The name a drive row shows: its label and its letter.
-fn drive_name(drive: &Drive) -> String {
-    format!("{} ({})", drive.label, drive.letter)
-}
-
 /// What a drive's tooltip says: its name, and the numbers behind the bar.
 ///
 /// Both numbers, since nothing has to fit beside anything here — and the name as well,
 /// because in a narrow panel the row's own label is the part that got truncated.
 fn drive_tooltip(drive: &Drive, out: &mut String) {
     out.clear();
-    out.push_str(&drive_name(drive));
+    out.push_str(&drive.display_name());
     out.push_str(" — ");
     match drive.used_fraction() {
         Some(_) => {
@@ -520,11 +757,14 @@ fn drive_row(
     scratch: &mut String,
     out: &mut Vec<Action>,
 ) {
-    let name = drive_name(drive);
+    let name = drive.display_name();
     let text_width = (width - TEXT_INSET - space::S3).max(0.0);
 
     let (rect, _) = ui.allocate_exact_size(vec2(width, DRIVE_ROW), Sense::hover());
-    let response = ui.interact(rect, Id::new(("drive", &drive.letter)), Sense::click());
+    // Keyed on the path rather than the letter: every network location has an empty letter, so a
+    // letter-keyed id would give every row in the Network group the same one — and two widgets
+    // sharing an id in egui share their hover, their tooltip and their click.
+    let response = ui.interact(rect, Id::new(("drive", &drive.path)), Sense::click());
     let here = drive.path == *current;
 
     // As on every other row here: the pointer's highlight only, never a mark for the folder that
@@ -708,5 +948,28 @@ mod tests {
         let mut out = String::new();
         drive_tooltip(&drive(0, 0), &mut out);
         assert_eq!(out, "Data (D:) — not measured");
+    }
+
+    /// A Network row is the same row, and its tooltip names it the same way.
+    ///
+    /// Both halves matter here. The name, because a share whose row is truncated to
+    /// `web on file…` in a narrow panel has nowhere else to say where it is; and "not
+    /// measured", because a disconnected share is exactly the case that never gets a gauge —
+    /// which without this reads as a row that has stopped working rather than a share that is
+    /// down.
+    #[test]
+    fn a_network_row_is_named_after_its_machine() {
+        let share = Drive {
+            path: PathBuf::from("\\\\fileserver\\web"),
+            letter: String::new(),
+            label: "web".to_owned(),
+            kind: DriveKind::Network,
+            total: 0,
+            free: 0,
+            described: true,
+        };
+        let mut out = String::new();
+        drive_tooltip(&share, &mut out);
+        assert_eq!(out, "web on fileserver — not measured");
     }
 }

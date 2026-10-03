@@ -575,6 +575,8 @@ fn mark_row(
         // Only bookmarks and their groups can be dragged, and only within this list.
         Sense::click_and_drag(),
         editing.drag == Some(spot),
+        // A bookmark is a place the user chose; nothing about it is uncertain.
+        false,
     );
     if response.drag_started() {
         editing.drag = Some(spot);

@@ -136,6 +136,48 @@ fn the_window_comes_back_the_way_it_was_left() {
     assert_eq!(back.panes[1].paths, saved.panes[1].paths);
 }
 
+/// Which sidebar groups were folded, and what a file written before the fourth one existed means.
+///
+/// Its own test because this line is a *list of positions* rather than a key per value, which is
+/// the one shape where adding a field can silently reinterpret every file already on disk. Two
+/// claims: the four flags survive a round trip, and a three-flag line — every settings file this
+/// program has ever written until now — still means the three groups it was written about.
+#[test]
+fn which_sidebar_groups_are_folded_survives_a_new_group_appearing() {
+    let saved = Config {
+        sections: Sections {
+            drives: false,
+            network: true,
+            bookmarks: false,
+            places: true,
+        },
+        ..Config::default()
+    };
+    let back = Config::parse(&saved.to_text()).sections;
+    assert!(!back.drives);
+    assert!(back.network);
+    assert!(!back.bookmarks);
+    assert!(back.places);
+
+    // **The line a previous build wrote**, which had no fourth position at all. The three
+    // decisions in it are kept — a length check here dropped all three and reopened every group
+    // — and the group it says nothing about opens, which is what a group nobody has folded does.
+    let older = Config::parse("sections=0,1,0\n").sections;
+    assert!(!older.drives, "the older file's own decisions are still read");
+    assert!(older.bookmarks);
+    assert!(!older.places);
+    assert!(older.network, "a group with no flag yet opens");
+
+    // Network is written *last*, out of panel order, so that those first three positions go on
+    // meaning what they have always meant. A file that put it second would read an old
+    // `sections=1,0,1` as "bookmarks folded" turning into "network folded".
+    assert!(
+        saved.to_text().contains("sections=0,0,1,1"),
+        "the flags moved: {}",
+        saved.to_text()
+    );
+}
+
 /// The bookmarks come back arranged the way they were left: the order, the groups, what is in
 /// each of them, and which of them were folded shut.
 ///

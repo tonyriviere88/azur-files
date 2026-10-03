@@ -37,7 +37,10 @@ pub(super) fn scan_real(path: &Path, started: Instant) -> Dir {
         if matches!(code, ERROR_FILE_NOT_FOUND | ERROR_NO_MORE_FILES) {
             return DirBuilder::new(path).finish(elapsed_micros(started));
         }
-        return Dir::failed(path, error_text(code));
+        // Whether a sign-in would fix it, decided here because this is the last place the *code*
+        // exists — a sentence cannot be asked whether it was about credentials.
+        return Dir::failed(path, error_text(code))
+            .wanting_credentials(super::wants_credentials(code, path));
     }
 
     let mut builder = DirBuilder::new(path);
@@ -167,7 +170,7 @@ pub(super) fn flags_of(attrs: u32) -> u16 {
 /// another feature of `windows-sys` and a `LocalFree` on every path; these five
 /// cover everything a user can act on.
 #[cfg(windows)]
-pub(super) fn error_text(code: u32) -> String {
+pub(crate) fn error_text(code: u32) -> String {
     match code {
         2 | 3 => "This folder no longer exists".to_owned(),
         5 => "Access denied".to_owned(),

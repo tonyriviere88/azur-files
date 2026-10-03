@@ -55,13 +55,63 @@ pub use win::silence_device_dialogs;
 /// Read `path` into a [`Dir`]. Never fails: an unreadable directory comes back as
 /// an empty one carrying the reason.
 ///
-/// An empty path is the synthetic "This PC" listing of drives.
+/// Two paths are not directories at all and are answered without touching the filesystem API:
+///
+/// - **An empty path** is the synthetic "This PC" listing of volumes.
+/// - **A bare `\\server`** is the machine's list of shares. A server is not a directory —
+///   `FindFirstFileW` against `\\fileserver\*` fails with `ERROR_BAD_PATHNAME` (161), which is
+///   exactly what a bare server path used to come up as — so it is asked of the machine instead.
+///   See [`super::drives::server_dir`]: that call goes to the network and can take twenty-two
+///   seconds to fail, which is affordable here and nowhere else, because this function only ever
+///   runs on a [`crate::loader`] worker.
 pub fn scan(path: &Path) -> Dir {
     let started = Instant::now();
     if path.as_os_str().is_empty() {
         return super::drives::this_pc(started);
     }
+    if let Some(server) = super::drives::unc_server(path) {
+        return super::drives::server_dir(&server, path, started);
+    }
     scan_real(path, started)
+}
+
+/// The handful of failures a file manager actually meets, in words.
+///
+/// Here rather than only in the platform half because a failure is not only a directory read's:
+/// [`super::drives::server_dir`] has a Win32 code to put into words too, and one vocabulary for
+/// both is what stops a server that is not there from being worded differently from a share that
+/// is not there.
+#[cfg(windows)]
+pub(crate) use win::error_text;
+
+/// Nothing portable hands back an error *code*, so there is nothing to translate.
+#[cfg(not(windows))]
+pub(crate) fn error_text(code: u32) -> String {
+    format!("Could not read this folder (error {code})")
+}
+
+/// Whether a failure is one that **signing in would fix**.
+///
+/// Both halves of the question, because either alone is wrong:
+///
+/// - **The code has to be about who is asking.** `ERROR_ACCESS_DENIED` is the one that matters and
+///   the one that is ambiguous: a server refusing an unauthenticated session returns it, and so
+///   does a folder whose ACL genuinely excludes you. The rest of the list is unambiguous.
+/// - **The path has to be a UNC path.** There is nobody to sign in to on `C:`, so offering it
+///   there would be a credential dialog raised over a file this account is simply not allowed to
+///   read — a prompt that cannot succeed, in front of the one message that explained why.
+///
+/// Codes left out on purpose: `ERROR_ACCOUNT_DISABLED`, `ERROR_ACCOUNT_LOCKED_OUT` and
+/// `ERROR_PASSWORD_EXPIRED` name an account that cannot be used at all, and
+/// `ERROR_SESSION_CREDENTIAL_CONFLICT` (1219) is the one where Windows itself refuses a second
+/// identity for a server already connected under another — a prompt for any of them fails again
+/// with the same answer, which is worse than the sentence they came with.
+pub(crate) fn wants_credentials(code: u32, path: &Path) -> bool {
+    /// `ERROR_ACCESS_DENIED`, and the four that say so outright:
+    /// `ERROR_INVALID_PASSWORD`, `ERROR_NOT_AUTHENTICATED`, `ERROR_LOGON_FAILURE`,
+    /// `ERROR_BAD_USERNAME`.
+    const ASKING: [u32; 5] = [5, 86, 1244, 1326, 2202];
+    ASKING.contains(&code) && path.to_string_lossy().starts_with("\\\\")
 }
 
 // ---------------------------------------------------------------------------
@@ -129,6 +179,12 @@ pub fn scan_deep(root: &Path, budget: usize, patience: std::time::Duration) -> D
     // machine, which is not what anybody means by the button.
     if root.as_os_str().is_empty() {
         return super::drives::this_pc(started);
+    }
+    // A machine is the same kind of thing one level down: its rows are shares, each a tree of its
+    // own, and flattening it would mean walking every share on the server. So the button gives
+    // back the shares, exactly as it gives back the volumes for This PC.
+    if let Some(server) = super::drives::unc_server(root) {
+        return super::drives::server_dir(&server, root, started);
     }
 
     walk(root, budget, patience, hands())

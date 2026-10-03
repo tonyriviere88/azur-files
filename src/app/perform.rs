@@ -176,6 +176,11 @@ impl App {
                 self.volumes.refresh(ctx);
                 let path = self.pane_mut(pane).map(|p| p.tab().path.clone());
                 if let Some(path) = path {
+                    // **F5 on a refused share is a request to be asked again**, possibly as
+                    // somebody else. Without this the credential dialog is raised once per path per
+                    // session and a cancel is permanent — see [`super::connect`], where the
+                    // once-only rule is what stops a cancel from looping.
+                    self.connecting.forget(&path);
                     self.loader.invalidate(&path);
                     if let Some(p) = self.pane_mut(pane) {
                         let tab = p.tab_mut();
@@ -651,6 +656,10 @@ impl App {
                     self.bookmarks.add(path)
                 };
             }
+            // Nothing is written to the settings: what a browse found is about the network at the
+            // moment it was asked, not a preference, and a machine that has gone quiet should not
+            // come back next launch as a row that leads nowhere.
+            Action::DiscoverNetwork => self.volumes.discover(ctx),
             Action::AddBookmarkGroup => {
                 // Made and named in one gesture: the `+` is pressed, the group appears at the
                 // end of the list with its name in a field, and typing over `New group` is the

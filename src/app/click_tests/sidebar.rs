@@ -1,4 +1,4 @@
-//! The sidebar: places, drives, bookmarks, and the splitter beside them.
+//! The sidebar: places, drives, network machines, bookmarks, and the splitter beside them.
 
 use super::*;
 
@@ -36,20 +36,209 @@ fn a_sidebar_group_header_folds_it() {
 #[test]
 fn a_drive_row_navigates() {
     let mut h = Harness::new();
-    let letter = h
+    let path = h
         .app
         .volumes
         .all()
         .first()
-        .map(|d| d.letter.clone())
+        .map(|d| d.path.clone())
         .expect("this machine has at least one volume");
     let at = h
-        .find(Id::new(("drive", &letter)), crate::ui::GUTTER + 100.0, 40..300)
+        .find(
+            Id::new(("drive", path.as_path())),
+            crate::ui::GUTTER + 100.0,
+            40..300,
+        )
         .expect("no drive row is reachable by the pointer");
     let done = h.click_at(at);
     assert!(
         done.contains(&"Navigate"),
         "a drive row did not navigate, got {done:?}"
+    );
+}
+
+/// A machine in the Network group is a row that opens it.
+///
+/// The row almost every network folder is now reached through: `\\fileserver` offers fourteen
+/// shares and only `web` was ever connected to, so a panel built from connections showed one and
+/// hid thirteen. Skipped on a machine with no network connections at all — like the drive tests
+/// above, this one is about the machine it runs on, and there is nothing to assert about a group
+/// that is correctly empty.
+#[test]
+fn a_network_machine_row_navigates() {
+    let mut h = Harness::new();
+    let Some(server) = h.app.volumes.servers().first().cloned() else {
+        return;
+    };
+    let at = h
+        .find(
+            Id::new(("server", server.as_path())),
+            crate::ui::GUTTER + 100.0,
+            40..500,
+        )
+        .unwrap_or_else(|| {
+            panic!(
+                "the `{}` row is not reachable by the pointer",
+                server.display()
+            )
+        });
+    let done = h.click_at(at);
+    assert!(
+        done.contains(&"Navigate"),
+        "a machine row did not navigate, got {done:?}"
+    );
+}
+
+/// The refresh on the Network heading starts a browse, and does not fold the section on the way.
+///
+/// Both halves, for the same reason the `+` on Bookmarks is tested this way: the button sits on top
+/// of the heading's own click target, so a press that landed on the heading instead — or on both —
+/// would start the browse and immediately hide what it was going to fill.
+///
+/// **It is the only thing that starts one.** A browse reaches the network and takes 14 seconds on
+/// this machine, so nothing automatic may produce this action — see `Volumes::discover`.
+#[test]
+fn the_refresh_on_the_network_heading_starts_a_browse() {
+    let mut h = Harness::new();
+    let open = h.app.sections.network;
+    assert!(open, "the section starts open");
+
+    let at = h
+        .find(
+            Id::new("network-discover"),
+            h.app.sidebar_width - 12.0,
+            30..760,
+        )
+        .expect("the refresh on the Network heading is not reachable by the pointer");
+    let done = h.click_at(at);
+    assert!(
+        done.contains(&"DiscoverNetwork"),
+        "the refresh did not start a browse, got {done:?}"
+    );
+    assert!(
+        h.app.sections.network,
+        "the refresh folded the section it was going to fill"
+    );
+}
+
+/// A machine the network only *announced* is drawn a step down the ink ladder, and opening it is
+/// what asks for a connection.
+///
+/// The whole difference between the two kinds of machine row, and it is said in the ink rather than
+/// with a badge: a connected machine is `text-secondary` like every other row in the panel, and a
+/// found one is `text-tertiary` — there, but not yet yours. Seeded rather than browsed, because a
+/// real browse takes 14 seconds and asks the network about other people's computers.
+#[test]
+fn a_machine_the_browse_found_is_dimmer_than_one_we_are_connected_to() {
+    let mut h = Harness::new();
+    let found = PathBuf::from("\\\\nowhere-announced");
+    h.app.volumes.pretend_found(vec![found.clone()]);
+    h.settle();
+
+    // The colour a row's label was laid out in. `truncated` bakes it into the galley and
+    // `text_left` paints with `PLACEHOLDER`, so the galley's own section is where it lives.
+    fn ink(h: &Harness, label: &str) -> Option<egui::Color32> {
+        fn walk(shape: &egui::Shape, label: &str, into: &mut Option<egui::Color32>) {
+            match shape {
+                egui::Shape::Text(text) if text.galley.text() == label => {
+                    *into = text.galley.job.sections.first().map(|s| s.format.color);
+                }
+                egui::Shape::Vec(shapes) => {
+                    for shape in shapes {
+                        walk(shape, label, into);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut out = None;
+        for shape in &h.shapes {
+            walk(shape, label, &mut out);
+        }
+        out
+    }
+
+    let t = &h.app.theme;
+    assert_eq!(
+        ink(&h, "nowhere-announced"),
+        Some(t.text.tertiary),
+        "a found machine is not drawn in the muted ink"
+    );
+    // And a row we *are* connected to is not muted, or the distinction says nothing. Skipped on a
+    // machine with no network connections, like the drive tests above.
+    if let Some(server) = h.app.volumes.servers().first().cloned() {
+        let name = crate::fs::display_name(&server);
+        assert_eq!(
+            ink(&h, &name),
+            Some(t.text.secondary),
+            "a connected machine should be a step brighter than a found one"
+        );
+    }
+
+    // And it opens, which is what asks for the connection: a machine that wants credentials
+    // refuses its share list, and that refusal is what raises Windows' prompt.
+    let at = h
+        .find(
+            Id::new(("server", found.as_path())),
+            crate::ui::GUTTER + 100.0,
+            30..760,
+        )
+        .expect("the found machine's row is not reachable by the pointer");
+    let done = h.click_at(at);
+    assert!(
+        done.contains(&"Navigate"),
+        "clicking a found machine did not open it, got {done:?}"
+    );
+}
+
+/// And a connection that no machine row reaches keeps a row of its own.
+///
+/// Normally empty — a connection to `\\server\share` is one click away through the machine, so it
+/// is deliberately *not* listed twice. What lands here is the DFS case, where the first component
+/// is a domain rather than a server and there is no machine row to reach it through; without this
+/// row it would be invisible, which is the fault the Network group exists to fix. Skipped when
+/// this machine has none, which is the common case.
+#[test]
+fn a_connection_no_machine_reaches_still_has_a_row() {
+    let mut h = Harness::new();
+    let Some(share) = h.app.volumes.shares().first().cloned() else {
+        return;
+    };
+    assert!(
+        share.letter.is_empty(),
+        "a volume with a letter belongs in Drives: {share:?}"
+    );
+    // Its machine is not on offer — that is the whole reason it has a row.
+    let host = crate::fs::drives::split_unc(&share.path).map(|(host, _)| host);
+    assert!(
+        host.is_some_and(|host| {
+            host.contains(['\\', '/'])
+                || !h
+                    .app
+                    .volumes
+                    .servers()
+                    .iter()
+                    .any(|s| s.as_os_str().eq_ignore_ascii_case(format!("\\\\{host}").as_str()))
+        }),
+        "`{}` is reachable by opening its machine and should not have a row too",
+        share.display_name()
+    );
+    let at = h
+        .find(
+            Id::new(("drive", share.path.as_path())),
+            crate::ui::GUTTER + 100.0,
+            40..500,
+        )
+        .unwrap_or_else(|| {
+            panic!(
+                "the `{}` row is not reachable by the pointer",
+                share.display_name()
+            )
+        });
+    let done = h.click_at(at);
+    assert!(
+        done.contains(&"Navigate"),
+        "a network row did not navigate, got {done:?}"
     );
 }
 
@@ -73,17 +262,21 @@ fn hovering_a_drive_puts_its_free_space_in_a_tooltip() {
     // the only place they exist. Whether one actually appears is not something the
     // source shows: it needs a real hover, which is what this harness is for.
     let mut h = Harness::new();
-    let letter = h
+    let path = h
         .app
         .volumes
         .all()
         .first()
         .expect("a machine has a drive")
-        .letter
+        .path
         .clone();
     let at = h
-        .find(Id::new(("drive", &letter)), crate::ui::GUTTER + 80.0, 30..300)
-        .unwrap_or_else(|| panic!("the `{letter}` row is not reachable"));
+        .find(
+            Id::new(("drive", path.as_path())),
+            crate::ui::GUTTER + 80.0,
+            30..300,
+        )
+        .unwrap_or_else(|| panic!("the `{}` row is not reachable", path.display()));
 
     // A tooltip is an area in its own layer order, so this asks egui whether one is up
     // rather than hunting for the text.
@@ -108,7 +301,7 @@ fn hovering_a_drive_puts_its_free_space_in_a_tooltip() {
             return;
         }
     }
-    panic!("hovering the `{letter}` drive row shows no tooltip");
+    panic!("hovering the `{}` drive row shows no tooltip", path.display());
 }
 
 #[test]
@@ -179,7 +372,10 @@ fn the_plus_on_the_bookmarks_heading_makes_a_group() {
         .find(
             Id::new("bookmark-group-add"),
             h.app.sidebar_width - 12.0,
-            30..200,
+            // The whole panel, not the first 200 points: how far down the Bookmarks heading sits
+            // depends on how many drives, network locations and machines *this* machine has, and a
+            // range guessed from one of them is a test that fails on the next.
+            30..760,
         )
         .expect("the + on the Bookmarks heading is not reachable by the pointer");
     let done = h.click_at(at);
@@ -349,7 +545,10 @@ fn a_group_is_named_by_typing_over_the_field() {
         .find(
             Id::new("bookmark-group-add"),
             h.app.sidebar_width - 12.0,
-            30..200,
+            // The whole panel, not the first 200 points: how far down the Bookmarks heading sits
+            // depends on how many drives, network locations and machines *this* machine has, and a
+            // range guessed from one of them is a test that fails on the next.
+            30..760,
         )
         .expect("the + is not reachable");
     h.click_at(at);

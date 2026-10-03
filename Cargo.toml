@@ -144,6 +144,16 @@ windows-core = "0.62"
 
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
+    # `NetApiBufferFree`, which frees what `NetShareEnum` allocates. The enumeration itself is
+    # filed under `Win32_Storage_FileSystem` above, along with its `SHARE_INFO_1` — this feature
+    # is here for the one call that gives the buffer back. See `fs::drives::shares_on`.
+    "Win32_NetworkManagement_NetManagement",
+    # `WNetOpenEnumW`, for the one thing `GetLogicalDrives` cannot answer: a connection to
+    # `\\server\share` that was made without mapping a drive letter is not a bit in a 26-bit
+    # mask, and every UNC path this machine has open is one of those. See
+    # `fs::drives::list_shares` — three functions out of `mpr.dll`, no COM, and it reads the
+    # redirector's own connection table rather than going to the network.
+    "Win32_NetworkManagement_WNet",
     "Win32_Storage_FileSystem",
     "Win32_System_Diagnostics_Debug",
     "Win32_System_Com",

@@ -38,14 +38,35 @@ use std::path::{Path, PathBuf};
 /// Differs from [`Path::parent`] at the two ends of the tree: a drive root's
 /// parent is "This PC" (the empty path) rather than nothing, and "This PC" has no
 /// parent at all. Without that, Up stops working one level too early.
+///
+/// **And it differs in the middle, for a UNC path**, because `Path` does not model a machine as a
+/// level. Measured, on Windows:
+///
+/// | path | `Path::parent` | here |
+/// | --- | --- | --- |
+/// | `\\fileserver\web` | `None` — the whole thing is one *prefix* | `\\fileserver` |
+/// | `\\fileserver` | `\` — a bare root, and nowhere at all | This PC |
+///
+/// The second row was a real fault rather than a tidying: Up from a machine navigated to `\`.
+/// The first makes the machine the level it is now — see [`drives::server_dir`], which lists one —
+/// so Up from a share goes to the server that offers it, and Up again to This PC.
 pub fn parent_of(path: &Path) -> Option<PathBuf> {
     if path.as_os_str().is_empty() {
         return None;
     }
+    // A machine. Above it is only the list of machines, which is This PC.
+    if drives::unc_server(path).is_some() {
+        return Some(PathBuf::new());
+    }
     match path.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => Some(parent.to_path_buf()),
-        // A root: `C:\` or `\\server\share`.
-        _ => Some(PathBuf::new()),
+        // A root. `C:\` goes to This PC; `\\server\share` goes to the machine, which is a place
+        // of its own — and is why this asks for the share's *own* server rather than reusing the
+        // `None` above, which `Path` gives for both.
+        _ => Some(match drives::split_unc(path) {
+            Some((host, _)) if !host.contains(['\\', '/']) => PathBuf::from(format!("\\\\{host}")),
+            _ => PathBuf::new(),
+        }),
     }
 }
 
@@ -182,6 +203,26 @@ fn expand(text: &str) -> String {
 pub fn breadcrumb_segments(path: &Path) -> Vec<(String, PathBuf)> {
     let mut out = vec![("This PC".to_owned(), PathBuf::new())];
     if path.as_os_str().is_empty() {
+        return out;
+    }
+
+    // **A UNC path is walked by hand, because `Path::components` does not model a machine.**
+    // Measured on Windows: `\\fileserver\web` arrives as a single `Prefix(UNC)` component — the
+    // server and the share welded into one — and `\\fileserver` as a bare `RootDir` plus a
+    // `Normal`, which put a segment labelled `\` on the bar leading nowhere.
+    //
+    // Split on the separator instead, which gives the levels [`parent_of`] walks: the machine,
+    // the share on it, then the folders. Every segment is somewhere to go — the machine lists its
+    // shares (see [`drives::server_dir`]) and the share root lists its contents.
+    if let Some(inner) = path.to_string_lossy().strip_prefix("\\\\") {
+        let mut walked = String::from("\\\\");
+        for (index, part) in inner.split('\\').filter(|p| !p.is_empty()).enumerate() {
+            if index > 0 {
+                walked.push('\\');
+            }
+            walked.push_str(part);
+            out.push((part.to_owned(), PathBuf::from(&walked)));
+        }
         return out;
     }
 

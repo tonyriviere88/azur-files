@@ -525,13 +525,12 @@ impl Drop for Git {
             self.queue.shutdown.store(true, Atomic::Release);
         }
         self.queue.wake.notify_all();
-        for worker in self.workers.drain(..) {
-            // A worker waiting on a `git status` cannot be interrupted, so this is as long as that
-            // status takes — which on somebody's monorepo is seconds. Joined anyway, for the reason
-            // the loader joins: a thread still running when the process tears down is holding a
-            // channel and a `Context` that are about to be dropped underneath it.
-            let _ = worker.join();
-        }
+        // Detached rather than joined, for the reason [`crate::loader::Loader::drop`] sets out: a
+        // worker waiting on a `git status` cannot be interrupted, and that is seconds on a monorepo
+        // and a redirector timeout on a repository that lives on a share which has gone away. The
+        // channel and the `Context` a worker holds are its own clones and outlive this, which is why
+        // there was never anything being dropped underneath it.
+        self.workers.clear();
     }
 }
 

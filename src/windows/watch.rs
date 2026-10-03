@@ -164,8 +164,37 @@ pub fn close(wake: isize) {
     if wake == 0 {
         return;
     }
-    // SAFETY: closed once, from `Watch::drop`, after the thread has been joined.
+    // SAFETY: closed once, from `Watch::drop`, and only once that has established the thread has
+    // ended — see [`finished`], which is what makes that true even when the thread is stuck.
     let _ = unsafe { CloseHandle(HANDLE(wake as *mut std::ffi::c_void)) };
+}
+
+/// Whether the watcher thread has ended, waiting up to `grace` for it.
+///
+/// **The whole reason `Watch::drop` does not simply join.** The thread opens each watched folder
+/// with `CreateFileW`, and on a share that has gone away that call blocks for a redirector timeout —
+/// around twenty seconds. It cannot see the quit flag while it is in there and the wake event cannot
+/// interrupt it, so a join is a twenty-second wait *after* the window has gone, which is the freeze
+/// this exists to avoid.
+///
+/// `false` means "still in there", and the caller's answer to that is to leave the thread alone and
+/// leak the event rather than close a handle the thread may still wait on — a closed handle value is
+/// free to be reused by the next object the process opens, which is the one way this could go wrong
+/// quietly. One event handle at exit costs nothing; the OS takes it back with the process.
+///
+/// The grace only has to cover *noticing*: a thread in `WaitForMultipleObjects` is released by the
+/// signal immediately, so this returns in microseconds in the normal case, and the tests that make
+/// and drop a `Watch` therefore still close their handle.
+pub fn finished(thread: &std::thread::JoinHandle<()>, grace: std::time::Duration) -> bool {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::WAIT_OBJECT_0;
+    use windows::Win32::System::Threading::WaitForSingleObject;
+
+    let handle = HANDLE(thread.as_raw_handle());
+    let ms = grace.as_millis().min(u128::from(u32::MAX)) as u32;
+    // SAFETY: the handle belongs to `thread`, which is borrowed for the whole call, so it cannot
+    // have been closed by the `JoinHandle` being dropped.
+    unsafe { WaitForSingleObject(handle, ms) == WAIT_OBJECT_0 }
 }
 
 fn run(shared: Arc<Mutex<Shared>>, wake: isize, ctx: egui::Context) {

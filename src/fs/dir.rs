@@ -90,6 +90,14 @@ pub struct Dir {
     pub total_size: u64,
     /// Why the listing is empty, if it is empty because something went wrong.
     pub error: Option<String>,
+    /// The read failed for want of credentials, and signing in could fix it.
+    ///
+    /// Kept as well as [`Dir::error`] because the words are for the user and this is for the
+    /// program: "Access denied" on `C:\Windows\System32\config` is final, and the same words on
+    /// `\\server\share` mean a server that has not been told who is asking. Only the code the
+    /// syscall returned can tell those apart, and by the time it is a sentence it is gone — so the
+    /// question is answered where the code still exists. See [`crate::fs::scan::wants_credentials`].
+    pub credentials: bool,
     /// The read stopped at a limit rather than at the end of what is there.
     ///
     /// Only ever true for a flattened listing — [`crate::fs::scan::scan_deep`] — which
@@ -206,9 +214,16 @@ impl Dir {
             file_count: 0,
             total_size: 0,
             error: Some(error.into()),
+            credentials: false,
             truncated: false,
             scan_micros: 0,
         }
+    }
+
+    /// The same, marked as a failure a sign-in could fix. See [`Dir::credentials`].
+    pub fn wanting_credentials(mut self, wanted: bool) -> Self {
+        self.credentials = wanted;
+        self
     }
 }
 
@@ -373,6 +388,7 @@ impl DirBuilder {
             file_count: self.file_count,
             total_size: self.total_size,
             error: None,
+            credentials: false,
             truncated: false,
             scan_micros,
         }

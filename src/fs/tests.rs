@@ -101,6 +101,62 @@ fn breadcrumbs_of_this_pc_are_just_this_pc() {
     assert_eq!(breadcrumb_segments(&PathBuf::new()).len(), 1);
 }
 
+/// A machine is a level of the tree, and `Path` does not think so.
+///
+/// The whole reason both of these are walked by hand. Measured on Windows:
+/// `Path::new(r"\\fileserver\web")` is a *single* `Prefix(UNC)` component with the server and
+/// the share welded together and a `parent()` of `None`, while `Path::new(r"\\fileserver")` is a
+/// bare `RootDir` plus a `Normal` whose `parent()` is `\` — a path that leads nowhere and which Up
+/// used to navigate to.
+#[test]
+#[cfg(windows)]
+fn a_machine_sits_between_this_pc_and_its_shares() {
+    // Up: a folder, its share, the machine, This PC. Every step is somewhere with a listing.
+    assert_eq!(
+        parent_of(Path::new("\\\\fileserver\\web\\owncloud")),
+        Some(PathBuf::from("\\\\fileserver\\web\\")),
+        "inside a share, `Path::parent` is right and is used as it is"
+    );
+    assert_eq!(
+        parent_of(Path::new("\\\\fileserver\\web")),
+        Some(PathBuf::from("\\\\fileserver")),
+        "Up from a share reaches the machine that offers it"
+    );
+    assert_eq!(
+        parent_of(Path::new("\\\\fileserver")),
+        Some(PathBuf::new()),
+        "and Up from the machine reaches This PC, not the bare `\\` that Path::parent gives"
+    );
+
+    // A DFS path, where the first component is a domain rather than a server: there is no machine
+    // to stop at, so a share root goes straight to This PC. `drives::list_servers` excludes these
+    // for the same reason — asking one for its shares takes 22 seconds to fail.
+    assert_eq!(
+        parent_of(Path::new("\\\\lgs-net.com\\alyo")),
+        Some(PathBuf::from("\\\\lgs-net.com")),
+        "a two-part UNC is a share on a machine as far as this can tell"
+    );
+
+    // And the bar shows those levels rather than one welded segment or a stray `\`.
+    let labels = |path: &str| -> Vec<String> {
+        breadcrumb_segments(Path::new(path))
+            .into_iter()
+            .map(|(label, _)| label)
+            .collect()
+    };
+    assert_eq!(labels("\\\\fileserver"), ["This PC", "fileserver"]);
+    assert_eq!(
+        labels("\\\\fileserver\\web\\owncloud"),
+        ["This PC", "fileserver", "web", "owncloud"]
+    );
+
+    // Every segment has to lead somewhere: the machine to its share list, the share to its root.
+    let crumbs = breadcrumb_segments(Path::new("\\\\fileserver\\web\\owncloud"));
+    assert_eq!(crumbs[1].1, PathBuf::from("\\\\fileserver"));
+    assert_eq!(crumbs[2].1, PathBuf::from("\\\\fileserver\\web"));
+    assert_eq!(crumbs[3].1, PathBuf::from("\\\\fileserver\\web\\owncloud"));
+}
+
 #[test]
 fn unknown_variables_survive_expansion() {
     assert_eq!(expand("%NOT_A_REAL_VAR_XYZ%\\x"), "%NOT_A_REAL_VAR_XYZ%\\x");

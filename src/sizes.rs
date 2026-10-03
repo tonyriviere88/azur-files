@@ -803,13 +803,12 @@ impl Drop for Sizes {
             self.queue.shutdown.store(true, Atomic::SeqCst);
         }
         self.queue.wake.notify_all();
-        for worker in self.workers.drain(..) {
-            // As long as one directory read takes, which on a share that has gone away is a
-            // timeout — the same exposure the loader's own join has, and joined for the same
-            // reason: a thread still running when the process tears down is holding a channel and
-            // a `Context` that are about to be dropped underneath it.
-            let _ = worker.join();
-        }
+        // Detached rather than joined, for the reason [`crate::loader::Loader::drop`] sets out: a
+        // walk inside a directory read on a share that has gone away cannot see the flag above, so
+        // joining it is a redirector timeout spent with no window left to show the answer in. The
+        // channel and the `Context` a worker holds are its own clones and outlive this, which is why
+        // there was never anything being dropped underneath it.
+        self.workers.clear();
     }
 }
 

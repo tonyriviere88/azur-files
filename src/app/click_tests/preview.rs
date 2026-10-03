@@ -1221,9 +1221,19 @@ fn everything_in_a_dependency_row_sits_on_one_line() {
     // The panel's rows, which is everything drawn below its header. Taken from what was
     // painted rather than from the geometry, so this does not have to re-derive the layout.
     let panel = preview_rect(&h);
+    // **Stopping short of the pane's status strip**, which is drawn over the bottom of the panel
+    // and is not a dependency row. Two things live in those last points and neither is on a row's
+    // baseline: the `1 / 1133 · 23.8 MB` line itself, and the row underneath it that the panel's
+    // scroll area paints and then clips away. A band that reached the full height put the two in
+    // the same bucket as the last visible row and compared their baselines — which is a failure
+    // about a helper's arithmetic, not about a row. The same `bottom() - STATUS_HEIGHT` that
+    // `click_tests::sizes` uses to find that strip.
     let rows_area = Rect::from_min_max(
         pos2(panel.left(), panel.top() + crate::ui::preview::HEADER),
-        panel.max,
+        pos2(
+            panel.right(),
+            panel.bottom() - crate::ui::filelist::STATUS_HEIGHT,
+        ),
     );
     let mut rows: std::collections::BTreeMap<i64, Vec<(f32, String)>> = Default::default();
     for (at, text) in h.baselines() {

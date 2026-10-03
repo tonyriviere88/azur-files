@@ -534,7 +534,100 @@ does not fit is the tail, truncated at the right-hand edge.
 
 ## The left panel
 
-Drives, bookmarks and places, each group collapsible and remembered.
+Drives, bookmarks, places and network locations, each group collapsible and remembered. Network is
+last because it is the only one of the four whose contents this machine may know nothing about, and
+a panel is scanned from the top.
+
+### The volumes that have no drive letter
+
+`GetLogicalDrives` answers with 26 bits, and a file manager that asks it what is mounted has
+just decided that a place is only real if it has a letter. It is not: opening `\\fileserver\web`
+— typing it, clicking a shortcut, following a link — makes a *deviceless* connection, which is a
+mounted volume with no letter and therefore no bit. `net use` shows one as a row with an empty
+*Local* column. Explorer shows it under Network. This program showed it nowhere, and there was no
+way to get back to a share except to type its path again.
+
+So "what is mounted" is two enumerations rather than one, and the second is
+`WNetOpenEnumW(RESOURCE_CONNECTED, RESOURCETYPE_ANY)` — the same list `net use` prints. **`ANY` and
+not `RESOURCETYPE_DISK`**, which looks obviously right and quietly loses the most important
+connection there is: signing in to a *machine* opens a session to `\\server\IPC$`, an inter-process
+channel rather than a disk, so a disk-only enumeration reported a machine you had just authenticated
+to as not connected. The type comes back on each row instead, and the two callers filter it
+themselves — one wants disks, the other wants anything that names a machine.
+
+The letterless rows go in their own **Network** group, because a network location cannot be named
+after a letter it has not got: `web on fileserver` says the share and the machine, which is what
+Windows has always called a network place. Anything that *does* have a letter stays in Drives,
+mapped share or not — a letter is what makes it belong beside the local disks.
+
+The thing that makes this affordable is the same thing that makes `GetDriveTypeW` affordable
+(see below): it reads the redirector's own connection table and does not go to the network.
+Measured on a machine where one of the two connections is to an unreachable server, both come
+back in **0 ms**, the dead one included — so it sits on the startup path next to the letters
+rather than behind a worker. The 13 ms it costs the first time is `mpr.dll` loading, once.
+Describing one is the slow half, exactly as it is for a letter, and goes to the same
+thread-per-volume probe.
+
+### And the machine itself, so a share nobody has opened is still reachable
+
+Connections are not the same question as *what exists*, and answering only the first one is a
+trap: `\\fileserver` offers **14** shares here and exactly one of them — `web` — had a
+connection, so a panel built from connections alone showed one row and hid thirteen. Discovering
+a share only once something has already opened it is the wrong way round.
+
+So a **machine** is a level of its own. The Network group lists one row per server, opening it
+lists every share the server offers, and the shares are a *listing* rather than sidebar rows —
+which is what keeps the panel a list of names when a NAS has fourteen shares on it, or forty.
+
+That needs a different call. A server is not a directory: `FindFirstFileW` against
+`\\fileserver\*` fails with `ERROR_BAD_PATHNAME` (161), which is exactly what a bare server
+path used to come up as. `NetShareEnum` is the one that answers — the same call `net view
+\\server` makes — and **it really does go to the network**:
+
+| server | answer | cost |
+| --- | --- | --- |
+| `\\fileserver` | 15 shares | **50 ms** cold, 15 ms warm |
+| a machine that refuses | `ERROR_ACCESS_DENIED` | 544 ms |
+| a name that does not resolve | `ERROR_BAD_NETPATH` | 1.3 s |
+| `\\lgs-net.com`, a DFS domain | `ERROR_BAD_NETPATH` | **22.1 s** |
+
+The last row is the 22-second trap again, so this only ever runs on a scanner worker — the same
+place a slow directory read already costs nothing but its own thread. It is also why a connection
+of the form `\\domain\namespace\...\share` contributes no server row: the first component of a DFS
+path is a domain, not a machine, and a row that spends twenty-two seconds to say nothing is worse
+than no row.
+
+`IPC$` and the admin shares are dropped. The type word carries flags in its top bits and the kind
+in its bottom byte, so both halves have to be asked — `IPC$` is `STYPE_IPC | STYPE_SPECIAL`, and
+`C$` is `STYPE_DISKTREE | STYPE_SPECIAL`. A server that refuses comes back as a listing carrying
+the reason rather than as an empty folder: those two look identical on screen and only one of them
+is something you can act on.
+
+### A machine is a level `Path` does not have
+
+Making the server a real level meant not trusting `std::path` about UNC, which models it
+differently than you would guess. Measured on Windows:
+
+| path | `components()` | `parent()` |
+| --- | --- | --- |
+| `\\fileserver\web` | one `Prefix(UNC)`, then `RootDir` | `None` |
+| `\\fileserver` | `RootDir`, then `Normal("fileserver")` | `\` |
+
+So the server and the share arrive welded into a single component, a bare server is not a UNC
+prefix at all, and `Path::starts_with` between the two is false in both directions. Two things
+came out of that:
+
+- **Up from a machine navigated to `\`**, a path that leads nowhere. That was a real fault, not a
+  tidy-up.
+- The breadcrumb walked those components and put a segment labelled `\` on the bar.
+
+Both are walked by hand now, splitting on the separator, which gives the levels that actually
+exist: This PC, the machine, the share, then the folders. Up goes `owncloud` → `web` →
+`fileserver` → This PC, and every segment on the bar is somewhere with a listing behind it.
+
+The machines and the network locations are both in the This PC listing too, and that is not
+decoration: Up from a machine arrives at This PC, and a listing that did not hold the row you had
+just come out of would be one that had lost it.
 
 The icons are **Windows' own**, per place rather than per type: the Downloads arrow, the
 Pictures thumbnail, the Recycle Bin, a network volume's plug, a drive with a custom
@@ -3971,7 +4064,8 @@ Two more things keep frames honest rather than fast:
   drive that is not currently reachable for its volume label takes **22 seconds** on
   this machine, in one blocking syscall. The sidebar lists drive letters immediately
   (microseconds, no I/O) and describes each volume on its own thread, so a stalled
-  share delays one row instead of the window.
+  share delays one row instead of the window. The network locations that have no
+  letter are listed on the same terms — see [the left panel](#the-volumes-that-have-no-drive-letter).
 
 The status line shows how long the current folder took to read. That is not
 decoration: a program that claims to be fast should be willing to be checked, and a
