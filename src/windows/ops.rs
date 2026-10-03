@@ -189,7 +189,13 @@ impl windows::Win32::UI::Shell::IFileOperationProgressSink_Impl for Sink_Impl {
         // The renamed item for preference; failing that, the new name in the folder it was
         // already in, which for a rename is where it still is.
         let now = path_of(made.as_ref()).or_else(|| {
-            // SAFETY: a null-terminated string owned by the caller for the length of the call.
+            // Null when the shell has no name to give, exactly as in [`landed`], where a replace
+            // walking one of these is what took the program down.
+            if name.is_null() {
+                return None;
+            }
+            // SAFETY: non-null, checked above, and a null-terminated string owned by the caller
+            // for the length of the call.
             let name = unsafe { name.to_string() }.ok()?;
             Some(was.parent()?.join(name))
         });
@@ -292,18 +298,29 @@ impl windows::Win32::UI::Shell::IFileOperationProgressSink_Impl for Sink_Impl {
 
 /// Where an item ended up: what the shell handed over, or the folder and name it was given.
 ///
-/// The item is the answer used, and the composition is a fallback that has never been reached —
+/// The item is the answer used, and the composition is the fallback for when it is absent —
 /// `psiNewlyCreated` was present on every callback measured by
-/// `the_sink_reports_what_the_shell_actually_did`, and it is documented as optional, so the
-/// fallback is here for the machine where it is not.
+/// `the_sink_reports_what_the_shell_actually_did`, and it is documented as optional.
 ///
-/// The fallback is *nearly* as good, which was a surprise worth writing down: `psznewname` turns
-/// out to be the name the shell settled on and not the one it was asked for — measured as
-/// `one - Copie.txt` for a copy into its own folder, and `made (2)` for the second `New folder`.
-/// Nearly, because there is nothing in the contract that says so, and the one thing undo cannot
-/// afford is a path that names the wrong file.
+/// **Both of them can be absent at once, and it took a crash to establish that.** Replacing a
+/// file on a network share faulted at `ucrtbase!wcslen`, reached from `PostCopyItem` through
+/// here: `psiNewlyCreated` yielded no path *and* `psznewname` was null, so the fallback ran and
+/// walked a null pointer. `PCWSTR::to_string` is `wcslen` on whatever it is handed and there is
+/// no check inside it — the null is this function's to catch. A replace produces no *new* item,
+/// which is the likely reason the shell has neither to give: there was already a file there and
+/// afterwards there still is, the same one, with different contents.
+///
+/// So a null name is `None`, an answer this sink already has a meaning for: the item is left out
+/// of the [`Outcome`], and undo declines to offer a step rather than acting on a path nobody
+/// confirmed. That is the same call the `result.is_err()` arm makes at every callback.
+///
+/// The fallback is otherwise *nearly* as good as the item, which was a surprise worth writing
+/// down: `psznewname` turns out to be the name the shell settled on and not the one it was asked
+/// for — measured as `one - Copie.txt` for a copy into its own folder, and `made (2)` for the
+/// second `New folder`. Nearly, because there is nothing in the contract that says so, and the
+/// one thing undo cannot afford is a path that names the wrong file.
 #[cfg(windows)]
-fn landed(
+pub(crate) fn landed(
     made: windows_core::Ref<windows::Win32::UI::Shell::IShellItem>,
     into: windows_core::Ref<windows::Win32::UI::Shell::IShellItem>,
     name: &windows_core::PCWSTR,
@@ -312,7 +329,11 @@ fn landed(
         return Some(path);
     }
     let folder = path_of(into.as_ref())?;
-    // SAFETY: a null-terminated string owned by the caller for the length of the call.
+    if name.is_null() {
+        return None;
+    }
+    // SAFETY: non-null, checked above, and a null-terminated string owned by the caller for the
+    // length of the call.
     let name = unsafe { name.to_string() }.ok()?;
     (!name.is_empty()).then(|| folder.join(name))
 }
@@ -330,6 +351,12 @@ fn path_of(item: Option<&windows::Win32::UI::Shell::IShellItem>) -> Option<PathB
         let wide = item
             .GetDisplayName(windows::Win32::UI::Shell::SIGDN_FILESYSPATH)
             .ok()?;
+        // An `S_OK` with nothing at the pointer, which `shell::clipboard` guards the same way.
+        // Not seen from this call; the reason it is checked anyway is that the alternative,
+        // measured in `landed`, is `wcslen` walking address zero and taking the process with it.
+        if wide.is_null() {
+            return None;
+        }
         let text = wide.to_string().ok();
         windows::Win32::System::Com::CoTaskMemFree(Some(wide.0 as *const std::ffi::c_void));
         text.map(PathBuf::from)

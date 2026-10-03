@@ -315,6 +315,66 @@ fn the_sink_reports_what_the_shell_actually_did() {
     crate::sandbox::remove(&root);
 }
 
+/// **A callback with neither an item nor a name must not take the process down.**
+///
+/// The table above says `psiNewlyCreated` was present every time, and it was — for the operations
+/// that table could run, which are the ones that raise no dialog. A **replace** raises one, so it
+/// is not up there, and it is the case where the shell gives `win::landed` neither an item with a
+/// path nor a name: nothing is newly created by writing over a file that already exists.
+///
+/// It crashed. Replacing a file on `\\SephiStation\web` faulted at `ucrtbase!wcslen`, called from
+/// `PostCopyItem` through `landed` and out of `PCWSTR::to_string`, which is `wcslen` on whatever
+/// pointer it is given and checks nothing:
+///
+/// ```text
+/// ucrtbase!wcslen+0x5f                                    rdx=0
+/// azur_file_explorer+0x2fc534
+/// azur_file_explorer+0xd7b21
+/// windows_storage!CFileOperation::_NotifyPostCopyItemCallback+0x40
+/// windows_storage!CFileOperation::NotifyPostCopyItem+0x90
+/// ```
+///
+/// So this is the shape of that callback, made directly rather than by asking the shell for a
+/// conflict nobody can answer without a mouse. A null `Ref` is what the shell passes for an absent
+/// item, and `Ref::default()` is that same null. The destination folder is real, because it was
+/// real in the crash — that is what gets past the `into` line and as far as the name.
+#[test]
+#[cfg(windows)]
+fn a_replace_reports_no_item_and_no_name_without_crashing() {
+    use windows::core::PCWSTR;
+    use windows_core::Ref;
+
+    let _serialised = crate::shell::serialised();
+    crate::shell::init();
+
+    let root = sandbox("landed");
+    std::fs::create_dir_all(&root).expect("sandbox");
+
+    // SAFETY: a pure lookup; the item is dropped at the end of the test.
+    let folder = unsafe { item(&root) }.expect("the sandbox folder as an IShellItem");
+
+    assert_eq!(
+        landed(Ref::default(), Ref::from(&folder), &PCWSTR::null()),
+        None,
+        "a callback with no item and no name has no path to report"
+    );
+
+    // And the name is still used when there is one, or the guard would have bought safety by
+    // throwing away the answer undo works from.
+    let named: Vec<u16> = "one.txt\0".encode_utf16().collect();
+    assert_eq!(
+        landed(
+            Ref::default(),
+            Ref::from(&folder),
+            &PCWSTR(named.as_ptr()),
+        ),
+        Some(root.join("one.txt")),
+        "the folder-and-name fallback still composes a path"
+    );
+
+    crate::sandbox::remove(&root);
+}
+
 /// **Undo of a move and of a rename, through the real shell.**
 ///
 /// [`Job::PutBack`] is what Ctrl+Z issues for both, and the pair inside one folder takes the

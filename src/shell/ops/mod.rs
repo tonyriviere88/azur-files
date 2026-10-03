@@ -61,7 +61,7 @@ pub(crate) use win::run;
 // Reached by the tests next door and in [`super::clipboard`], which check what the shell
 // actually answers rather than a mock of it.
 #[cfg(all(test, windows))]
-pub(crate) use win::{all_already_in, item};
+pub(crate) use win::{all_already_in, item, landed};
 use std::sync::mpsc::{channel, Receiver, Sender};
 
 use super::Owner;
