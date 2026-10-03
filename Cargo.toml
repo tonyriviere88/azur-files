@@ -1,0 +1,169 @@
+[package]
+name = "azur-file-explorer"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "A file explorer that stays out of the way: tabs in the title bar, a real breadcrumb, and side-by-side panes"
+build = "build.rs"
+publish = false
+
+[dependencies]
+# Must resolve to the same egui the theme tracks: two egui versions in one graph
+# are two different `Context` types, and the theme would style neither.
+egui = { version = "0.35", default-features = false }
+azur-egui-theme = { path = "../azur-egui-theme" }
+
+# To ask eframe for the window's `HWND`, which the shell needs so its progress and
+# conflict dialogs are owned by this window instead of appearing behind it. Pinned to
+# the version eframe itself resolves, or the handle would be a different type.
+raw-window-handle = "0.6.2"
+
+# To decode the design system's icon into the bitmap the window hands the taskbar, to write
+# `--shot` frames, and to decode whatever the preview panel is pointed at. Already in the graph
+# via eframe.
+#
+# The codec list is the preview panel's, and it is every raster format `image` implements in
+# pure Rust — no C library appears here, which is the whole reason this crate and not one of
+# the bindings. `avif` and `exr` are left out: the first needs `dav1d`, and the second is a
+# 16-bit-float format whose tone mapping is a decision a file manager has no business making.
+# Vector art is `resvg`'s, below.
+image = { version = "0.25", default-features = false, features = [
+    "png",
+    "jpeg",
+    "gif",
+    "bmp",
+    "ico",
+    "tiff",
+    "webp",
+    "pnm",
+    "tga",
+    "dds",
+    "hdr",
+    "qoi",
+    "ff",
+] }
+
+# SVG, for the preview panel, because a folder of icons is a folder of `.svg` and a preview
+# that cannot show them is not much of a preview.
+#
+# `default-features = false` deliberately, and it is the difference between eleven small crates
+# and a font stack: the default build pulls `fontdb`, `rustybuzz` and system font enumeration in
+# order to lay out `<text>` elements, which is most of the dependency and none of the value here.
+# The cost is that text inside an SVG is not drawn — see `preview::vector`, which says so on the
+# canvas rather than quietly leaving a hole.
+resvg = { version = "0.48", default-features = false }
+
+# The regex toggle in the text preview's find bar, and nothing else. A find bar without one is a
+# find bar people work around, and the alternative was writing an engine: a wrong regex engine in a
+# file manager is worse than a dependency, and this is the crate whose correctness is not in doubt.
+#
+# It is also the *only* engine safe to hand a pattern somebody is still typing. `regex` has no
+# backtracking by construction, so it cannot be made to hang by `(a+)+b` — which a find bar running
+# on the UI thread on every keystroke would otherwise be one paste away from. `size_limit` in
+# `preview::hits` covers the other end, where a pattern is legal but compiles to something enormous.
+#
+# `default-features = false` drops the whole `perf` group — `aho-corasick`, `memchr`, the lazy DFA
+# and the one-pass and backtracking engines — leaving the PikeVM, which is slower per byte and a
+# fraction of the code. Which is the right trade here and only here: the haystack is one text
+# preview, capped at `preview::TEXT_CAP` (1 MiB), where the plain (non-regex) search does not use
+# this crate at all. `unicode-case` is what makes the match-case toggle mean anything outside ASCII,
+# and `unicode-perl` is `\d`, `\w` and `\s` — the three escapes anybody typing a pattern will reach
+# for first.
+regex = { version = "1", default-features = false, features = [
+    "std",
+    "unicode-case",
+    "unicode-perl",
+] }
+
+# `wgpu`, with `glow` kept as an escape hatch — `main::reporting_wgpu` has the measurements. In
+# short: `egui_glow`'s painter leaks a couple of kilobytes per draw call per frame, which
+# scrolling turns into 7 MB a second, and `wgpu` does not. Both are compiled in so `AZUR_GLOW=1`
+# can go back on a machine where this one misbehaves. Which backend `wgpu` presents on is
+# `azur_egui_theme::render`'s decision, not this crate's: the compositor resamples OpenGL and
+# D3D12 windows, and a design system specified in one-pixel strokes does not survive that.
+eframe = { version = "0.35", default-features = false, features = [
+    "wgpu",
+    "glow",
+    "default_fonts",
+    "x11",
+    "wayland",
+] }
+
+[target.'cfg(windows)'.dependencies]
+# COM, for the parts of this program that are the shell rather than merely near it:
+# the system image list behind Explorer's file icons, `IFileOperation` behind its
+# copy/move/delete (with its progress, its conflict prompts and its undo), the real
+# `IContextMenu` including whatever extensions are installed, and OLE drag and drop.
+#
+# None of that is expressible through `windows-sys`, which is flat `extern` blocks
+# with no vtable dispatch. Both crates are kept rather than one: the flat calls in
+# `fs/` are written, tested and fast against `windows-sys`, and rewriting them to
+# change nothing would be churn in the one place that must not regress.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    # `GetProcessMemoryInfo` and `GetGuiResources`, for the leak test in `app::click_tests`:
+    # the Rust heap is only part of this process, and the shell, COM and GDI all allocate
+    # outside it — as do the icon and bitmap handles this program asks the shell for.
+    "Win32_System_ProcessStatus",
+    # `CreateJobObjectW` and `TerminateJobObject`, for stopping a command in the console panel.
+    # A job object is the only reliable way to end a process *tree* from a program with no console:
+    # `GenerateConsoleCtrlEvent` signals a console process group, and a `windows` subsystem binary
+    # has no console to have a group in. See `console::Session::stop`.
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+    "Win32_System_SystemServices",
+    # `DRIVE_REMOTE`, which is where the constants `GetDriveTypeW` returns happen to
+    # live. See `shell::over_network`.
+    "Win32_System_WindowsProgramming",
+    "Win32_System_IO",
+    "Win32_Storage_FileSystem",
+    "Win32_UI_Controls",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_Common",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+# The whole reason the listing is fast. `FindFirstFileExW` at `FindExInfoBasic` hands
+# the UTF-16 name straight into the arena, and `LARGE_FETCH` fills a big buffer per
+# syscall instead of a small one.
+# The `#[implement]` macro expands to `::windows_core::…` paths, so the crate has to be
+# nameable here even though everything else reaches it through `windows::core`. Needed
+# for the two OLE interfaces this program implements rather than merely calls:
+# `IDropSource` and `IDropTarget`.
+windows-core = "0.62"
+
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Com",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_System_Time",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+
+# A file explorer is only worth using at speed, and an unoptimised `sort_by` over
+# 100k entries is visible. Optimise the dependencies even in a debug build.
+[profile.dev.package."*"]
+opt-level = 2
+
+[build-dependencies]
+# Puts the `.ico` into the executable's own resources, which is the only way Explorer, a
+# pinned shortcut or Alt-Tab-before-launch can show it — none of them run the process.
+# A build-time dependency only; nothing of it is linked into the program.
+winresource = "0.1"
