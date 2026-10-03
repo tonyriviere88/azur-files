@@ -397,6 +397,9 @@ fn main() -> eframe::Result {
             // ready to show in its place. See `cloak`.
             cloak(cc, true);
             azur_egui_theme::fonts::install(&cc.egui_ctx);
+            // One wheel notch is one "line", which egui makes 40 points: a row and two thirds,
+            // which felt slow. 72 is exactly three rows of `ROW_HEIGHT`.
+            cc.egui_ctx.options_mut(|o| o.input_options.line_scroll_speed = 72.0);
             restore_position(cc, position);
             if config.maximized {
                 open_maximized(cc, placed);
