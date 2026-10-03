@@ -1,6 +1,6 @@
 # Azur File Explorer
 
-![the mark](../azur-egui-theme/app-icons/file-explorer/app-64.png)
+![the mark](assets/app-icon/app-128.png)
 
 A file manager that stays out of the way. Tabs in the title bar, above the pane they
 belong to, a breadcrumb that behaves like Explorer's, a details view that does not care
@@ -4664,43 +4664,56 @@ points overlap and [One surface, divided by lines](#one-surface-divided-by-lines
 
 ## The mark
 
-A folder in one stroked outline, `AZURE_70` on a `GRAY_2` plate. **It is not this
-program's** — [`azur-egui-theme/app-icons/`](../azur-egui-theme/app-icons/) holds the marks
-for four applications and their rasterised sets, and this is a reference to the
-file-explorer one. [`brand.rs`](src/brand.rs) is 90 lines of wiring and a name.
+A blue folder behind a stack of pages with a magnifier over it, on a near-black rounded
+plate (`#191D23`). One rendered image, in this program's own
+[`assets/app-icon/`](assets/app-icon/) — see that folder's README for how the sizes are
+made. [`brand.rs`](src/brand.rs) is the wiring and a name.
 
 | form | where you see it | comes from |
 | --- | --- | --- |
-| a stroked outline, one theme colour | the title bar, at 16px | the design system's `marks.rs`, via `#[path]` |
-| one RGBA bitmap, decoded at startup | the taskbar button, Alt-Tab | `app-64.png`, via `include_bytes!` |
+| one RGBA bitmap at the size the monitor asks for | the title bar, at 16pt | `LADDER`, seven rungs via `include_bytes!` |
+| one RGBA bitmap, decoded at startup | the taskbar button, Alt-Tab | the 64px rung |
 | a nine-size `.ico` in the executable | Explorer, a pinned shortcut, Alt-Tab before launch | `app.ico`, handed to the linker by `build.rs` |
 
 Ship the first two and Explorer shows the generic application icon. Ship only the third and
 the taskbar button changes identity the moment the window opens.
 
-`app-icons/README.md` says to copy its `marks.rs` into the application. This references it
-in place instead, at the same relative path `Cargo.toml` already needs to find the theme at
-all — the point of the design system holding the geometry is that four applications cannot
-drift apart, and a vendored copy is exactly how they would. The three other marks come along
-unused; they are `const` data nothing refers to, so they cost nothing in the binary.
+**It used to be the design system's**, and referenced in place rather than copied:
+[`azur-egui-theme/app-icons/`](../azur-egui-theme/app-icons/) holds marks for four
+applications as one geometry definition, and the title bar's was a folder in a single
+stroked outline drawn by a `Painter` in whatever colour it was handed. That is the better
+shape for a 16px glyph and it is why the mark was a vector at all — an outline snapped to
+the pixel grid cannot go mushy. A shaded three-dimensional render is not something a
+`Painter` call reproduces, so every form of the mark is now a bitmap, the title bar's
+included, and the cost lands exactly where the vector earned its keep: at 16px the
+magnifier is three grey pixels and the mark reads by silhouette.
 
-Two things about it worth knowing:
+Three things about it worth knowing:
 
-- **The plate is dark, not azure.** This is §15's "dark chrome" row rather than the
-  white-on-azure default, and the design system records the consequence: against a dark
-  Windows 11 taskbar the plate is 1.1:1 and effectively invisible, so the icon reads there as
-  a blue folder floating on the bar. Deliberate, and `PLATE` in the theme's
-  `examples/app_icons.rs` is the one place to revisit it.
-- **The window icon is the 64, not the 256** the design system's README reaches for. There is
-  one slot — `IconData` is a single bitmap — and Windows scales it down to 32 for the taskbar
-  button and 16 for the window's own corner. 64 halves exactly into both; 256 is the
-  eighth-scale reduction the brief calls grey mush. The hand-snapped 16 and 20 exist only in
-  the `.ico`, because nothing in the window-icon path can take more than one size.
+- **The title bar gets a ladder, not one bitmap minified per frame.** Seven rungs, one per
+  scale factor at 16pt — 16 at 100%, 20 at 125%, 24 at 150%, 32 at 200%, and so on — and
+  `pick` takes the first that covers the request, so 175% lands on the 32 and every whole
+  factor is drawn 1:1 in device pixels. A shaded render reduced 3:1 by the sampler is mush;
+  the same reduction done once by Lanczos when the asset was built is not. 128 and 256 stay
+  out of the binary, since nothing in the window draws the mark that big.
+- **The plate is dark, and it stays under the art in the title bar.** The design system's
+  note on that still applies: against a dark Windows 11 taskbar such a plate is about 1.1:1
+  and effectively invisible, so the icon reads there as a blue folder floating on the bar.
+  The same happens in the dark theme and not in the light one, where it is a dark chip.
+  Cutting the art out of the plate would look tidier in the dark theme and lose the pages
+  entirely in the light one, which is why it is kept.
+- **The window icon is the 64, not the 256.** There is one slot — `IconData` is a single
+  bitmap — and Windows scales it down to 32 for the taskbar button and 16 for the window's
+  own corner. 64 halves exactly into both; 256 is an eighth-scale reduction into the
+  smallest. The 16 and 20 exist only in the ladder and the `.ico`, because nothing in the
+  window-icon path can take more than one size.
 
-Two tests, both guarding the wiring rather than the art: the window bitmap decodes to 64×64
-in the two palette colours the design system names, and the `.ico` really carries all nine
-sizes — otherwise a truncated file is a `cargo:warning` nobody reads and an executable
-wearing the generic icon.
+Four tests, all guarding the wiring rather than the art: the window bitmap decodes to 64×64
+and still has a dark plate, an azure folder and near-white pages in it; every rung decodes
+at the size it claims, so a mislabelled one cannot silently scale; the ladder covers every
+scale factor Windows offers and saturates instead of wrapping; and the `.ico` really carries
+all nine sizes — otherwise a truncated file is a `cargo:warning` nobody reads and an
+executable wearing the generic icon.
 
 ## The design system
 

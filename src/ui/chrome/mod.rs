@@ -342,13 +342,12 @@ pub fn title_bar(
         ui.painter()
             .rect_filled(mark, CornerRadius::same(radius::SMALL), t.bg.control_hover);
     }
-    // In `accent-default` rather than the `text-secondary` the icon brief suggests for a
-    // title bar: this is the one glyph in the window that *is* the brand, and the accent is
-    // the brand. Everywhere else an icon takes the colour of the text it sits beside.
+    // The one icon in the window that takes no colour from the theme. Everywhere else an icon
+    // is a glyph in the colour of the text beside it; this is the brand, it is a full-colour
+    // image, and `brand::mark` picks the rung of its size ladder that matches the monitor.
     crate::brand::mark(
         ui.painter(),
         Rect::from_center_size(mark.center(), vec2(16.0, 16.0)),
-        t.accent.default,
     );
     app_menu(ui, &mark_response, t.dark, sidebar, out);
     x = mark.right() + space::S2;
