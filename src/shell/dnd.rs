@@ -106,6 +106,8 @@ pub enum Onto {
 pub enum Doing {
     Copy,
     Move,
+    /// Making a shortcut to each item — the Alt-drag. See [`crate::shell::ops::Job::Link`].
+    Link,
     /// Pinning in the sidebar, which is what Explorer calls the same gesture onto Quick access.
     Pin,
 }
@@ -130,6 +132,10 @@ impl Doing {
         let (yes, no, joining) = match self {
             Self::Copy => ("Copy ", "Cannot copy ", " into "),
             Self::Move => ("Move ", "Cannot move ", " into "),
+            // *Link to one.txt in docs* — the two halves read as one sentence about a shortcut
+            // without the word appearing twice, and `in` rather than `into` because what goes
+            // into the folder is the shortcut and not the file.
+            Self::Link => ("Link to ", "Cannot link to ", " in "),
             Self::Pin => ("Pin ", "Cannot pin ", " to "),
         };
         (if refused { no } else { yes }, joining)
@@ -1108,9 +1114,15 @@ fn running(_pid: u32) -> bool {
     true
 }
 
-#[cfg(windows)]
+/// Private, with one exception in a test build: [`crate::shell::links`]'s naming test reaches
+/// `win::link_drop_through_the_shell` — the shell's own answer to a link drop, and so the only
+/// honest measuring stick for the names this program gives one.
+#[cfg(all(windows, not(test)))]
 #[path = "../windows/dnd.rs"]
 mod win;
+#[cfg(all(windows, test))]
+#[path = "../windows/dnd.rs"]
+pub(crate) mod win;
 
 #[cfg(test)]
 mod tests {
@@ -1824,6 +1836,108 @@ mod tests {
                 Some("Move one.txt into src".to_owned()),
                 false
             )
+        );
+    }
+
+    /// **The four modifiers, and Explorer's order of precedence between them.**
+    ///
+    /// | held | effect | said |
+    /// | --- | --- | --- |
+    /// | nothing | the volume rule — a move, here | *Move one.txt into src* |
+    /// | Ctrl | copy | *Copy one.txt into src* |
+    /// | Shift | move | *Move one.txt into src* |
+    /// | Alt | link | *Link to one.txt in src* |
+    /// | Ctrl+Shift | link, the same as Alt | *Link to one.txt in src* |
+    ///
+    /// The last row is the one with a trap in it, and it is the same trap `Ctrl+Shift+T` has in
+    /// [`crate::app::App::keyboard`]: `Ctrl` alone is *also* true when Shift is down, so a pair
+    /// tested after its halves never wins. Ctrl+Shift asked for a plain copy until it was tested
+    /// first, and nothing about that reads as wrong in the source.
+    ///
+    /// Alt is passed here as `MK_ALT`, which is what an OLE drag reports it as when it reports it.
+    /// The other half of that answer — the physical key, for a drag loop that does not — cannot be
+    /// reached from a test, because it is a real key under a real pointer; see `win::alt_held`.
+    #[test]
+    fn the_modifiers_ask_for_copy_move_and_link() {
+        use windows::Win32::Foundation::POINTL;
+        use windows::Win32::System::Ole::{
+            IDropTarget, DROPEFFECT, DROPEFFECT_COPY, DROPEFFECT_LINK, DROPEFFECT_MOVE,
+        };
+        use windows::Win32::System::SystemServices::{MK_CONTROL, MK_SHIFT, MODIFIERKEYS_FLAGS};
+
+        let here = PathBuf::from(r"C:\work");
+        let file = here.join("one.txt");
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        shared.lock().unwrap().targets = Targets {
+            zones: vec![Region {
+                rect: (0, 0, 100, 100),
+                onto: Onto::Folder(here.join("src")),
+                name: "src".to_owned(),
+            }],
+            from: None,
+        };
+        let ctx = egui::Context::default();
+        let target: IDropTarget =
+            win::Target::holding(shared.clone(), ctx, vec![file], false).into();
+
+        let told = |keys: u32| {
+            // All three offered, so nothing is degraded on the way out and what comes back is
+            // what the gesture asked for. See `permitted`.
+            let mut effect =
+                DROPEFFECT(DROPEFFECT_COPY.0 | DROPEFFECT_MOVE.0 | DROPEFFECT_LINK.0);
+            // SAFETY: an out-parameter this call owns for its duration, and no data object —
+            // `DragOver` is the callback that carries none.
+            unsafe {
+                target
+                    .DragOver(
+                        MODIFIERKEYS_FLAGS(keys),
+                        POINTL { x: 10, y: 50 },
+                        &mut effect,
+                    )
+                    .expect("DragOver refused");
+            }
+            let said = shared.lock().unwrap().telling.as_ref().map(Told::sentence);
+            (effect, said)
+        };
+
+        const ALT: u32 = windows::Win32::System::Ole::MK_ALT;
+        let moving = (DROPEFFECT_MOVE, Some("Move one.txt into src".to_owned()));
+        let copying = (DROPEFFECT_COPY, Some("Copy one.txt into src".to_owned()));
+        let linking = (DROPEFFECT_LINK, Some("Link to one.txt in src".to_owned()));
+
+        assert_eq!(told(0), moving, "the same volume, so the plain drag moves");
+        assert_eq!(told(MK_CONTROL.0), copying);
+        assert_eq!(told(MK_SHIFT.0), moving);
+        assert_eq!(told(ALT), linking, "Alt asks for a shortcut");
+        assert_eq!(
+            told(MK_CONTROL.0 | MK_SHIFT.0),
+            linking,
+            "Ctrl+Shift is the other way of asking, and must not come out as a plain copy"
+        );
+        // And Alt wins over either of them, which is what a hand resting on Ctrl needs it to do.
+        assert_eq!(told(ALT | MK_CONTROL.0), linking);
+        assert_eq!(told(ALT | MK_SHIFT.0), linking);
+    }
+
+    /// A link into the folder the items are already in is a **real gesture**, unlike a move there.
+    ///
+    /// `one.txt.lnk` appears beside `one.txt`, which is what Explorer does and is occasionally the
+    /// point. So [`does_nothing`] must not hush it the way it hushes a move — the rule is keyed on
+    /// `moving` for exactly this reason, and this is the third caller of it after the copy and the
+    /// right drag.
+    #[test]
+    fn a_link_into_the_folder_the_items_are_in_is_something() {
+        let here = PathBuf::from(r"C:\work");
+        let into = Onto::Folder(here.clone());
+        let mine = [here.join("one.txt")];
+
+        assert!(
+            does_nothing(&into, &mine, true, false),
+            "a move there is still nothing"
+        );
+        assert!(
+            !does_nothing(&into, &mine, false, false),
+            "a link or a copy there makes a new name and is not nothing"
         );
     }
 

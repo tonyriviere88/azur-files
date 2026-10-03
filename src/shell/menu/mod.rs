@@ -125,10 +125,14 @@ use std::path::{Path, PathBuf};
 /// question: where a right-button drag has just landed, and Paste on empty space.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Own {
-    /// The three a right-button drag offers when it lands, which is how Windows has asked
-    /// "copy or move?" since it stopped guessing.
+    /// The four a right-button drag offers when it lands, which is how Windows has asked
+    /// "copy, move, or a shortcut?" since it stopped guessing.
     CopyHere,
     MoveHere,
+    /// Explorer's *Create shortcuts here*, and the same operation an Alt-drag performs —
+    /// [`crate::shell::ops::Job::Link`]. Plural in Explorer's own wording whatever the count,
+    /// which is worth keeping: the label is a menu entry rather than a sentence about this drag.
+    LinkHere,
     Cancel,
     /// Paste, on a folder's **background** menu — the one gap the shell leaves.
     ///
@@ -150,6 +154,7 @@ impl Own {
         match self {
             Self::CopyHere => "Copy here",
             Self::MoveHere => "Move here",
+            Self::LinkHere => "Create shortcuts here",
             Self::Cancel => "Cancel",
             // English, among a menu Windows has filled in French. Deliberate, and the same
             // choice as the three above: these entries are this program's, and this program's

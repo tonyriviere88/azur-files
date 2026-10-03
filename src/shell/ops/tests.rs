@@ -590,6 +590,123 @@ fn a_move_can_be_undone_and_redone_through_the_history() {
     crate::sandbox::remove(&root);
 }
 
+/// **An Alt-drag, and Ctrl+Z after it.**
+///
+/// [`Job::Link`] is the one job that goes through neither `IFileOperation` nor the Recycle Bin, so
+/// what it reports is written by hand rather than by a sink — which makes "does undo work for it"
+/// a real question rather than a consequence. It does, and this is why: the shortcuts it wrote are
+/// the ones it reports, so the history's answer is a recycle of exactly those.
+#[test]
+#[cfg(windows)]
+fn shortcuts_from_a_drop_can_be_undone() {
+    use crate::shell::ops::history::History;
+
+    let _serialised = crate::shell::serialised();
+    crate::shell::init();
+    let _for_real = for_real();
+
+    let ctx = egui::Context::default();
+    let root = sandbox("link-undo");
+    let from = root.join("from");
+    let into = root.join("into");
+    std::fs::create_dir_all(&from).expect("sandbox");
+    std::fs::create_dir_all(&into).expect("sandbox");
+    let one = from.join("one.txt");
+    let two = from.join("two.txt");
+    std::fs::write(&one, b"one").expect("write");
+    std::fs::write(&two, b"two").expect("write");
+
+    let mut ops = Operations::new();
+    let mut history = History::default();
+    let settle = |ops: &mut Operations, history: &mut History| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut arrived: Vec<Done> = Vec::new();
+        while std::time::Instant::now() < deadline {
+            for done in ops.drain() {
+                history.record(done.clone());
+                arrived.push(done);
+            }
+            if ops.in_progress().is_none() {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        arrived
+    };
+
+    ops.start(
+        Job::Link {
+            items: vec![one.clone(), two.clone()],
+            into: into.clone(),
+        },
+        Owner::default(),
+        &ctx,
+    );
+    let arrived = settle(&mut ops, &mut history);
+    assert_eq!(arrived.len(), 1, "the link job never reported back");
+    assert_eq!(arrived[0].error, None);
+    assert!(into.join("one.txt.lnk").is_file(), "no shortcut for one.txt");
+    assert!(into.join("two.txt.lnk").is_file(), "no shortcut for two.txt");
+    assert!(one.exists() && two.exists(), "the originals were touched");
+    assert_eq!(
+        arrived[0].outcome.created,
+        [into.join("one.txt.lnk"), into.join("two.txt.lnk")],
+        "a link job has to report what it wrote, or there is nothing to undo"
+    );
+
+    // ---- Ctrl+Z ----
+    //
+    // Which recycles them, exactly as the undo of a copy does — so this test puts two `.lnk` files
+    // in the user's Recycle Bin, and takes them back out again at the end. An undo that deleted
+    // them permanently would be the wrong operation to be testing.
+    let back = history.undo().expect("an undo job");
+    assert!(
+        matches!(&back, Job::Delete { to_bin: true, items } if items.len() == 2),
+        "the undo of a link should recycle the shortcuts: {back:?}"
+    );
+    ops.start_then(back, After::Settle, Owner::default(), &ctx);
+    let arrived = settle(&mut ops, &mut history);
+    assert_eq!(arrived.len(), 1, "the undo never reported back");
+    assert_eq!(arrived[0].error, None, "the undo was refused");
+    assert!(
+        !into.join("one.txt.lnk").exists() && !into.join("two.txt.lnk").exists(),
+        "Ctrl+Z left the shortcuts behind"
+    );
+    assert!(one.exists() && two.exists(), "and it took the originals");
+
+    // ---- And out of the bin, so nothing of this is left in it ----
+    //
+    // From the records the recycle itself reported, which is the same route Ctrl+Z would take from
+    // here — a second undo, of the undo. Doing it by the same mechanism rather than by hand is what
+    // makes the tidying a check as well: two shortcuts went in, and these are the two that name
+    // them.
+    let recycled = arrived[0].outcome.recycled.clone();
+    assert_eq!(
+        recycled.len(),
+        2,
+        "the recycle did not say what went to the bin, so this test cannot clear up after itself"
+    );
+    assert_eq!(
+        run_now(Job::Restore { items: recycled }),
+        None,
+        "the shortcuts are in the Recycle Bin, named for {}",
+        into.display()
+    );
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !(into.join("one.txt.lnk").exists() && into.join("two.txt.lnk").exists())
+        && std::time::Instant::now() < deadline
+    {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    assert!(
+        into.join("one.txt.lnk").exists() && into.join("two.txt.lnk").exists(),
+        "the shortcuts did not come back out of the Recycle Bin, and are still in it under {}",
+        into.display()
+    );
+
+    crate::sandbox::remove(&root);
+}
+
 /// Run a job to completion, on a thread of its own.
 ///
 /// On a thread of its own because that is where production runs it, and because [`super::run`]
@@ -967,6 +1084,24 @@ fn descriptions_count_and_name_the_operation() {
         }
         .describe(),
         "Putting 2 items back…"
+    );
+    // Counted in what it makes rather than in what it is given, which is the one description here
+    // that does not use `plural`.
+    assert_eq!(
+        Job::Link {
+            items: vec![PathBuf::from("x")],
+            into: PathBuf::from("z")
+        }
+        .describe(),
+        "Making a shortcut…"
+    );
+    assert_eq!(
+        Job::Link {
+            items: vec![PathBuf::from("x"), PathBuf::from("y")],
+            into: PathBuf::from("z")
+        }
+        .describe(),
+        "Making 2 shortcuts…"
     );
 }
 

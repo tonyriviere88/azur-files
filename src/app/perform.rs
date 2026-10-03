@@ -559,13 +559,14 @@ impl App {
                 pane,
                 items,
                 into,
-                moving,
+                effect,
             } => {
+                use crate::shell::clipboard::Effect;
                 self.focused = pane;
-                let job = if moving {
-                    crate::shell::ops::Job::Move { items, into }
-                } else {
-                    crate::shell::ops::Job::Copy { items, into }
+                let job = match effect {
+                    Effect::Move => crate::shell::ops::Job::Move { items, into },
+                    Effect::Copy => crate::shell::ops::Job::Copy { items, into },
+                    Effect::Link => crate::shell::ops::Job::Link { items, into },
                 };
                 self.ops.start(job, self.owner, ctx);
             }

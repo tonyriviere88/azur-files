@@ -151,11 +151,14 @@ pub enum Action {
     /// Pick the selection up and hand it to OLE.
     DragOut { pane: PaneId, items: Vec<PathBuf> },
     /// What a right-button drag was asked about, once it has been answered.
+    ///
+    /// The effect and not a `moving` flag, because the menu offers three answers: Explorer's
+    /// *Copy here*, *Move here* and *Create shortcuts here*. See [`crate::shell::menu::Own`].
     DropHere {
         pane: PaneId,
         items: Vec<PathBuf>,
         into: PathBuf,
-        moving: bool,
+        effect: crate::shell::clipboard::Effect,
     },
     /// Show the shell context menu for these items at this screen position.
     ///

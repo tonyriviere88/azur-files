@@ -61,3 +61,41 @@ pub(super) fn read_shortcut(path: &Path) -> Option<Shortcut> {
         folder: find.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0,
     })
 }
+
+/// Write a `.lnk` at `at` pointing at `target`, with `arguments` as its command line — `""` for
+/// none. `false` if the shell refused.
+///
+/// The same two interfaces the reading above uses, from the other end, which is what makes the
+/// round trip in `a_real_shortcut_is_read_back` a test of anything.
+///
+/// Nothing but the path and the command line is set. A shortcut made by dragging is a shortcut *to
+/// a thing*, and a working directory or an icon index invented here would be this program's idea
+/// rather than the shell's.
+#[cfg(windows)]
+pub(super) fn write_shortcut(at: &Path, target: &Path, arguments: &str) -> bool {
+    use windows::core::{Interface, PCWSTR};
+    use windows::Win32::System::Com::{CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER};
+    use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
+
+    let at = crate::shell::wide(at);
+    let target = crate::shell::wide(target);
+    let arguments: Vec<u16> = arguments.encode_utf16().chain(Some(0)).collect();
+    // SAFETY: every string is a NUL-terminated local that outlives the calls, and each result is
+    // checked before the next call depends on it.
+    unsafe {
+        let made = || -> Option<()> {
+            let link: IShellLinkW =
+                CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
+            link.SetPath(PCWSTR(target.as_ptr())).ok()?;
+            // Set unconditionally: an empty command line is what a shortcut without one has, and
+            // the call is the same either way.
+            link.SetArguments(PCWSTR(arguments.as_ptr())).ok()?;
+            let file: IPersistFile = link.cast().ok()?;
+            // `true` is `fRemember`: the object takes this as the file it belongs to, which is
+            // what a later `Save` with no name would write back to.
+            file.Save(PCWSTR(at.as_ptr()), true).ok()
+        };
+        made().is_some()
+    }
+}
+

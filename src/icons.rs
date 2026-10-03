@@ -741,6 +741,27 @@ pub fn arrow_down(p: &Painter, rect: Rect, color: Color32) {
     arrow(p, rect, color, 2.0);
 }
 
+/// A shortcut: an arrow on the diagonal, which is what "stands for somewhere else" looks like
+/// everywhere.
+///
+/// The mark on the drag sign for an Alt-drag — see [`crate::ui::drag_sign`], where it sits beside
+/// the plus that means copy and the level arrow that means move.
+///
+/// **[`arrow`] at half a turn, and not a figure of its own.** The first attempt here was a bent
+/// elbow with a head on the corner, drawn from scratch: a bracket with a tick on it next to its
+/// neighbours, a fifth heavier in the stroke, and sitting low and right of the arrows either side of
+/// it. Every one of those faults came from re-deriving what [`arrow`] already knows — the 1.5-unit
+/// stroke, the shaft from 13 to 3.4, the head at ±4.2 either side of the tip, and the rotation about
+/// the grid's centre that keeps all four of them on one optical axis. So this is that arrow turned
+/// 45°, and it is aligned with the other three by construction rather than by eye.
+///
+/// The diagonal is what separates it from [`arrow_right`] and its move: up-and-right is
+/// *elsewhere*, level is *over there*. It is also the direction the badge on [`folder_link`] points,
+/// so a row that already *is* a shortcut and a gesture about to make one agree.
+pub fn link(p: &Painter, rect: Rect, color: Color32) {
+    arrow(p, rect, color, 0.5);
+}
+
 // ---------------------------------------------------------------------------
 // Git
 // ---------------------------------------------------------------------------
@@ -1244,4 +1265,3 @@ pub fn grid_view(p: &Painter, rect: Rect, color: Color32) {
         p.rect_filled(g.rect(x, y, x + 5.0, y + 5.0), g.radius(0.8), color);
     }
 }
-

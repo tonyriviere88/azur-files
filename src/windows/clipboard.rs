@@ -76,9 +76,16 @@ pub fn data_object(paths: &[PathBuf], effect: Effect) -> Result<IDataObject, Str
             .map_err(|e| format!("The shell refused: {}", e.message()))?;
 
         // Cut or copy. Without this the target has to guess, and guesses copy.
+        //
+        // `Link` is here for completeness rather than because anything takes this route: nothing
+        // in this program puts a link on the clipboard — Ctrl+X and Ctrl+C are the only two callers
+        // — and a shortcut is made by [`crate::shell::ops::Job::Link`] rather than announced to
+        // somebody else's paste. Spelled out anyway, so that a third caller cannot arrive and have
+        // its effect silently read as a copy.
         let value = match effect {
             Effect::Copy => DROPEFFECT_COPY,
             Effect::Move => DROPEFFECT_MOVE,
+            Effect::Link => DROPEFFECT_LINK,
         };
         if let Some(medium) = global_dword(value) {
             let format = FORMATETC {

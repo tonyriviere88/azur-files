@@ -324,39 +324,106 @@ fn reparse_target(path: &Path) -> Option<Target> {
 /// Write a `.lnk` at `at` pointing at `target`, with `arguments` as its command line — `""` for
 /// none. `false` if the shell refused.
 ///
-/// Test-only, and the only way to have a real shortcut to resolve: a fixture checked into the
-/// repository would be a binary blob nobody could read, and one from `C:\Users` is not the
-/// same on two machines. It uses the same two interfaces the reading does, from the other end.
-#[cfg(all(test, windows))]
-pub(crate) fn write_shortcut(at: &Path, target: &Path, arguments: &str) -> bool {
-    use std::os::windows::ffi::OsStrExt;
-    use windows::core::{Interface, PCWSTR};
-    use windows::Win32::System::Com::{CoCreateInstance, IPersistFile, CLSCTX_INPROC_SERVER};
-    use windows::Win32::UI::Shell::{IShellLinkW, ShellLink};
-
-    fn made(at: &[u16], target: &[u16], arguments: &[u16]) -> Option<()> {
-        // SAFETY: every slice is a NUL-terminated local of the caller, alive for the calls.
-        unsafe {
-            let link: IShellLinkW =
-                CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER).ok()?;
-            link.SetPath(PCWSTR(target.as_ptr())).ok()?;
-            // Set unconditionally: an empty command line is what a shortcut without one has,
-            // and the call is the same either way.
-            link.SetArguments(PCWSTR(arguments.as_ptr())).ok()?;
-            let file: IPersistFile = link.cast().ok()?;
-            file.Save(PCWSTR(at.as_ptr()), true).ok()?;
-        }
-        Some(())
+/// The only way to have a real shortcut to resolve, which is what the tests want it for: a fixture
+/// checked into the repository would be a binary blob nobody could read, and one from `C:\Users` is
+/// not the same on two machines.
+pub fn write_shortcut(at: &Path, target: &Path, arguments: &str) -> bool {
+    #[cfg(windows)]
+    {
+        // The writing thread needs an apartment as much as the reading one does, and asking for one
+        // it already has is not a mistake: `CoInitializeEx` with a *different* model answers
+        // `RPC_E_CHANGED_MODE` and initialises nothing, which is exactly what should happen on the
+        // operation thread — that one is an STA of its own making and uninitialises itself. So this
+        // is the links worker's MTA when it is the caller, and a no-op when it is not.
+        apartment();
+        win::write_shortcut(at, target, arguments)
     }
-
-    // The writing thread needs an apartment as much as the reading one does.
-    apartment();
-    let wide = |path: &Path| -> Vec<u16> {
-        path.as_os_str().encode_wide().chain(Some(0)).collect()
-    };
-    let argv: Vec<u16> = arguments.encode_utf16().chain(Some(0)).collect();
-    made(&wide(at), &wide(target), &argv).is_some()
+    #[cfg(not(windows))]
+    {
+        let _ = (at, target, arguments);
+        false
+    }
 }
+
+/// Make a shortcut in `into` for each of `items`, and say where each one landed.
+///
+/// What [`crate::shell::ops::Job::Link`] runs, on the operation's own thread.
+///
+/// # The names are the shell's, and they were measured rather than chosen
+///
+/// `the_names_match_the_shell_s_own_link_drop` hands the destination folder's *own* `IDropTarget` a
+/// `DROPEFFECT_LINK` drop — the call Explorer makes for an Alt-drag — and compares what appears with
+/// what this produces. Measured on this machine:
+///
+/// | dropped | appeared | and again |
+/// | --- | --- | --- |
+/// | `one.txt` | `one.txt.lnk` | `one.txt (2).lnk` |
+/// | `a folder` | `a folder.lnk` | `a folder (2).lnk` |
+///
+/// So: **the whole name including its extension, with `.lnk` on the end** — not the stem, and with
+/// no ` - Shortcut` suffix. That suffix is real but it belongs elsewhere: to the context menu's
+/// *Create shortcut* and to a drop on the Desktop, neither of which is this gesture. A collision
+/// takes ` (2)` before the extension, counting up.
+///
+/// # Why this rather than handing the drop to the shell
+///
+/// Because that route reports nothing back. It works — the test named above is the proof, since it
+/// uses it — but *what* it created is not knowable afterwards, and an operation this program cannot
+/// describe is one Ctrl+Z cannot take back. Made here, every path is known as it is written, so a
+/// link drop goes into [`crate::shell::ops::history`] beside the copy and the move. The cost is that
+/// the naming rule above is this program's, which is why it is held to the shell's by a test rather
+/// than by this comment.
+pub fn shortcuts_into(items: &[PathBuf], into: &Path) -> (Option<String>, Vec<PathBuf>) {
+    let mut made = Vec::new();
+    let mut refused = 0usize;
+    for item in items {
+        // **A path with no last component is counted as refused rather than skipped**, and the case
+        // is a drive root: `C:\` has no `file_name`, so there is no name to put a `.lnk` after.
+        // Explorer names that one after the volume label — `Local Disk (C:).lnk` — which is a rule
+        // this cannot check against anything, and inventing one is the thing the rest of this
+        // function is at pains not to do. So it is reported instead of guessed at, and a drag of a
+        // drive says so rather than quietly doing nothing.
+        let name = item.file_name().map(|name| name.to_string_lossy());
+        match name.and_then(|name| free_name(into, &name)) {
+            Some(at) if write_shortcut(&at, item, "") => made.push(at),
+            _ => refused += 1,
+        }
+    }
+    // Reported per item rather than as one failure, because a partial answer is what the user has
+    // to be told about: the shortcuts that *were* made are real, are on screen, and are what Ctrl+Z
+    // will take back. Silence here would leave somebody counting rows to find the one that is
+    // missing.
+    let error = match (refused, made.is_empty()) {
+        (0, _) => None,
+        (_, true) if items.len() == 1 => Some("Could not make the shortcut".to_owned()),
+        (_, true) => Some("Could not make the shortcuts".to_owned()),
+        (n, false) => Some(format!("{n} of {} shortcuts could not be made", items.len())),
+    };
+    (error, made)
+}
+
+/// `into\name.lnk`, or `into\name (2).lnk` and up until one is free.
+///
+/// `None` when the folder somehow holds every name this will try, which is not a real folder and is
+/// not worth spinning over — see [`TRIES`].
+fn free_name(into: &Path, name: &str) -> Option<PathBuf> {
+    let first = into.join(format!("{name}.lnk"));
+    if !first.exists() {
+        return Some(first);
+    }
+    // From two, because the first one has no number: the shell's own `one.txt.lnk` is followed by
+    // `one.txt (2).lnk` and never by `one.txt (1).lnk`.
+    (2..=TRIES)
+        .map(|n| into.join(format!("{name} ({n}).lnk")))
+        .find(|candidate| !candidate.exists())
+}
+
+/// How far [`free_name`] counts before giving up.
+///
+/// A bound rather than a loop, because the alternative is a folder that has been dropped into a
+/// thousand times freezing the operation thread on `exists` calls. A thousand shortcuts to the same
+/// file is already past anything intentional.
+const TRIES: usize = 1000;
 
 #[cfg(test)]
 mod tests {
@@ -494,5 +561,167 @@ mod tests {
         assert_eq!(tidy(r"C:\ProgramData"), r"C:\ProgramData");
         assert_eq!(tidy(r"\\?\C:\Users\"), r"C:\Users");
         assert_eq!(tidy(r"\\server\share"), r"\\server\share");
+    }
+}
+
+#[cfg(all(test, windows))]
+mod link_tests {
+    use super::*;
+
+    /// **The names this makes are the shell's own, compared against the shell.**
+    ///
+    /// The rule in [`shortcuts_into`] — the whole file name, `.lnk` on the end, ` (2)` before it on
+    /// a collision — is this program's arithmetic, and the only thing that makes it more than a
+    /// guess is this: the same two items are dropped twice into one folder by
+    /// [`crate::shell::dnd::win::link_drop_through_the_shell`], which is the call Explorer makes for
+    /// an Alt-drag, and twice into another by [`shortcuts_into`]. The two folders then have to hold
+    /// the same names.
+    ///
+    /// A file **and** a folder, because the two are named differently by every other operation here
+    /// — `one.txt` has an extension to put the `.lnk` after, and `a folder` does not — and twice
+    /// each, because the second time is what shows the collision rule.
+    #[test]
+    fn the_names_match_the_shell_s_own_link_drop() {
+        let _serialised = crate::shell::serialised();
+        crate::shell::init();
+
+        let root = crate::sandbox::fresh("link-names");
+        let from = root.join("from");
+        let ours = root.join("ours");
+        let theirs = root.join("theirs");
+        for dir in [&from, &ours, &theirs] {
+            std::fs::create_dir_all(dir).expect("sandbox");
+        }
+        let file = from.join("one.txt");
+        std::fs::write(&file, b"one").expect("write");
+        let folder = from.join("a folder");
+        std::fs::create_dir_all(&folder).expect("sandbox");
+        let items = vec![file, folder];
+
+        let names = |dir: &Path| -> Vec<String> {
+            let mut found: Vec<String> = std::fs::read_dir(dir)
+                .expect("read the folder back")
+                .filter_map(|entry| entry.ok())
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .collect();
+            found.sort();
+            found
+        };
+
+        // Twice each, so the collision rule is exercised as well as the plain one.
+        for round in 1..=2 {
+            let (error, made) = shortcuts_into(&items, &ours);
+            assert_eq!(error, None, "round {round}");
+            assert_eq!(made.len(), 2, "round {round}: {made:?}");
+            for at in &made {
+                assert!(at.is_file(), "round {round}: {} was not written", at.display());
+            }
+
+            assert!(
+                crate::shell::dnd::win::link_drop_through_the_shell(&items, &theirs),
+                "round {round}: the shell would not take a link drop, so there is nothing to \
+                 compare against"
+            );
+            // The shell's drop is asynchronous in a way `shortcuts_into` is not: `Drop` returns
+            // before the `.lnk` is necessarily on disk, exactly as `NewItem` does.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while names(&theirs).len() < round * 2 && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+
+        assert_eq!(
+            names(&ours),
+            names(&theirs),
+            "the shortcut names have drifted from the shell's own"
+        );
+        // And what they are, written down, so a change in either is legible in the diff rather
+        // than only in a mismatch.
+        assert_eq!(
+            names(&ours),
+            [
+                "a folder (2).lnk",
+                "a folder.lnk",
+                "one.txt (2).lnk",
+                "one.txt.lnk",
+            ]
+        );
+
+        crate::sandbox::remove(&root);
+    }
+
+    /// A shortcut this makes resolves to the item it was made for — read back through the same
+    /// interface a row uses, which is the only thing that makes it a shortcut rather than a file.
+    #[test]
+    fn a_shortcut_points_at_what_it_was_made_for() {
+        let _serialised = crate::shell::serialised();
+        crate::shell::init();
+
+        let root = crate::sandbox::fresh("link-target");
+        let into = root.join("into");
+        std::fs::create_dir_all(&into).expect("sandbox");
+        let file = root.join("one.txt");
+        std::fs::write(&file, b"one").expect("write");
+
+        let (error, made) = shortcuts_into(std::slice::from_ref(&file), &into);
+        assert_eq!(error, None);
+        let [at] = &made[..] else {
+            panic!("expected one shortcut, got {made:?}")
+        };
+        assert_eq!(at, &into.join("one.txt.lnk"));
+
+        // Read back through `shortcut_target`, which is exactly what fills a row's dimmed half —
+        // so this checks the shortcut against the thing that will display it.
+        let target = shortcut_target(at).expect("the shortcut should resolve");
+        assert_eq!(Path::new(&target.path), file, "it points somewhere else");
+        assert!(
+            target.arguments.is_empty(),
+            "a shortcut made by dragging runs nothing: {:?}",
+            target.arguments
+        );
+
+        crate::sandbox::remove(&root);
+    }
+
+    /// Nothing to make a shortcut *of* is not an error, and nothing is written.
+    #[test]
+    fn no_items_makes_no_shortcuts() {
+        let root = crate::sandbox::fresh("link-none");
+        let (error, made) = shortcuts_into(&[], &root);
+        assert_eq!(error, None);
+        assert!(made.is_empty());
+        assert_eq!(std::fs::read_dir(&root).into_iter().flatten().count(), 0);
+        crate::sandbox::remove(&root);
+    }
+
+    /// An item that cannot be named is **said** to have been refused, not passed over.
+    ///
+    /// A drive root is the case — see [`shortcuts_into`]. What matters here is that the count comes
+    /// back rather than the folder quietly staying empty, because a drag that appears to do nothing
+    /// is indistinguishable from one that is not wired up.
+    #[test]
+    fn an_item_with_no_name_is_reported_rather_than_skipped() {
+        let root = crate::sandbox::fresh("link-unnamed");
+        let (error, made) = shortcuts_into(&[PathBuf::from(r"C:\")], &root);
+        assert!(made.is_empty(), "a drive root has no name to make a .lnk from");
+        assert_eq!(error.as_deref(), Some("Could not make the shortcut"));
+        crate::sandbox::remove(&root);
+    }
+
+    /// The collision rule on its own, without the shell: the first has no number, and the count
+    /// starts at two.
+    #[test]
+    fn a_free_name_counts_from_two() {
+        let root = crate::sandbox::fresh("link-free");
+        assert_eq!(free_name(&root, "one.txt"), Some(root.join("one.txt.lnk")));
+        std::fs::write(root.join("one.txt.lnk"), b"").expect("write");
+        assert_eq!(
+            free_name(&root, "one.txt"),
+            Some(root.join("one.txt (2).lnk")),
+            "the second one is (2), never (1)"
+        );
+        std::fs::write(root.join("one.txt (2).lnk"), b"").expect("write");
+        assert_eq!(free_name(&root, "one.txt"), Some(root.join("one.txt (3).lnk")));
+        crate::sandbox::remove(&root);
     }
 }

@@ -185,6 +185,13 @@ pub enum Job {
     Delete { items: Vec<PathBuf>, to_bin: bool },
     Rename { item: PathBuf, name: String },
     NewFolder { parent: PathBuf, name: String },
+    /// Make a shortcut in `into` for each item — the Alt-drag, and the right-drag menu's
+    /// *Create shortcuts here*.
+    ///
+    /// The one job here that creates something without copying anything, which is why it is not a
+    /// [`Self::Copy`] with a flag. See [`crate::shell::links::shortcuts_into`] for what it makes
+    /// and what the names are measured against.
+    Link { items: Vec<PathBuf>, into: PathBuf },
 
     // ---- The two that only undo asks for -------------------------------------
     //
@@ -219,6 +226,10 @@ impl Job {
             Self::Delete { items, .. } => format!("Deleting {}…", plural(items.len())),
             Self::Rename { .. } => "Renaming…".to_owned(),
             Self::NewFolder { .. } => "Creating a folder…".to_owned(),
+            // Counted in shortcuts rather than in items, because that is what is being made and
+            // "a shortcut for 1 item" says the number twice.
+            Self::Link { items, .. } if items.len() == 1 => "Making a shortcut…".to_owned(),
+            Self::Link { items, .. } => format!("Making {} shortcuts…", items.len()),
             // Both undo jobs say "Putting back", which is what they are from where the user is
             // standing: they pressed Ctrl+Z, and whether the shell is being asked to move a file
             // or to empty one out of the Recycle Bin is not their problem.
@@ -244,6 +255,9 @@ impl Job {
             Self::Delete { items, .. } => parents(items),
             Self::Rename { item, .. } => item.parent().map(Path::to_path_buf).into_iter().collect(),
             Self::NewFolder { parent, .. } => vec![parent.clone()],
+            // Only the destination. What the shortcuts point at is not touched — that is the
+            // whole difference between this and a copy.
+            Self::Link { into, .. } => vec![into.clone()],
             // Both ends of every pair: an item leaves one folder and arrives in another, and a
             // pane showing either has to be told.
             Self::PutBack { items } => items
@@ -281,6 +295,10 @@ impl Job {
             Self::Delete { items, .. } => paths.extend(items.iter().cloned()),
             Self::Rename { item, .. } => paths.push(item.clone()),
             Self::NewFolder { parent, .. } => paths.push(parent.clone()),
+            Self::Link { items, into } => {
+                paths.extend(items.iter().cloned());
+                paths.push(into.clone());
+            }
             Self::PutBack { items } => {
                 paths.extend(items.iter().flat_map(|(from, to)| [from.clone(), to.clone()]))
             }
@@ -290,7 +308,7 @@ impl Job {
     }
 }
 
-/// `1 item` or `n items`, which three of the descriptions above want.
+/// `1 item` or `n items`, which four of the descriptions above want.
 fn plural(count: usize) -> String {
     if count == 1 {
         "1 item".to_owned()

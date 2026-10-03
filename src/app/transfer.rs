@@ -376,10 +376,12 @@ impl App {
             };
             // Dropping a folder into itself is meaningless whatever button carried it, and a drag
             // holding one was already refused while it was still moving -- so this is the drag that
-            // named its files only now. A *move* back into the folder the items are already in was
-            // refused while it moved too; a copy there is `one - Copy.txt` and a right drag is a
-            // question, so both of those keep everything they are carrying.
-            let keep = dropped.asked || dropped.effect == Effect::Copy;
+            // named its files only now.
+            // A *move* back into the folder the items are already in was refused while the drag was
+            // still moving; a copy there is `one - Copy.txt`, a shortcut there is `one.txt.lnk`, and
+            // a right drag is a question nobody has answered yet — so all three of those keep
+            // everything they are carrying.
+            let keep = dropped.asked || dropped.effect != Effect::Move;
             let items = Self::droppable(dropped.items, &into, keep);
             if items.is_empty() {
                 continue;
@@ -389,7 +391,8 @@ impl App {
             // whole reason anybody drags with the right button.
             if dropped.asked {
                 use crate::shell::menu::{Entry, Own};
-                let own = [Own::CopyHere, Own::MoveHere, Own::Cancel]
+                // Explorer's own four, in Explorer's own order.
+                let own = [Own::CopyHere, Own::MoveHere, Own::LinkHere, Own::Cancel]
                     .into_iter()
                     .map(Entry::own)
                     .collect();
@@ -413,6 +416,7 @@ impl App {
             let job = match dropped.effect {
                 Effect::Move => Job::Move { items, into },
                 Effect::Copy => Job::Copy { items, into },
+                Effect::Link => Job::Link { items, into },
             };
             self.ops.start(job, self.owner, ctx);
         }

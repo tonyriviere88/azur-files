@@ -37,12 +37,20 @@ pub(crate) fn run(job: &Job, owner: Owner) -> (Option<String>, Outcome) {
             );
         }
         let recorded = Recorder::default();
-        // A restore is the one job that is not `IFileOperation` at all — the Recycle Bin is a
-        // namespace, and taking something out of it is a context-menu verb. It records nothing:
-        // an `undelete` reports only whether it ran, and nothing needs more than that, because
-        // an undo's own outcome is never put in the history. See [`crate::shell::ops::history`].
+        // Two jobs are not `IFileOperation` at all, and each says so where it is implemented:
+        //
+        // - a **restore**, because the Recycle Bin is a namespace and taking something out of it is
+        //   a context-menu verb. It records nothing — an `undelete` reports only whether it ran,
+        //   and nothing needs more, because an undo's own outcome is never put in the history.
+        // - a **link**, because there is no create-shortcut operation to ask for. It records what
+        //   it wrote, which is what makes an Alt-drag undoable like everything else.
         let error = match job {
             Job::Restore { items } => super::bin::restore(items, owner),
+            Job::Link { items, into } => {
+                let (error, made) = crate::shell::links::shortcuts_into(items, into);
+                recorded.with(|outcome| outcome.created = made);
+                error
+            }
             _ => perform(job, owner, &recorded),
         };
         CoUninitialize();
@@ -469,13 +477,16 @@ unsafe fn perform(job: &Job, owner: Owner, recorded: &Recorder) -> Option<String
             }
             queued
         }
-        // Unreachable: [`run`] sends a restore to [`super::bin`] instead, because the Recycle Bin
-        // is not an `IFileOperation` destination. Here so the match stays exhaustive — and it
-        // returns rather than falling through to the count, because the message below would blame
-        // missing items for what would actually be a wrong turn in `run`. A plausible error is
-        // worse than an impossible one: the plausible one gets believed.
-        Job::Restore { .. } => {
-            return Some("A restore does not go through IFileOperation".to_owned())
+        // Unreachable: [`run`] sends both of these elsewhere, because neither is something
+        // `IFileOperation` can be asked for — see the note there. Here so the match stays
+        // exhaustive, and returning rather than falling through to the count, because the message
+        // below would blame missing items for what would actually be a wrong turn in `run`. A
+        // plausible error is worse than an impossible one: the plausible one gets believed.
+        Job::Restore { .. } | Job::Link { .. } => {
+            return Some(format!(
+                "{} does not go through IFileOperation",
+                job.describe().trim_end_matches('…')
+            ))
         }
     };
 

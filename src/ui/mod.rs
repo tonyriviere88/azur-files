@@ -724,6 +724,8 @@ fn drag_sign(
     let glyph: fn(&Painter, Rect, Color32) = match told.doing {
         Doing::Copy => crate::icons::plus,
         Doing::Move => crate::icons::arrow_right,
+        // The badge Windows puts on every shortcut, which is what the drop is about to make.
+        Doing::Link => crate::icons::link,
         Doing::Pin => crate::icons::star,
     };
     (glyph, t.accent.mark)

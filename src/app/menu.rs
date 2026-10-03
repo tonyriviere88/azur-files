@@ -575,11 +575,15 @@ impl App {
         Some(match which {
             // A right-button drag, answered. The menu already carries what was dropped and
             // where, so there is nothing to look up.
-            Own::CopyHere | Own::MoveHere => Action::DropHere {
+            Own::CopyHere | Own::MoveHere | Own::LinkHere => Action::DropHere {
                 pane: menu.pane,
                 items: menu.items.clone(),
                 into: menu.folder.clone(),
-                moving: which == Own::MoveHere,
+                effect: match which {
+                    Own::MoveHere => crate::shell::clipboard::Effect::Move,
+                    Own::LinkHere => crate::shell::clipboard::Effect::Link,
+                    _ => crate::shell::clipboard::Effect::Copy,
+                },
             },
             Own::Cancel => return None,
             // Into the folder the menu was raised in, which for a background menu is the folder

@@ -44,11 +44,22 @@
 
 use std::path::{Path, PathBuf};
 
-/// What the clipboard is asking a paste to do.
+/// What a paste or a drop is asking for.
+///
+/// The three `DROPEFFECT` values that mean something, which is why this is here rather than in
+/// [`crate::shell::dnd`]: the clipboard and a drag are the same question asked twice, and Windows
+/// answers both with the same word.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Effect {
     Copy,
     Move,
+    /// Make a shortcut to each item rather than a copy of it — the Alt-drag, and Explorer's
+    /// *Create shortcuts here*. See [`crate::shell::ops::Job::Link`].
+    ///
+    /// **Never comes off the clipboard.** `Preferred DropEffect` can hold `DROPEFFECT_LINK` in
+    /// principle and nothing puts it there in practice, so [`get`] answers `Copy` for it — see
+    /// `win::read_effect`. This variant exists for the drag half, where it is the whole point.
+    Link,
 }
 
 /// What is on the clipboard, if it is files.
@@ -71,6 +82,8 @@ pub struct Pasteable {
 const DROPEFFECT_COPY: u32 = windows::Win32::System::Ole::DROPEFFECT_COPY.0;
 #[cfg(windows)]
 const DROPEFFECT_MOVE: u32 = windows::Win32::System::Ole::DROPEFFECT_MOVE.0;
+#[cfg(windows)]
+const DROPEFFECT_LINK: u32 = windows::Win32::System::Ole::DROPEFFECT_LINK.0;
 
 /// Put files on the clipboard.
 ///

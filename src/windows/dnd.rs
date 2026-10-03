@@ -136,6 +136,13 @@ pub fn drag_out(items: &[PathBuf], ui_thread: u32, shared: Arc<Mutex<Shared>>) -
     if hr != DRAGDROP_S_DROP {
         return None;
     }
+    // What the *target* settled on, which is all a source learns. Only the move matters to the
+    // caller — it is what takes files out of the folder this drag came from, so that folder has to
+    // be re-read; see `App::pump_drag`.
+    //
+    // A **link** answers `None` deliberately, alongside a drop that was refused. A shortcut is
+    // made in the destination and nothing whatever happens where the drag started, so there is no
+    // more for this end to report than for a drop that went nowhere.
     if effect.0 & DROPEFFECT_MOVE.0 != 0 {
         Some(Effect::Move)
     } else if effect.0 & DROPEFFECT_COPY.0 != 0 {
@@ -288,6 +295,37 @@ impl Incoming {
             all_folders,
         }
     }
+}
+
+/// Whether Alt is down, which is how Explorer is asked for a shortcut.
+///
+/// # Two ways of asking, because the first one is not certain to answer
+///
+/// `MK_ALT` is documented on `IDropTarget`'s key state and it is **bit `0x20`** — which the
+/// `windows` crate names twice, as `Ole::MK_ALT` and as `SystemServices::MK_XBUTTON1`. They are the
+/// same bit with two meanings and the meaning is the caller's: in an OLE drag it is Alt, and the
+/// `MODIFIERKEYS_FLAGS` set next door in this same function is the mouse-message family where it is
+/// the first thumb button. `Ole::MK_ALT` is the one named here so that nobody reconciles the two.
+///
+/// What is *not* certain is that the drag loop fills it in — it is optional in the interface, and
+/// this could not be driven from a test to find out: an Alt-drag is a real pointer under a real
+/// modifier, and no synthesised event reaches `DoDragDrop`'s own modal loop. So the physical key is
+/// read as well. `GetAsyncKeyState` and not `GetKeyState`, deliberately: the latter answers from the
+/// calling thread's message queue, which for a drag coming out of *another* program has never seen
+/// the key.
+///
+/// The cost of asking both is one call per `DragOver` that reads a byte the input system already
+/// has, against a modifier that would otherwise silently do nothing.
+#[cfg(windows)]
+fn alt_held(keys: MODIFIERKEYS_FLAGS) -> bool {
+    use windows::Win32::UI::Input::KeyboardAndMouse::{GetAsyncKeyState, VK_MENU};
+
+    if keys.0 & windows::Win32::System::Ole::MK_ALT != 0 {
+        return true;
+    }
+    // SAFETY: a read of the input system's own state; it takes nothing and retains nothing.
+    // The high bit is "down now", which is the documented shape of the answer.
+    unsafe { GetAsyncKeyState(VK_MENU.0 as i32) as u16 & 0x8000 != 0 }
 }
 
 /// The nearest thing to `wanted` that the source is willing to allow.
@@ -472,10 +510,18 @@ impl Target_Impl {
             None => return DROPEFFECT_NONE,
         };
 
-        if keys.0 & MK_CONTROL.0 != 0 {
+        // **Explorer's four, in Explorer's order of precedence.** Ctrl+Shift and Alt both mean
+        // "make a shortcut", and the pair has to be tested *before* either key alone or a thumb
+        // resting on Shift turns a deliberate Ctrl+Shift into a plain copy.
+        let ctrl = keys.0 & MK_CONTROL.0 != 0;
+        let shift = keys.0 & MK_SHIFT.0 != 0;
+        if alt_held(keys) || (ctrl && shift) {
+            return permitted(DROPEFFECT_LINK, allowed);
+        }
+        if ctrl {
             return permitted(DROPEFFECT_COPY, allowed);
         }
-        if keys.0 & MK_SHIFT.0 != 0 {
+        if shift {
             return permitted(DROPEFFECT_MOVE, allowed);
         }
         // Where it came from, read from the data object when the drag arrived rather than
@@ -493,9 +539,14 @@ impl Target_Impl {
         if temporary {
             return permitted(DROPEFFECT_COPY, allowed);
         }
+        // A drag with nothing held is never a shortcut — Explorer's unmodified rule is the
+        // volume one and no more, so [`super::default_effect`] has only two answers. The third arm
+        // is here because the type has three, and mapping it to anything but its own effect would
+        // be a lie waiting for somebody to widen that function.
         let wanted = match super::default_effect(source.as_deref(), target) {
             Effect::Move => DROPEFFECT_MOVE,
             Effect::Copy => DROPEFFECT_COPY,
+            Effect::Link => DROPEFFECT_LINK,
         };
         permitted(wanted, allowed)
     }
@@ -529,6 +580,10 @@ impl Target_Impl {
             Some(region) if would != DROPEFFECT_NONE => match region.onto {
                 Onto::Bookmarks | Onto::BookmarkGroup(_) => Some(Doing::Pin),
                 Onto::Folder(_) if would.0 & DROPEFFECT_MOVE.0 != 0 => Some(Doing::Move),
+                // Before the copy, because `permitted` degrades a link the source will not allow
+                // *to* a copy — so by the time this is reached, `LINK` means the source agreed to
+                // it and a shortcut really is what the drop will make.
+                Onto::Folder(_) if would.0 & DROPEFFECT_LINK.0 != 0 => Some(Doing::Link),
                 Onto::Folder(_) => Some(Doing::Copy),
             },
             _ => None,
@@ -689,10 +744,13 @@ impl IDropTarget_Impl for Target_Impl {
         if let Ok(mut shared) = self.shared.lock() {
             shared.dropped.push(Dropped {
                 items,
-                effect: if chosen.0 & DROPEFFECT_MOVE.0 != 0 {
-                    Effect::Move
-                } else {
-                    Effect::Copy
+                // Read off the effect that was *answered*, which is the one the source agreed
+                // to: `permitted` has already degraded anything it would not allow, so a `LINK`
+                // reaching here is a shortcut the drag really is willing to have made.
+                effect: match chosen {
+                    _ if chosen.0 & DROPEFFECT_MOVE.0 != 0 => Effect::Move,
+                    _ if chosen.0 & DROPEFFECT_LINK.0 != 0 => Effect::Link,
+                    _ => Effect::Copy,
                 },
                 at,
                 onto,
@@ -745,5 +803,48 @@ fn paths_of(data: &IDataObject) -> Option<Vec<PathBuf>> {
         let mut medium = medium;
         ReleaseStgMedium(&mut medium);
         Some(items)
+    }
+}
+
+/// Hand `into`'s own `IDropTarget` a `DROPEFFECT_LINK` drop of `items` — the call Explorer makes
+/// for an Alt-drag — and say whether the shell took it.
+///
+/// **The measuring stick, and it is only ever used as one.** Production makes its shortcuts through
+/// [`crate::shell::links::shortcuts_into`], for the reason set out there: this route reports nothing
+/// back, so nothing it does can be undone. What it is good for is establishing what the names ought
+/// to be, which is `the_names_match_the_shell_s_own_link_drop`.
+#[cfg(all(test, windows))]
+pub(crate) fn link_drop_through_the_shell(items: &[PathBuf], into: &std::path::Path) -> bool {
+    use windows::Win32::UI::Shell::{IShellItem, SHCreateItemFromParsingName, BHID_SFUIObject};
+
+    // SAFETY: the data object and the drop target are the shell's own, released when they go out
+    // of scope here; the three callbacks are the documented sequence and nothing is retained.
+    unsafe {
+        let Some(data) = data_object(items) else {
+            return false;
+        };
+        let wide = crate::shell::wide(into);
+        let folder: IShellItem =
+            match SHCreateItemFromParsingName(windows::core::PCWSTR(wide.as_ptr()), None) {
+                Ok(folder) => folder,
+                Err(_) => return false,
+            };
+        let Ok(target) = folder.BindToHandler::<_, IDropTarget>(None, &BHID_SFUIObject) else {
+            return false;
+        };
+        let pt = POINTL { x: 0, y: 0 };
+        let keys = MODIFIERKEYS_FLAGS(0);
+        let mut effect = DROPEFFECT_LINK;
+        if target.DragEnter(&data, keys, pt, &mut effect).is_err() {
+            return false;
+        }
+        // Answered as a link, or the folder is one that will not take one and the comparison
+        // would be against nothing.
+        if effect.0 & DROPEFFECT_LINK.0 == 0 {
+            let _ = target.DragLeave();
+            return false;
+        }
+        effect = DROPEFFECT_LINK;
+        target.Drop(Some(&data), keys, pt, &mut effect).is_ok()
     }
 }
