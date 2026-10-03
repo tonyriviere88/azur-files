@@ -168,6 +168,17 @@ pub struct Player {
     /// the frame it was showing. The seek happens when the drag ends.
     scrubbing: Option<f64>,
     muted: bool,
+    /// How many times the mute has actually been written to the engine.
+    ///
+    /// **For the test that it is written once and then left alone**, which is not the same claim as
+    /// the value being right: the mute being correct at the end of a frame says nothing about how
+    /// often it changed *during* one, and a mute rewritten every frame is audible as crackling rather
+    /// than visible as a wrong value. Two owners writing it — a per-tile draw and a loop after the
+    /// tiles — is exactly the bug this counts, and it made four clips in one panel crackle while
+    /// every value assertion about them passed. See `crate::ui::preview::video::canvas`, which is the
+    /// one owner there is now.
+    #[cfg(test)]
+    mute_writes: u32,
     /// How many frames have been asked for without anything to show for them. See [`PATIENCE`].
     waited: u32,
     /// **This player has the keyboard**, so Space and the arrows are its.
@@ -212,6 +223,10 @@ impl Player {
             failed: None,
             scrubbing: None,
             muted,
+            // The value it was born with does not count as a write: the engine was told at `open`,
+            // and what this counts is the panel changing its mind afterwards.
+            #[cfg(test)]
+            mute_writes: 0,
             waited: 0,
             keys: false,
             stepped_at: f64::NEG_INFINITY,
@@ -474,6 +489,16 @@ impl Player {
     pub fn set_muted(&mut self, muted: bool) {
         self.muted = muted;
         self.engine.set_muted(muted);
+        #[cfg(test)]
+        {
+            self.mute_writes += 1;
+        }
+    }
+
+    /// How many times the mute has reached the engine. See [`Player::mute_writes`].
+    #[cfg(test)]
+    pub fn mute_writes(&self) -> u32 {
+        self.mute_writes
     }
 
     /// Stop, because nobody is looking any more.

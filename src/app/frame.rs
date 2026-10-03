@@ -694,6 +694,11 @@ impl App {
             // payload — the diff came back with it — and a picture cannot: the comparison is what the
             // toggle asks for, so with it off there is nothing in the panel that knows.
             let changed = Self::changed_here(tab);
+            // And whether the selection is two pictures, which is what turns the header's diff button
+            // into the compare button — the one control that keeps the blended view reachable now that
+            // selecting two files tiles them. Asked here, beside `changed`, because both are questions
+            // about the *listing* that the panel has no way to answer for itself.
+            let can_compare = Self::can_compare(tab);
             crate::ui::preview::show(
                 &mut child,
                 t,
@@ -703,6 +708,7 @@ impl App {
                 preview,
                 body,
                 changed,
+                can_compare,
                 scratch,
                 actions,
             );

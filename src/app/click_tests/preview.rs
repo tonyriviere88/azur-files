@@ -934,13 +934,34 @@ fn two_selected_pictures_are_compared_in_three_views() {
         "one selected picture is not one view"
     );
 
-    // And the second one turns it into a comparison, without a shortcut or a menu.
+    // And the second one **tiles** them: selecting two files is a request for two previews, and each
+    // tile holds its own single picture. See [`crate::app::App::selected_previews`].
     h.app.panes[0].tab_mut().toggle(1);
     settle_preview(&mut h);
     assert_eq!(
+        h.app.panes[0].tab().preview.count(),
+        2,
+        "two selected pictures did not become two tiles"
+    );
+    assert_eq!(
+        h.app.panes[0].tab().preview.frames(),
+        Some((1, 1)),
+        "a tile beside another is still one picture, not a comparison"
+    );
+
+    // The blend is what the diff button asks for while exactly those two are selected — and then it
+    // is one tile with three views in it, which is what two pictures used to mean by default.
+    h.app.panes[0].tab_mut().preview.set_compare(true);
+    settle_preview(&mut h);
+    assert_eq!(
+        h.app.panes[0].tab().preview.count(),
+        1,
+        "the blend is one tile, not two"
+    );
+    assert_eq!(
         h.app.panes[0].tab().preview.frames(),
         Some((3, 3)),
-        "two selected pictures did not become three views"
+        "the compare toggle did not produce the three views"
     );
     let texts: Vec<String> = h.texts().into_iter().map(|(_, text)| text).collect();
     assert!(
@@ -976,18 +997,28 @@ fn two_selected_pictures_are_compared_in_three_views() {
         h.app.preview.share = share;
         h.frame(Vec::new());
         let bar: Vec<String> = h.texts().into_iter().map(|(_, text)| text).collect();
-        let comment = bar.iter().any(|text| text.contains("differs"));
-        let size = bar.iter().any(|text| text.contains("60 × 40"));
+        // **For a comparison the share that differs is the slot that survives**, and the dimensions
+        // are the one that gives way — the priorities are inverted against every other view, because
+        // "0.04% differs" is the answer somebody opened the comparison for. See the `differing` arm
+        // of the header's detail block, which is where that swap is made and why.
+        //
+        // So the backwards case is the *dimensions* outliving the share, not the other way about. The
+        // sweep only reaches the width where either is dropped once the compare button is on the bar,
+        // which is why this went unexercised while two pictures blended by default.
+        let headline = bar.iter().any(|text| text.contains("differs"));
+        let nicety = bar.iter().any(|text| text.contains("60 × 40"));
         assert!(
-            !(comment && !size),
-            "at {share} the comment is on the bar and the size is not, which is backwards: \
-             {bar:?}"
+            !(nicety && !headline),
+            "at {share} the dimensions are on the bar and the share that differs is not, which is \
+             backwards: {bar:?}"
         );
         assert!(
             bar.iter().any(|text| text.starts_with("a.png")),
             "at {share} the name is gone, and the details were droppable: {bar:?}"
         );
-        seen.push((comment, size));
+        // Recorded in the order they give way — the nicety first, then the headline — so the
+        // monotonicity check below reads the same way for this view as for every other.
+        seen.push((nicety, headline));
     }
     assert_eq!(seen.first(), Some(&(true, true)), "the widest bar: {seen:?}");
     assert_eq!(seen.last(), Some(&(false, false)), "the narrowest: {seen:?}");
@@ -1534,7 +1565,7 @@ fn a_file_with_no_preview_offers_to_show_it_another_way() {
     );
 
     // The button, where the frame put it.
-    let button = Id::new(("preview-as", pane, "Text"));
+    let button = Id::new(("preview-as", crate::ui::preview::Spot::tile(pane, 0), "Text"));
     let rect = h
         .ctx
         .read_response(button)
@@ -1617,5 +1648,101 @@ fn a_screen_filled_by_a_video_that_is_not_there_comes_back_by_itself() {
         size_before,
         "the monitor's size was recorded as the window's during the fullscreen frame, which is what \
          would reopen the program filling the screen"
+    );
+}
+
+/// **Every tile's clip plays, and only the focused one is audible.**
+///
+/// The rule for four videos at once: silence for three of them would make the panel a still contact
+/// sheet, and sound from four would make it unusable. So they all run and the focused tile has the
+/// sound — see [`crate::ui::preview::show`], which asserts that every frame rather than only when a
+/// player is opened, because the focus moves under a click.
+///
+/// Driven with two files that are `.mp4` in name and nonsense inside — the same fixture
+/// [`a_video_the_machine_cannot_play_says_so_in_the_panel`] uses, and for the same reason. A player
+/// that will not decode is still a player, and `muted` is a field on it either way, so this tests the
+/// routing of the sound without needing a codec or a real clip.
+#[cfg(windows)]
+#[test]
+fn every_tile_plays_and_only_the_focused_one_has_the_sound() {
+    let dir = crate::sandbox::fresh("preview-video-tiles");
+    for name in ["one.mp4", "two.mp4"] {
+        std::fs::write(dir.join(name), vec![0x5Au8; 64 * 1024]).expect("a file in the sandbox");
+    }
+
+    let mut h = Harness::new();
+    let pane = h.app.panes[0].id;
+    h.app.perform(
+        &h.ctx.clone(),
+        Action::Navigate {
+            pane,
+            path: dir.clone(),
+        },
+    );
+    h.settle();
+
+    // Both clips selected, which is what asks for two tiles.
+    let rows = {
+        let tab = h.app.panes[0].tab();
+        let listing = tab.dir.as_ref().expect("the listing arrived");
+        let find = |want: &str| {
+            tab.order
+                .iter()
+                .position(|&i| listing.name(i as usize) == want)
+                .expect("the fixture is in its own folder's listing")
+        };
+        (find("one.mp4"), find("two.mp4"))
+    };
+    h.app.panes[0].tab_mut().select_only(rows.0);
+    h.app.panes[0].tab_mut().toggle(rows.1);
+    h.app.panes[0].tab_mut().preview.open = true;
+
+    // The panel takes its players a frame after the selection settles, and the settle needs the clock
+    // to have moved past the debounce — so this waits for both rather than assuming a frame count,
+    // the same way the test above waits for the engine's refusal.
+    let mut muted = Vec::new();
+    for _ in 0..200 {
+        h.time += crate::ui::preview::FOLLOW_DELAY;
+        h.frame(Vec::new());
+        muted = h.app.panes[0].tab().preview.videos_muted();
+        if muted.len() == 2 {
+            break;
+        }
+    }
+
+    assert_eq!(
+        h.app.panes[0].tab().preview.count(),
+        2,
+        "two selected clips did not become two tiles"
+    );
+    assert_eq!(
+        muted,
+        vec![false, true],
+        "the focused tile is not the one with the sound"
+    );
+
+    // **And it is written once and then left alone**, which is the assertion this test was missing and
+    // the bug it now covers: two owners of the mute — a per-tile draw and a loop after the tiles —
+    // settled on the right value every frame and rewrote it twice getting there, which is inaudible as
+    // a wrong value and very audible as crackling. Ten frames with nothing changing must cost nothing.
+    let before = h.app.panes[0].tab().preview.video_mute_writes();
+    for _ in 0..10 {
+        h.time += 0.05;
+        h.frame(Vec::new());
+    }
+    assert_eq!(
+        h.app.panes[0].tab().preview.video_mute_writes(),
+        before,
+        "the mute is being rewritten on a frame where nothing changed, which is the crackle"
+    );
+
+    // The focus moving takes the sound with it — a tile that kept the sound after losing the focus
+    // would mean two audible clips the moment a third was opened.
+    h.app.panes[0].tab_mut().preview.focus_on(1);
+    h.frame(Vec::new());
+    assert_eq!(
+        h.app.panes[0].tab().preview.videos_muted(),
+        vec![true, false],
+        "the sound did not follow the focus"
     );
 }

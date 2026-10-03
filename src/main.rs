@@ -183,6 +183,7 @@ fn main() -> eframe::Result {
     let mut preview = false;
     let mut find: Option<String> = None;
     let mut compare = false;
+    let mut previews = 0usize;
     let mut trace = false;
     let mut walk: Option<std::path::PathBuf> = None;
     let mut scroll = false;
@@ -236,6 +237,12 @@ fn main() -> eframe::Result {
         } else if arg == "--compare" {
             preview = true;
             compare = true;
+        } else if let Some(text) = arg.strip_prefix("--previews=") {
+            // `--previews=3`: select that many previewable files, so a capture can show the panel
+            // tiled. `--compare` is the two-picture *blend*; this is the general case of the
+            // gesture, and the two are different pictures of the same panel.
+            preview = true;
+            previews = text.parse().unwrap_or(0);
         } else if let Some(text) = arg.strip_prefix("--find=") {
             preview = true;
             find = Some(text.to_owned());
@@ -390,6 +397,7 @@ fn main() -> eframe::Result {
                 console,
                 find,
                 compare,
+                previews,
                 waited: 0,
                 frames: 0,
                 owned: false,
@@ -553,6 +561,9 @@ struct Window {
     find: Option<String>,
     /// `--compare`: select the first *two* pictures instead, so a capture can show the comparison.
     compare: bool,
+    /// `--previews=<n>`: select that many previewable files, so a capture can show the panel tiled.
+    /// Zero is "leave the selection alone", which is what every run without the flag is.
+    previews: usize,
     /// Frames a `--menu` capture has spent waiting for the shell's half of that menu.
     waited: u32,
     /// Frames drawn, for the developer flags that have to wait for the window to settle.
@@ -629,6 +640,9 @@ impl eframe::App for Window {
             self.preview = false;
             if self.compare {
                 self.app.compare_here();
+            }
+            if self.previews > 1 {
+                self.app.preview_here(self.previews);
             }
             self.app.open_preview_here();
             if let Some(text) = self.find.take() {

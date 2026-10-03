@@ -361,7 +361,7 @@ fn the_panel_waits_for_the_selection_to_stop_moving() {
 
     // The file already on show is never asked for again, or the answer arriving would queue
     // another read of it for ever.
-    it.asked(two.clone(), 1);
+    it.asked(0, two.clone(), 1);
     it.follow(Some(two.clone()), 40.0);
     assert_eq!(it.settle(41.0), (None, None));
     assert_eq!(it.showing(), Some(two.first()));
@@ -376,10 +376,10 @@ fn the_panel_waits_for_the_selection_to_stop_moving() {
 
     // And the keyboard moving onto something with no preview clears it: this panel is beside
     // the row it is about, so a stale picture next to a different selection would be a lie.
-    it.asked(pair, 2);
+    it.asked(0, pair, 2);
     it.follow(None, 60.0);
     assert_eq!(it.showing(), None);
-    assert!(matches!(it.content, Content::Unsupported(_)));
+    assert!(matches!(it.focused().content, Content::Unsupported(_)));
 
     // The keyboard asking for the panel itself does not wait at all.
     it.ask_for(one.clone());
@@ -407,12 +407,12 @@ fn a_view_picked_for_one_file_does_not_follow_the_keyboard() {
     it.follow(Some(named.clone()), 10.0);
     let (ready, _) = it.settle(10.0 + FOLLOW_DELAY * 2.0);
     assert_eq!(ready.as_ref(), Some(&named));
-    it.asked(named.clone(), 1);
-    it.content = Content::Unsupported("nosuchthing".to_owned());
+    it.asked(0, named.clone(), 1);
+    it.focused_mut().content = Content::Unsupported("nosuchthing".to_owned());
 
     // The button. Asked for at once — a click is not a selection and has nothing to debounce.
-    it.force(preview::Kind::Text);
-    assert_eq!(it.forced_kind(), Some(preview::Kind::Text));
+    it.focused_mut().force(preview::Kind::Text);
+    assert_eq!(it.focused().forced_kind(), Some(preview::Kind::Text));
     let (ready, left) = it.settle(10.0);
     assert_eq!(
         ready,
@@ -420,29 +420,29 @@ fn a_view_picked_for_one_file_does_not_follow_the_keyboard() {
         "the pick did not become a read"
     );
     assert_eq!(left, None, "the pick waited for the debounce");
-    it.asked(Ask::One(path.clone(), preview::Kind::Text), 2);
+    it.asked(0, Ask::One(path.clone(), preview::Kind::Text), 2);
 
     // And it holds while the keyboard stays put, against the classifier saying `Shell` every frame.
     // Without this the panel would ask for the file again the moment the answer landed, for ever.
     it.follow(Some(named.clone()), 20.0);
     assert_eq!(it.settle(21.0), (None, None), "it asked for the file again");
-    assert_eq!(it.forced_kind(), Some(preview::Kind::Text));
+    assert_eq!(it.focused().forced_kind(), Some(preview::Kind::Text));
 
     // **Pressing it again takes it off**, back to the kind the name asks for.
-    it.force(preview::Kind::Text);
-    assert_eq!(it.forced_kind(), None);
+    it.focused_mut().force(preview::Kind::Text);
+    assert_eq!(it.focused().forced_kind(), None);
     assert_eq!(it.settle(22.0).0, Some(named.clone()));
-    it.asked(named.clone(), 3);
+    it.asked(0, named.clone(), 3);
 
     // A different view is a different pick rather than a toggle.
-    it.force(preview::Kind::Picture);
-    it.force(preview::Kind::Binary);
-    assert_eq!(it.forced_kind(), Some(preview::Kind::Binary));
+    it.focused_mut().force(preview::Kind::Picture);
+    it.focused_mut().force(preview::Kind::Binary);
+    assert_eq!(it.focused().forced_kind(), Some(preview::Kind::Binary));
     assert_eq!(
         it.settle(23.0).0,
         Some(Ask::One(path.clone(), preview::Kind::Binary))
     );
-    it.asked(Ask::One(path.clone(), preview::Kind::Binary), 4);
+    it.asked(0, Ask::One(path.clone(), preview::Kind::Binary), 4);
 
     // **And the keyboard moving on drops it.** The next file is a fresh question: a folder of `.dat`
     // is exactly as likely to be a folder of something else, and a panel that read the second one as
@@ -452,14 +452,14 @@ fn a_view_picked_for_one_file_does_not_follow_the_keyboard() {
         preview::Kind::Shell,
     );
     it.follow(Some(next.clone()), 30.0);
-    assert_eq!(it.forced_kind(), None, "the pick followed the keyboard");
+    assert_eq!(it.focused().forced_kind(), None, "the pick followed the keyboard");
     assert_eq!(it.settle(30.0 + FOLLOW_DELAY * 2.0).0, Some(next.clone()));
-    it.asked(next, 5);
+    it.asked(0, next, 5);
 
     // As does the panel letting go of the file altogether — a folder selected, or `Ctrl+P`.
-    it.force(preview::Kind::Text);
+    it.focused_mut().force(preview::Kind::Text);
     it.follow(None, 40.0);
-    assert!(it.forced_kind().is_none() && it.forced.is_none());
+    assert!(it.focused().forced_kind().is_none() && it.focused().forced.is_none());
 }
 
 /// Closing lets go of what the panel was holding, and a duplicated tab does not inherit it.
@@ -469,7 +469,7 @@ fn a_shut_panel_holds_nothing() {
         open: true,
         ..Default::default()
     };
-    it.asked(
+    it.asked(0, 
         Ask::One(PathBuf::from(r"C:\a.png"), preview::Kind::Picture),
         3,
     );
@@ -481,7 +481,7 @@ fn a_shut_panel_holds_nothing() {
 
     it.close();
     assert!(!it.open && !it.busy() && it.showing().is_none());
-    assert!(matches!(it.content, Content::Nothing));
+    assert!(matches!(it.focused().content, Content::Nothing));
 }
 
 /// The bar's title says what is on show, and a comparison says both names.
@@ -870,4 +870,180 @@ fn a_new_file_forgets_what_was_found_in_the_last_one() {
     assert_eq!(find.search.text, "aaaa");
     find.against("x");
     assert!(find.hits.is_empty());
+}
+
+/// **The shapes the panel cuts for two, three and four files.**
+///
+/// The geometry the whole feature is: one tile fills the canvas, two go side by side, three put the
+/// odd one along the full width of the bottom, and four make a 2x2. Checked as *relationships* rather
+/// than against numbers, because the numbers are the canvas's and the shape is the claim.
+#[test]
+fn the_canvas_is_cut_into_the_shape_the_count_asks_for() {
+    let canvas = Rect::from_min_max(pos2(0.0, 0.0), pos2(400.0, 300.0));
+    let spans = |rects: &[Rect]| -> Vec<(f32, f32, f32, f32)> {
+        rects
+            .iter()
+            .map(|r| (r.left(), r.top(), r.right(), r.bottom()))
+            .collect()
+    };
+
+    // One file has the lot, and no seam is taken out of it: there is no neighbour to be separated
+    // from.
+    assert_eq!(tiles(canvas, 1), vec![canvas]);
+    assert_eq!(tiles(canvas, 0), vec![canvas], "an empty panel still has a tile");
+
+    // Two, side by side: same height as the canvas, and a gap between them.
+    let two = tiles(canvas, 2);
+    assert_eq!(two.len(), 2);
+    assert_eq!(two[0].top(), canvas.top());
+    assert_eq!(two[0].bottom(), canvas.bottom());
+    assert_eq!(two[1].top(), canvas.top());
+    assert_eq!(two[1].bottom(), canvas.bottom());
+    assert!(two[0].right() < two[1].left(), "the two tiles overlap");
+    assert!(
+        (two[1].left() - two[0].right() - SEAM).abs() < 1e-6,
+        "the gap between them is not one seam: {:?}",
+        spans(&two)
+    );
+
+    // Three: two across the top, the third the *full width* underneath.
+    let three = tiles(canvas, 3);
+    assert_eq!(three.len(), 3);
+    assert_eq!(three[0].top(), canvas.top());
+    assert_eq!(three[1].top(), canvas.top());
+    assert_eq!(three[0].bottom(), three[1].bottom(), "the top two are one row");
+    assert!(three[0].right() < three[1].left(), "the top two overlap");
+    // The one that makes this shape what it is.
+    assert_eq!(three[2].left(), canvas.left());
+    assert_eq!(three[2].right(), canvas.right());
+    assert_eq!(three[2].bottom(), canvas.bottom());
+    assert!(
+        three[2].top() > three[0].bottom(),
+        "the bottom tile is not below the top row: {:?}",
+        spans(&three)
+    );
+
+    // Four: two by two, so the columns line up down the panel and the rows across it.
+    let four = tiles(canvas, 4);
+    assert_eq!(four.len(), 4);
+    assert_eq!(four[0].left(), four[2].left(), "the left column is not a column");
+    assert_eq!(four[0].right(), four[2].right());
+    assert_eq!(four[1].left(), four[3].left(), "the right column is not a column");
+    assert_eq!(four[0].top(), four[1].top(), "the top row is not a row");
+    assert_eq!(four[2].bottom(), four[3].bottom(), "the bottom row is not a row");
+    assert!(four[0].bottom() < four[2].top(), "the rows overlap");
+    // Nothing spills out of the canvas, which is what the seam coming out of the *tiles* buys.
+    for tile in &four {
+        assert!(canvas.contains_rect(*tile), "{tile:?} is outside {canvas:?}");
+    }
+}
+
+/// The panel grows and shrinks with the selection, and shrinking lets go of what it was holding.
+///
+/// Dropping the slot is the whole of the teardown for a video that was playing in it — see
+/// [`Preview::fit`] — so the count going down has to actually remove them rather than blank them.
+#[test]
+fn the_panel_holds_one_slot_per_file_up_to_four() {
+    let mut it = Preview {
+        open: true,
+        ..Default::default()
+    };
+    let ask = |name: &str| Ask::One(PathBuf::from(format!(r"C:\pics\{name}.png")), preview::Kind::Picture);
+
+    // A panel with nothing selected still has one tile to say so in.
+    it.follow_all(Vec::new(), 0.0);
+    assert_eq!(it.count(), 1);
+
+    let four = [ask("a"), ask("b"), ask("c"), ask("d")];
+    it.follow_all(four.to_vec(), 10.0);
+    assert_eq!(it.count(), 4);
+
+    // Every tile settles on its own file, and each is a request of its own.
+    let (ready, left) = it.settle_all(10.0 + FOLLOW_DELAY * 2.0);
+    assert_eq!(left, None);
+    assert_eq!(ready.len(), 4, "one request per tile, got {ready:?}");
+    for (at, (slot, got)) in ready.iter().enumerate() {
+        assert_eq!(*slot, at, "the tile index has to travel with the request");
+        assert_eq!(got, &four[at], "tile {at} settled on the wrong file");
+    }
+    for (at, (slot, got)) in ready.into_iter().enumerate() {
+        it.asked(slot, got, at as u64 + 1);
+    }
+    assert_eq!(it.showing_all().len(), 4);
+
+    // Past four the panel does not grow: a select-all is not a request for forty previews.
+    let five: Vec<Ask> = "abcde".chars().map(|c| ask(&c.to_string())).collect();
+    it.follow_all(five.clone(), 20.0);
+    assert_eq!(it.count(), MOST);
+
+    // And the focus comes back with the selection when it shrinks under it.
+    it.focus = 3;
+    it.follow_all(four[..2].to_vec(), 30.0);
+    assert_eq!(it.count(), 2);
+    assert_eq!(it.focused_at(), 1, "the focus stayed off the end of the slots");
+
+    // Shut, and it is back to its resting shape rather than four empty tiles.
+    it.close();
+    assert_eq!(it.count(), 1);
+    assert_eq!(it.focused_at(), 0);
+    assert!(!it.open);
+}
+
+/// A read comes back to the tile that asked for it, and nowhere else.
+///
+/// The token is the whole of that: four tiles are four requests in flight at once, and a payload is a
+/// decoded picture — there is one of it, so handing it to the wrong tile loses it.
+#[test]
+fn a_payload_lands_in_the_tile_that_asked_for_it() {
+    let mut it = Preview {
+        open: true,
+        ..Default::default()
+    };
+    let ask = |name: &str| Ask::One(PathBuf::from(format!(r"C:\pics\{name}.txt")), preview::Kind::Text);
+    let two = [ask("first"), ask("second")];
+    it.follow_all(two.to_vec(), 0.0);
+    let (ready, _) = it.settle_all(FOLLOW_DELAY * 2.0);
+    assert_eq!(ready.len(), 2);
+    it.asked(0, two[0].clone(), 11);
+    it.asked(1, two[1].clone(), 22);
+
+    // Both tokens are this panel's, and neither is any other panel's.
+    assert!(it.wants(11) && it.wants(22));
+    assert!(!it.wants(33));
+    // Still busy while either is outstanding, which is what a capture waits on.
+    assert!(it.busy());
+
+    // The second tile's answer is what the second tile shows.
+    assert_eq!(it.showing_all(), vec![two[0].first(), two[1].first()]);
+    // And a request whose tile has gone is dropped rather than landing on a survivor.
+    it.follow_all(two[..1].to_vec(), 100.0);
+    it.asked(1, two[1].clone(), 44);
+    assert!(!it.wants(44), "a request for a tile that no longer exists was kept");
+}
+
+/// **Two selected pictures tile, unless the diff button asks for the blend.**
+///
+/// The gesture used to mean the blended comparison and now means two tiles, so the blend has to be
+/// reachable and has to be *asked for* — see [`crate::app::App::selected_previews`]. This is the
+/// panel's half: the latch, and its dying with the selection it was about.
+#[test]
+fn the_blend_is_a_latch_that_dies_with_its_two_files() {
+    let mut it = Preview {
+        open: true,
+        ..Default::default()
+    };
+    assert!(!it.comparing(), "the blend is off until it is asked for");
+
+    // Two pictures selected, so the button is on offer and the latch can be set.
+    it.allow_compare(true);
+    it.compare = true;
+    assert!(it.comparing());
+    // Still two pictures: the latch stands.
+    it.allow_compare(true);
+    assert!(it.comparing());
+
+    // The selection stops being two pictures and the latch goes with it, or the next two picked
+    // would be blended by a choice made about a different pair.
+    it.allow_compare(false);
+    assert!(!it.comparing());
 }

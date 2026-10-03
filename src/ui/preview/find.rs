@@ -162,7 +162,7 @@ impl Find {
 /// The order is the one every find bar uses, and it is worth reading as a sentence: what to look for,
 /// how to look for it, how many there are, and the two ways to move through them. The three *hows*
 /// are inside the field because they belong to the query rather than to the results.
-pub(super) fn find_bar(ui: &mut Ui, t: &Theme, canvas: Rect, pane: PaneId, find: &mut Find) {
+pub(super) fn find_bar(ui: &mut Ui, t: &Theme, canvas: Rect, spot: Spot, find: &mut Find) {
     // Everything but the field is fixed, so the field is what the arithmetic solves for. A panel
     // narrow enough to squeeze it past `FIND_MIN` gets a bar wider than the canvas, clipped at the
     // left — which loses the start of what you typed and keeps every control. The other way round
@@ -203,7 +203,7 @@ pub(super) fn find_bar(ui: &mut Ui, t: &Theme, canvas: Rect, pane: PaneId, find:
     // over a point.
     let claim = ui.interact(
         bar,
-        Id::new(("preview-find-bar", pane)),
+        Id::new(("preview-find-bar", spot)),
         Sense::click_and_drag(),
     );
     if claim.hovered() {
@@ -263,7 +263,7 @@ pub(super) fn find_bar(ui: &mut Ui, t: &Theme, canvas: Rect, pane: PaneId, find:
                     ui,
                     t,
                     at,
-                    Id::new(("preview-flag", pane, label)),
+                    Id::new(("preview-flag", spot, label)),
                     label,
                     tip,
                     under,
@@ -290,7 +290,7 @@ pub(super) fn find_bar(ui: &mut Ui, t: &Theme, canvas: Rect, pane: PaneId, find:
                     // about by name, and an id derived from how many widgets came before it in the
                     // frame moves when anything upstream changes — see `ui::deps`, whose rows stopped
                     // answering clicks for exactly that reason.
-                    .id(Id::new(("preview-find-field", pane)))
+                    .id(Id::new(("preview-find-field", spot)))
                     .frame(egui::Frame::NONE)
                     .margin(egui::Margin::ZERO)
                     .desired_width(typing.width())
@@ -366,7 +366,7 @@ pub(super) fn find_bar(ui: &mut Ui, t: &Theme, canvas: Rect, pane: PaneId, find:
                     ui,
                     t,
                     at,
-                    Id::new(("preview-find", pane, id)),
+                    Id::new(("preview-find", spot, id)),
                     glyph,
                     tip,
                     enabled,

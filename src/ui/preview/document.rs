@@ -49,7 +49,7 @@ pub(super) fn draw(
     ui: &mut Ui,
     t: &Theme,
     canvas: Rect,
-    pane: PaneId,
+    spot: Spot,
     doc: &markdown::Doc,
     find: &mut Find,
 ) {
@@ -62,7 +62,7 @@ pub(super) fn draw(
     );
     child.set_clip_rect(canvas.intersect(ui.clip_rect()));
     let output = egui::ScrollArea::vertical()
-        .id_salt(("preview-doc", pane))
+        .id_salt(("preview-doc", spot))
         .auto_shrink([false, false])
         .show(&mut child, |ui| {
             let marks = &mut find.marks();

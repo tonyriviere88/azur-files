@@ -134,7 +134,7 @@ impl Picture {
 ///
 /// With three frames all of that is **shared**: one zoom, one pan, one gesture over the whole
 /// canvas. Three views that scrolled independently would be three views of nothing in particular.
-pub(super) fn pictures(ui: &mut Ui, t: &Theme, canvas: Rect, pane: PaneId, picture: &mut Picture) {
+pub(super) fn pictures(ui: &mut Ui, t: &Theme, canvas: Rect, spot: Spot, picture: &mut Picture) {
     let count = picture.showing().len().max(1);
     let n = count as f32;
     // Along the canvas's longer axis, so three views of a wide panel are three columns and three
@@ -162,7 +162,7 @@ pub(super) fn pictures(ui: &mut Ui, t: &Theme, canvas: Rect, pane: PaneId, pictu
     // One interaction over the whole canvas, so a drag anywhere moves every view together.
     let response = ui.interact(
         canvas,
-        Id::new(("preview-canvas", pane)),
+        Id::new(("preview-canvas", spot)),
         Sense::click_and_drag(),
     );
 

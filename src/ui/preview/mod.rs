@@ -297,8 +297,10 @@ impl Default for Layout {
 }
 
 /// What is on the canvas.
+#[derive(Default)]
 enum Content {
     /// Nothing has been asked for: no selection, or one with no preview.
+    #[default]
     Nothing,
     /// A selection with nothing to show, and what it was — `"zip"`, `"mp4"`.
     Unsupported(String),
@@ -335,9 +337,56 @@ struct Forced {
     own: preview::Kind,
 }
 
-/// One folder's preview panel.
-pub struct Preview {
-    pub open: bool,
+/// Which tile a widget belongs to: the pane it is in, and the tile's place in the panel.
+///
+/// **Everything below the header is keyed on this rather than on the pane alone.** egui keys
+/// interaction state by id, so four canvases sharing one id are one canvas painted four times: they
+/// would pan together, scroll together, and hand every video's play button to the same player. The
+/// header is the exception and still takes a bare [`PaneId`], because there is one of it and it is
+/// about the focused tile — see [`Preview::focus`].
+/// **`pub` for the click tests and for no other reason.** They address a tile's widgets the way the
+/// panel does — by id — so they have to be able to name one. Nothing outside this module builds one
+/// to *draw* with.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct Spot {
+    pane: PaneId,
+    at: usize,
+}
+
+impl Spot {
+    /// The `at`-th tile of `pane`, counting the way [`tiles`] lays them out. The panel builds its
+    /// own inline, so this exists for the click tests and is compiled only for them.
+    #[cfg(test)]
+    pub fn tile(pane: PaneId, at: usize) -> Self {
+        Self { pane, at }
+    }
+
+    /// The pane, for an [`Action`] that has to name one. A tile is not a thing the rest of the
+    /// program has heard of, so nothing outside this module ever needs the other half.
+    fn pane(self) -> PaneId {
+        self.pane
+    }
+}
+
+/// How many files the panel will show at once.
+///
+/// Four, because [`tiles`] runs out of shapes that are worth looking at: a fifth tile in a panel
+/// that is 40% of a pane is a thumbnail, and a preview too small to read is not a preview. It is
+/// also the point where the *selection* stops being a deliberate act — picking four files is
+/// something somebody means, and picking forty is a select-all.
+pub const MOST: usize = 4;
+
+/// One file in the panel: what it is, what it is showing, and what is being looked for in it.
+///
+/// **Everything here is per-file**, which is what makes the panel able to hold up to [`MOST`] of
+/// them. It was all fields of [`Preview`] when the panel showed one file, and the split is the whole
+/// of that change: a second file needs its own decode, its own find bar and its own forced view, and
+/// sharing any of those would mean two tiles disagreeing about which file they were about.
+///
+/// What is *not* here is the panel's chrome and its preferences — [`Layout`] is one per window, and
+/// the header acts on whichever slot has focus. See [`Preview::focus`].
+#[derive(Default)]
+struct Slot {
     /// What is on show, or being read.
     of: Option<Ask>,
     /// A selection that has not sat still long enough yet: what, and since when.
@@ -346,38 +395,47 @@ pub struct Preview {
     awaiting: Option<u64>,
     content: Content,
     find: Find,
-    /// The view a button under `No preview for a .zip` asked for. See [`Preview::force`].
+    /// The view a button under `No preview for a .zip` asked for. See [`Slot::force`].
     forced: Option<Forced>,
+}
+
+/// One folder's preview panel: up to [`MOST`] files, tiled.
+pub struct Preview {
+    pub open: bool,
+    /// The files on show, in the order [`tiles`] lays them out — which is the order they appear in
+    /// the listing, so the panel reads the way the rows above it do.
+    ///
+    /// **Never empty.** One slot showing nothing is what a panel with no selection is, and a `Vec`
+    /// that could be empty would make every accessor here answer two different kinds of "nothing".
+    slots: Vec<Slot>,
+    /// Which slot the header, the find bar and the keyboard act on, and which one has the sound.
+    ///
+    /// Always a valid index into `slots` — [`Preview::fit`] is the only thing that resizes them and
+    /// it clamps this on the way out. Followed by a click on a tile, and by the selection shrinking
+    /// under it.
+    focus: usize,
+    /// Show two selected pictures blended instead of side by side.
+    ///
+    /// **Off by default, because tiling is what selecting two files now means.** The blended
+    /// comparison is the older answer and still the better one for two frames of the same thing, so
+    /// it is what the header's diff button asks for while exactly two pictures are selected — see
+    /// [`crate::app::App::selected_previews`]. Not a [`Layout`] field: it is about the files in front
+    /// of you rather than a way of reading, so it dies with the selection.
+    compare: bool,
 }
 
 impl Default for Preview {
     fn default() -> Self {
         Self {
             open: false,
-            of: None,
-            pending: None,
-            awaiting: None,
-            content: Content::Nothing,
-            find: Find::default(),
-            forced: None,
+            slots: vec![Slot::default()],
+            focus: 0,
+            compare: false,
         }
     }
 }
 
-impl Preview {
-    /// A duplicate for a new tab of the same folder: open the same way, showing nothing yet.
-    ///
-    /// The content is deliberately not copied. A decoded picture is up to 16 MB — three of them for
-    /// a comparison — and a graph is a megabyte of names; handing a copy to every `Ctrl+T` would
-    /// make duplicating a tab the most expensive thing in the window. The panel is following the
-    /// selection anyway, so it fills itself in a quarter of a second.
-    pub fn duplicate(&self) -> Self {
-        Self {
-            open: self.open,
-            ..Self::default()
-        }
-    }
-
+impl Slot {
     /// Whether a read has been asked for, or is about to be, and has not landed yet.
     ///
     /// **A video that has not shown its first frame counts**, even though nothing was asked of
@@ -489,17 +547,6 @@ impl Preview {
         }
     }
 
-    /// Shut it, and let go of everything it was holding.
-    ///
-    /// Up to three decoded pictures, or a dependency graph. There is nothing to be gained by
-    /// keeping any of it for a panel nobody is looking at, and re-reading is a quarter of a second
-    /// — which is also what somebody who has just rebuilt the file means by opening the panel
-    /// again.
-    pub fn close(&mut self) {
-        self.open = false;
-        self.forget();
-    }
-
     fn forget(&mut self) {
         self.of = None;
         self.pending = None;
@@ -602,7 +649,7 @@ impl Preview {
             kind,
             own,
         });
-        self.ask_for(Ask::One(path, kind));
+        self.ask_now(Ask::One(path, kind));
     }
 
     /// The view this file was told to use, if it was told one. For the button that says so.
@@ -615,8 +662,7 @@ impl Preview {
     }
 
     /// Ask for something at once, with no waiting — the keyboard asked for the panel itself.
-    pub fn ask_for(&mut self, ask: Ask) {
-        self.open = true;
+    fn ask_now(&mut self, ask: Ask) {
         self.pending = Some((ask, f64::NEG_INFINITY));
     }
 
@@ -775,6 +821,318 @@ impl Preview {
     }
 }
 
+impl Preview {
+    /// A duplicate for a new tab of the same folder: open the same way, showing nothing yet.
+    ///
+    /// The content is deliberately not copied. A decoded picture is up to 16 MB — three of them for
+    /// a comparison, and now up to [`MOST`] of those — and a graph is a megabyte of names; handing a
+    /// copy to every `Ctrl+T` would make duplicating a tab the most expensive thing in the window.
+    /// The panel is following the selection anyway, so it fills itself in a quarter of a second.
+    pub fn duplicate(&self) -> Self {
+        Self {
+            open: self.open,
+            ..Self::default()
+        }
+    }
+
+    /// The slot the header, the find bar and the keyboard are about.
+    ///
+    /// Infallible by construction: `slots` is never empty and [`Self::fit`] clamps `focus` every time
+    /// it resizes them, which is the only way either can change.
+    ///
+    /// Only the tests read a slot without writing to it — the panel itself draws through
+    /// [`Self::focused_mut`] or walks `slots` directly.
+    #[cfg(test)]
+    fn focused(&self) -> &Slot {
+        &self.slots[self.focus.min(self.slots.len() - 1)]
+    }
+
+    fn focused_mut(&mut self) -> &mut Slot {
+        let at = self.focus.min(self.slots.len() - 1);
+        &mut self.slots[at]
+    }
+
+    /// How many files are on show. What [`tiles`] is asked for.
+    pub fn count(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// Whether two selected pictures are to be blended rather than tiled. See [`Self::compare`].
+    pub fn comparing(&self) -> bool {
+        self.compare
+    }
+
+    /// The blend is on offer, or it is not — and a latch that is no longer on offer is dropped.
+    ///
+    /// Called every frame with [`crate::app::App::can_compare`]'s answer, which is what stops a
+    /// choice about two pictures from surviving the selection it was about and blending the next two.
+    pub fn allow_compare(&mut self, can: bool) {
+        if !can {
+            self.compare = false;
+        }
+    }
+
+
+    /// Whether **any** slot is still waiting, which is what `--shot --preview` holds a capture open
+    /// for: a photograph of four tiles is only worth taking once all four have something in them.
+    pub fn busy(&self) -> bool {
+        self.slots.iter().any(Slot::busy)
+    }
+
+    /// Whether one of this panel's slots is waiting for `token`.
+    ///
+    /// Asked before the payload is handed over rather than after, because a payload is a decoded
+    /// picture or a walked graph and there is only one of it — every other panel would have to be
+    /// given a copy in order to reject it.
+    pub fn wants(&self, token: u64) -> bool {
+        self.slots.iter().any(|slot| slot.wants(token))
+    }
+
+    /// A read has come back. Handed to the one slot that asked for it, and dropped otherwise.
+    pub fn arrived(&mut self, token: u64, payload: Payload, ctx: &egui::Context) {
+        if let Some(slot) = self.slots.iter_mut().find(|slot| slot.wants(token)) {
+            slot.arrived(token, payload, ctx);
+        }
+    }
+
+    /// Shut it, and let go of everything every slot was holding.
+    ///
+    /// Up to three decoded pictures per slot, or a dependency graph. There is nothing to be gained
+    /// by keeping any of it for a panel nobody is looking at, and re-reading is a quarter of a
+    /// second — which is also what somebody who has just rebuilt the file means by opening the panel
+    /// again. **Back to one slot**, so reopening starts from the panel's resting shape rather than
+    /// from four empty tiles.
+    pub fn close(&mut self) {
+        self.open = false;
+        self.slots = vec![Slot::default()];
+        self.focus = 0;
+        self.compare = false;
+    }
+
+    /// This panel's tab has stopped being the one on show. Every slot is told, because every slot
+    /// could be holding a video — see [`Slot::out_of_sight`].
+    pub fn out_of_sight(&mut self) {
+        for slot in &mut self.slots {
+            slot.out_of_sight();
+        }
+    }
+
+    /// Keep the panel's shape and its slots pointed at what is selected.
+    ///
+    /// One [`Ask`] per tile, in listing order. An empty list is a selection with nothing to preview,
+    /// which is one slot told so rather than no slots at all — see [`Preview::slots`].
+    ///
+    /// **Taken by value and moved into the slots.** This runs every frame the panel is open, and each
+    /// [`Ask`] holds one or two `PathBuf`s; borrowing the list meant cloning all of them on every
+    /// frame to hand `follow` something it owns, and in the steady state — the selection has not
+    /// changed, which is nearly always — every one of those clones was dropped again unused.
+    pub fn follow_all(&mut self, asks: Vec<Ask>, now: f64) {
+        self.fit(asks.len());
+        if asks.is_empty() {
+            self.slots[0].follow(None, now);
+            return;
+        }
+        for (slot, ask) in self.slots.iter_mut().zip(asks) {
+            slot.follow(Some(ask), now);
+        }
+    }
+
+    /// Grow or shrink to `want` tiles, clamped to `1..=MOST`.
+    ///
+    /// **Shrinking drops the slots off the end**, and dropping a slot is what shuts a video that was
+    /// playing in it — see [`Content::Video`], whose whole contract is that replacing or dropping it
+    /// is the teardown. Going from four selected files to two therefore silences the two that went.
+    fn fit(&mut self, want: usize) {
+        let want = want.clamp(1, MOST);
+        self.slots.truncate(want);
+        while self.slots.len() < want {
+            self.slots.push(Slot::default());
+        }
+        // The selection shrinking under the focus pulls it back to the last tile there is.
+        self.focus = self.focus.min(self.slots.len() - 1);
+    }
+
+    /// Which slots have waited long enough, and how long until the soonest of the rest is ready.
+    ///
+    /// One deadline out of all of them, because one frame serves every slot that is waiting — the
+    /// same argument [`crate::app::App::collect_previews`] already makes across panels.
+    pub fn settle_all(&mut self, now: f64) -> (Vec<(usize, Ask)>, Option<f64>) {
+        let mut ready: Vec<(usize, Ask)> = Vec::new();
+        let mut soonest: Option<f64> = None;
+        for (at, slot) in self.slots.iter_mut().enumerate() {
+            let (ask, left) = slot.settle(now);
+            if let Some(ask) = ask {
+                ready.push((at, ask));
+            }
+            if let Some(left) = left {
+                soonest = Some(soonest.map_or(left, |had: f64| had.min(left)));
+            }
+        }
+        (ready, soonest)
+    }
+
+    /// A read has been started for what [`Self::settle_all`] handed back, for the slot that wanted
+    /// it. Out-of-range is dropped rather than clamped: the selection has changed under the request,
+    /// and the answer is about a file no tile is showing any more.
+    pub fn asked(&mut self, at: usize, ask: Ask, token: u64) {
+        if let Some(slot) = self.slots.get_mut(at) {
+            slot.asked(ask, token);
+        }
+    }
+
+    /// A player has been opened for it instead — see [`preview::Kind::Video`].
+    pub fn plays(&mut self, at: usize, ask: Ask, player: preview::Player) {
+        if let Some(slot) = self.slots.get_mut(at) {
+            slot.plays(ask, player);
+        }
+    }
+
+    /// And it could not be opened at all.
+    pub fn refused(&mut self, at: usize, ask: Ask, why: String) {
+        if let Some(slot) = self.slots.get_mut(at) {
+            slot.refused(ask, why);
+        }
+    }
+
+    /// Ask for one file at once, with no waiting — the keyboard asked for the panel itself.
+    ///
+    /// **Back to one tile.** This is the shortcut that opens the panel on the file under the cursor,
+    /// so it is a statement about one file; leaving three stale tiles beside it would be answering a
+    /// different question. The next frame's [`Self::follow_all`] restores the tiling if the selection
+    /// really is several files.
+    pub fn ask_for(&mut self, ask: Ask) {
+        self.open = true;
+        self.fit(1);
+        self.focus = 0;
+        self.slots[0].ask_now(ask);
+    }
+
+    /// Open the find bar on `text` in the focused tile, without anybody having typed it.
+    ///
+    /// For `--find=`, so a capture can photograph the bar doing its job — the same reason
+    /// `--preview` and `--compare` exist.
+    pub fn look_for(&mut self, text: &str) {
+        self.focused_mut().look_for(text);
+    }
+
+    /// The player the keyboard belongs to. **The focused tile's and no other**, which is the whole
+    /// of "the keys go to one video": four clips can be playing and the space bar means the one you
+    /// last clicked on.
+    pub fn keyed_player(&mut self, force: bool) -> Option<&mut preview::Player> {
+        self.focused_mut().keyed_player(force)
+    }
+
+    /// Ask for the blend without pressing the button.
+    ///
+    /// For `--compare` and for the tests, and for the one reason both exist: a capture run has no
+    /// pointer, so the gesture has to be reachable without one. The latch still dies with the
+    /// selection — see [`Self::allow_compare`], which runs every frame either way, so this cannot
+    /// blend two files it was not asked about.
+    pub fn set_compare(&mut self, on: bool) {
+        self.compare = on;
+    }
+
+    /// Follow one file, and settle one file. For the tests about the *debounce*, which is per slot:
+    /// the wait belongs to a tile and one tile is the shape those tests are written against. The
+    /// panel itself always goes through [`Self::follow_all`] and [`Self::settle_all`].
+    #[cfg(test)]
+    pub fn follow(&mut self, what: Option<Ask>, now: f64) {
+        self.follow_all(what.into_iter().collect(), now);
+    }
+
+    #[cfg(test)]
+    pub fn settle(&mut self, now: f64) -> (Option<Ask>, Option<f64>) {
+        let (ready, left) = self.settle_all(now);
+        (ready.into_iter().next().map(|(_, ask)| ask), left)
+    }
+
+    /// What the focused tile is looking at. For the tests; the panel reads the slots.
+    #[cfg(test)]
+    pub fn showing(&self) -> Option<&Path> {
+        self.focused().showing()
+    }
+
+    /// Every tile's file, in tile order. For the tests that are about the tiling itself.
+    #[cfg(test)]
+    pub fn showing_all(&self) -> Vec<&Path> {
+        self.slots.iter().filter_map(Slot::showing).collect()
+    }
+
+    /// Which tile the header acts on, and which one has the sound.
+    pub fn focused_at(&self) -> usize {
+        self.focus.min(self.slots.len() - 1)
+    }
+
+    /// Move the focus, as a click on a tile does. For the tests, which have no pointer.
+    #[cfg(test)]
+    pub fn focus_on(&mut self, at: usize) {
+        self.focus = at.min(self.slots.len() - 1);
+    }
+
+    #[cfg(test)]
+    pub fn dependency_rows(&self) -> Option<usize> {
+        self.focused().dependency_rows()
+    }
+
+    #[cfg(test)]
+    pub fn dependency_first_foldable(&self, rows: usize) -> Option<usize> {
+        self.focused().dependency_first_foldable(rows)
+    }
+
+    #[cfg(test)]
+    pub fn video(&self) -> Option<(Option<String>, Option<f64>)> {
+        self.focused().video()
+    }
+
+    /// Every tile that is a video, and whether it has the sound. For the test that is about exactly
+    /// that: all of them play and one of them is audible.
+    #[cfg(test)]
+    pub fn videos_muted(&self) -> Vec<bool> {
+        self.slots
+            .iter()
+            .filter_map(|slot| match &slot.content {
+                Content::Video(player) => Some(player.muted()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// How many times each tile's mute has reached the engine.
+    ///
+    /// **The value being right is not the claim** — see [`preview::Player::mute_writes`]. A mute
+    /// written twice a frame settles on the correct value and crackles the whole time.
+    #[cfg(test)]
+    pub fn video_mute_writes(&self) -> Vec<u32> {
+        self.slots
+            .iter()
+            .filter_map(|slot| match &slot.content {
+                Content::Video(player) => Some(player.mute_writes()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub fn frames(&self) -> Option<(usize, usize)> {
+        self.focused().frames()
+    }
+
+    #[cfg(test)]
+    pub fn set_regex(&mut self, on: bool) {
+        self.focused_mut().set_regex(on);
+    }
+
+    #[cfg(test)]
+    pub fn finding(&self) -> (bool, usize, usize, String) {
+        self.focused().finding()
+    }
+
+    #[cfg(test)]
+    pub fn toggle_all(&mut self) {
+        self.focused_mut().toggle_all();
+    }
+}
+
 /// Draw this panel's video over the whole window instead of in its panel. See [`video::theatre`].
 ///
 /// `false` when there is nothing to fill a screen with — no video in this panel any more, or one that
@@ -790,8 +1148,18 @@ pub fn theatre(
     layout: &mut Layout,
     out: &mut Vec<Action>,
 ) -> bool {
-    match &mut preview.content {
-        Content::Video(player) => video::theatre(ui, t, screen, pane, player, layout, out),
+    // The focused tile's video and no other: filling the screen is a statement about one clip, and
+    // with four playing the one it is about is the one holding the keys. See [`Preview::keyed_player`].
+    //
+    // Its own tile's spot, so the controls over a fullscreen video are the same widgets they were in
+    // the panel — the play button keeps its state across the two, which is what makes the transition
+    // look like the same player growing rather than a second one appearing.
+    let spot = Spot {
+        pane,
+        at: preview.focused_at(),
+    };
+    match &mut preview.focused_mut().content {
+        Content::Video(player) => video::theatre(ui, t, screen, spot, player, layout, out),
         _ => false,
     }
 }
@@ -857,6 +1225,60 @@ pub fn split(body: Rect, open: bool, layout: Layout) -> (Rect, Option<Rect>) {
     }
 }
 
+/// Cut the canvas into one tile per file on show.
+///
+/// | files | shape |
+/// | --- | --- |
+/// | 1 | the whole canvas |
+/// | 2 | side by side |
+/// | 3 | two across the top, the third the full width beneath them |
+/// | 4 | two by two |
+///
+/// **The seam is taken out of the tiles rather than drawn over them**, exactly as [`split`] does
+/// between the panel and the listing: a boundary neither side paints is a boundary that cannot be
+/// half a pixel off, and it means a tile's content is never under the line that separates it from its
+/// neighbour.
+///
+/// The three-file shape puts the odd one along the bottom rather than down the side because the
+/// bottom of a panel is the wider edge in the common case — a panel on the right is taller than it is
+/// wide, so a full-width row reads better than a full-height column. It is the shape a contact sheet
+/// has for the same reason.
+///
+/// Anything past [`MOST`] is not laid out; the caller does not ask for more, and a count of zero
+/// gives one tile because a panel always has somewhere to say "nothing selected".
+fn tiles(canvas: Rect, count: usize) -> Vec<Rect> {
+    // Half of the gap between two tiles, which each side gives up.
+    let half = SEAM / 2.0;
+    let left = |r: Rect, x: f32| Rect::from_min_max(r.min, pos2(x - half, r.bottom()));
+    let right = |r: Rect, x: f32| Rect::from_min_max(pos2(x + half, r.top()), r.max);
+    let top = |r: Rect, y: f32| Rect::from_min_max(r.min, pos2(r.right(), y - half));
+    let bottom = |r: Rect, y: f32| Rect::from_min_max(pos2(r.left(), y + half), r.max);
+
+    let mid_x = canvas.center().x;
+    let mid_y = canvas.center().y;
+    match count {
+        0 | 1 => vec![canvas],
+        2 => vec![left(canvas, mid_x), right(canvas, mid_x)],
+        3 => {
+            let upper = top(canvas, mid_y);
+            vec![
+                left(upper, mid_x),
+                right(upper, mid_x),
+                bottom(canvas, mid_y),
+            ]
+        }
+        _ => {
+            let (upper, lower) = (top(canvas, mid_y), bottom(canvas, mid_y));
+            vec![
+                left(upper, mid_x),
+                right(upper, mid_x),
+                left(lower, mid_x),
+                right(lower, mid_x),
+            ]
+        }
+    }
+}
+
 /// Draw the panel, and answer the pointer.
 #[allow(clippy::too_many_arguments)]
 pub fn show(
@@ -870,6 +1292,9 @@ pub fn show(
     // Whether git has a version of this file that is not the one on disk. Only a *picture* needs
     // telling — see [`header`].
     changed: bool,
+    // Whether the selection is two pictures, which turns the header's diff button into the compare
+    // button. See [`crate::app::App::can_compare`].
+    can_compare: bool,
     scratch: &mut String,
     out: &mut Vec<Action>,
 ) {
@@ -889,22 +1314,134 @@ pub fn show(
 
     let bar = Rect::from_min_size(inside.min, vec2(inside.width(), HEADER));
     let canvas = Rect::from_min_max(bar.left_bottom(), inside.max);
-    header(ui, t, bar, pane, preview, layout, changed, scratch, out);
+    header(ui, t, bar, pane, preview, layout, changed, can_compare, scratch, out);
 
     if canvas.height() < 24.0 || canvas.width() < 48.0 {
         return;
     }
 
+    // One tile per file on show, and the focus read before the slots are borrowed.
+    let count = preview.count();
+    let focus = preview.focused_at();
+    let rects = tiles(canvas, count);
+    // Which tile a view was asked for in, and which one the pointer claimed. Both are acted on after
+    // the loop, because both write to the panel and the loop is holding its slots.
+    let mut picked: Option<(usize, preview::Kind)> = None;
+    let mut clicked: Option<usize> = None;
+
+    for (at, slot) in preview.slots.iter_mut().enumerate() {
+        let Some(&whole) = rects.get(at) else { continue };
+        let spot = Spot { pane, at };
+        // **The name strip, and only when there is more than one tile.** A single preview is named by
+        // the header above it, and a strip repeating that name would be a second answer to a question
+        // already answered. With two or more it is the only thing that says which file you are
+        // looking at. See [`strip_for`].
+        let tile = if count > 1 {
+            strip_for(ui, t, whole, slot, at == focus)
+        } else {
+            whole
+        };
+        if tile.height() < 16.0 || tile.width() < 32.0 {
+            continue;
+        }
+        // Salted per tile, so the pointer landing in one canvas is not also landing in the others.
+        if ui
+            .interact(whole, Id::new(("preview-tile", spot)), Sense::click())
+            .clicked()
+        {
+            clicked = Some(at);
+        }
+        // **The focused tile is the one allowed the sound**, and it is told here rather than fixed up
+        // afterwards: a second pass re-asserting it is a second owner of the player's mute, and two
+        // owners writing it every frame is what made four clips crackle.
+        if let Some(kind) = tile_content(ui, t, tile, spot, slot, layout, at == focus, out) {
+            picked = Some((at, kind));
+        }
+    }
+
+    // The pointer chose which tile the header, the find bar and the sound belong to.
+    if let Some(at) = clicked {
+        preview.focus = at;
+    }
+    // A view was asked for, in the tile it was asked in. After the loop rather than inside it,
+    // because this replaces what that tile is drawing and the borrow of the slots ends here.
+    if let Some((at, kind)) = picked {
+        if let Some(slot) = preview.slots.get_mut(at) {
+            slot.force(kind);
+        }
+        // The read is queued rather than done, and this frame is the one the click arrived on: a
+        // request nobody books a frame for is a request that lands the next time something unrelated
+        // wants one. The same reasoning as the debounce's `request_repaint_after`.
+        ui.ctx().request_repaint();
+    }
+}
+
+/// The thin strip along the top of a tile that says which file it holds, and returns what is left for
+/// the content.
+///
+/// **A name and nothing else.** Every control belongs to the header, which acts on the focused tile —
+/// four copies of the view buttons would not fit across a 2×2 anyway, and a tile is chosen by
+/// clicking it rather than by operating it. The focused one is named in the primary ink and underlined
+/// along the bottom of its strip; the others are secondary. That is the same one-step ink ladder the
+/// sidebar uses for a found machine, and it needs no badge.
+fn strip_for(ui: &Ui, t: &Theme, whole: Rect, slot: &Slot, focused: bool) -> Rect {
+    let strip = Rect::from_min_size(whole.min, vec2(whole.width(), header::CAPTION));
+    let name = slot
+        .of
+        .as_ref()
+        .map(Ask::title)
+        .unwrap_or_else(|| "Nothing selected".to_owned());
+    let ink = if focused {
+        t.text.primary
+    } else {
+        t.text.secondary
+    };
+    // On its baseline rather than centred in the strip's box — see [`ink_baseline`], which is what
+    // puts the name and the rule under it on one grid.
+    let baseline = ink_baseline(ui.painter(), &t.fonts.caption, strip.top(), strip.height());
+    let galley = truncated(
+        ui.painter(),
+        &name,
+        t.fonts.caption.clone(),
+        ink,
+        (strip.width() - PAD * 2.0).max(0.0),
+    );
+    galley_on_baseline(ui.painter(), strip.left() + PAD, baseline, galley);
+    if focused {
+        // The line under the focused name, which is what says the header above is about this tile.
+        ui.painter().hline(
+            strip.x_range(),
+            strip.bottom() - 1.0,
+            Stroke::new(1.0, t.text.primary),
+        );
+    }
+    Rect::from_min_max(strip.left_bottom(), whole.max)
+}
+
+/// Draw one tile's content. Returns the view a button under `No preview for a .zip` asked for.
+#[allow(clippy::too_many_arguments)]
+fn tile_content(
+    ui: &mut Ui,
+    t: &Theme,
+    canvas: Rect,
+    spot: Spot,
+    slot: &mut Slot,
+    layout: &mut Layout,
+    // Whether this is the focused tile, which for a video is whether it is the one heard. See
+    // [`video::show`], which owns that decision along with [`Layout::muted`].
+    audible: bool,
+    out: &mut Vec<Action>,
+) -> Option<preview::Kind> {
     // What the chooser needs, read before the content is borrowed: whether there is a single file for
     // it to be about — the empty canvas is also what a *folder* gets, and there is nothing to try on
     // one — and which view has already been picked, so its button can say so.
-    let one = matches!(preview.of, Some(Ask::One(..)));
-    let forced = preview.forced_kind();
+    let one = matches!(slot.of, Some(Ask::One(..)));
+    let forced = slot.forced_kind();
     let mut picked = None;
 
-    // The two halves of the panel state that are looked at together, and the only place they are:
-    // the search is *about* the content, and the content is what the canvas draws.
-    let Preview { content, find, .. } = preview;
+    // The two halves of the slot that are looked at together, and the only place they are: the search
+    // is *about* the content, and the content is what the canvas draws.
+    let Slot { content, find, .. } = slot;
     // The diff view, before anything reads the body: it *is* the body while it is on, so a search
     // that ran first would be holding offsets into the other string.
     if let Content::Text(text) = &mut *content {
@@ -928,7 +1465,7 @@ pub fn show(
             } else {
                 format!("No preview for a .{ext}")
             };
-            picked = nothing_to_show(ui, t, canvas, pane, &what, one, forced);
+            picked = nothing_to_show(ui, t, canvas, spot, &what, one, forced);
         }
         // Nothing is drawn but the word. A read takes tens of milliseconds and a spinner that
         // appears and vanishes inside three frames is worse than nothing.
@@ -940,39 +1477,30 @@ pub fn show(
             // try and `Format error` is a reasonable answer, and the next thing to try has to be one
             // click away rather than a trip off the file and back. Not offered for a decoder failing
             // on a file it was the *right* choice for — a corrupt `.png` has nothing else to be.
-            picked = nothing_to_show(ui, t, canvas, pane, &why, one && forced.is_some(), forced);
+            picked = nothing_to_show(ui, t, canvas, spot, &why, one && forced.is_some(), forced);
         }
-        Content::Picture(picture) => pictures(ui, t, canvas, pane, picture),
+        Content::Picture(picture) => pictures(ui, t, canvas, spot, picture),
         // **A player that will not open is the same dead end**, and it gets the same way out for the
         // same reason — with one difference: a real video the machine has no codec for is news about
         // the machine, so the buttons only appear where something asked for this view. See
         // [`video::show`], which is what would otherwise draw the complaint.
         Content::Video(player) if forced == Some(preview::Kind::Video) && player.failed().is_some() => {
             let why = player.failed().unwrap_or_default().to_owned();
-            picked = nothing_to_show(ui, t, canvas, pane, &why, one, forced);
+            picked = nothing_to_show(ui, t, canvas, spot, &why, one, forced);
         }
-        Content::Video(player) => video::show(ui, t, canvas, pane, player, layout, out),
+        Content::Video(player) => video::show(ui, t, canvas, spot, player, layout, out, audible),
         Content::Text(text) => match &text.doc {
-            Some(doc) if !layout.markup => document::draw(ui, t, canvas, pane, doc, find),
-            _ => text_canvas(ui, t, canvas, pane, text, layout.numbers, find),
+            Some(doc) if !layout.markup => document::draw(ui, t, canvas, spot, doc, find),
+            _ => text_canvas(ui, t, canvas, spot, text, layout.numbers, find),
         },
         Content::Binary(view) => deps::show(ui, t, canvas, view),
     }
 
     // And the find bar over the top of it, last, because it floats.
     if find.open && matches!(&*content, Content::Text(_)) {
-        find_bar(ui, t, canvas, pane, find);
+        find_bar(ui, t, canvas, spot, find);
     }
-
-    // A view was asked for. After the canvas rather than inside it, because this replaces what the
-    // canvas is drawing and the borrow of it ends here.
-    if let Some(kind) = picked {
-        preview.force(kind);
-        // The read is queued rather than done, and this frame is the one the click arrived on: a
-        // request nobody books a frame for is a request that lands the next time something unrelated
-        // wants one. The same reasoning as the debounce's `request_repaint_after`.
-        ui.ctx().request_repaint();
-    }
+    picked
 }
 
 /// A line of secondary text in the middle of the canvas, for the states that have nothing to draw.
@@ -1000,7 +1528,7 @@ fn nothing_to_show(
     ui: &mut Ui,
     t: &Theme,
     canvas: Rect,
-    pane: PaneId,
+    spot: Spot,
     saying: &str,
     offer: bool,
     forced: Option<preview::Kind>,
@@ -1104,7 +1632,7 @@ fn nothing_to_show(
                 at,
                 // By label rather than by index, so wrapping the row does not renumber the buttons
                 // under a pointer that is resting on one.
-                Id::new(("preview-as", pane, label)),
+                Id::new(("preview-as", spot, label)),
                 *glyph,
                 label,
                 tip,

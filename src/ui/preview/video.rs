@@ -55,7 +55,7 @@ pub(super) fn theatre(
     ui: &mut Ui,
     t: &Theme,
     screen: Rect,
-    pane: PaneId,
+    spot: Spot,
     player: &mut preview::Player,
     layout: &mut Layout,
     out: &mut Vec<Action>,
@@ -63,21 +63,28 @@ pub(super) fn theatre(
     if player.failed().is_some() {
         return false;
     }
-    canvas(ui, t, screen, pane, player, layout, out, true);
+    // Filling the screen is the focused tile by construction — there is nothing else on screen to
+    // have the sound. See [`super::Preview::keyed_player`].
+    canvas(ui, t, screen, spot, player, layout, out, true, true);
     true
 }
 
 /// The picture, the controls, and the repaint that keeps it moving.
+///
+/// `audible` is whether this tile is the one allowed the sound — the focused one. Every tile's clip
+/// plays; only one of them is heard.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn show(
     ui: &mut Ui,
     t: &Theme,
     rect: Rect,
-    pane: PaneId,
+    spot: Spot,
     player: &mut preview::Player,
     layout: &mut Layout,
     out: &mut Vec<Action>,
+    audible: bool,
 ) {
-    canvas(ui, t, rect, pane, player, layout, out, false);
+    canvas(ui, t, rect, spot, player, layout, out, false, audible);
 }
 
 /// Both of the above. `filling` is whether this is the whole screen rather than a panel, which
@@ -88,17 +95,27 @@ fn canvas(
     ui: &mut Ui,
     t: &Theme,
     canvas: Rect,
-    pane: PaneId,
+    spot: Spot,
     player: &mut preview::Player,
     layout: &mut Layout,
     out: &mut Vec<Action>,
     filling: bool,
+    audible: bool,
 ) {
-    // **The preference is what is true, and the player is told.** Mute is one setting for the window
-    // — see [`Layout::muted`] — so a player opened before it was last changed, in another pane or
-    // another tab, has to be brought into line rather than keeping the value it was born with.
-    if player.muted() != layout.muted {
-        player.set_muted(layout.muted);
+    // **The preference and the focus are one decision, and this is the only place that makes it.**
+    // Mute is a setting for the window — see [`Layout::muted`] — so a player opened before it was
+    // last changed, in another pane or another tab, has to be brought into line rather than keeping
+    // the value it was born with. With more than one tile there is a second reason to be silent:
+    // only the focused tile is heard.
+    //
+    // **Both of them here, together, because two owners crackled.** The panel used to re-assert the
+    // focus rule in a loop of its own after drawing the tiles, and this line asserted the preference
+    // while drawing them — so every frame a non-focused clip was unmuted by this and muted again by
+    // that, at frame rate, which is audible as crackling. It only bit with two videos in *one* panel:
+    // with a single tile the two owners agreed and nothing moved. One owner, one write.
+    let quiet = layout.muted || !audible;
+    if player.muted() != quiet {
+        player.set_muted(quiet);
     }
     // The strip is dropped whole rather than squeezed when the panel is too short for it.
     //
@@ -149,7 +166,7 @@ fn canvas(
     }
 
     // One interaction over the picture, before it is painted, so the cursor can be set from it.
-    let response = ui.interact(screen, Id::new(("preview-video", pane)), Sense::click());
+    let response = ui.interact(screen, Id::new(("preview-video", spot)), Sense::click());
 
     // The ground the picture sits on, which is also what shows either side of it.
     //
@@ -216,7 +233,7 @@ fn canvas(
     let now = ui.input(|i| i.time);
     if response.double_clicked() {
         player.double_clicked();
-        out.push(Action::ToggleVideoFullscreen(pane));
+        out.push(Action::ToggleVideoFullscreen(spot.pane()));
     } else if response.clicked() {
         player.clicked(now);
     }
@@ -243,7 +260,7 @@ fn canvas(
     }
 
     if let Some(bar) = bar {
-        strip(ui, t, bar, pane, player, layout, out, filling);
+        strip(ui, t, bar, spot, player, layout, out, filling);
     }
 }
 
@@ -260,7 +277,7 @@ fn strip(
     ui: &mut Ui,
     t: &Theme,
     bar: Rect,
-    pane: PaneId,
+    spot: Spot,
     player: &mut preview::Player,
     layout: &mut Layout,
     out: &mut Vec<Action>,
@@ -278,7 +295,7 @@ fn strip(
         ui,
         t,
         at,
-        Id::new(("preview-play", pane)),
+        Id::new(("preview-play", spot)),
         // Two glyphs in one slot, which is why they are drawn to the same weight — see
         // [`crate::icons::pause`].
         if playing {
@@ -320,7 +337,7 @@ fn strip(
         ui,
         t,
         at,
-        Id::new(("preview-fullscreen", pane)),
+        Id::new(("preview-fullscreen", spot)),
         if filling {
             &crate::icons::fullscreen_exit as azur_egui_theme::icons::Icon<'_>
         } else {
@@ -337,7 +354,7 @@ fn strip(
     )
     .clicked()
     {
-        out.push(Action::ToggleVideoFullscreen(pane));
+        out.push(Action::ToggleVideoFullscreen(spot.pane()));
     }
     right = at.left() - PAD;
 
@@ -354,7 +371,7 @@ fn strip(
             ui,
             t,
             at,
-            Id::new(("preview-mute", pane)),
+            Id::new(("preview-mute", spot)),
             if muted {
                 &crate::icons::sound_off as azur_egui_theme::icons::Icon<'_>
             } else {
@@ -425,7 +442,7 @@ fn strip(
             ui,
             t,
             Rect::from_min_max(pos2(left, bar.top()), pos2(right, bar.bottom())),
-            pane,
+            spot,
             player,
         );
     }
@@ -438,10 +455,10 @@ fn strip(
 /// decodes of frames nobody will see; what moves during the drag is
 /// [`crate::preview::Player::scrub_to`], which only changes what this draws. A *click* on the track
 /// seeks at once, because there is one position in a click.
-fn scrubber(ui: &mut Ui, t: &Theme, band: Rect, pane: PaneId, player: &mut preview::Player) {
+fn scrubber(ui: &mut Ui, t: &Theme, band: Rect, spot: Spot, player: &mut preview::Player) {
     let response = ui.interact(
         band,
-        Id::new(("preview-scrub", pane)),
+        Id::new(("preview-scrub", spot)),
         Sense::click_and_drag(),
     );
     let duration = player.duration();

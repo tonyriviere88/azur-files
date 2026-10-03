@@ -544,28 +544,58 @@ impl App {
     ///
     /// For the same reason [`App::open_preview_here`] exists: two selected rows is a mouse gesture
     /// and a capture run has no mouse.
+    /// **And ask for the blend**, which is the whole of what this flag means: selecting two pictures
+    /// tiles them now, so a `--compare` that only selected them would photograph two tiles and the
+    /// flag would quietly no longer be about a comparison at all. See
+    /// [`crate::ui::preview::Preview::set_compare`].
     pub fn compare_here(&mut self) {
+        self.select_previewable(2, Some(crate::preview::Kind::Picture));
+        let pane = self.focused;
+        if let Some(p) = self.pane_mut(pane) {
+            p.tab_mut().preview.set_compare(true);
+        }
+    }
+
+    /// Select the first `how_many` previewable files, so `--shot --previews=3` photographs the panel
+    /// tiled rather than showing one file.
+    ///
+    /// The same argument [`App::compare_here`] makes and the general case of it: two, three or four
+    /// selected rows is a mouse gesture, and a capture run has no mouse.
+    pub fn preview_here(&mut self, how_many: usize) {
+        self.select_previewable(how_many, None);
+    }
+
+    /// Select the first `how_many` rows that have a preview, or that have one of `only` in particular.
+    ///
+    /// What both of the above are: the row-picking rule differs by one predicate and the selecting is
+    /// identical, and it was written twice before this. Clamped to [`crate::ui::preview::MOST`],
+    /// because that is as many tiles as the panel has shapes for.
+    fn select_previewable(&mut self, how_many: usize, only: Option<crate::preview::Kind>) {
         let pane = self.focused;
         let Some(p) = self.pane_mut(pane) else { return };
         let tab = p.tab_mut();
-        let pictures: Vec<usize> = (0..tab.order.len())
-            .filter(|&at| {
-                tab.entry_at(at)
-                    .zip(tab.dir.as_ref())
-                    .and_then(|(entry, dir)| {
-                        crate::preview::kind_of(
-                            dir.leaf(entry),
-                            dir.ext(entry),
-                            dir.entries[entry].is_dir(),
-                        )
-                    })
-                    == Some(crate::preview::Kind::Picture)
+        let rows: Vec<usize> = (0..tab.order.len())
+            .filter(|&at| match (Self::preview_kind_at(tab, at), only) {
+                // A kind was asked for: only that one counts.
+                (Some(kind), Some(want)) => kind == want,
+                // Otherwise anything with a preview at all.
+                (Some(_), None) => true,
+                (None, _) => false,
             })
-            .take(2)
+            .take(how_many.clamp(1, crate::ui::preview::MOST))
             .collect();
-        if let [a, b] = pictures[..] {
-            tab.select_only(a);
-            tab.toggle(b);
+        // **All of them or none**, which matters for `--compare`: one picture selected where two were
+        // asked for is a capture of the wrong thing, and silently narrowing it would look like the
+        // feature failing rather than the folder not having two.
+        if rows.len() < how_many.min(crate::ui::preview::MOST) {
+            return;
+        }
+        let Some((&first, rest)) = rows.split_first() else {
+            return;
+        };
+        tab.select_only(first);
+        for &row in rest {
+            tab.toggle(row);
         }
     }
 }

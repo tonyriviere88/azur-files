@@ -48,8 +48,9 @@ impl App {
         }
 
         // What each open panel should be looking at, worked out before anything is borrowed
-        // mutably: `selected_preview` reads the tab, and asking for a read writes to it.
-        type Wanted = (PaneId, usize, Option<crate::preview::Ask>);
+        // mutably: `selected_previews` reads the tab, and asking for a read writes to it. **A list
+        // rather than an option**, one entry per tile — see [`Self::selected_previews`].
+        type Wanted = (PaneId, usize, Vec<crate::preview::Ask>, bool);
         let wanted: Vec<Wanted> = self
             .panes
             .iter()
@@ -58,7 +59,18 @@ impl App {
                     .iter()
                     .enumerate()
                     .filter(|(at, tab)| tab.preview.open && *at == pane.active)
-                    .map(|(at, tab)| (pane.id, at, Self::selected_preview(tab, self.preview.diff)))
+                    .map(|(at, tab)| {
+                        (
+                            pane.id,
+                            at,
+                            Self::selected_previews(
+                                tab,
+                                self.preview.diff,
+                                tab.preview.comparing(),
+                            ),
+                            Self::can_compare(tab),
+                        )
+                    })
                     .collect::<Vec<_>>()
             })
             .collect();
@@ -78,24 +90,41 @@ impl App {
         }
 
         let mut soonest: Option<f64> = None;
-        for (id, at, what) in wanted {
+        for (id, at, asks, can_compare) in wanted {
             let Some(pane) = self.panes.iter_mut().find(|p| p.id == id) else {
                 continue;
             };
             let Some(tab) = pane.tabs.get_mut(at) else {
                 continue;
             };
-            tab.preview.follow(what, now);
-            let (ready, left) = tab.preview.settle(now);
-            if let Some(ask) = ready {
+            // The blend is only on offer while the selection is the two pictures it was asked about,
+            // so this is where a latch that has outlived them is dropped.
+            tab.preview.allow_compare(can_compare);
+            tab.preview.follow_all(asks, now);
+            let (ready, left) = tab.preview.settle_all(now);
+            // Read out of the panel before the loop below borrows `self` again for the muting
+            // decision, which is the whole reason it is a local.
+            let focused = tab.preview.focused_at();
+            let quiet_all = self.preview.muted;
+            // **One request per tile that is ready**, and the tile's index travels with it: the
+            // answer has to come back to the slot that asked, and by the time it does the selection
+            // may well have moved.
+            for (slot, ask) in ready {
                 // **A video is opened here rather than asked for.** It is a player and not a read —
                 // see [`crate::preview::Kind::Video`] — so there is no worker, no token and no
                 // payload: the panel is handed the thing itself. Which is also why this is the one
                 // request that can fail on the spot, and says so where a decoder's complaint would
                 // have gone.
+                //
+                // Opened muted unless it is the focused tile's — every clip plays, one is audible,
+                // and [`crate::ui::preview::show`] keeps that true as the focus moves.
                 let player = match &ask {
                     crate::preview::Ask::One(path, crate::preview::Kind::Video) => {
-                        Some(crate::preview::Player::open(path, self.preview.muted, ctx))
+                        Some(crate::preview::Player::open(
+                            path,
+                            quiet_all || slot != focused,
+                            ctx,
+                        ))
                     }
                     _ => None,
                 };
@@ -107,9 +136,9 @@ impl App {
                     .and_then(|p| p.tabs.get_mut(at))
                 {
                     match (player, token) {
-                        (Some(Ok(player)), _) => tab.preview.plays(ask, player),
-                        (Some(Err(why)), _) => tab.preview.refused(ask, why),
-                        (None, Some(token)) => tab.preview.asked(ask, token),
+                        (Some(Ok(player)), _) => tab.preview.plays(slot, ask, player),
+                        (Some(Err(why)), _) => tab.preview.refused(slot, ask, why),
+                        (None, Some(token)) => tab.preview.asked(slot, ask, token),
                         (None, None) => {}
                     }
                 }
@@ -127,55 +156,125 @@ impl App {
         }
     }
 
-    /// What this tab's preview panel should be showing, if anything.
+    /// What this tab's preview panel should be showing: one [`Ask`] per tile, in listing order.
     ///
-    /// **Two pictures selected at once is a comparison**, and that is the one case where the
-    /// *selection* rather than the cursor decides: picking a second image is a deliberate act with
-    /// an obvious meaning, and no other pair of files has one. Everything else is the cursor's
-    /// answer — the cursor is where the keyboard is, it follows a click as well, and a preview is
-    /// about one file, so a selection of thirty has nothing to show.
+    /// **A selection of two, three or four files is that many previews**, side by side — see
+    /// [`crate::ui::preview::tiles`] for the shapes. Selecting a handful of files is a deliberate act
+    /// with an obvious meaning, and it is the one case where the *selection* rather than the cursor
+    /// decides. Past [`crate::ui::preview::MOST`] it stops being deliberate — a select-all is not a
+    /// request for forty previews — so a wider selection falls back to the cursor's one file, which
+    /// is also what a selection of one is.
     ///
-    /// **And a picture git has a different version of is a comparison too**, when the panel's diff
-    /// toggle is on: a `.png` has no lines to put a red band behind, so what "show me what changed"
-    /// means for one is the two versions and the difference between them — which is the view two
-    /// selected pictures already get. `diffing` is that toggle, and it is read here rather than in the
-    /// panel because it changes *what is read*: turning it off has to be a different [`Ask`], or the
-    /// panel would go on showing the comparison it is holding.
-    pub(super) fn selected_preview(tab: &Tab, diffing: bool) -> Option<crate::preview::Ask> {
-        use crate::preview::{kind_of, Ask, Kind};
-
+    /// The cursor is the answer everywhere else: it is where the keyboard is, and it follows a click.
+    ///
+    /// # The two comparisons, which are one file's worth of tile each
+    ///
+    /// Both are a *blend* — three views of the same picture in one tile — rather than two tiles, and
+    /// both are asked for rather than implied:
+    ///
+    /// - **Two selected pictures**, when `comparing` is on. That is the panel's diff button, which is
+    ///   what it means while exactly two pictures are selected; the default is off, because tiling is
+    ///   what selecting two files now means. It used to be the *only* answer for two pictures, and
+    ///   the button is what keeps it reachable.
+    /// - **One picture git has a different version of**, when `diffing` is on. A `.png` has no lines
+    ///   to put a red band behind, so "show me what changed" for one is the two versions and the
+    ///   difference between them.
+    ///
+    /// Both toggles are read here rather than in the panel because they change *what is read*:
+    /// turning either off has to produce a different [`Ask`], or the panel would go on showing the
+    /// comparison it is already holding.
+    /// What a row would be previewed as, from its name alone.
+    ///
+    /// Costs nothing to ask about a row, and a file that passes here and turns out to be something
+    /// else says so in the panel rather than being refused. `None` is a row with no preview: a folder,
+    /// or a name nothing has a view for.
+    ///
+    /// Out here because four places wanted it — the two that decide what the panel shows, and the two
+    /// capture flags that stand in for the mouse — and each had written the same three arguments out
+    /// for itself.
+    pub(super) fn preview_kind_at(tab: &Tab, row: usize) -> Option<crate::preview::Kind> {
         let dir = tab.dir.as_ref()?;
-        let kind_at = |row: usize| -> Option<Kind> {
-            let entry = tab.entry_at(row)?;
-            // From the name alone, which costs nothing to ask about a row. A file that passes and
-            // turns out to be something else says so in the panel rather than being refused here.
-            kind_of(
-                dir.leaf(entry),
-                dir.ext(entry),
-                dir.entries[entry].is_dir(),
-            )
+        let entry = tab.entry_at(row)?;
+        crate::preview::kind_of(
+            dir.leaf(entry),
+            dir.ext(entry),
+            dir.entries[entry].is_dir(),
+        )
+    }
+
+    pub(super) fn selected_previews(
+        tab: &Tab,
+        diffing: bool,
+        comparing: bool,
+    ) -> Vec<crate::preview::Ask> {
+        use crate::preview::{Ask, Kind};
+
+        let kind_at = |row: usize| Self::preview_kind_at(tab, row);
+
+        // In display order, so the left-hand or upper tile is the upper row — the panel reads the way
+        // the listing above it does rather than the way the clicks happened to land.
+        let picked: Vec<usize> = if (2..=crate::ui::preview::MOST).contains(&tab.selected_count) {
+            (0..tab.order.len())
+                .filter(|&row| tab.is_selected(row))
+                .collect()
+        } else {
+            Vec::new()
         };
 
-        if tab.selected_count == 2 {
-            // In display order, so the left-hand or upper view is the upper row — the pair reads
-            // the way the listing above it does rather than the way the clicks happened to land.
-            let two: Vec<usize> = (0..tab.order.len())
-                .filter(|&row| tab.is_selected(row))
-                .take(3)
-                .collect();
-            if let [a, b] = two[..] {
+        // Two pictures, blended, because the diff button asked for it. One tile, not two.
+        if comparing && picked.len() == 2 {
+            if let [a, b] = picked[..] {
                 if kind_at(a) == Some(Kind::Picture) && kind_at(b) == Some(Kind::Picture) {
-                    return Some(Ask::Pair(tab.target_at(a)?, tab.target_at(b)?));
+                    if let (Some(a), Some(b)) = (tab.target_at(a), tab.target_at(b)) {
+                        return vec![Ask::Pair(a, b)];
+                    }
                 }
             }
         }
-        let at = tab.cursor?;
-        let kind = kind_at(at)?;
-        let path = tab.target_at(at)?;
-        if diffing && kind == Kind::Picture && Self::changed_here(tab) {
-            return Some(Ask::AgainstHead(path));
+
+        if !picked.is_empty() {
+            // A row with nothing to preview is left out rather than given an empty tile: the tiling
+            // is about the files that *have* a preview, and a folder among four selected files should
+            // not cost one of the four its place.
+            let asks: Vec<Ask> = picked
+                .iter()
+                .filter_map(|&row| Some(Ask::One(tab.target_at(row)?, kind_at(row)?)))
+                .collect();
+            if !asks.is_empty() {
+                return asks;
+            }
         }
-        Some(Ask::One(path, kind))
+
+        let Some(at) = tab.cursor else {
+            return Vec::new();
+        };
+        let Some(kind) = kind_at(at) else {
+            return Vec::new();
+        };
+        let Some(path) = tab.target_at(at) else {
+            return Vec::new();
+        };
+        if diffing && kind == Kind::Picture && Self::changed_here(tab) {
+            return vec![Ask::AgainstHead(path)];
+        }
+        vec![Ask::One(path, kind)]
+    }
+
+    /// Whether the diff button should be offering the two-picture blend rather than git's changes.
+    ///
+    /// Exactly two selected pictures and nothing else. Asked so that the header can label its button
+    /// for what pressing it will actually do, and so that [`crate::ui::preview::Preview::compare`] is
+    /// dropped the moment the selection stops being the one it was about — a latch that outlived its
+    /// two files would blend the next two the moment they were picked.
+    pub(super) fn can_compare(tab: &Tab) -> bool {
+        if tab.selected_count != 2 {
+            return false;
+        }
+        let rows: Vec<usize> = (0..tab.order.len()).filter(|&row| tab.is_selected(row)).collect();
+        rows.len() == 2
+            && rows.iter().all(|&row| {
+                Self::preview_kind_at(tab, row) == Some(crate::preview::Kind::Picture)
+            })
     }
 
     /// Fill the monitor with this window, or put it back exactly as it was.

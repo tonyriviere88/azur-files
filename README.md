@@ -1509,6 +1509,69 @@ The eye on the path bar — or `Ctrl+P`, or `Space` — opens a panel **inside t
 is in the file the keyboard is on. Four views: a picture, a video playing, some text, or for a
 binary the dependency tree below.
 
+### Up to four files at once
+
+Select two, three or four files and the panel shows all of them, tiled. It is the one place the
+*selection* rather than the cursor decides what is on screen: picking a handful of files is a
+deliberate act with an obvious meaning, and comparing two builds of a shader or four frames of an
+animation is the thing you would otherwise open four windows for.
+
+```
+   2 files              3 files              4 files
+┌─────┬─────┐        ┌─────┬─────┐        ┌─────┬─────┐
+│     │     │        │  a  │  b  │        │  a  │  b  │
+│  a  │  b  │        ├─────┴─────┤        ├─────┼─────┤
+│     │     │        │     c     │        │  c  │  d  │
+└─────┴─────┘        └───────────┘        └─────┴─────┘
+```
+
+The odd one of three goes along the **bottom** rather than down the side, because the bottom is the
+wider edge in the common case — a panel on the right is taller than it is wide, so a full-width row
+reads better than a full-height column. It is the shape a contact sheet has, for the same reason.
+
+Past four it stops: a fifth tile in a panel that is 40% of a pane is a thumbnail, and a preview too
+small to read is not a preview. It is also where the selection stops being deliberate — picking four
+files is something you meant, and picking forty is a select-all — so a wider selection falls back to
+the cursor's one file.
+
+**Each tile is a whole preview.** Its own decode, its own scroll and zoom, its own find bar, its own
+forced view: they are separate `Slot`s, and sharing any of that would mean two tiles disagreeing
+about which file they were about. Which is also why every id below the header is keyed on the *tile*
+and not on the pane — egui keys interaction state by id, so four canvases sharing one id are one
+canvas painted four times, panning and scrolling together.
+
+The chrome does not multiply with them. A tile carries a thin strip with its name and nothing else;
+the bar along the top keeps all the controls and acts on whichever tile has **focus**, which a click
+chooses and which the name strip says in one step of ink plus a rule under it. Four copies of the view
+buttons would not fit across a 2×2 anyway, and a tile is something you *choose* rather than operate.
+
+**Every video plays, and only the focused tile is audible.** Silence in three of them would make the
+panel a still contact sheet; sound from four would make it unusable.
+
+The mute has exactly **one owner** — the line in the video canvas that computes
+`layout.muted || !audible` — and that is a scar rather than tidiness. It first shipped with two: the
+canvas asserted the window's mute preference while drawing each tile, and the panel re-asserted the
+focus rule in a loop after them. Both were right about their own half, they settled on the correct
+value every frame, and in between they wrote the engine twice — unmute, mute, at frame rate. That is
+inaudible as a wrong value and very audible as **crackling**, and it only bit with two clips in *one*
+panel: with a single tile the two owners agreed and nothing moved, which is why two videos in two
+panes were always fine.
+
+The test for it counts writes rather than reading the value, because the value was never wrong.
+Ten frames with nothing changing must cost nothing; against the two-owner version it cost twenty.
+
+Two selected pictures used to mean the **blended comparison** — three views of the same frame with the
+difference between them — and that gesture now tiles instead. So the blend became something asked for:
+while exactly two pictures are selected, the bar's diff button is a compare button, and pressing it
+collapses the two tiles into the one blended view. Same glyph, because it is the same question — *show
+me the difference* — asked of two files rather than of two versions of one. The latch is not a
+preference and is not remembered: it dies with the two files it was about, or the next two picked
+would be blended by a choice made about a different pair.
+
+`--previews=<n>` selects that many previewable files, so a capture run can photograph the tiling —
+the same reason `--compare` exists, since two selected rows is a mouse gesture and a screenshot run
+has no mouse.
+
 ```
 ┌───────────────┬──────────────────────────────────────────────────────┐
 │ Drives        │ ← → ↑ │ … › pics        👁 ▤ [Filter]                │  the eye, latched

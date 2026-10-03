@@ -30,10 +30,23 @@ pub(super) fn header(
     preview: &mut Preview,
     layout: &mut Layout,
     changed: bool,
+    // Whether the selection is two pictures, which is what turns the diff button into the compare
+    // button. See [`crate::app::App::can_compare`].
+    can_compare: bool,
     scratch: &mut String,
     out: &mut Vec<Action>,
 ) {
     use std::fmt::Write as _;
+
+    // **The bar is about the focused tile.** Everything below reads one file's content and one
+    // file's find bar, and with up to `MOST` of them on show the focused one is the one the bar
+    // names — see [`Preview::focus`]. Destructured rather than reached through `focused_mut`, because
+    // the compare latch beside it is the panel's rather than the tile's and both are wanted at once.
+    let focus = preview.focused_at();
+    let Preview {
+        slots, compare, ..
+    } = preview;
+    let slot = &mut slots[focus];
 
     // One baseline for the whole bar, taken from its principal font, so the title, the details and
     // the glyph beside them are on one line. `crate::ui::deps` says why at length.
@@ -68,7 +81,7 @@ pub(super) fn header(
     // The view's own toggle, immediately inside the close button: showing both sources of a
     // comparison, or numbering the lines of a text file. Never both — they belong to different
     // views — so they share the slot.
-    match &mut preview.content {
+    match &mut slot.content {
         Content::Picture(picture) => {
             // **A picture git has moved on from gets the same toggle a text file does**, and it is
             // the same preference behind it: one answer to "show me what changed", whatever kind of
@@ -82,7 +95,19 @@ pub(super) fn header(
             // an `AgainstHead` for anything but a [`crate::preview::Kind::Picture`] and this button
             // would sit there latching a preference that changed nothing on screen. A control that
             // does nothing is worse than no control; the same argument the two text toggles make.
-            if changed && !picture.shell {
+            // **With two pictures selected this is the compare button instead**, and that is what
+            // keeps the blended view reachable now that selecting two files tiles them side by side.
+            // The same glyph, because it is the same question — *show me the difference* — asked of
+            // two files rather than of two versions of one. It takes precedence because it is about
+            // the files in front of you, where `layout.diff` is a standing preference.
+            let offering = if can_compare {
+                Some((*compare, "Compare the two selected pictures"))
+            } else if changed && !picture.shell {
+                Some((layout.diff, "Show what changed since the last commit"))
+            } else {
+                None
+            };
+            if let Some((latched, tip)) = offering {
                 let at = button(right);
                 if tool_button(
                     ui,
@@ -90,15 +115,21 @@ pub(super) fn header(
                     at,
                     Id::new(("preview-diff", pane)),
                     &crate::icons::diff,
-                    "Show what changed since the last commit",
+                    tip,
                     true,
-                    layout.diff,
+                    latched,
                     surface,
                 )
                 .clicked()
                 {
-                    layout.diff = !layout.diff;
-                    out.push(Action::RememberLayout);
+                    if can_compare {
+                        // Not a preference and not remembered: it dies with these two files. See
+                        // [`Preview::compare`].
+                        *compare = !*compare;
+                    } else {
+                        layout.diff = !layout.diff;
+                        out.push(Action::RememberLayout);
+                    }
                 }
                 right = at.left() - PAD;
             }
@@ -215,7 +246,7 @@ pub(super) fn header(
                     // is holding is an offset into the wrong one. Forgotten rather than
                     // recomputed here: the search runs again on the next frame, against
                     // whichever of them is now on screen.
-                    preview.find.forget();
+                    slot.find.forget();
                     out.push(Action::RememberLayout);
                 }
                 right = at.left() - PAD;
@@ -231,7 +262,7 @@ pub(super) fn header(
     // A button and not a shortcut. `Ctrl+F` is the pane's filter box and has been since long before
     // this panel existed — a preview that took it would be taking the keyboard away from the window
     // it lives in, for a bar that only exists while one kind of file is selected.
-    if matches!(preview.content, Content::Text(_)) {
+    if matches!(slot.content, Content::Text(_)) {
         let at = button(right);
         if tool_button(
             ui,
@@ -241,15 +272,15 @@ pub(super) fn header(
             &azur_icons::search,
             "Find in this file",
             true,
-            preview.find.open,
+            slot.find.open,
             surface,
         )
         .clicked()
         {
-            preview.find.open = !preview.find.open;
+            slot.find.open = !slot.find.open;
             // Opening it puts the caret in it: a find bar you have to click into after asking for it
             // is a find bar that wanted two clicks.
-            preview.find.grab = preview.find.open;
+            slot.find.grab = slot.find.open;
         }
         right = at.left() - PAD;
     }
@@ -261,7 +292,7 @@ pub(super) fn header(
     // does not cover, and the alternative is drawing them on top of each other: a panel down the
     // side is never this narrow — `MIN_PANEL_W` is sized from `ACTIONS` for exactly this reason —
     // but a panel along the bottom is as wide as its pane, and a pane can be squeezed.
-    if let Content::Picture(picture) = &mut preview.content {
+    if let Content::Picture(picture) = &mut slot.content {
         if right - rect.left() > ACTIONS {
             for (glyph, tip, step) in [
                 (
@@ -311,7 +342,7 @@ pub(super) fn header(
     scratch.clear();
     let size = scratch;
     let mut mark = None;
-    match &preview.content {
+    match &slot.content {
         Content::Picture(picture) => {
             // The dimensions, and both of them when two files are being compared and disagree —
             // because that *is* a difference.
@@ -399,7 +430,7 @@ pub(super) fn header(
 
     // ---- The title, and what the details have left it --------------------
     let mut x = rect.left() + PAD;
-    let (glyph, ink): (azur_egui_theme::icons::Icon<'_>, Color32) = match &preview.content {
+    let (glyph, ink): (azur_egui_theme::icons::Icon<'_>, Color32) = match &slot.content {
         Content::Picture(_) => (&crate::icons::image, t.image),
         // The same glyph and the same hue the row in the listing beside it is wearing, which is what
         // the whole table in `crate::icons::for_kind` is for.
@@ -413,7 +444,7 @@ pub(super) fn header(
     glyph(ui.painter(), box_rect, ink);
     x = box_rect.right() + PAD;
 
-    let name = preview
+    let name = slot
         .of
         .as_ref()
         .map(Ask::title)
@@ -491,7 +522,7 @@ pub(super) fn header(
     // A binary's title carries the whole answer: what the walk found, how long it took, and
     // where every name was looked for — which is the one thing a location column cannot say for
     // itself, and does not fit on a bar this narrow.
-    if let Content::Binary(view) = &preview.content {
+    if let Content::Binary(view) = &slot.content {
         let response = ui.interact(
             Rect::from_min_max(pos2(x, rect.top()), pos2(right, rect.bottom())),
             Id::new(("preview-title", pane)),

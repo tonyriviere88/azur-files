@@ -217,7 +217,7 @@ pub(super) fn text_canvas(
     ui: &mut Ui,
     t: &Theme,
     canvas: Rect,
-    pane: PaneId,
+    spot: Spot,
     text: &Text,
     numbers: bool,
     find: &mut Find,
@@ -234,7 +234,7 @@ pub(super) fn text_canvas(
     );
     child.set_clip_rect(canvas.intersect(ui.clip_rect()));
     let output = egui::ScrollArea::vertical()
-        .id_salt(("preview-text", pane))
+        .id_salt(("preview-text", spot))
         .auto_shrink([false, false])
         .show(&mut child, |ui| {
             // **What is actually on screen**: the file, or the diff's own body when one is being

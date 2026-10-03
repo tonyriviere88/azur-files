@@ -409,7 +409,10 @@ impl App {
                     // Opened with nothing previewable selected, the panel still opens and says
                     // what it would show. A shortcut that silently does nothing is a shortcut
                     // people conclude is broken.
-                    match Self::selected_preview(tab, diffing) {
+                    // The cursor's file, not the tiling: the shortcut is about one file, and the
+                    // next frame's `follow_all` spreads it out again if the selection is several.
+                    // See [`crate::ui::preview::Preview::ask_for`].
+                    match Self::selected_previews(tab, diffing, false).into_iter().next() {
                         Some(ask) => tab.preview.ask_for(ask),
                         None => tab.preview.open = true,
                     }
