@@ -169,14 +169,20 @@ pub struct Target {
     /// Held here rather than in `shared` because the callbacks convert points while
     /// holding that lock, and a `Mutex` is not reentrant.
     hwnd: isize,
+    /// How the frame loop is woken, for the reason set out on [`Shared::hovering`].
+    ///
+    /// Beside `hwnd` and outside the lock, for the same reason it is: the callbacks reach for this
+    /// while the shared block is held.
+    wake: egui::Context,
 }
 
 impl Target {
-    pub fn new(shared: Arc<Mutex<Shared>>, hwnd: isize) -> Self {
+    pub fn new(shared: Arc<Mutex<Shared>>, hwnd: isize, wake: egui::Context) -> Self {
         Self {
             shared,
             held: Mutex::new(None),
             hwnd,
+            wake,
         }
     }
 }
@@ -275,6 +281,19 @@ impl Target_Impl {
         allowed: DROPEFFECT,
     ) -> DROPEFFECT {
         let at = self.in_client(pt);
+        // The highlight is drawn from what is written just below, and a drag from another program
+        // has nothing else asking for frames — see [`Shared::hovering`]. Asked for on every
+        // `DragOver` rather than only when the point changes, because the frame that reads it is
+        // the same frame that decides whether it has moved.
+        //
+        // **This is also what gets a drop acted on.** Every callback that carries a point comes
+        // through here, `Drop` included — `DragLeave` is the one that does not, and asks for itself
+        // — so the frame that reads `Shared::dropped` and starts the copy is this same request.
+        // Made before the drop is pushed, which is in time, because
+        // the frame it asks for cannot run until this callback has returned. Without it the copy
+        // waited on the next unrelated event, a mouse twitch over the window usually, which is
+        // why it looked prompt rather than broken.
+        self.wake.request_repaint();
         let onto = {
             let Ok(mut shared) = self.shared.lock() else {
                 return DROPEFFECT_NONE;
@@ -368,6 +387,9 @@ impl IDropTarget_Impl for Target_Impl {
             shared.hovering = None;
             shared.right_button = false;
         }
+        // A highlight that is never taken down is worse than one that never appears: the drag has
+        // left the window and the row it was over would go on claiming the drop.
+        self.wake.request_repaint();
         Ok(())
     }
 

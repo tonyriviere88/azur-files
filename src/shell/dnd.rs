@@ -41,7 +41,10 @@
 //!
 //! The callbacks arrive on the UI thread from inside winit's message pump, where the
 //! application state is not reachable — so they read and write a small shared block
-//! instead, which the frame loop publishes into and drains from.
+//! instead, which the frame loop publishes into and drains from. **And then ask for a frame**,
+//! because for a drag from another program nothing else will: OLE has the pointer, so no mouse
+//! event reaches winit and nothing wakes the window to look at what the callbacks just wrote. See
+//! [`Shared::hovering`].
 
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -106,6 +109,15 @@ pub struct Shared {
     /// Whether the right button was down the last time the drag was seen moving.
     pub right_button: bool,
     /// Where a drag is hovering, for the frame loop to highlight.
+    ///
+    /// **Writing this is not enough on its own: the frame loop has to be woken to read it.** For a
+    /// drag this window started that happens anyway — [`crate::app::App::pump_drag`] asks for a
+    /// repaint on every frame for the length of it — but a drag from *another* program has nothing
+    /// driving the window at all. OLE holds the pointer, so not one mouse event reaches winit;
+    /// `DragOver` arrives instead, wrote this, and nothing ever came to look. The highlight
+    /// therefore appeared for a drag between two panes and not for one out of an archive or out of
+    /// Explorer, which is the same window and the same folder row answering the same question two
+    /// different ways. So the callbacks request a repaint of their own — see `Target::wake`.
     pub hovering: Option<(i32, i32)>,
     /// Completed drops, waiting to be acted on.
     pub dropped: Vec<Dropped>,
@@ -164,7 +176,10 @@ impl Zone {
     ///
     /// Idempotent, and safe to call before the window exists — it does nothing until
     /// there is a handle.
-    pub fn attach(&mut self, owner: super::Owner) {
+    ///
+    /// `ctx` is how the callbacks wake the frame loop, and without it a drag from another program
+    /// is invisible: see [`Shared::hovering`].
+    pub fn attach(&mut self, owner: super::Owner, ctx: &egui::Context) {
         #[cfg(windows)]
         {
             if self.registered || owner.0 == 0 {
@@ -172,7 +187,8 @@ impl Zone {
             }
             use windows::Win32::System::Ole::{IDropTarget, RegisterDragDrop, RevokeDragDrop};
 
-            let target: IDropTarget = win::Target::new(self.shared.clone(), owner.0).into();
+            let target: IDropTarget =
+                win::Target::new(self.shared.clone(), owner.0, ctx.clone()).into();
             // SAFETY: winit registered its own target on this window; ours replaces it.
             // OLE takes a reference of its own, and the local one is deliberately leaked
             // so the target outlives this scope — `Drop` revokes it, which releases it.
@@ -186,7 +202,7 @@ impl Zone {
             }
         }
         #[cfg(not(windows))]
-        let _ = owner;
+        let _ = (owner, ctx);
     }
 }
 
@@ -353,8 +369,8 @@ pub fn under_temp(path: &std::path::Path) -> bool {
 /// materialisation ([`under_temp`]), where the staging directory is made ([`staging`]), and what
 /// [`is_staging`] will authorise a `remove_dir_all` of. A test that could not move it would have to
 /// build its fixture in the real `%TEMP%` to reach any of that, and the containment rule in
-/// [`crate::sandbox`] does not allow it — which is why the claim went untested through two rounds
-/// of the same bug.
+/// `crate::sandbox` does not allow it — which is why the claim went untested through two rounds of
+/// the same bug.
 fn temp_root() -> PathBuf {
     #[cfg(test)]
     if let Some(root) = TEMP_OVERRIDE.with(|cell| cell.borrow().clone()) {
@@ -524,18 +540,18 @@ fn take_dir(from: &std::path::Path, to: &std::path::Path) -> bool {
     let Ok(entries) = std::fs::read_dir(from) else {
         return false;
     };
-    let (mut taken, mut left) = (0usize, 0usize);
+    let (mut arrived, mut refused) = (false, false);
     for entry in entries.flatten() {
         if take(&entry.path(), &to.join(entry.file_name())) {
-            taken += 1;
+            arrived = true;
         } else {
-            left += 1;
+            refused = true;
         }
     }
     // Nothing came across at all and there was something to come: the source is still the better
-    // answer of the two, and the empty shell made here is not one. An empty directory that was
-    // *already* empty is a different thing, and is claimed — `taken` and `left` both zero.
-    if taken == 0 && left > 0 {
+    // answer of the two, and the empty shell made here is not one. A directory that was *already*
+    // empty is a different thing, and is claimed — neither flag set.
+    if !arrived && refused {
         let _ = std::fs::remove_dir(to);
         return false;
     }
@@ -817,7 +833,7 @@ mod tests {
     #[test]
     fn a_file_that_cannot_be_renamed_is_claimed_by_a_second_name_for_it() {
         use std::os::windows::fs::OpenOptionsExt;
-        const FILE_SHARE_READ: u32 = 0x1;
+        use windows::Win32::Storage::FileSystem::FILE_SHARE_READ;
 
         let (temp, _temp) = sandboxed_temp("claim-an-unmovable-file");
         let master = temp.join("7zE8C57170C").join("master");
@@ -827,7 +843,7 @@ mod tests {
 
         let held = std::fs::OpenOptions::new()
             .read(true)
-            .share_mode(FILE_SHARE_READ)
+            .share_mode(FILE_SHARE_READ.0)
             .open(&scanned)
             .unwrap();
         assert!(
@@ -874,6 +890,69 @@ mod tests {
             0,
             "a staging directory was made for a drop that had nothing to claim"
         );
+    }
+
+    /// **A drag from another program has to wake the window, or its drop highlight never appears.**
+    ///
+    /// The highlight is drawn from `App::drop_hover`, which is refreshed in
+    /// [`crate::app::App::collect_drops`] — inside a frame. A drag this window started keeps frames
+    /// coming, because [`crate::app::App::pump_drag`] asks for one every frame for the length of it.
+    /// A drag out of 7-Zip, or out of Explorer, has no such thing: OLE holds the pointer, so winit
+    /// sees no mouse move, and `DragOver` wrote where the drag was to a block nothing came to read.
+    /// The row lit up for a drag between two panes and stayed dark for a drag out of an archive.
+    ///
+    /// Driven through the real `IDropTarget` rather than through a stand-in, because the whole
+    /// question is what *that object* does when Windows calls it: an `hwnd` of zero is the one
+    /// concession, and it is one the point conversion already makes room for.
+    #[cfg(windows)]
+    #[test]
+    fn a_drag_from_another_program_wakes_the_window() {
+        use windows::Win32::Foundation::POINTL;
+        use windows::Win32::System::Ole::{IDropTarget, DROPEFFECT_COPY};
+        use windows::Win32::System::SystemServices::MODIFIERKEYS_FLAGS;
+
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        shared.lock().unwrap().targets = Targets {
+            zones: vec![((0, 0, 100, 100), Onto::Folder(PathBuf::from(r"C:\into")))],
+        };
+        let ctx = egui::Context::default();
+        let target: IDropTarget = win::Target::new(shared.clone(), 0, ctx.clone()).into();
+
+        // Frames first, so that what is asserted below is this drag's doing and not the repaint
+        // every freshly built context wants for its first paint. Bounded rather than `while`, so a
+        // context that went on wanting one fails the suite instead of hanging it — and stated,
+        // because a context still asking would make the assertion at the end pass for the wrong
+        // reason and say nothing at all.
+        for _ in 0..8 {
+            if !ctx.has_requested_repaint() {
+                break;
+            }
+            let _ = ctx.run_ui(egui::RawInput::default(), |_| {});
+        }
+        assert!(
+            !ctx.has_requested_repaint(),
+            "the context never settled, so a wake could not be told from what was already pending"
+        );
+
+        let mut effect = DROPEFFECT_COPY;
+        // SAFETY: an out-parameter this call owns for its duration, and no data object — `DragOver`
+        // is the callback that carries none, which is why the highlight can be tested without one.
+        unsafe {
+            target
+                .DragOver(MODIFIERKEYS_FLAGS(0), POINTL { x: 10, y: 20 }, &mut effect)
+                .expect("DragOver refused");
+        }
+
+        assert_eq!(
+            shared.lock().unwrap().hovering,
+            Some((10, 20)),
+            "the drag was not recorded, so there would be nothing to highlight"
+        );
+        assert!(
+            ctx.has_requested_repaint(),
+            "the window was not woken, so the frame that draws the highlight never runs"
+        );
+        assert_eq!(effect, DROPEFFECT_COPY, "a folder should take a copy");
     }
 
     #[test]

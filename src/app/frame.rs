@@ -126,7 +126,7 @@ impl App {
         self.collect_operations();
         // Registered on the window rather than at startup, because the handle does not
         // exist until the platform has made one.
-        self.drops.attach(self.owner);
+        self.drops.attach(self.owner, &ctx);
         self.publish_drop_targets(&ctx);
         self.collect_drops(&ctx);
         self.pump_drag(&ctx);
