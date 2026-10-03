@@ -623,6 +623,14 @@ pub struct Tab {
     pub reveal: Option<String>,
     /// Scroll to the cursor on the next frame, for keyboard movement and reveal.
     pub scroll_to_cursor: bool,
+    /// And leave [`crate::ui::filelist::SCROLL_CONTEXT`] rows showing past it when it does.
+    ///
+    /// For a **jump** — the type-ahead — which can land anywhere in the listing. Brought only to the
+    /// edge of the view, the row it found sat on the very last line, under whatever the bottom of the
+    /// pane was drawing, and the name you had just typed was the one name you could not quite read.
+    /// An arrow key steps one row and keeps the plain nudge: a margin there would scroll the listing
+    /// before the cursor reached the edge, which is not how a listing moves anywhere else.
+    pub scroll_context: bool,
 
     /// Keystrokes typed recently, for type-ahead find, and when the last one was.
     pub typeahead: String,
@@ -839,6 +847,7 @@ impl Tab {
             rename_revealed: false,
             name_the_new: None,
             scroll_to_cursor: false,
+            scroll_context: false,
             typeahead: String::new(),
             typeahead_at: 0.0,
             editing_path: false,

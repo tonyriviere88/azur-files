@@ -730,18 +730,15 @@ pub fn show(
     if let Some(offset) = tab.scroll_to.take() {
         scroll = scroll.vertical_scroll_offset(offset.max(0.0));
         tab.scroll_to_cursor = false;
+        tab.scroll_context = false;
     } else if tab.scroll_to_cursor {
         if let Some((top, height)) = tab.cursor.and_then(|at| layout.locate(at)) {
-            let view = body.height();
-            let mut offset = tab.scroll_y;
-            if top < offset {
-                offset = top;
-            } else if top + height > offset + view {
-                offset = top + height - view;
-            }
-            scroll = scroll.vertical_scroll_offset(offset.max(0.0));
+            let offset =
+                crate::ui::filelist::nudge(tab.scroll_y, body.height(), top, height, tab.scroll_context);
+            scroll = scroll.vertical_scroll_offset(offset);
         }
         tab.scroll_to_cursor = false;
+        tab.scroll_context = false;
     }
 
     let output = scroll.show_viewport(&mut child, |ui, viewport| {

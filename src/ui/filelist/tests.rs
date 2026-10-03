@@ -305,3 +305,33 @@ fn the_status_line_puts_its_words_and_its_glyphs_on_one_middle() {
         }
     }
 }
+
+/// **A jump leaves two rows showing past the row it found**; a step does not.
+///
+/// The type-ahead lands on a row anywhere in the listing, and brought only to the edge of the view
+/// that row sat on the very last line. With the context it stops two rows short of whichever edge
+/// it came in by — and a row already on show does not move the listing at all, context or not.
+#[test]
+fn a_jump_leaves_room_around_the_row_it_lands_on() {
+    let (row, view) = (ROW_HEIGHT, 10.0 * ROW_HEIGHT);
+    // Row 30, from the top of the listing: past the bottom edge.
+    let top = 30.0 * row;
+    assert_eq!(nudge(0.0, view, top, row, false), top + row - view, "a step: flush with the edge");
+    assert_eq!(
+        nudge(0.0, view, top, row, true),
+        top + row + SCROLL_CONTEXT * row - view,
+        "a jump: two rows below it on show"
+    );
+    // Row 5, from row 20: past the top edge.
+    let top = 5.0 * row;
+    assert_eq!(nudge(20.0 * row, view, top, row, false), top);
+    assert_eq!(nudge(20.0 * row, view, top, row, true), top - SCROLL_CONTEXT * row);
+    // Already on show, and not only at an edge: nothing moves.
+    assert_eq!(nudge(0.0, view, 4.0 * row, row, true), 0.0);
+    // Near the top of the listing there is nothing above to show, and no negative offset.
+    assert_eq!(nudge(10.0 * row, view, row, row, true), 0.0);
+    // A view too short for the margin centres the row as best it can rather than hiding it.
+    let short = 2.0 * row;
+    let offset = nudge(0.0, short, 30.0 * row, row, true);
+    assert!(offset <= 30.0 * row && offset + short >= 31.0 * row, "the row is on show: {offset}");
+}

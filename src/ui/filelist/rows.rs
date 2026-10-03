@@ -294,6 +294,32 @@ fn share_bar(painter: &egui::Painter, t: &Theme, cell: Rect, share: f32, dim: bo
     );
 }
 
+/// How many rows a jump to the cursor leaves showing beyond it — see [`crate::pane::Tab::scroll_context`].
+pub(crate) const SCROLL_CONTEXT: f32 = 2.0;
+
+/// The scroll offset that brings a row at `top`, `height` tall, into a view `view` tall that is
+/// scrolled to `offset` — moving as little as it can, and not at all if the row is already on show.
+///
+/// With `context`, the row is brought [`SCROLL_CONTEXT`] of its own heights clear of the edge it
+/// arrived at, or as close to the middle as a short view allows. Shared by the details view and the
+/// tiles, which differ only in how a cursor becomes a `top` and a `height`. The far end needs no
+/// clamp here: `ScrollArea` stops at the end of what it holds.
+pub(crate) fn nudge(offset: f32, view: f32, top: f32, height: f32, context: bool) -> f32 {
+    let margin = if context {
+        (SCROLL_CONTEXT * height).min(((view - height) / 2.0).max(0.0))
+    } else {
+        0.0
+    };
+    let offset = if top - margin < offset {
+        top - margin
+    } else if top + height + margin > offset + view {
+        top + height + margin - view
+    } else {
+        offset
+    };
+    offset.max(0.0)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn rows(
     ui: &mut Ui,
@@ -341,20 +367,20 @@ pub(crate) fn rows(
         // cursor nudge because the pointer is the thing being followed.
         scroll = scroll.vertical_scroll_offset(offset.max(0.0));
         tab.scroll_to_cursor = false;
+        tab.scroll_context = false;
     } else if tab.scroll_to_cursor {
         if let Some(at) = tab.cursor {
-            let top = at as f32 * ROW_HEIGHT;
-            let bottom = top + ROW_HEIGHT;
-            let view = body.height();
-            let mut offset = tab.scroll_y;
-            if top < offset {
-                offset = top;
-            } else if bottom > offset + view {
-                offset = bottom - view;
-            }
-            scroll = scroll.vertical_scroll_offset(offset.max(0.0));
+            let offset = nudge(
+                tab.scroll_y,
+                body.height(),
+                at as f32 * ROW_HEIGHT,
+                ROW_HEIGHT,
+                tab.scroll_context,
+            );
+            scroll = scroll.vertical_scroll_offset(offset);
         }
         tab.scroll_to_cursor = false;
+        tab.scroll_context = false;
     }
 
     // **`ScrollArea::show_rows`, with a fractional row at the end of it.** That is the whole reason

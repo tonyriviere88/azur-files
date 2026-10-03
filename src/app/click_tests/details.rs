@@ -698,3 +698,50 @@ fn an_extraction_in_flight_is_drawn_on_the_status_line() {
         "and the figures it displaced have to come back: {after:?}"
     );
 }
+
+/// **A row found by typing its name lands two rows clear of the bottom edge**, not on it.
+///
+/// Brought only to the edge of the view, the row the type-ahead found sat on the listing's very last
+/// line — under the status line's hairline, and cropped. So a jump asks for context; see
+/// [`crate::pane::Tab::scroll_context`]. Driven through the window's own text events, so it is the
+/// whole route from the keystroke to the scroll offset the frame used.
+#[test]
+fn a_row_found_by_typing_is_not_left_on_the_edge() {
+    let root = crate::sandbox::fresh("typeahead-scroll");
+    for n in 0..200 {
+        std::fs::write(root.join(format!("a{n:03}.txt")), b"x").expect("a file in the sandbox");
+    }
+    let mut h = Harness::opening(vec![root]);
+    for ch in ["a", "1", "5", "0"] {
+        h.frame(vec![Event::Text(ch.to_owned())]);
+    }
+    // One more for the scroll the jump asked for, and one for the offset it left to be recorded.
+    h.frame(Vec::new());
+    h.frame(Vec::new());
+
+    let tab = h.tab(0);
+    let at = tab.cursor.expect("the type-ahead found a row");
+    let name = tab.dir.as_ref().map(|dir| dir.name(tab.order[at] as usize).to_owned());
+    assert_eq!(name.as_deref(), Some("a150.txt"), "it found the row that was typed");
+
+    let rows_top = h.pane_content_top(0)
+        + crate::ui::breadcrumb::HEIGHT
+        + crate::ui::filelist::HEADER_HEIGHT;
+    // Give or take the one hairline between the rows and the status line, which the rows' own rect
+    // runs over: measured at a point, and without the context the gap is two whole rows.
+    let bottom_of_view = h.pane_rect(0).bottom() - crate::ui::filelist::STATUS_HEIGHT + 1.0;
+    let row = crate::pane::ROW_HEIGHT;
+    // The row two below the one found, whose bottom has to be on show.
+    let context_bottom = rows_top + row * (at as f32 + 1.0 + crate::ui::filelist::SCROLL_CONTEXT)
+        - tab.scroll_y;
+    assert!(
+        context_bottom <= bottom_of_view + 0.5,
+        "the found row is at the edge: two rows below it end at {context_bottom}, the view at \
+         {bottom_of_view} (scrolled to {})",
+        tab.scroll_y
+    );
+    assert!(
+        rows_top + row * at as f32 - tab.scroll_y >= rows_top,
+        "and the row itself is not off the top"
+    );
+}

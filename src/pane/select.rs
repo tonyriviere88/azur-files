@@ -481,6 +481,7 @@ impl Tab {
         if let Some(at) = found {
             self.select_only(at);
             self.scroll_to_cursor = true;
+            self.scroll_context = true;
         }
     }
 }
