@@ -447,8 +447,29 @@ And so does **Windows' own entry for it**. A folder's context menu has `Pin to Q
 in it — `Épingler à l'accès rapide` on a French Windows — because the shell put it there, and
 what it is *for* is the sidebar of a file manager. The sidebar in front of you is this one, so
 that entry pins here, into Bookmarks, exactly as `Ctrl+D` would; `Unpin from Quick access`
-removes it again. It is recognised by verb (`pintohome`, `unpinfromhome`) rather than by label,
-since the label is a translation. Everything else in that menu is still Windows'.
+removes it again.
+
+Four more of the shell's own entries are answered here for the same reason — what they are *for*
+is the file manager in front of you:
+
+| the entry | what Windows would do | what happens instead |
+| --- | --- | --- |
+| `Open` on a folder | opens it in a new Explorer window | navigates this pane; several folders get a tab each |
+| `Cut`, `Copy` | fill the clipboard, and nothing here knows | this program's own, so the cut rows fade |
+| `Paste` on a folder | the shell's own copy | this program's, into that folder |
+
+Every one is recognised by verb (`open`, `cut`, `copy`, `paste`, `pintohome`, `unpinfromhome`)
+rather than by label, since the labels are translations — `Ouvrir`, `Couper`, `Copier`, `Coller`
+on a French Windows. `Open` on a *file* is deliberately left alone: the shell's is the registered
+default verb, and a file is not a place this program can show.
+
+Right-clicking **empty space** is the one menu with an entry of this program's own in it, at the
+top, greyed when there is nothing to paste. That is not a preference: the background menu is a
+different shell object from a selection's, it carries no `Paste` to redirect, and Explorer's own
+is synthesised by its view rather than read out of the shell. So either this program puts one
+there or empty space has no Paste at all. `Ctrl+V` does the same thing.
+
+Everything else in those menus is still Windows'.
 
 With one difference from Explorer: **going up does not trim the bar.**
 

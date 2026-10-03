@@ -154,6 +154,26 @@ impl View {
         self.rows.len()
     }
 
+    /// The first row a click would actually unfold, as a position in what is on show.
+    ///
+    /// For the test that drives a real click at a row's coordinates, which needs a row where
+    /// unfolding is a thing that can happen — expandable, not already open, and not a branch that
+    /// stops because the module is its own ancestor.
+    ///
+    /// It exists because that test used to assume the row under the root was one, and that is not a
+    /// fact about this program at all: the panel is pointed at the **test binary itself**, so the
+    /// order of the rows is the order the linker wrote that binary's import table in, and any change
+    /// to this crate can rearrange it. It did — `api-ms-win-core-synch-l1-2-0.dll` arrived at the
+    /// top, and an API set has nothing under it to show, so the click landed on a row that could not
+    /// unfold and the test failed for a reason that had nothing to do with whether the click reached
+    /// it. Which is the only thing it was ever trying to prove.
+    #[cfg(test)]
+    pub fn first_foldable(&self) -> Option<usize> {
+        self.rows
+            .iter()
+            .position(|row| row.expandable && !row.open && !row.cyclic)
+    }
+
     /// Fold a module open or shut.
     fn toggle(&mut self, module: usize) {
         if !self.expanded.remove(&module) {

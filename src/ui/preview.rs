@@ -821,6 +821,17 @@ impl Preview {
         }
     }
 
+    /// Which row of the dependency tree a click could unfold. See
+    /// [`crate::ui::deps::View::first_foldable`], which is where the reason this is needed is
+    /// written down.
+    #[cfg(test)]
+    pub fn dependency_first_foldable(&self) -> Option<usize> {
+        match &self.content {
+            Content::Binary(view) => view.first_foldable(),
+            _ => None,
+        }
+    }
+
     /// How many images this is holding, and how many are on show. For the tests, which is where
     /// the difference — the comparison's toggle — can be seen from.
     #[cfg(test)]

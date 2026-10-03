@@ -121,8 +121,8 @@ use std::path::{Path, PathBuf};
 /// is still on its keyboard shortcut, and most of them are in the shell's menu anyway under the
 /// name Explorer gives it.
 ///
-/// What is left is the one menu Windows has no answer for, because it is not the shell's question:
-/// where a right-button drag has just landed.
+/// What is left is the two things the shell has no answer for, because neither is the shell's
+/// question: where a right-button drag has just landed, and Paste on empty space.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Own {
     /// The three a right-button drag offers when it lands, which is how Windows has asked
@@ -130,6 +130,19 @@ pub enum Own {
     CopyHere,
     MoveHere,
     Cancel,
+    /// Paste, on a folder's **background** menu — the one gap the shell leaves.
+    ///
+    /// Every other entry in that menu comes from Windows, and this one has to be ours because
+    /// Windows does not put it there. `CreateViewObject`'s menu carries no `paste` verb — see
+    /// [`win::context_of`] for the two menus a folder has and what is in each — and Explorer's own
+    /// Paste on empty space is synthesised by its view, around the shell's menu rather than out of
+    /// it. So there is nothing to redirect the way `cut`, `copy` and the `paste` on a *selected*
+    /// folder are redirected (see [`crate::app::App::ours_rather_than_the_shell_s`]): a right click
+    /// on empty space either shows this entry or shows no Paste at all.
+    ///
+    /// It goes through the same [`crate::shell::ops`] engine as Ctrl+V, so it is the same paste
+    /// with the same progress, conflicts and undo — the shortcut and the entry cannot drift.
+    Paste,
 }
 
 impl Own {
@@ -138,6 +151,11 @@ impl Own {
             Self::CopyHere => "Copy here",
             Self::MoveHere => "Move here",
             Self::Cancel => "Cancel",
+            // English, among a menu Windows has filled in French. Deliberate, and the same
+            // choice as the three above: these entries are this program's, and this program's
+            // interface is in English throughout — the sidebar says Drives and Bookmarks. What
+            // is in French is what Windows wrote, which is everything else in this menu.
+            Self::Paste => "Paste",
         }
     }
 }
@@ -293,6 +311,41 @@ impl Entry {
             icon: None,
         }
     }
+}
+
+/// Put this program's Paste at the top of a folder's **background** menu.
+///
+/// For the one menu that arrives from the shell with a gap in it. See [`Own::Paste`] for why the
+/// gap is there and cannot be closed by redirecting a verb.
+///
+/// `can_paste` greys the entry rather than hiding it, which is what Explorer does and is the more
+/// useful of the two: an entry that disappears when the clipboard is empty reads as a program that
+/// has no Paste. It is passed in rather than read here so that the menu's shape can be tested
+/// without taking over the desktop's one clipboard;
+/// [`crate::app::App::pump_menu`] is the caller and asks
+/// [`crate::shell::clipboard::has_files`], which is cheap enough for the once per menu it is asked.
+///
+/// # Why prepending is safe
+///
+/// It was not always. Putting this program's entries above the shell's used to break every submenu
+/// in the program, because a submenu was identified by its *path* through the entries and the path
+/// on screen no longer matched the one the shell had filed it under. That is why [`Kind::Submenu`]
+/// carries an opaque `source` id instead — read the note there. Nothing else in an entry is a
+/// position in this list either: a [`Command::Shell`]'s `id` and `path` are positions in the
+/// shell's own `HMENU`, recorded when it was read and untouched by what is put in front of them.
+pub fn with_our_paste(entries: Vec<Entry>, can_paste: bool) -> Vec<Entry> {
+    let mut paste = Entry::own(Own::Paste);
+    paste.enabled = can_paste;
+
+    let mut ours = vec![paste];
+    // Only when there is something to be divided from. The shell's background menu is never
+    // actually empty, but a separator hanging off the bottom of a menu is the kind of thing that
+    // shows up the one time it is.
+    if !entries.is_empty() {
+        ours.push(Entry::separator());
+    }
+    ours.extend(entries);
+    ours
 }
 
 
@@ -1798,6 +1851,122 @@ mod tests {
         (dir, file, sub)
     }
 
+    /// Every canonical verb read off one menu, by label.
+    ///
+    /// The labels are whatever language this Windows is in and are no use for recognising
+    /// anything — see [`Command::creates_an_item`] — so these tests match on the verb and carry
+    /// the label only to put in a failure message somebody has to read.
+    #[cfg(windows)]
+    fn verbs_of(parent: &Path, items: &[PathBuf]) -> Vec<(String, String)> {
+        let Some((_live, entries)) = super::win::Live::open(parent, items, Depth::Full) else {
+            return Vec::new();
+        };
+        entries
+            .iter()
+            .filter_map(|entry| match &entry.kind {
+                Kind::Command(Command::Shell { verb: Some(verb), .. }) => {
+                    Some((verb.clone(), entry.label.clone()))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The verbs [`crate::app::App::ours_rather_than_the_shell_s`] takes over are really the ones
+    /// the shell hands out.
+    ///
+    /// Those hooks are keyed on `open`, `cut` and `copy`, and a hook keyed on a verb that has been
+    /// renamed does not fail — it *silently stops intercepting*, and the gesture goes back to
+    /// opening Windows Explorer or to putting the selection on the clipboard without fading the
+    /// rows. Nothing else in the program would notice, so this is the test that would.
+    ///
+    /// `paste` is the fourth and is not here: the shell only offers it when there is something on
+    /// the clipboard, so it needs a test that takes the clipboard over. See
+    /// [`the_shell_offers_paste_on_a_folder_only_when_the_clipboard_has_files`].
+    #[test]
+    #[cfg(windows)]
+    fn the_verbs_this_program_takes_over_are_still_the_shell_s() {
+        let _serialised = crate::shell::serialised();
+        crate::shell::init();
+        let (dir, file, sub) = scratch("hooked-verbs");
+
+        for (what, items) in [
+            ("a selected folder", vec![sub.clone()]),
+            ("a selected file", vec![file.clone()]),
+            ("both at once", vec![sub.clone(), file.clone()]),
+        ] {
+            let verbs = verbs_of(&dir, &items);
+            for wanted in ["open", "cut", "copy"] {
+                assert!(
+                    verbs.iter().any(|(verb, _)| verb == wanted),
+                    "the shell no longer offers `{wanted}` on {what}, so the hook that redirects \
+                     it into this program is dead code. What it did offer: {:?}",
+                    verbs
+                );
+            }
+        }
+
+        crate::sandbox::remove(&dir);
+    }
+
+    /// `paste` is on a selected **folder**, not on the folder's background, and only while there
+    /// is something to paste.
+    ///
+    /// Worth pinning down, because both halves are load-bearing and neither is obvious:
+    ///
+    /// - **On the selection, not the background.** The background menu is the view object's — see
+    ///   [`win::context_of`] — and Explorer synthesises its own Paste around that one rather than
+    ///   reading it out of the shell. So there is no background Paste to redirect, and Ctrl+V is
+    ///   what covers pasting into the folder you are looking at.
+    /// - **Only with a full clipboard.** The entry is absent rather than greyed, so a test that
+    ///   ran with an empty clipboard would conclude the shell offers no Paste anywhere and the
+    ///   hook was pointless. It is not: with files on the clipboard it is there, on every
+    ///   selection that contains at least one folder.
+    #[test]
+    #[cfg(windows)]
+    #[ignore = "takes over the real clipboard; run explicitly, single-threaded"]
+    fn the_shell_offers_paste_on_a_folder_only_when_the_clipboard_has_files() {
+        let _serialised = crate::shell::serialised();
+        crate::shell::init();
+        let (dir, file, sub) = scratch("hooked-paste");
+        let on_folder = || {
+            verbs_of(&dir, std::slice::from_ref(&sub))
+                .into_iter()
+                .any(|(verb, _)| verb == "paste")
+        };
+
+        crate::shell::clipboard::clear();
+        assert!(
+            !on_folder(),
+            "the shell offered `paste` with an empty clipboard, so the absence this program \
+             relies on to tell 'nothing to paste' from 'no such verb' is not there"
+        );
+
+        crate::shell::clipboard::put(
+            std::slice::from_ref(&file),
+            crate::shell::clipboard::Effect::Copy,
+        )
+        .expect("put the file on the clipboard");
+        assert!(
+            crate::shell::clipboard::has_files(),
+            "the clipboard did not take the file, so the rest of this proves nothing"
+        );
+        assert!(
+            on_folder(),
+            "the shell no longer offers `paste` on a selected folder with a full clipboard, so \
+             the hook that redirects it into this program is dead code"
+        );
+        // And still not on the background, which is why Ctrl+V is the only paste there.
+        assert!(
+            !verbs_of(&dir, &[]).into_iter().any(|(verb, _)| verb == "paste"),
+            "the folder's background menu has grown a Paste — this program synthesises none, so \
+             it would now be showing Windows' one and pasting through the shell"
+        );
+
+        crate::shell::clipboard::settle_for_tests();
+        crate::sandbox::remove(&dir);
+    }
+
     /// The lazy half of the design: opening the menu must *not* fill the submenus, and
     /// filling one afterwards must give what the eager path would have.
     ///
@@ -2491,13 +2660,20 @@ mod tests {
         crate::sandbox::remove(&dir);
     }
 
+    /// The right-drag answers and Paste are the only entries of our own.
+    ///
+    /// This test is the fence around that, and the list is short on purpose: everything else this
+    /// program used to put above the shell's menu is gone, and a context menu that starts
+    /// collecting entries of its own again stops being the menu it claims to be. Each of these
+    /// four is here because Windows has no answer for the question — "a right-button drag just
+    /// landed", and Paste on empty space, which the shell's background menu does not carry. See
+    /// [`Own::Paste`].
     #[test]
-    fn the_right_drag_entries_are_the_only_ones_of_our_own() {
-        // Everything else this program used to put above the shell's menu is gone; these three
-        // are here because Windows has no answer for "a right-button drag just landed".
+    fn the_drag_answers_and_paste_are_the_only_entries_of_our_own() {
         assert_eq!(Own::CopyHere.label(), "Copy here");
         assert_eq!(Own::MoveHere.label(), "Move here");
         assert_eq!(Own::Cancel.label(), "Cancel");
+        assert_eq!(Own::Paste.label(), "Paste");
         let entry = Entry::own(Own::CopyHere);
         assert!(entry.enabled);
         assert!(!entry.checked);
@@ -2505,6 +2681,71 @@ mod tests {
             entry.shortcut.is_empty(),
             "a drop answer is not on a shortcut"
         );
+    }
+
+    /// The background menu gets a Paste and the shell's entries keep their order under it.
+    ///
+    /// The greying is the part worth pinning: an entry that vanishes with an empty clipboard reads
+    /// as a program with no Paste at all, which is the complaint this whole entry exists to answer.
+    #[test]
+    fn the_background_menu_gets_this_program_s_paste() {
+        let shell_entries = || {
+            vec![
+                Entry {
+                    label: "Nouveau".to_owned(),
+                    shortcut: String::new(),
+                    kind: Kind::unfilled(7),
+                    enabled: true,
+                    checked: false,
+                    icon: None,
+                },
+                Entry {
+                    label: "Propriétés".to_owned(),
+                    shortcut: String::new(),
+                    kind: Kind::Command(Command::Shell {
+                        verb: Some("properties".to_owned()),
+                        id: 0,
+                        path: Vec::new(),
+                        label: "Propriétés".to_owned(),
+                    }),
+                    enabled: true,
+                    checked: false,
+                    icon: None,
+                },
+            ]
+        };
+
+        let with = with_our_paste(shell_entries(), true);
+        assert!(
+            matches!(with[0].kind, Kind::Command(Command::Own(Own::Paste))),
+            "Paste is not the first entry of the background menu"
+        );
+        assert_eq!(with[0].label, "Paste");
+        assert!(with[0].enabled, "there was something to paste and it was greyed");
+        assert!(
+            matches!(with[1].kind, Kind::Separator),
+            "nothing divides ours from the shell's"
+        );
+        assert_eq!(
+            with[2..].iter().map(|e| e.label.as_str()).collect::<Vec<_>>(),
+            ["Nouveau", "Propriétés"],
+            "the shell's own entries were reordered or lost"
+        );
+        // The submenu is still filled by its opaque id, which is the thing that used to break the
+        // moment anything was put above the shell's entries. See the note on `Kind::Submenu`.
+        assert_eq!(with[2].kind.unasked(), Some(7));
+
+        // Nothing to paste greys it rather than removing it.
+        let empty = with_our_paste(shell_entries(), false);
+        assert!(
+            matches!(empty[0].kind, Kind::Command(Command::Own(Own::Paste))),
+            "Paste disappeared when the clipboard was empty"
+        );
+        assert!(!empty[0].enabled, "Paste was offered with nothing to paste");
+
+        // And no separator dangling off a menu the shell gave nothing for.
+        let alone = with_our_paste(Vec::new(), true);
+        assert_eq!(alone.len(), 1, "a separator with nothing under it");
     }
 
     #[test]

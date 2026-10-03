@@ -118,6 +118,15 @@ pub enum Action {
     Copy(PaneId),
     /// Act on whatever is on the clipboard, into this pane's folder.
     Paste(PaneId),
+    /// The same three, on paths named outright rather than on whatever a pane has selected.
+    ///
+    /// What the shell's own `cut`, `copy` and `paste` verbs are redirected into — see
+    /// [`App::ours_rather_than_the_shell_s`]. They cannot go through [`Action::Cut`] and its two
+    /// siblings, because those read the pane: the menu was raised over a *particular* selection
+    /// and, for `paste`, over a particular folder that is not the one the pane is showing.
+    CutItems(Vec<PathBuf>),
+    CopyItems(Vec<PathBuf>),
+    PasteIntoFolder(PathBuf),
     /// `permanent` is Shift+Delete; otherwise it goes to the Recycle Bin.
     Delete { pane: PaneId, permanent: bool },
     /// Start renaming the row under the cursor.
@@ -204,6 +213,9 @@ impl Action {
             Self::Cut(_) => "Cut",
             Self::Copy(_) => "Copy",
             Self::Paste(_) => "Paste",
+            Self::CutItems(_) => "CutItems",
+            Self::CopyItems(_) => "CopyItems",
+            Self::PasteIntoFolder(_) => "PasteIntoFolder",
             Self::Delete { .. } => "Delete",
             Self::BeginRename(_) => "BeginRename",
             Self::CommitRename { .. } => "CommitRename",
@@ -1953,12 +1965,22 @@ impl App {
 
     /// Put the selection on the clipboard, as a cut or as a copy.
     fn put_on_clipboard(&mut self, pane: PaneId, cutting: bool) {
-        use crate::shell::clipboard::{put, Effect};
-
         let paths = self
             .pane_mut(pane)
             .map(|p| p.tab().selection_paths())
             .unwrap_or_default();
+        self.put_these_on_clipboard(paths, cutting);
+    }
+
+    /// The same, on paths named outright.
+    ///
+    /// Split out from [`App::put_on_clipboard`] because the context menu's `cut` and `copy` are
+    /// redirected into it — see [`App::ours_rather_than_the_shell_s`] — and the menu carries the
+    /// items it was raised over rather than reading them back off the pane. One implementation, so
+    /// that Ctrl+X and the menu's Couper cannot come to mean two different things.
+    fn put_these_on_clipboard(&mut self, paths: Vec<PathBuf>, cutting: bool) {
+        use crate::shell::clipboard::{put, Effect};
+
         if paths.is_empty() {
             self.notice = Some("Nothing selected".to_owned());
             return;
@@ -1977,12 +1999,21 @@ impl App {
 
     /// Act on whatever is on the clipboard, into this pane's folder.
     fn paste_into(&mut self, pane: PaneId, ctx: &egui::Context) {
-        use crate::shell::clipboard::{self, Effect};
-        use crate::shell::ops::Job;
-
         let Some(into) = self.pane_mut(pane).map(|p| p.tab().path.clone()) else {
             return;
         };
+        self.paste_into_folder(into, ctx);
+    }
+
+    /// The same, into a folder named outright.
+    ///
+    /// Split out from [`App::paste_into`] because the context menu's `paste` is redirected into it
+    /// — see [`App::ours_rather_than_the_shell_s`] — and that entry means "into the folder the
+    /// menu was raised over", which is a *selected* folder and not the one the pane is showing.
+    fn paste_into_folder(&mut self, into: PathBuf, ctx: &egui::Context) {
+        use crate::shell::clipboard::{self, Effect};
+        use crate::shell::ops::Job;
+
         if into.as_os_str().is_empty() {
             self.notice = Some("This PC is not a folder to paste into".to_owned());
             return;
@@ -2188,6 +2219,18 @@ impl App {
                                 .to_owned(),
                         );
                     }
+                    // An empty selection is the folder's *background* menu, and that is the one
+                    // menu the shell hands over with a gap in it: it carries no Paste, and
+                    // Explorer's own is synthesised by its view rather than read out of the
+                    // shell. So this program's goes in. See `crate::shell::menu::Own::Paste`.
+                    let entries = if asking.items.is_empty() {
+                        crate::shell::menu::with_our_paste(
+                            entries,
+                            crate::shell::clipboard::has_files(),
+                        )
+                    } else {
+                        entries
+                    };
                     self.menu = Some(crate::ui::menu::Open::new(
                         asking.pane,
                         asking.at,
@@ -2679,10 +2722,10 @@ impl App {
                     // Nothing is remembered about which pane asked: whatever the command does
                     // to the folder, `crate::watch` is what notices. See `collect_modal`.
                     //
-                    // Unless it is a pin, which this program answers itself — see
-                    // `pin_is_a_bookmark`.
+                    // Unless it is one of the handful this program answers itself — see
+                    // `ours_rather_than_the_shell_s`.
                     Command::Shell { .. } => {
-                        let ours = Self::pin_is_a_bookmark(&menu, &command);
+                        let ours = Self::ours_rather_than_the_shell_s(&menu, &command);
                         if !ours.is_empty() {
                             self.actions.extend(ours);
                             return;
@@ -2701,6 +2744,136 @@ impl App {
                 }
             }
         }
+    }
+
+    /// The entries in Windows' own menu that this program answers itself.
+    ///
+    /// The context menu is the shell's — every entry in it is there because the shell or an
+    /// installed extension put it there, under whatever name this Windows is in. For nearly all of
+    /// them, handing the verb straight back is exactly right: that is the whole point of showing
+    /// the real menu rather than an imitation of it. A handful are different, because what they are
+    /// *for* is the file manager in front of the user, and that one is this one:
+    ///
+    /// | verb | what Windows would do | what happens instead |
+    /// | --- | --- | --- |
+    /// | `open` on a folder | opens it in a new **Explorer window** | navigates this pane |
+    /// | `cut`, `copy` | fills the clipboard, and nothing here knows | [`App::put_these_on_clipboard`] |
+    /// | `paste` on a folder | the shell's own copy, with no notice and no undo of ours | [`App::paste_into_folder`] |
+    /// | `pintohome` | Explorer's Quick access | this program's bookmarks — see [`App::pin_is_a_bookmark`] |
+    ///
+    /// Recognised by verb in every case, never by label. `GetCommandString` gives the canonical
+    /// name, which is the same on every Windows; the labels on this machine are `Ouvrir`, `Couper`,
+    /// `Copier` and `Coller`, and matching those would be a program that works in French.
+    /// `the_verbs_this_program_takes_over_are_still_the_shell_s` is what holds the four names to
+    /// what the shell actually offers, because a hook keyed on a verb that has been renamed does
+    /// not fail — it silently stops intercepting.
+    ///
+    /// Empty means "not ours, give it to the shell", which is the answer for all but four verbs
+    /// and also for the cases below where a verb *is* one of the four and there is nothing here to
+    /// do with it.
+    ///
+    /// # What is deliberately not redirected
+    ///
+    /// **`open` on files.** Only folders are taken over. The shell's `open` on a file is the
+    /// registered default verb with everything that comes with it, and a file is not a place this
+    /// program can show, so there is nothing to gain and a working Open to lose.
+    ///
+    /// **Paste on empty space.** There is no `paste` verb on a folder's *background* menu to
+    /// redirect: that menu is the view object's, and Explorer synthesises its own Paste around it
+    /// rather than reading one out of the shell — see `shell::menu::win::context_of`. So pasting
+    /// into the folder you are looking at is Ctrl+V, as it already was. The `paste` this hooks is
+    /// the one on a **selected folder**, which means "into that folder", and the shell offers it
+    /// only while there is something on the clipboard.
+    fn ours_rather_than_the_shell_s(
+        menu: &crate::ui::menu::Open,
+        command: &crate::shell::menu::Command,
+    ) -> Vec<Action> {
+        let crate::shell::menu::Command::Shell { verb: Some(verb), .. } = command else {
+            return Vec::new();
+        };
+        match verb.as_str() {
+            "pintohome" | "unpinfromhome" => Self::pin_is_a_bookmark(menu, command),
+            "open" => Self::open_in_this_explorer(menu),
+            // The selection the menu was raised over, not the pane's — see
+            // [`App::put_these_on_clipboard`]. Empty is the background menu, which has neither
+            // entry on it; the guard is here so that a shell that grew one would fall through to
+            // it rather than quietly clearing the clipboard.
+            "cut" if !menu.items.is_empty() => vec![Action::CutItems(menu.items.clone())],
+            "copy" if !menu.items.is_empty() => vec![Action::CopyItems(menu.items.clone())],
+            // Into the selected folder. The shell offers this on any selection with a folder
+            // somewhere in it, including several at once — where Explorer's own answer is not
+            // something to reproduce by accident. The first folder is the one, and the rest of
+            // the selection is left alone: pasting into one folder is undone by hand, and
+            // pasting into four is not.
+            "paste" => menu
+                .items
+                .iter()
+                .find(|item| item.is_dir())
+                .map(|into| vec![Action::PasteIntoFolder(into.clone())])
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// `Open` on a selection with a folder in it, as this program's own navigation.
+    ///
+    /// The gesture is one `InvokeCommand` for the whole selection — there is no asking the shell
+    /// to open half of it — so this either takes the lot or none of it. It takes the lot as soon as
+    /// there is one folder present, because the alternative is a folder opening in a second file
+    /// manager over the top of this one, which is the thing being fixed. Any files alongside go
+    /// through [`Action::Open`], which is what `Enter` and a double click on a row already do.
+    ///
+    /// A selection of nothing but files is *not* ours — see the note on
+    /// [`App::ours_rather_than_the_shell_s`] — and comes back empty.
+    ///
+    /// One folder navigates the pane the menu was raised in, which is what double-clicking it
+    /// does and what Explorer's own Open does to the window it was invoked from. Several open in
+    /// tabs of their own instead, leaving the pane where it is: Explorer answers the same gesture
+    /// with one new window each, and a tab is what this program has that a window was for.
+    fn open_in_this_explorer(menu: &crate::ui::menu::Open) -> Vec<Action> {
+        let places: Vec<(PathBuf, Option<PathBuf>)> = menu
+            .items
+            .iter()
+            .map(|item| (item.clone(), Self::place_of(item)))
+            .collect();
+        let folders: Vec<PathBuf> = places.iter().filter_map(|(_, place)| place.clone()).collect();
+        if folders.is_empty() {
+            return Vec::new();
+        }
+
+        let mut actions: Vec<Action> = if let [only] = &folders[..] {
+            vec![Action::Navigate {
+                pane: menu.pane,
+                path: only.clone(),
+            }]
+        } else {
+            folders
+                .into_iter()
+                .map(|path| Action::NavigateNewTab {
+                    pane: menu.pane,
+                    path,
+                })
+                .collect()
+        };
+        actions.extend(
+            places
+                .into_iter()
+                .filter(|(_, place)| place.is_none())
+                .map(|(item, _)| Action::Open(item)),
+        );
+        actions
+    }
+
+    /// Where this program could go for an item, if the item is a place at all.
+    ///
+    /// A directory, or a shortcut to one — the same two things `Enter` on a row treats as somewhere
+    /// to go, and for the same reason: a `.lnk` to a folder handed to the shell opens Explorer. A
+    /// junction or a directory symlink is a directory here, which is what the listing calls it too.
+    fn place_of(item: &Path) -> Option<PathBuf> {
+        if item.is_dir() {
+            return Some(item.to_path_buf());
+        }
+        crate::shell::links::folder_target(item)
     }
 
     /// `Pin to Quick access` means *this* program's bookmarks, not Explorer's Quick access.
@@ -2782,10 +2955,11 @@ impl App {
 
     /// What one of this program's own menu entries means.
     ///
-    /// Only a right-button drop asks anything of its own now. Everything else that used to be
-    /// here -- Open, Open in new tab, Open in a pane to the right or below, Add to bookmarks,
-    /// Copy path, Refresh, Select all, Show hidden files, New folder, Open terminal here -- has
-    /// been taken out of the context menu, which shows Windows' menu and nothing else.
+    /// Two things ask anything of their own now: a right-button drop, and Paste on empty space.
+    /// Everything else that used to be here -- Open, Open in new tab, Open in a pane to the right
+    /// or below, Add to bookmarks, Copy path, Refresh, Select all, Show hidden files, New folder,
+    /// Open terminal here -- has been taken out of the context menu, which otherwise shows Windows'
+    /// menu and nothing else.
     fn own_menu_action(
         &self,
         menu: &crate::ui::menu::Open,
@@ -2803,6 +2977,10 @@ impl App {
                 moving: which == Own::MoveHere,
             },
             Own::Cancel => return None,
+            // Into the folder the menu was raised in, which for a background menu is the folder
+            // being shown. Named outright rather than as [`Action::Paste`], which would read the
+            // pane again: the same reasoning as the redirected `paste` verb, and the same action.
+            Own::Paste => Action::PasteIntoFolder(menu.folder.clone()),
         })
     }
 
@@ -3987,6 +4165,11 @@ impl App {
             Action::Cut(pane) => self.put_on_clipboard(pane, true),
             Action::Copy(pane) => self.put_on_clipboard(pane, false),
             Action::Paste(pane) => self.paste_into(pane, ctx),
+            // The context menu's Couper, Copier and Coller, which name what they act on rather
+            // than reading it off a pane. See `ours_rather_than_the_shell_s`.
+            Action::CutItems(items) => self.put_these_on_clipboard(items, true),
+            Action::CopyItems(items) => self.put_these_on_clipboard(items, false),
+            Action::PasteIntoFolder(into) => self.paste_into_folder(into, ctx),
             Action::Delete { pane, permanent } => {
                 let items = self
                     .pane_mut(pane)
@@ -4861,6 +5044,288 @@ mod tests {
             App::pin_is_a_bookmark(&on_selection, &Command::Own(crate::shell::menu::Own::CopyHere))
                 .is_empty()
         );
+
+        crate::sandbox::remove(&dir);
+    }
+
+    /// Windows' Open, Couper, Copier and Coller act *here*, and everything else in the menu is
+    /// still the shell's.
+    ///
+    /// By verb throughout, for the reason on [`App::ours_rather_than_the_shell_s`]: the labels are
+    /// in whatever language this Windows is in. What the shell offers under each of those verbs is
+    /// held down separately, by
+    /// `shell::menu::tests::the_verbs_this_program_takes_over_are_still_the_shell_s` — this test is
+    /// the other half, that the verbs turn into the right actions once they arrive.
+    ///
+    /// The last two cases are the ones worth having: an empty answer is what sends a command on to
+    /// [`crate::shell::Modal`], so a rule that matched too much would take entries *away* from
+    /// Windows, which is the opposite of the point.
+    #[test]
+    fn the_shell_s_open_cut_copy_and_paste_act_in_this_explorer() {
+        use crate::shell::menu::Command;
+
+        // Real files and folders: the rules ask the disk which is which.
+        let dir = crate::sandbox::fresh("redirected-verbs");
+        let sub = dir.join("inner");
+        let other = dir.join("second");
+        std::fs::create_dir_all(&sub).expect("a folder");
+        std::fs::create_dir_all(&other).expect("another folder");
+        let file = dir.join("one.txt");
+        std::fs::write(&file, b"x").expect("a file");
+
+        let shell = |verb: &str| Command::Shell {
+            verb: Some(verb.to_owned()),
+            id: 0,
+            path: Vec::new(),
+            label: "whatever Windows calls it".to_owned(),
+        };
+        let menu = |items: Vec<PathBuf>| {
+            crate::ui::menu::Open::new(
+                7,
+                pos2(0.0, 0.0),
+                items,
+                dir.clone(),
+                Vec::new(),
+                crate::shell::menu::Depth::Full,
+                0,
+            )
+        };
+        let ours = |items: Vec<PathBuf>, verb: &str| {
+            App::ours_rather_than_the_shell_s(&menu(items), &shell(verb))
+        };
+
+        // Open on one folder navigates the pane the menu came from -- 7, not the focused one.
+        match ours(vec![sub.clone()], "open").as_slice() {
+            [Action::Navigate { pane, path }] => {
+                assert_eq!(*pane, 7, "Open navigated a pane the menu was not raised in");
+                assert_eq!(*path, sub);
+            }
+            other => panic!("Open on a folder gave {:?}", names(other)),
+        }
+
+        // Several folders get a tab each instead, leaving the pane where it is.
+        match ours(vec![sub.clone(), other.clone()], "open").as_slice() {
+            [
+                Action::NavigateNewTab { path: first, .. },
+                Action::NavigateNewTab { path: second, .. },
+            ] => {
+                assert_eq!(*first, sub);
+                assert_eq!(*second, other);
+            }
+            got => panic!("Open on two folders gave {:?}", names(got)),
+        }
+
+        // A shortcut to a folder is a place too, and leads to the folder rather than to the `.lnk`.
+        #[cfg(windows)]
+        {
+            let link = dir.join("to-inner.lnk");
+            assert!(
+                crate::shell::links::write_shortcut(&link, &sub),
+                "could not write the shortcut this case is about"
+            );
+            match ours(vec![link.clone()], "open").as_slice() {
+                [Action::Navigate { path, .. }] => assert_eq!(
+                    *path, sub,
+                    "Open on a folder shortcut did not follow it -- so it would have opened \
+                     Explorer"
+                ),
+                got => panic!("Open on a folder shortcut gave {:?}", names(got)),
+            }
+        }
+
+        // A file is the shell's: its `open` is the registered default verb, and this program has
+        // nowhere to show a file anyway.
+        for (what, items) in [
+            ("one file", vec![file.clone()]),
+            ("two files", vec![file.clone(), file.clone()]),
+            ("the background", Vec::new()),
+        ] {
+            assert!(
+                ours(items, "open").is_empty(),
+                "Open on {what} was taken off the shell"
+            );
+        }
+
+        // A folder and a file together: the folder here, the file the way `Enter` opens one. The
+        // gesture is one `InvokeCommand` for the whole selection, so half of it cannot be left to
+        // Windows -- and leaving all of it would open the folder in Explorer.
+        match ours(vec![sub.clone(), file.clone()], "open").as_slice() {
+            [Action::Navigate { path, .. }, Action::Open(opened)] => {
+                assert_eq!(*path, sub);
+                assert_eq!(*opened, file);
+            }
+            got => panic!("Open on a folder and a file gave {:?}", names(got)),
+        }
+
+        // Cut and Copy carry the selection the menu was raised over.
+        match ours(vec![sub.clone(), file.clone()], "cut").as_slice() {
+            [Action::CutItems(items)] => assert_eq!(*items, vec![sub.clone(), file.clone()]),
+            got => panic!("Cut gave {:?}", names(got)),
+        }
+        match ours(vec![file.clone()], "copy").as_slice() {
+            [Action::CopyItems(items)] => assert_eq!(*items, vec![file.clone()]),
+            got => panic!("Copy gave {:?}", names(got)),
+        }
+
+        // Paste means into the selected folder, not into the folder the pane is showing.
+        match ours(vec![sub.clone()], "paste").as_slice() {
+            [Action::PasteIntoFolder(into)] => assert_eq!(*into, sub),
+            got => panic!("Paste on a folder gave {:?}", names(got)),
+        }
+        // The shell offers it on any selection with a folder somewhere in it. The first folder is
+        // the one; the file beside it is not pasted into.
+        match ours(vec![file.clone(), sub.clone()], "paste").as_slice() {
+            [Action::PasteIntoFolder(into)] => assert_eq!(*into, sub),
+            got => panic!("Paste on a file and a folder gave {:?}", names(got)),
+        }
+        assert!(
+            ours(vec![file.clone()], "paste").is_empty(),
+            "Paste was answered for a selection with no folder in it to paste into"
+        );
+
+        // Nothing selected is the folder's background menu, which carries none of the three --
+        // Explorer synthesises its own Paste there and this program has Ctrl+V. A shell that grew
+        // one would fall through to it rather than being answered against no selection at all.
+        for verb in ["cut", "copy", "paste"] {
+            assert!(
+                ours(Vec::new(), verb).is_empty(),
+                "`{verb}` on a background menu was answered with no selection to act on"
+            );
+        }
+
+        // Pinning still comes through here, unchanged.
+        match ours(vec![sub.clone()], "pintohome").as_slice() {
+            [Action::AddBookmark(path)] => assert_eq!(*path, sub),
+            got => panic!("`pintohome` gave {:?}", names(got)),
+        }
+
+        // And the whole rest of the menu is Windows'. `openas`, `opennew` and `opencontaining`
+        // are here because they *start with* the verb that is hooked, which is the mistake a
+        // `starts_with` would make.
+        for verb in [
+            "delete", "rename", "properties", "link", "copyaspath", "edit", "print", "runas",
+            "openas", "opennew", "opencontaining", "pintohomefile", "PinToStartScreen",
+            "NewFolder", "ShareX", "{6A1F6B13-3B82-48A1-9E06-7BB0A6D0BFFD}",
+        ] {
+            assert!(
+                ours(vec![sub.clone()], verb).is_empty(),
+                "`{verb}` was taken off the shell"
+            );
+        }
+        // An empty verb matches nothing rather than falling into a hook.
+        assert!(ours(vec![sub.clone()], "").is_empty());
+        // And an entry the shell gave no canonical verb for at all is the shell's too: there is
+        // nothing to recognise it by, and guessing from the label is what none of this does. The
+        // label here is the one a French Windows puts on `copy`, which is the mistake being ruled
+        // out.
+        assert!(App::ours_rather_than_the_shell_s(
+            &menu(vec![sub.clone()]),
+            &Command::Shell {
+                verb: None,
+                id: 25,
+                path: Vec::new(),
+                label: "Copier".to_owned(),
+            },
+        )
+        .is_empty(), "an entry with no verb was matched on its label");
+
+        crate::sandbox::remove(&dir);
+    }
+
+    /// This program's Paste on empty space pastes into the folder the menu was raised in.
+    ///
+    /// The counterpart of the redirected `paste` verb, which is the one on a *selected* folder. Both
+    /// end at [`Action::PasteIntoFolder`] so that the two entries and Ctrl+V are one paste — see
+    /// [`crate::shell::menu::Own::Paste`] for why this one has to be ours at all.
+    #[test]
+    fn our_paste_on_empty_space_pastes_into_the_folder_being_shown() {
+        let dir = crate::sandbox::dir("own-paste");
+        let (app, _ctx) = app(&["/a"]);
+        // A background menu: nothing selected, raised in `dir`.
+        let background = crate::ui::menu::Open::new(
+            1,
+            pos2(0.0, 0.0),
+            Vec::new(),
+            dir.clone(),
+            Vec::new(),
+            crate::shell::menu::Depth::Full,
+            0,
+        );
+        match app.own_menu_action(&background, crate::shell::menu::Own::Paste) {
+            Some(Action::PasteIntoFolder(into)) => assert_eq!(
+                into, dir,
+                "Paste went somewhere other than the folder the menu was raised in"
+            ),
+            other => panic!(
+                "Paste gave {:?}",
+                other.as_ref().map(Action::name)
+            ),
+        }
+        // And Cancel is still the one own entry that means "do nothing", so a menu dismissed
+        // through it does not paste.
+        assert!(
+            app.own_menu_action(&background, crate::shell::menu::Own::Cancel)
+                .is_none()
+        );
+    }
+
+    /// The join: the entry the shell really puts in the menu, through the real dispatch.
+    ///
+    /// Everything either side of this is covered on its own —
+    /// `shell::menu::tests::the_verbs_this_program_takes_over_are_still_the_shell_s` holds the shell
+    /// to the four verb names, and
+    /// [`the_shell_s_open_cut_copy_and_paste_act_in_this_explorer`] holds the dispatch to the right
+    /// actions — but both halves pass while the two are wired to different strings. So this one
+    /// hands over a `Command` that was read out of an `HMENU` rather than one written here, and
+    /// nothing about it is synthesised except which pane it came from.
+    #[test]
+    #[cfg(windows)]
+    fn the_real_open_entry_from_the_real_menu_navigates_here() {
+        let _serialised = crate::shell::serialised();
+        crate::shell::init();
+
+        let dir = crate::sandbox::fresh("real-open-entry");
+        let sub = dir.join("inner");
+        std::fs::create_dir_all(&sub).expect("a folder to right-click");
+
+        let entries = crate::shell::menu::build(&dir, std::slice::from_ref(&sub));
+        assert!(
+            !entries.is_empty(),
+            "the shell gave no menu at all for a folder, so this test proves nothing"
+        );
+        let open = entries
+            .iter()
+            .find_map(|entry| match &entry.kind {
+                crate::shell::menu::Kind::Command(
+                    command @ crate::shell::menu::Command::Shell { verb: Some(verb), .. },
+                ) if verb == "open" => Some(command.clone()),
+                _ => None,
+            })
+            .expect("the shell's menu for a folder has an Open in it");
+
+        let menu = crate::ui::menu::Open::new(
+            3,
+            pos2(0.0, 0.0),
+            vec![sub.clone()],
+            dir.clone(),
+            entries,
+            crate::shell::menu::Depth::Full,
+            0,
+        );
+        match App::ours_rather_than_the_shell_s(&menu, &open).as_slice() {
+            [Action::Navigate { pane, path }] => {
+                assert_eq!(*pane, 3);
+                assert_eq!(
+                    *path, sub,
+                    "the shell's own Open on a folder has to navigate this pane; anything else \
+                     opens a second file manager over the top of this one"
+                );
+            }
+            got => panic!(
+                "the shell's real Open entry gave {:?} instead of navigating here",
+                names(got)
+            ),
+        }
 
         crate::sandbox::remove(&dir);
     }
@@ -7993,9 +8458,24 @@ mod click_tests {
             // kind of thing that looks correct in the source and does nothing at all.
             let before = shown_deps(&h);
             assert!(before > 2, "{at:?}: the root's imports are not on show");
+            // **The row is asked for rather than assumed.** This used to click the row under the
+            // root, on the reasoning that the first import would have imports of its own. That is
+            // not a fact about this program: the panel is pointed at the test binary itself, so the
+            // order of these rows is the order the linker wrote *its* import table in, and adding
+            // anything to this crate can rearrange it. It did — an API set came to the top, an API
+            // set has nothing under it, and the click landed on a row that could not unfold. Which
+            // says nothing about whether the click reached it, and that is the whole question here.
+            // See `crate::ui::deps::View::first_foldable`.
+            let row = h.app.panes[0]
+                .tab()
+                .preview
+                .dependency_first_foldable()
+                .unwrap_or_else(|| panic!("{at:?}: nothing in the tree can be unfolded at all"));
             let first_import = pos2(
                 panel.left() + 80.0,
-                panel.top() + crate::ui::preview::HEADER + crate::ui::deps::ROW * 1.5,
+                panel.top()
+                    + crate::ui::preview::HEADER
+                    + crate::ui::deps::ROW * (row as f32 + 0.5),
             );
             // **Settled first.** The panel has just been filled by a worker thread, and a click on a
             // row of it in the same breath is a click on a view that is still arriving: co-executing
@@ -10004,15 +10484,19 @@ mod click_tests {
             );
         }
         let menu = h.app.menu.as_ref().expect("open by now");
-        // Windows' menu, and nothing of ours in front of it. This program used to put half a
-        // dozen entries of its own above the shell's — they are gone, and the only entries it
-        // still owns anywhere are the three a right-button drop asks.
+        // Windows' menu, with exactly one entry of ours in front of it. This program used to put
+        // half a dozen above the shell's — those are gone. What is left here is Paste, and this is
+        // the *background* menu ([`App::open_folder_menu`] raises that one), which is the single
+        // menu the shell hands over with a gap in it: see `crate::shell::menu::Own::Paste`. On a
+        // file's or a folder's own menu there is still nothing of ours, which
+        // `the_drag_answers_and_paste_are_the_only_entries_of_our_own` and
+        // `the_background_menu_gets_this_program_s_paste` hold between them.
         assert!(
             menu.entries.len() > 3,
             "the shell should have filled the menu: {:?}",
             menu.entries.iter().map(|e| &e.label).collect::<Vec<_>>()
         );
-        let ours: Vec<&String> = menu
+        let ours: Vec<&str> = menu
             .entries
             .iter()
             .filter(|e| {
@@ -10021,11 +10505,13 @@ mod click_tests {
                     crate::shell::menu::Kind::Command(crate::shell::menu::Command::Own(_))
                 )
             })
-            .map(|e| &e.label)
+            .map(|e| e.label.as_str())
             .collect();
-        assert!(
-            ours.is_empty(),
-            "a file's menu should be Windows' own, with nothing of ours in it: {ours:?}"
+        assert_eq!(
+            ours,
+            ["Paste"],
+            "the background menu should be Windows' own with this program's Paste above it, and \
+             nothing else of ours"
         );
 
         // Every shell submenu is there and empty, which is the point of the lazy fill.
@@ -13030,6 +13516,11 @@ mod click_tests {
         std::fs::write(from.join("copied.txt"), b"c").expect("write");
         std::fs::write(from.join("moved.txt"), b"m").expect("write");
         std::fs::write(from.join("binned.txt"), b"b").expect("write");
+        // For the context menu's Copier and Coller, which name their items and their destination
+        // rather than reading either off a pane.
+        std::fs::write(from.join("menu-copied.txt"), b"n").expect("write");
+        let inner = from.join("target");
+        std::fs::create_dir_all(&inner).expect("sandbox");
 
         let mut h = Harness::new();
         let pane = h.app.panes[0].id;
@@ -13146,6 +13637,51 @@ mod click_tests {
              would move files that are no longer where it says"
         );
         assert!(h.app.cut.is_empty(), "and nothing is pending any more");
+
+        // ---- The context menu's Copier and Coller ----
+        //
+        // The pair the shell's `copy` and `paste` verbs are redirected into -- see
+        // `ours_rather_than_the_shell_s`. They differ from Ctrl+C and Ctrl+V in exactly one way and
+        // it is the thing worth a test: they act on what the *menu* named. So the pane stays on
+        // `from` throughout, and the paste has to land in the selected folder rather than in the
+        // folder being shown -- which is what `Action::Paste(pane)` would have done, and what a
+        // redirect that reached for the pane instead of the entry would silently do.
+        show(&mut h, pane, &from);
+        h.app.perform(
+            &h.ctx.clone(),
+            Action::CopyItems(vec![from.join("menu-copied.txt")]),
+        );
+        assert_eq!(
+            clipboard::get().map(|p| p.effect),
+            Some(Effect::Copy),
+            "the menu's Copier put nothing on the clipboard; the program said {:?}",
+            h.app.notice
+        );
+        h.app
+            .perform(&h.ctx.clone(), Action::PasteIntoFolder(inner.clone()));
+        settle_ops(&mut h);
+        assert!(
+            inner.join("menu-copied.txt").is_file(),
+            "the menu's Coller should have pasted into the selected folder; the program said {:?}",
+            h.app.notice
+        );
+        assert!(
+            from.join("menu-copied.txt").is_file(),
+            "and left the original where it was"
+        );
+        // Nothing landed in the folder the pane was showing. A paste that reached for the pane
+        // would have copied the file onto itself and left a `menu-copied (2).txt` beside it.
+        let strays: Vec<String> = std::fs::read_dir(&from)
+            .expect("read the source folder back")
+            .flatten()
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("menu-copied") && name != "menu-copied.txt")
+            .collect();
+        assert!(
+            strays.is_empty(),
+            "the paste also went into the folder the pane was showing: {strays:?}"
+        );
+        clipboard::clear();
 
         // ---- Delete ----
         show(&mut h, pane, &from);
