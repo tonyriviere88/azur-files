@@ -439,7 +439,7 @@ impl App {
         let pane = self.focused;
         let Some(p) = self.pane_mut(pane) else { return };
         let tab = p.tab_mut();
-        let previewable = |tab: &Tab, at: usize| {
+        let kind = |tab: &Tab, at: usize| {
             tab.entry_at(at)
                 .zip(tab.dir.as_ref())
                 .and_then(|(entry, dir)| {
@@ -449,13 +449,23 @@ impl App {
                         dir.entries[entry].is_dir(),
                     )
                 })
-                .is_some()
+        };
+        let previewable = |tab: &Tab, at: usize| kind(tab, at).is_some();
+        // **A kind this program decodes, in preference to one the shell would draw.** Nearly every
+        // file is previewable now — see [`crate::preview::kind_of`] — so "the first previewable row"
+        // in a folder of mixed content is whatever happens to sort first, and a capture run has no
+        // way to say it meant the source file. The picture, text and binary views are the ones worth
+        // photographing; a shell render is the fallback here as it is everywhere else.
+        let decoded = |tab: &Tab, at: usize| {
+            !matches!(kind(tab, at), None | Some(crate::preview::Kind::Shell))
         };
         // Whatever `--reveal=` already selected, if that can be previewed — so the two flags
-        // compose and a capture can name the file it wants. The first previewable row otherwise.
+        // compose and a capture can name the file it wants. Failing that the first row this program
+        // reads itself, and failing *that* the first row with any preview at all.
         let row = tab
             .cursor
             .filter(|&at| previewable(tab, at))
+            .or_else(|| (0..tab.order.len()).find(|&at| decoded(tab, at)))
             .or_else(|| (0..tab.order.len()).find(|&at| previewable(tab, at)));
         if let Some(at) = row {
             if tab.selected_count < 2 {

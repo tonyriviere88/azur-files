@@ -504,6 +504,7 @@ impl Preview {
                     natural: picture.natural,
                     scaled: picture.scaled,
                     vector: picture.vector,
+                    shell: picture.shell,
                     ..Picture::fresh()
                 }
                 .labelled()))
@@ -546,6 +547,16 @@ impl Preview {
             }),
             Payload::Binary(graph) => Content::Binary(deps::View::new(graph)),
             Payload::Failed(why) => Content::Failed(why),
+            // The shell had no visualizer for it either, so the panel says what it has always said
+            // about a file with no preview. The extension comes from the file this panel is holding
+            // rather than travelling with the answer: there is one right name for it and this is where
+            // it is known.
+            Payload::Unsupported => Content::Unsupported(
+                self.of
+                    .as_ref()
+                    .map(|ask| preview::extension_of(ask.first()))
+                    .unwrap_or_default(),
+            ),
         };
     }
 }

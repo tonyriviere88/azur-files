@@ -9,15 +9,18 @@ use std::time::{Duration, Instant};
 ///
 /// It is a property of the tests rather than of the service, which has exactly one worker and
 /// therefore never has two calls out. Saying so with a lock is honest; discovering it again as a
-/// test that fails one run in three would not be. [`TRIES`] is what the *program* does about the
+/// test that fails one run in three would not be. [`BACKOFF`] is what the *program* does about the
 /// same fact when the other caller is Explorer.
 ///
-/// Poisoning is stepped over deliberately: a failing test has a failure to report, and the second
-/// one refusing to run because the first panicked would hide it.
-static SHELL: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
+/// **[`crate::shell::serialised`] and not a lock of its own**, which it was until the preview panel
+/// started asking the same question: `GetImage` is now called from two modules, and two private locks
+/// exclude each test from its own neighbours and from nothing else. One lock for everything that
+/// reaches the shell is the only version of this that holds.
+///
+/// Poisoning is stepped over deliberately, inside `serialised`: a failing test has a failure to
+/// report, and the second one refusing to run because the first panicked would hide it.
 fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
-    SHELL.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    crate::shell::serialised()
 }
 
 /// The shell draws a picture for a file that is not a picture.

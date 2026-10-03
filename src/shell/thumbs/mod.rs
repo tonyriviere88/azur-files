@@ -133,6 +133,15 @@
 //!
 //! An entry carries the file's modified stamp, so a picture edited under the window is re-fetched
 //! rather than shown as it was.
+//!
+//! # The preview panel borrows the call, and only the call
+//!
+//! [`crate::preview::visual`] asks the same registered providers for the same reason — a `.pdf` and
+//! an `.mp4` are no more decodable in the panel than they are on a tile — so `GetImage` is called in
+//! one place and [`rendered`] is the door it comes through. **Nothing else here is shared**: the
+//! panel wants one file at a large size, holds it for as long as the selection sits still, and has no
+//! use for an atlas, a queue, a frame counter or a backoff table. It also wants a different answer to
+//! "the shell has nothing for this" — see [`win::Want`], which is the whole of the difference.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -946,6 +955,27 @@ fn draw(path: &Path) -> Got {
         return Got::Picture(image);
     }
     picture(path)
+}
+
+/// **What the registered visualizer makes of a file, and nothing else** — no icon fallback.
+///
+/// The one thing [`crate::preview`] borrows from this module, and the whole of it. `size` is the long
+/// edge to ask for, which for the panel is [`crate::preview::visual::SIZE`] rather than the [`CELL`] a
+/// tile wants.
+///
+/// `None` covers both "nothing is registered for this type" and "the shell refused just now", which
+/// the call cannot reliably tell apart — see [`win::image`]. The panel's answer to that is
+/// [`crate::preview::visual`]'s `load`; it is not this one's to make.
+///
+/// **Not cached here**, deliberately, and the reason is that there is nothing to cache: a panel shows
+/// one file at a time and holds its answer for as long as the keyboard stays on the row, so the
+/// second look is the panel's own copy rather than a second call. The look after *that* — coming back
+/// to a file later — is served by the per-user thumbnail cache this call reads, which is shared with
+/// Explorer and outlives the process. A cache of our own in front of it would be a second copy of a
+/// cache that is already there.
+#[cfg(windows)]
+pub(crate) fn rendered(path: &Path, size: u32) -> Option<ColorImage> {
+    win::image(path, size, win::Want::Rendered)
 }
 
 /// A `.svg` rasterised here, or `None` for anything the shell should be asked about after all.

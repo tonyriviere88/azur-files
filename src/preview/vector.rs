@@ -73,5 +73,6 @@ pub(super) fn from_bytes(bytes: &[u8], cap: u32) -> Result<Picture, String> {
         natural: [size.width() as u32, size.height() as u32],
         scaled: false,
         vector: true,
+        shell: false,
     })
 }

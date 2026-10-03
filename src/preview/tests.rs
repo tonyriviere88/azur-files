@@ -168,11 +168,90 @@ fn a_name_says_what_it_will_be_shown_as() {
     assert_eq!(kind_of("Makefile", "", false), Some(Kind::Unknown));
     assert_eq!(kind_of(".gitignore", "gitignore", false), Some(Kind::Text));
     assert_eq!(kind_of(".npmrc", "npmrc", false), Some(Kind::Unknown));
-    // And things that genuinely have no preview.
-    assert_eq!(kind_of("a.zip", "zip", false), None);
-    assert_eq!(kind_of("a.mp4", "mp4", false), None);
-    // A folder is what the listing beside the panel is already showing.
+    // **And everything else is the shell's**, which is the point of the lists above being short: they
+    // are what this program decodes better than Windows would, not what has a preview. A `.pdf` and an
+    // `.mp4` have a registered visualizer; a `.zip` does not, and the difference is not knowable from
+    // the name — so all three come here and `visual::load` is what finds out.
+    if cfg!(windows) {
+        assert_eq!(kind_of("a.zip", "zip", false), Some(Kind::Shell));
+        assert_eq!(kind_of("a.mp4", "mp4", false), Some(Kind::Shell));
+        assert_eq!(kind_of("a.pdf", "pdf", false), Some(Kind::Shell));
+        assert_eq!(kind_of("a.docx", "docx", false), Some(Kind::Shell));
+    } else {
+        assert_eq!(kind_of("a.pdf", "pdf", false), None);
+    }
+    // A folder is what the listing beside the panel is already showing, on either platform.
     assert_eq!(kind_of("src", "", true), None);
+    assert_eq!(kind_of("pics", "", true), None);
+}
+
+/// **What this program cannot decode, Windows draws** — and what Windows cannot draw either says so
+/// rather than pretending.
+///
+/// The two halves of [`visual`], which are the two things a panel over an unknown file can be. The
+/// positive one goes through a `.png`, deliberately and not through the `.pdf` that motivated the
+/// feature: a PNG thumbnail provider ships with Windows, so this tests *this program's* plumbing —
+/// the apartment on the worker, the size asked for, the `Picture` that comes out — rather than which
+/// PDF reader the machine happens to have installed. Measured here with a real one for the record:
+/// a valid single-page PDF came back 724 × 1024 in 708 ms cold and 64 ms warm.
+///
+/// `.png` reaches [`visual::load`] only because this calls it directly. Through [`kind_of`] it is a
+/// [`Kind::Picture`] and always will be — see that function for why a decoder here beats a render
+/// there whenever there is one.
+#[cfg(windows)]
+#[test]
+fn the_shell_draws_what_this_program_cannot_and_says_so_when_it_cannot_either() {
+    let _one = crate::shell::serialised();
+    let dir = crate::sandbox::fresh("preview-visual");
+
+    // Larger than `visual::SIZE` on both edges, so the answer proves the cap as well as the render.
+    let wide = dir.join("wide.png");
+    let mut encoded = std::io::Cursor::new(Vec::new());
+    image::RgbaImage::from_fn(3000, 2000, |x, y| {
+        image::Rgba([(x % 256) as u8, (y % 256) as u8, 64, 255])
+    })
+    .write_to(&mut encoded, image::ImageFormat::Png)
+    .expect("`image` can encode a PNG");
+    std::fs::write(&wide, encoded.into_inner()).expect("a file in the sandbox");
+
+    let Payload::Picture(picture) = visual::load(&wide) else {
+        panic!("the shell drew nothing for a PNG, which every Windows has a provider for");
+    };
+    assert!(picture.shell, "the bar would report the render's size as the file's");
+    let [w, h] = picture.pixels.size;
+    assert!(
+        w as u32 <= visual::SIZE && h as u32 <= visual::SIZE,
+        "the render came back {w} × {h}, past the {} that was asked for — which is also past the \
+         bound in `windows::icons::read_bgra`, so the next size up would come back as nothing",
+        visual::SIZE
+    );
+    assert!(w > 1 && h > 1, "the render is {w} × {h}, which is not a picture");
+    // 3000 × 2000 fits its own aspect inside the cap, so the long edge *is* the cap: anything else
+    // means `SIIGBF_RESIZETOFIT` was not honoured and the panel is holding a stretched picture.
+    assert_eq!(w as u32, visual::SIZE, "the long edge is not the size asked for");
+    assert!(h < w, "the aspect was not kept: {w} × {h} from a 3:2 picture");
+    // The render's own size, because a document has no pixel size of its own — which is the whole
+    // reason `shell` has to travel with it.
+    assert_eq!(picture.natural, [w as u32, h as u32]);
+    assert!(!picture.scaled, "nothing here threw pixels away to fit `CAP`");
+
+    // And the other half: an extension nothing on earth has a provider for. Not `Failed` — nothing
+    // went wrong, so the panel says "No preview for a .nosuchthing" rather than showing an error.
+    let unknown = dir.join("mystery.nosuchthing");
+    std::fs::write(&unknown, vec![0u8; 4096]).expect("a file in the sandbox");
+    assert!(
+        matches!(read(&Ask::One(unknown, Kind::Shell)), Payload::Unsupported),
+        "a type with no visualizer was reported as a failure rather than as having no preview"
+    );
+
+    // A file with nothing to go on that turns out not to be text falls through to the shell too,
+    // rather than stopping at "not something this can show" — a renamed `.psd` is still a picture.
+    let nameless = dir.join("binary-blob");
+    std::fs::write(&nameless, [0u8, 1, 2, 0, 255, 0, 7]).expect("a file in the sandbox");
+    assert!(
+        matches!(read(&Ask::One(nameless, Kind::Unknown)), Payload::Unsupported),
+        "a sniffed binary never reached the shell"
+    );
 }
 
 /// Text is read, its line endings are made harmless, and a long one is cut and says so.
@@ -213,10 +292,15 @@ fn text_comes_back_readable_and_bounded() {
     crate::sandbox::remove_file(&exact);
 }
 
-/// An extensionless file is text if it reads as text, and refused if it does not.
+/// An extensionless file is text if it reads as text, and **never** text if it does not.
 ///
 /// The refusal is the half that matters: without it, pointing the panel at a file with no
 /// extension would paint whatever bytes it holds into a wrapped paragraph.
+///
+/// What happens to the refused file is [`visual`]'s business rather than this test's — it goes to the
+/// shell, which is what makes a renamed `.psd` previewable — so the assertions below are on [`sniff`]
+/// and on the answer *not* being text. `the_shell_draws_what_this_program_cannot_and_says_so_when_it_cannot_either`
+/// is where the fall-through itself is pinned.
 #[test]
 fn an_unknown_file_is_sniffed_rather_than_guessed() {
     let readme = scratch("README");
@@ -228,7 +312,10 @@ fn an_unknown_file_is_sniffed_rather_than_guessed() {
     let blob = scratch("blob");
     std::fs::write(&blob, b"MZ\x90\x00\x03\x00\x00\x00").expect("a file");
     assert_eq!(sniff(&blob), Some(false));
-    assert!(matches!(read(&Ask::One(blob.clone(), Kind::Unknown)), Payload::Failed(_)));
+    assert!(
+        !matches!(read(&Ask::One(blob.clone(), Kind::Unknown)), Payload::Text(_)),
+        "a file full of NULs was painted into a wrapped paragraph"
+    );
 
     // Invalid UTF-8 well inside the window, with no NUL anywhere.
     let latin = scratch("latin");
@@ -543,3 +630,4 @@ fn a_complaint_is_cut_to_something_that_fits_in_a_panel() {
     assert_eq!(short(""), "Cannot be read");
     assert!(short(&"very long complaint ".repeat(20)).len() <= 80);
 }
+

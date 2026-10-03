@@ -121,6 +121,8 @@ fn difference(a: Picture, b: Picture) -> Payload {
             natural: [size[0] as u32, size[1] as u32],
             scaled: false,
             vector: false,
+            // A measurement this program made, and the only `Picture` here that was never a file.
+            shell: false,
         },
         a,
         b,

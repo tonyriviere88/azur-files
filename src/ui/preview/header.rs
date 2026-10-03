@@ -75,7 +75,14 @@ pub(super) fn header(
             // file is on screen. Offered only where there is something to compare with — and unlike
             // the text one, that cannot be read off the payload, because with the toggle off the
             // panel holds one picture and nothing that remembers there was another.
-            if changed {
+            //
+            // **Never over a shell render**, which is the one case where there is nothing to compare
+            // *with*. `crate::preview::diff` builds the older side by decoding the blob git has, and
+            // a registered visualizer takes a path rather than bytes — so `selected_preview` refuses
+            // an `AgainstHead` for anything but a [`crate::preview::Kind::Picture`] and this button
+            // would sit there latching a preference that changed nothing on screen. A control that
+            // does nothing is worse than no control; the same argument the two text toggles make.
+            if changed && !picture.shell {
                 let at = button(right);
                 if tool_button(
                     ui,
@@ -322,6 +329,18 @@ pub(super) fn header(
                     if differing > 0.0 {
                         mark = Some(t.status.danger);
                     }
+                    comment.push_str(&dimensions);
+                }
+                // **And for a shell render the headline is that it is one**, which is the same
+                // priority argument the comparison makes one arm up: the slot that survives a narrow
+                // panel goes to the thing somebody needs to know, and the dimensions take the one
+                // that gives way. What they need to know is that this is a *picture of* the file
+                // produced by Windows — the first page of the PDF, a frame of the video, at the size
+                // it was asked for — so `1024 × 576` is the size of that render and not of anything
+                // in the file. Left in the surviving slot, those dimensions would read as the file's
+                // own the moment the note beside them was dropped.
+                None if picture.shell => {
+                    size.push_str("Windows preview");
                     comment.push_str(&dimensions);
                 }
                 None => {

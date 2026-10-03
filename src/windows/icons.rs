@@ -202,11 +202,15 @@ unsafe fn read_bgra(
         return None;
     }
     let (w, h) = (header.bmWidth as usize, header.bmHeight as usize);
-    // A sanity bound and nothing more: an image list cell is 16 or 48 square and a thumbnail is
-    // whatever [`crate::shell::thumbs::CELL`] asked for. 1024 is past both with room to spare and
-    // still refuses the case this is here for — a handle that is not the bitmap it claims to be,
-    // where the header's figures are whatever happened to be in memory.
-    if w > 1024 || h > 1024 {
+    // A sanity bound and nothing more, against the case this is here for: a handle that is not the
+    // bitmap it claims to be, where the header's figures are whatever happened to be in memory.
+    //
+    // Three real sizes come through here and the bound has to clear the largest with room to spare: an
+    // image list cell is 16 or 48 square, a tile's thumbnail is [`crate::shell::thumbs::CELL`], and the
+    // preview panel's shell render is [`crate::preview::visual::SIZE`] — 1024, which is why this is no
+    // longer 1024 itself. A bound a legitimate caller sits exactly on is a bound that fails the day
+    // somebody asks for one pixel more.
+    if w > 2048 || h > 2048 {
         return None;
     }
 

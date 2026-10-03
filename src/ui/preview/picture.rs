@@ -33,6 +33,10 @@ pub(super) struct Picture {
     pub(super) other: Option<[u32; 2]>,
     pub(super) scaled: bool,
     pub(super) vector: bool,
+    /// Windows' registered visualizer drew this, because nothing here could — see
+    /// [`crate::preview::visual`]. What it changes is the bar: `natural` is the render's size rather
+    /// than the file's, so it is reported as the preview's and takes the slot that gives way first.
+    pub(super) shell: bool,
     /// The share of pixels that differ, for a comparison.
     pub(super) differing: Option<f32>,
     /// Show both sources as well as the difference. Only meaningful with three frames.
@@ -79,6 +83,7 @@ impl Picture {
             other: None,
             scaled: false,
             vector: false,
+            shell: false,
             differing: None,
             all: true,
             zoom: None,

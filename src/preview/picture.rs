@@ -12,6 +12,13 @@ pub struct Picture {
     pub scaled: bool,
     /// Vector art, rasterised at [`CAP`] rather than decoded at a natural size.
     pub vector: bool,
+    /// Not decoded here at all: this is Windows' registered visualizer's render of a file nothing in
+    /// this program can read. See [`super::visual`].
+    ///
+    /// The panel has to know, because `natural` then means something different — the size of the
+    /// *render* rather than of the file, which has no pixel size of its own — and because a first page
+    /// standing in for a document is worth saying out loud.
+    pub shell: bool,
 }
 
 pub(super) fn load(path: &Path) -> Payload {
@@ -121,5 +128,6 @@ fn raster_from<R: std::io::BufRead + std::io::Seek>(
         natural: [natural.0, natural.1],
         scaled,
         vector: false,
+        shell: false,
     })
 }

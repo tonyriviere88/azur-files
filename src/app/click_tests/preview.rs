@@ -1153,29 +1153,51 @@ fn the_preview_panel_follows_the_keyboard() {
         "the walk landed and the panel is not showing it: {texts:?}"
     );
 
-    // The keyboard moving onto something with no preview clears it, rather than leaving a
-    // stale answer beside a different row. This panel is *inside* the pane, so what it shows
-    // is read as being about the selection next to it.
+    // **The keyboard moving to another row never leaves the last answer behind.** This panel is
+    // *inside* the pane, so what it shows is read as being about the selection beside it — a
+    // dependency tree left next to a `.rmeta` would be a lie about the `.rmeta`.
+    //
+    // The row is picked as one this program has no decoder for, which since
+    // [`crate::preview::kind_of`] started handing those to the shell is no longer the same thing as
+    // "no preview": a `.d` is a `Kind::Shell`, so it is asked about and comes back
+    // `Payload::Unsupported` a moment later. Either way the panel has *let go of the binary*, and
+    // that — rather than the panel being empty — is what has to hold.
     let plain = {
         let tab = h.app.panes[0].tab();
         let dir = tab.dir.as_ref().expect("the listing");
         (0..tab.order.len()).find(|&row| {
             tab.entry_at(row).is_some_and(|entry| {
-                crate::preview::kind_of(
-                    dir.leaf(entry),
-                    dir.ext(entry),
-                    dir.entries[entry].is_dir(),
+                !matches!(
+                    crate::preview::kind_of(
+                        dir.leaf(entry),
+                        dir.ext(entry),
+                        dir.entries[entry].is_dir(),
+                    ),
+                    Some(crate::preview::Kind::Binary)
                 )
-                .is_none()
             })
         })
     }
-    .expect("a build folder holds something with no preview");
+    .expect("a build folder holds something that is not a PE image");
     h.app.panes[0].tab_mut().select_only(plain);
     h.time += crate::ui::preview::FOLLOW_DELAY * 2.0;
-    h.frame(Vec::new());
-    h.frame(Vec::new());
-    assert_eq!(showing(&h), None, "the panel kept a stale answer");
+    for _ in 0..200 {
+        h.frame(Vec::new());
+        if !h.app.preview_pending() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    assert_ne!(
+        showing(&h).as_deref(),
+        Some(me.as_path()),
+        "the panel kept a stale answer about the row the keyboard has left"
+    );
+    assert_eq!(
+        h.app.panes[0].tab().preview.dependency_rows(),
+        None,
+        "the panel is still holding the binary's dependency tree beside a different row"
+    );
 }
 
 /// **Everything in a dependency row is on one baseline.**

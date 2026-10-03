@@ -1,7 +1,7 @@
 //! What is in the file the keyboard is on, read off the UI thread.
 //!
 //! The panel that shows it is [`crate::ui::preview`]; this is the half that decides **what a
-//! file is** and then **goes and gets it**. Three kinds, and they have nothing in common except
+//! file is** and then **goes and gets it**. Four kinds, and they have nothing in common except
 //! that answering takes long enough that the window must not wait for it:
 //!
 //! - **A picture.** Decoded by `image`, or rasterised by `resvg` where it is vector art, and
@@ -11,6 +11,11 @@
 //!   never paint a megabyte of `\0` into a wrapped paragraph.
 //! - **A binary.** [`crate::pe`]'s dependency walk, which is the interesting thing a `.dll`
 //!   has inside it.
+//! - **Anything else.** Handed to whatever visualizer Windows has registered for the type, which
+//!   is where a `.pdf`, an `.mp4`, a `.docx` and a camera's `.cr2` get their picture — see
+//!   [`visual`]. **The general case, and the other three are the exceptions**: those are the file
+//!   types this program has a better answer for than the shell's, and nothing else has to be
+//!   listed for the panel to have something to show.
 //!
 //! # One service, one token, one answer
 //!
@@ -37,6 +42,7 @@
 //! | [`vector`] | `.svg`, rasterised by `resvg` at the size asked for |
 //! | [`diff`] | two pictures, or one against `HEAD` |
 //! | [`search`] | the find bar's walk over a text body |
+//! | [`visual`] | everything else, through whatever Windows has registered for it |
 
 use std::path::Path;
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -47,6 +53,7 @@ pub mod picture;
 pub mod search;
 pub mod text;
 pub mod vector;
+pub mod visual;
 
 // The names the rest of the program knows this module by. Splitting the reading up by content
 // type is an arrangement of *this* module's insides; nothing outside it should have to learn
@@ -73,8 +80,17 @@ pub enum Kind {
     Binary,
     /// No extension, or one nothing here has heard of. **Decided on the worker** by looking at
     /// the first few kilobytes, because "is this text?" is a question about contents and the
-    /// answer for `README`, `LICENSE`, `Makefile` and `.gitignore` is yes.
+    /// answer for `README`, `LICENSE`, `Makefile` and `.gitignore` is yes. A file that turns out
+    /// not to be text falls through to [`Self::Shell`].
     Unknown,
+    /// Something with no decoder here, shown by whatever visualizer Windows has registered for the
+    /// type: a `.pdf`, an `.mp4`, a `.docx`, a `.psd`, a camera's raw file. See [`visual`].
+    ///
+    /// **The default, not a list**, which is the one thing worth knowing about [`kind_of`]: the three
+    /// kinds above are the types this program decodes *better* than the shell would, and everything
+    /// else lands here without having to be enumerated. What the shell then has nothing for — a
+    /// `.zip`, a `.rlib` — is the panel's "No preview for a .zip", exactly as before.
+    Shell,
 }
 
 /// Every extension shown as a picture.
@@ -171,6 +187,24 @@ pub fn is_code(stem: &str, ext: &str) -> bool {
 ///
 /// A folder is not previewed: what a folder contains is what the listing beside the panel is
 /// already showing, and a second copy of it would be the same answer twice.
+///
+/// # The lists say what this program decodes, not what has a preview
+///
+/// Worth stating plainly, because it used to be the other way round and the difference is the whole
+/// shape of this function. Every extension in [`PICTURES`], [`CODE`] and [`PROSE`], and every one
+/// [`crate::pe`] claims, is a type with a decoder **here** — and the reason to prefer it over the
+/// shell's is the same in each case: the panel can zoom a decoded picture, search a text body, colour
+/// its syntax, diff it against `HEAD` and walk a binary's imports, none of which a rendered thumbnail
+/// can be made to do.
+///
+/// Anything else is [`Kind::Shell`], and a file with nothing to go on is [`Kind::Unknown`], which is
+/// the same thing with a look at the bytes first. So there is no list of what has no preview, and
+/// nothing needs adding here when a machine gains a visualizer for a type nobody has heard of.
+///
+/// Off Windows there are no registered visualizers to ask, so the `Shell` answer is `None` and the
+/// panel says "No preview for a .pdf" as it always did. Not left to [`visual::load`] to discover: it
+/// would mean a quarter-second debounce, a thread and a `Reading…` for an answer that is knowable from
+/// the name.
 pub fn kind_of(name: &str, ext: &str, is_dir: bool) -> Option<Kind> {
     if is_dir {
         return None;
@@ -187,6 +221,8 @@ pub fn kind_of(name: &str, ext: &str, is_dir: bool) -> Option<Kind> {
         // rather than an extension, so `Dir::ext` is empty for those anyway — the second test is
         // for `.gitignore`-style names whose *extension* is a word this list does happen to know.
         Some(Kind::Unknown)
+    } else if cfg!(windows) {
+        Some(Kind::Shell)
     } else {
         None
     }
@@ -237,6 +273,15 @@ pub enum Payload {
     Binary(Arc<crate::pe::Graph>),
     /// Nothing to show, and why — short enough to put in the middle of the panel.
     Failed(String),
+    /// Nothing to show, and nothing went wrong: Windows has no visualizer for this type either.
+    ///
+    /// **Distinct from [`Self::Failed`]** because the panel says something different — "No preview
+    /// for a .zip" rather than a complaint — and because it is not news. A `.zip` having no preview
+    /// is a fact about `.zip`, and an error glyph beside it would suggest something had broken.
+    ///
+    /// Carries nothing: the extension to name is the one belonging to the file the panel is holding,
+    /// which the panel knows and this does not need to repeat. See `ui::preview::Preview::arrived`.
+    Unsupported,
 }
 
 /// What a panel has asked for: one file, two to be compared, or one against the version in the last
@@ -363,12 +408,16 @@ fn read(ask: &Ask) -> Payload {
                 _ => Payload::Failed("Cannot be read".to_owned()),
             }
         }
-        // Text if it looks like text, and nothing if it does not.
+        // Text if it looks like text, and the shell's problem if it does not: a file with no
+        // extension can still be a `.psd` somebody renamed, and asking is cheap now that there is
+        // somewhere to ask. Only a file that cannot be *read* stops here — the shell would fail on it
+        // too, and "Cannot be read" is the more useful of the two answers.
         Kind::Unknown => match text::sniff(path) {
             Some(true) => text::load(path),
-            Some(false) => Payload::Failed("Not something this can show".to_owned()),
+            Some(false) => visual::load(path),
             None => Payload::Failed("Cannot be read".to_owned()),
         },
+        Kind::Shell => visual::load(path),
     }
 }
 
