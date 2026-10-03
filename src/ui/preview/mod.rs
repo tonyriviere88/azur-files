@@ -31,6 +31,15 @@
 //! `Layout::diff` means for a picture is the two of them and the difference — see
 //! [`crate::preview::against_head`].
 //!
+//! # And a fifth thing, for a file that got none of them
+//!
+//! A file this program has no decoder for and Windows has no visualizer for used to be the end of the
+//! panel: one sentence, `No preview for a .zip`, and nothing to do about it. Under that sentence there
+//! is now **a button per view** — see [`nothing_to_show`] — because the classifier works from the
+//! *name* and a name is a guess: a `.dat` that is a JPEG, a `.bin` that is a PE image, a log with an
+//! extension nobody has heard of. The guess being overridable is worth more than the guess being
+//! better, and the choice is remembered for that one file only. [`Preview::force`] is the whole of it.
+//!
 //! # What goes on the bar, and what goes first when it will not fit
 //!
 //! Left to right: the name, then a comment, then the size, then the controls — and the controls are
@@ -70,7 +79,8 @@ use crate::preview::{self, Ask, Payload};
 use crate::syntax;
 use crate::theme::Theme;
 use crate::ui::{
-    control_fills, deps, icon_rect, seam, text_center, tool_button, truncated, SEAM, TOOL_SIZE,
+    control_fills, deps, icon_rect, seam, snap, text_center, tool_button, truncated, SEAM,
+    TOOL_SIZE,
 };
 
 mod diff;
@@ -125,6 +135,19 @@ const PAD: f32 = space::S2;
 
 /// The glyph in the bar, saying which of the views this is.
 const GLYPH: f32 = 14.0;
+
+/// The air between the sentence in the middle of an empty canvas and the buttons under it.
+///
+/// Wider than the air inside them, so the two read as a sentence *and* its controls rather than as
+/// four things in a stack. See [`nothing_to_show`].
+const PICK_GAP: f32 = space::S4;
+
+/// What a chooser button keeps at each end, inside its fill.
+///
+/// Twice [`PAD`], which is what makes it look like a button rather than like a word with a rectangle
+/// round it: the bar's icon buttons are square and get their air from being square, and this one has
+/// to earn the same air from a padding.
+const PICK_PAD: f32 = space::S3;
 
 /// The mark beside a count that must not itself be coloured.
 const MARK: f32 = 12.0;
@@ -284,6 +307,22 @@ enum Content {
     Failed(String),
 }
 
+/// A previewer this panel was **told** to use, for the one file it was told about.
+///
+/// What makes it a struct rather than a `Kind` on its own is the path: the classifier is asked about
+/// the selection every frame, so a choice with no file attached to it would silently become a choice
+/// about the next file the keyboard landed on.
+struct Forced {
+    /// The file it is about. A choice made about a `.dat` is not a choice about the `.dat` beside it.
+    path: std::path::PathBuf,
+    /// What to show that file as.
+    kind: preview::Kind,
+    /// And what its *name* asked for, which is what pressing the button again goes back to. Kept
+    /// because [`Preview::follow`] is the only place the file's own kind is ever known, and by the
+    /// time the button is pressed a second time that answer has been overridden for several frames.
+    own: preview::Kind,
+}
+
 /// One folder's preview panel.
 pub struct Preview {
     pub open: bool,
@@ -295,6 +334,8 @@ pub struct Preview {
     awaiting: Option<u64>,
     content: Content,
     find: Find,
+    /// The view a button under `No preview for a .zip` asked for. See [`Preview::force`].
+    forced: Option<Forced>,
 }
 
 impl Default for Preview {
@@ -306,6 +347,7 @@ impl Default for Preview {
             awaiting: None,
             content: Content::Nothing,
             find: Find::default(),
+            forced: None,
         }
     }
 }
@@ -453,6 +495,9 @@ impl Preview {
         self.content = Content::Nothing;
         // The hits belong to a body that is going. The *query* does not — see [`Find`].
         self.find.forget();
+        // And nor does the view somebody picked for the file that is going. See [`Self::force`]: it
+        // is a choice about one file, and this is the panel letting go of that file.
+        self.forced = None;
     }
 
     /// What the keyboard is on, offered every frame while the panel is open.
@@ -464,6 +509,9 @@ impl Preview {
     /// selection's. A panel across the whole window could keep the last thing it was shown; this
     /// one cannot.
     pub fn follow(&mut self, what: Option<Ask>, now: f64) {
+        // A view somebody asked for beats the one the file's name implies — for that file, and for as
+        // long as the keyboard stays on it. See [`Self::force`].
+        let what = what.map(|ask| self.forced_over(ask));
         let Some(ask) = what else {
             // The extension is the useful half of "nothing to show here".
             let ext = self
@@ -488,6 +536,70 @@ impl Preview {
         if self.pending.as_ref().map(|(pending, _)| pending) != Some(&ask) {
             self.pending = Some((ask, now));
         }
+    }
+
+    /// Substitute the view this file was told to use for the one its name implies.
+    ///
+    /// The override is dropped the moment the question is about anything else, which is what keeps
+    /// [`Forced`] from leaking onto the next file: this is called with the classifier's own answer
+    /// every frame, so "anything else" includes the keyboard moving one row down.
+    fn forced_over(&mut self, ask: Ask) -> Ask {
+        let Some(forced) = &self.forced else {
+            return ask;
+        };
+        match ask {
+            Ask::One(path, _) if path == forced.path => Ask::One(path, forced.kind),
+            other => {
+                self.forced = None;
+                other
+            }
+        }
+    }
+
+    /// Show this file as `kind` instead, because a button under `No preview for a .zip` was pressed.
+    ///
+    /// **The classifier works from the name, and a name is a guess.** A `.dat` that is a JPEG, a
+    /// `.bin` that is a PE image, a log called `.trace` — every one of those is a file whose contents
+    /// this panel can show perfectly well and whose extension says nothing. So the guess is
+    /// overridable, and [`Self::forced_over`] is where the override wins.
+    ///
+    /// Only for a single file: a comparison is two pictures and already has its view. Nothing is
+    /// persisted, and the choice dies with the selection — the next `.dat` is a fresh question,
+    /// because a folder of them is exactly as likely to be a folder of something else.
+    fn force(&mut self, kind: preview::Kind) {
+        let Some(Ask::One(path, showing)) = self.of.clone() else {
+            return;
+        };
+        // What this file's name asks for. The kind on show, unless a choice has already displaced it
+        // — then it is the one that choice pushed aside, which [`Forced`] kept for exactly this.
+        let own = match &self.forced {
+            Some(forced) if forced.path == path => forced.own,
+            _ => showing,
+        };
+        // **Pressing the view that is already on takes it off again**, which is what every latched
+        // button in this window does, and what leaves a way back: the shell's answer for a `.docx`
+        // is a page of the document, and somebody who read its bytes as text has to be able to get
+        // the page back without arrowing off the file and onto it again.
+        let held = self
+            .forced
+            .as_ref()
+            .is_some_and(|forced| forced.path == path && forced.kind == kind);
+        let kind = if held { own } else { kind };
+        self.forced = (kind != own).then(|| Forced {
+            path: path.clone(),
+            kind,
+            own,
+        });
+        self.ask_for(Ask::One(path, kind));
+    }
+
+    /// The view this file was told to use, if it was told one. For the button that says so.
+    ///
+    /// Answered `None` for a choice about some *other* file, which the panel can be holding for the
+    /// one frame between the keyboard moving and [`Self::follow`] noticing.
+    fn forced_kind(&self) -> Option<preview::Kind> {
+        let forced = self.forced.as_ref()?;
+        (self.of.as_ref().map(Ask::first) == Some(forced.path.as_path())).then_some(forced.kind)
     }
 
     /// Ask for something at once, with no waiting — the keyboard asked for the panel itself.
@@ -771,6 +883,13 @@ pub fn show(
         return;
     }
 
+    // What the chooser needs, read before the content is borrowed: whether there is a single file for
+    // it to be about — the empty canvas is also what a *folder* gets, and there is nothing to try on
+    // one — and which view has already been picked, so its button can say so.
+    let one = matches!(preview.of, Some(Ask::One(..)));
+    let forced = preview.forced_kind();
+    let mut picked = None;
+
     // The two halves of the panel state that are looked at together, and the only place they are:
     // the search is *about* the content, and the content is what the canvas draws.
     let Preview { content, find, .. } = preview;
@@ -797,16 +916,29 @@ pub fn show(
             } else {
                 format!("No preview for a .{ext}")
             };
-            note(ui, t, canvas, &what);
+            picked = nothing_to_show(ui, t, canvas, pane, &what, one, forced);
         }
         // Nothing is drawn but the word. A read takes tens of milliseconds and a spinner that
         // appears and vanishes inside three frames is worse than nothing.
         Content::Reading => note(ui, t, canvas, "Reading…"),
         Content::Failed(why) => {
             let why = why.clone();
-            note(ui, t, canvas, &why)
+            // **The chooser stays up while a view somebody picked is the thing that failed**, so a
+            // wrong guess is not a dead end: reading a `.zip` as a picture is a reasonable thing to
+            // try and `Format error` is a reasonable answer, and the next thing to try has to be one
+            // click away rather than a trip off the file and back. Not offered for a decoder failing
+            // on a file it was the *right* choice for — a corrupt `.png` has nothing else to be.
+            picked = nothing_to_show(ui, t, canvas, pane, &why, one && forced.is_some(), forced);
         }
         Content::Picture(picture) => pictures(ui, t, canvas, pane, picture),
+        // **A player that will not open is the same dead end**, and it gets the same way out for the
+        // same reason — with one difference: a real video the machine has no codec for is news about
+        // the machine, so the buttons only appear where something asked for this view. See
+        // [`video::show`], which is what would otherwise draw the complaint.
+        Content::Video(player) if forced == Some(preview::Kind::Video) && player.failed().is_some() => {
+            let why = player.failed().unwrap_or_default().to_owned();
+            picked = nothing_to_show(ui, t, canvas, pane, &why, one, forced);
+        }
         Content::Video(player) => video::show(ui, t, canvas, pane, player, layout, out),
         Content::Text(text) => match &text.doc {
             Some(doc) if !layout.markup => document::draw(ui, t, canvas, pane, doc, find),
@@ -819,6 +951,16 @@ pub fn show(
     if find.open && matches!(&*content, Content::Text(_)) {
         find_bar(ui, t, canvas, pane, find);
     }
+
+    // A view was asked for. After the canvas rather than inside it, because this replaces what the
+    // canvas is drawing and the borrow of it ends here.
+    if let Some(kind) = picked {
+        preview.force(kind);
+        // The read is queued rather than done, and this frame is the one the click arrived on: a
+        // request nobody books a frame for is a request that lands the next time something unrelated
+        // wants one. The same reasoning as the debounce's `request_repaint_after`.
+        ui.ctx().request_repaint();
+    }
 }
 
 /// A line of secondary text in the middle of the canvas, for the states that have nothing to draw.
@@ -830,6 +972,204 @@ fn note(ui: &Ui, t: &Theme, rect: Rect, text: &str) {
         t.text.secondary,
         text,
     );
+}
+
+/// The canvas with nothing on it: what happened, and — for a file that could be shown some other way
+/// — a button for each of the ways. Returns the one that was pressed.
+///
+/// **The sentence and the buttons are centred as one block.** The alternative is what the panel did
+/// when the sentence was all there was: put it on the middle of the canvas and hang the buttons under
+/// it, which reads as a line of text with an unrelated piece of furniture below it rather than as a
+/// question and its answers.
+///
+/// `offer` is what decides whether the buttons appear at all — see the call sites, which is where the
+/// three states that reach here differ. Off, this is [`note`] with one extra galley.
+fn nothing_to_show(
+    ui: &mut Ui,
+    t: &Theme,
+    canvas: Rect,
+    pane: PaneId,
+    saying: &str,
+    offer: bool,
+    forced: Option<preview::Kind>,
+) -> Option<preview::Kind> {
+    // Every view this program has a decoder of its own for, in the order it offers them: text first,
+    // because a file with a strange extension is far more often a log or a dump than anything else.
+    //
+    // **`Kind::Shell` is deliberately not here.** It is what a file gets by default and what already
+    // came back with nothing, so a button for it would be a button that changes nothing — the same
+    // argument the bar's toggles make about controls that do nothing. What plays that part is the
+    // pressed button un-pressing: see [`Preview::force`].
+    let offered: [(preview::Kind, &str, &str, azur_egui_theme::icons::Icon<'_>); 4] = [
+        (
+            preview::Kind::Text,
+            "Text",
+            "Read it as text",
+            &crate::icons::document,
+        ),
+        (
+            preview::Kind::Picture,
+            "Picture",
+            "Decode it as an image",
+            &crate::icons::image,
+        ),
+        (
+            preview::Kind::Video,
+            "Video",
+            "Play it",
+            &crate::icons::video,
+        ),
+        (
+            preview::Kind::Binary,
+            "Binary",
+            "Walk what it imports",
+            &crate::icons::executable,
+        ),
+    ];
+
+    let words = ui
+        .painter()
+        .layout_no_wrap(saying.to_owned(), t.fonts.body.clone(), t.text.secondary);
+    let said = words.size();
+
+    // What each button costs, measured before any of them is placed: the row is centred and a narrow
+    // panel wraps it, so where the first one goes depends on all of them.
+    let mut buttons = Vec::new();
+    if offer {
+        for (kind, label, tip, glyph) in offered {
+            // Nothing to play off Windows — there is no engine there, and `kind_of` never answers
+            // `Video` either. See [`crate::preview::Kind::Video`].
+            if kind == preview::Kind::Video && !cfg!(windows) {
+                continue;
+            }
+            buttons.push((kind, label, tip, glyph, chip_width(ui.painter(), t, label)));
+        }
+    }
+
+    // Packed into as many lines as it takes. A panel dragged down to `MIN_PANEL_W` is narrower than
+    // the four of them in a row, and the alternative to wrapping is a button that is off the edge of
+    // the panel — or the whole row shrinking away, which is the one thing that must not happen: the
+    // buttons are the only way out of this state.
+    let room = canvas.width() - PAD * 2.0;
+    let mut lines: Vec<(std::ops::Range<usize>, f32)> = Vec::new();
+    for (at, button) in buttons.iter().enumerate() {
+        match lines.last_mut() {
+            Some((line, width)) if *width + PAD + button.4 <= room => {
+                line.end = at + 1;
+                *width += PAD + button.4;
+            }
+            _ => lines.push((at..at + 1, button.4)),
+        }
+    }
+
+    // And then the block, which is what the middle of the canvas is measured against.
+    let stack = lines.len() as f32 * TOOL_SIZE + (lines.len() as f32 - 1.0).max(0.0) * PAD;
+    let mut block = said.y;
+    if !lines.is_empty() && block + PICK_GAP + stack <= canvas.height() {
+        block += PICK_GAP + stack;
+    } else {
+        // A canvas too short for both keeps the sentence: it is the half that says what happened, and
+        // the buttons drawn over the panel's own edge would be worse than the buttons being missing.
+        // Reachable — a panel along the bottom is only `MIN_PANEL_H` tall at its smallest.
+        lines.clear();
+    }
+    let top = canvas.center().y - block * 0.5;
+    ui.painter().galley(
+        snap(ui.painter(), pos2(canvas.center().x - said.x * 0.5, top)),
+        words,
+        Color32::PLACEHOLDER,
+    );
+
+    let mut picked = None;
+    let mut y = top + said.y + PICK_GAP;
+    for (line, width) in lines {
+        let mut x = canvas.center().x - width * 0.5;
+        for (kind, label, tip, glyph, wide) in &buttons[line] {
+            let at = Rect::from_min_size(pos2(x.round(), y.round()), vec2(*wide, TOOL_SIZE));
+            if chip(
+                ui,
+                t,
+                at,
+                // By label rather than by index, so wrapping the row does not renumber the buttons
+                // under a pointer that is resting on one.
+                Id::new(("preview-as", pane, label)),
+                *glyph,
+                label,
+                tip,
+                forced == Some(*kind),
+            )
+            .clicked()
+            {
+                picked = Some(*kind);
+            }
+            x += wide + PAD;
+        }
+        y += TOOL_SIZE + PAD;
+    }
+    picked
+}
+
+/// How wide one of [`nothing_to_show`]'s buttons is: its glyph, its word, and the air around them.
+fn chip_width(painter: &egui::Painter, t: &Theme, label: &str) -> f32 {
+    let words = painter.layout_no_wrap(label.to_owned(), t.fonts.caption.clone(), t.text.primary);
+    (PICK_PAD * 2.0 + GLYPH + PAD + words.size().x).ceil()
+}
+
+/// One view to try, as a button with its glyph and its name in it.
+///
+/// [`tool_button`] with a word beside the glyph and one difference in the states: **a fill at rest**.
+/// Those buttons sit in a row of chrome where being in the row is what says they are buttons, and this
+/// one stands on its own in the middle of an empty canvas — where an icon and a word with nothing
+/// behind them are an icon and a word. `bg.control` is the design system's answer for a button on
+/// `bg.layer`, which is the surface the panel painted.
+///
+/// A separate function rather than an argument to that one because its whole shape is a square whose
+/// side is its icon's: the two would share the four lines of fill arithmetic below and nothing else.
+#[allow(clippy::too_many_arguments)]
+fn chip(
+    ui: &mut Ui,
+    t: &Theme,
+    rect: Rect,
+    id: Id,
+    glyph: azur_egui_theme::icons::Icon<'_>,
+    label: &str,
+    tooltip: &str,
+    active: bool,
+) -> Response {
+    let response = ui.interact(rect, id, Sense::click());
+    let corner = CornerRadius::same(radius::SMALL);
+    let (hover, pressed) = control_fills(t, t.bg.layer);
+    let latched = azur_egui_theme::desktop::latched(t, response.hovered());
+    let fill = if active {
+        latched.0
+    } else if response.is_pointer_button_down_on() {
+        pressed
+    } else if response.hovered() {
+        hover
+    } else {
+        t.bg.control
+    };
+    ui.painter().rect_filled(rect, corner, fill);
+
+    // The glyph and the word on one line — the glyph centred on its own ink by `azur::icons`, and the
+    // word put on the baseline that matches it. `crate::ui::deps` has the reasoning at length; the
+    // short version is that a galley centred in the same box sits a point and a half lower.
+    let ink = if active { latched.1 } else { t.text.primary };
+    let box_rect = icon_rect(rect, rect.left() + PICK_PAD, GLYPH);
+    glyph(ui.painter(), box_rect, ink);
+    let baseline = ink_baseline(ui.painter(), &t.fonts.caption, rect.top(), rect.height());
+    let words = ui
+        .painter()
+        .layout_no_wrap(label.to_owned(), t.fonts.caption.clone(), ink);
+    galley_on_baseline(ui.painter(), box_rect.right() + PAD, baseline, words);
+
+    if response.has_focus() {
+        azur_icons::focus_ring_inset(ui.painter(), rect, corner, t.stroke.focus);
+    }
+    if !tooltip.is_empty() {
+        azur_egui_theme::components::tooltip(response.clone(), tooltip);
+    }
+    response
 }
 
 /// The panel's edge, which is also how much room it has.

@@ -1429,6 +1429,106 @@ fn a_video_the_machine_cannot_play_says_so_in_the_panel() {
     crate::sandbox::remove(&dir);
 }
 
+/// **A file with no preview offers the views it could have, and one of them is a real click away.**
+///
+/// The whole chain, driven the way a person drives it: the classifier answering `Shell` for an
+/// extension nobody has heard of, the shell having no visualizer either, the panel drawing
+/// `No preview for a .nosuchthing` with a button under it, the button being where the pointer can
+/// reach it, and the pick coming back as a read of the same file as something else.
+///
+/// **The button's rect is asked of the frame that drew it** rather than derived here. Both halves
+/// matter: a test that recomputed the layout would agree with a wrong layout, and one that hard-coded
+/// a y would fail the next time the sentence changed length. `read_response` is what the harness's own
+/// `hovers` uses, so this is the same question — did the pointer land on the widget — asked once.
+#[test]
+fn a_file_with_no_preview_offers_to_show_it_another_way() {
+    let dir = crate::sandbox::fresh("preview-chooser");
+    // An extension no machine has a thumbnail provider for, holding something that is plainly text.
+    // Both halves are the fixture: the name is what makes the panel say it has nothing, and the
+    // contents are what makes `Text` the right answer once it is asked for.
+    let odd = dir.join("notes.nosuchthing");
+    let body = "the bytes of this file are words after all";
+    std::fs::write(&odd, body).expect("a file in the sandbox");
+
+    let mut h = Harness::new();
+    let pane = h.app.panes[0].id;
+    h.app.perform(
+        &h.ctx.clone(),
+        Action::Navigate {
+            pane,
+            path: dir.clone(),
+        },
+    );
+    h.settle();
+
+    let at = {
+        let tab = h.app.panes[0].tab();
+        let listing = tab.dir.as_ref().expect("the listing arrived");
+        tab.order
+            .iter()
+            .position(|&i| listing.name(i as usize) == "notes.nosuchthing")
+            .expect("the fixture is in its own folder's listing")
+    };
+    h.app.panes[0].tab_mut().select_only(at);
+    h.app.panes[0].tab_mut().preview.open = true;
+    h.time += crate::ui::preview::FOLLOW_DELAY * 2.0;
+    for attempt in 0..400 {
+        h.frame(Vec::new());
+        if !h.app.preview_pending() && attempt > 2 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    assert!(!h.app.preview_pending(), "the read never came back");
+
+    let texts: Vec<String> = h.texts().into_iter().map(|(_, text)| text).collect();
+    assert!(
+        texts.iter().any(|text| text == "No preview for a .nosuchthing"),
+        "the panel is not in the state this test is about: {texts:?}"
+    );
+
+    // The button, where the frame put it.
+    let button = Id::new(("preview-as", pane, "Text"));
+    let rect = h
+        .ctx
+        .read_response(button)
+        .map(|response| response.rect)
+        .expect("no `Text` button was drawn under the sentence");
+    assert!(
+        crate::ui::preview::split(pane_body(&h), true, h.app.preview)
+            .1
+            .expect("the panel has room")
+            .contains(rect.center()),
+        "the button was drawn outside the panel it belongs to"
+    );
+    h.click_at(rect.center());
+
+    // And the file comes back as text: the read is a fresh one for the same path, so this waits the
+    // way the first one did. No `FOLLOW_DELAY` — a click is not a selection and has nothing to settle.
+    for _ in 0..400 {
+        h.frame(Vec::new());
+        if !h.app.preview_pending() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    let texts: Vec<String> = h.texts().into_iter().map(|(_, text)| text).collect();
+    assert!(
+        texts.iter().any(|text| text.contains(body)),
+        "the pick did not become a text view of the file: {texts:?}"
+    );
+    // The sentence is gone with it, which is the half that says the panel *replaced* what it was
+    // showing rather than drawing a view under it.
+    assert!(
+        !texts
+            .iter()
+            .any(|text| text.starts_with("No preview for")),
+        "the panel is showing the file as text and still saying it cannot: {texts:?}"
+    );
+
+    crate::sandbox::remove(&dir);
+}
+
 /// **A screen filled by a video that is not there comes back by itself.**
 ///
 /// The way out that nobody presses, and it is not a corner case: closing the panel, switching tabs and

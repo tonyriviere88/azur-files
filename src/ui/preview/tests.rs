@@ -386,6 +386,82 @@ fn the_panel_waits_for_the_selection_to_stop_moving() {
     assert_eq!(it.settle(70.0).0, Some(one));
 }
 
+/// **A view somebody picked for a file beats the classifier, and only for that file.**
+///
+/// The button under `No preview for a .zip` is one call to [`Preview::force`], and everything that
+/// makes it behave is in the *lifetime* of what it sets rather than in the click: the panel is offered
+/// the classifier's own answer again on every frame, and the file's name has not changed, so an
+/// override that did not know which file it was about would silently follow the keyboard down the
+/// folder. That is the assertion here, along with the two ways it ends.
+#[test]
+fn a_view_picked_for_one_file_does_not_follow_the_keyboard() {
+    let mut it = Preview {
+        open: true,
+        ..Default::default()
+    };
+    let path = PathBuf::from(r"C:\stuff\thing.nosuchthing");
+    // What the classifier says about it, offered every frame: on Windows anything with an extension
+    // nobody has heard of is the shell's to draw, and the shell had nothing.
+    let named = Ask::One(path.clone(), preview::Kind::Shell);
+
+    it.follow(Some(named.clone()), 10.0);
+    let (ready, _) = it.settle(10.0 + FOLLOW_DELAY * 2.0);
+    assert_eq!(ready.as_ref(), Some(&named));
+    it.asked(named.clone(), 1);
+    it.content = Content::Unsupported("nosuchthing".to_owned());
+
+    // The button. Asked for at once — a click is not a selection and has nothing to debounce.
+    it.force(preview::Kind::Text);
+    assert_eq!(it.forced_kind(), Some(preview::Kind::Text));
+    let (ready, left) = it.settle(10.0);
+    assert_eq!(
+        ready,
+        Some(Ask::One(path.clone(), preview::Kind::Text)),
+        "the pick did not become a read"
+    );
+    assert_eq!(left, None, "the pick waited for the debounce");
+    it.asked(Ask::One(path.clone(), preview::Kind::Text), 2);
+
+    // And it holds while the keyboard stays put, against the classifier saying `Shell` every frame.
+    // Without this the panel would ask for the file again the moment the answer landed, for ever.
+    it.follow(Some(named.clone()), 20.0);
+    assert_eq!(it.settle(21.0), (None, None), "it asked for the file again");
+    assert_eq!(it.forced_kind(), Some(preview::Kind::Text));
+
+    // **Pressing it again takes it off**, back to the kind the name asks for.
+    it.force(preview::Kind::Text);
+    assert_eq!(it.forced_kind(), None);
+    assert_eq!(it.settle(22.0).0, Some(named.clone()));
+    it.asked(named.clone(), 3);
+
+    // A different view is a different pick rather than a toggle.
+    it.force(preview::Kind::Picture);
+    it.force(preview::Kind::Binary);
+    assert_eq!(it.forced_kind(), Some(preview::Kind::Binary));
+    assert_eq!(
+        it.settle(23.0).0,
+        Some(Ask::One(path.clone(), preview::Kind::Binary))
+    );
+    it.asked(Ask::One(path.clone(), preview::Kind::Binary), 4);
+
+    // **And the keyboard moving on drops it.** The next file is a fresh question: a folder of `.dat`
+    // is exactly as likely to be a folder of something else, and a panel that read the second one as
+    // a binary because the first one was would be a panel that had learnt the wrong thing.
+    let next = Ask::One(
+        PathBuf::from(r"C:\stuff\other.nosuchthing"),
+        preview::Kind::Shell,
+    );
+    it.follow(Some(next.clone()), 30.0);
+    assert_eq!(it.forced_kind(), None, "the pick followed the keyboard");
+    assert_eq!(it.settle(30.0 + FOLLOW_DELAY * 2.0).0, Some(next.clone()));
+    it.asked(next, 5);
+
+    // As does the panel letting go of the file altogether — a folder selected, or `Ctrl+P`.
+    it.force(preview::Kind::Text);
+    it.follow(None, 40.0);
+    assert!(it.forced_kind().is_none() && it.forced.is_none());
+}
+
 /// Closing lets go of what the panel was holding, and a duplicated tab does not inherit it.
 #[test]
 fn a_shut_panel_holds_nothing() {
