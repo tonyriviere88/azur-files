@@ -344,11 +344,7 @@ fn main() -> eframe::Result {
         // to. Off, as `azur_egui_theme::render` documents for every Azur window.
         dithering: false,
         // `wgpu`, on the backend the design system pins. See `reporting_wgpu`.
-        renderer: if std::env::var_os("AZUR_GLOW").is_some() {
-            eframe::Renderer::Glow
-        } else {
-            eframe::Renderer::Wgpu
-        },
+        renderer: eframe::Renderer::Wgpu,
         wgpu_options: reporting_wgpu(),
         ..Default::default()
     };
@@ -421,10 +417,11 @@ fn reachable(_position: &[f32; 2]) -> bool {
 ///
 /// **`wgpu`, not `glow`.** `egui_glow`'s painter leaks a couple of kilobytes for every draw
 /// call, every frame: scrolling one folder grew this process by 7 MB a second and never gave
-/// any of it back. It is not this program's bug — `examples/spin.rs` is forty lines of eframe
-/// that reproduces it, and the same forty lines are flat under `wgpu`. Batching the icons and
+/// any of it back. It is not this program's bug — `examples/spin.rs` was forty lines of eframe
+/// that reproduced it, and the same forty lines were flat under `wgpu`. Batching the icons and
 /// putting them in one atlas cut it from 7 MB/s to 1.16, because it cut the draw calls; only
-/// changing backend removes it.
+/// changing backend removes it. `glow` is no longer compiled in at all, so that example now
+/// measures the backend this program actually ships.
 ///
 /// **On Vulkan, and that one is not this program's call** — it is
 /// [`azur_egui_theme::render`], because a design system built on one-pixel strokes has a stake
@@ -450,12 +447,23 @@ fn reachable(_position: &[f32; 2]) -> bool {
 /// backend. A file listing that is soft whenever nobody is touching it is a file listing that is
 /// soft nearly all the time, so the memory goes.
 ///
-/// Three escape hatches, all named for the design system rather than for this program, because
-/// all three Azur applications now read the same ones. `AZUR_GLOW=1` goes back to the leaking
-/// painter, for a machine where `wgpu` will not start at all. `AZUR_BACKEND=gl` or `=d3d12`
-/// changes backend without leaving `wgpu`. `AZUR_ADAPTER=low` renders on the integrated GPU,
-/// which is around 100 MB lighter and whose correctness depends on how the machine is wired —
-/// see [`azur_egui_theme::render`] before taking it.
+/// One escape hatch left, named for the design system rather than for this program because all
+/// three Azur applications read the same one. `AZUR_ADAPTER=low` renders on the integrated GPU,
+/// which is around 100 MB lighter and whose correctness depends on how the machine is wired — see
+/// [`azur_egui_theme::render`] before taking it.
+///
+/// There used to be three, and what happened to the other two is a single decision applied twice.
+/// `AZUR_GLOW=1` went back to the leaking painter for a machine where `wgpu` would not start at
+/// all; `AZUR_BACKEND=gl` and `=d3d12` changed backend without leaving `wgpu`. Between them they
+/// were 181,476 bytes of `egui_glow`, `glutin` and `glow`, 531,456 for wgpu's own GL backend, and
+/// 407,396 for `wgpu-hal::dx12` and the HLSL writer it needs — 1.1 MB of every copy of this
+/// program, standing by for a machine nobody has reported. All three are gone, and the table above
+/// is why: there was only ever one row worth presenting on.
+///
+/// **What that costs is worth knowing before it happens.** A machine with no working Vulkan driver
+/// no longer has anything to fall back to, and this window will not open on it. See
+/// [`azur_egui_theme::render`], which also explains why a name wgpu cannot serve is worse than no
+/// name at all.
 fn reporting_wgpu() -> eframe::egui_wgpu::WgpuConfiguration {
     use eframe::egui_wgpu::{wgpu, SurfaceErrorAction};
 
@@ -679,7 +687,7 @@ impl eframe::App for Window {
         raw_input.events.extend(self.app.take_injected());
     }
 
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+    fn on_exit(&mut self) {
         // Anything copied here is still only a pointer into this process until it is rendered,
         // so a copy taken a moment ago has to be made real before the process that owns it goes
         // away. See `shell::flush`.

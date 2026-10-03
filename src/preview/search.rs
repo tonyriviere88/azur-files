@@ -66,6 +66,14 @@ pub fn hits(body: &str, search: &Search) -> Hits {
     } else {
         search.text.clone()
     };
+    // **Unicode mode stays on, and it is the `unicode-case` and `unicode-perl` features in
+    // `Cargo.toml` that pay for it.** Turning it off would drop a quarter of a megabyte of Unicode
+    // tables from the executable, and it was measured and rejected: `.unicode(false)` makes `.`
+    // match a *byte* rather than a character, which can split a UTF-8 sequence, so `regex` refuses
+    // to build the pattern at all rather than hand back a `Regex` that could slice a string in
+    // half. A find bar where `.` is an error is not a find bar. Leaving the mode on and dropping
+    // the features instead only moves the failure: `\d`, `\w`, `\s` and `\b` stop compiling, and
+    // the whole-word toggle above wraps every pattern in `\b`.
     let Ok(re) = regex::RegexBuilder::new(&pattern)
         .case_insensitive(!search.case)
         .size_limit(PATTERN_LIMIT)

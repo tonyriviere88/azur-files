@@ -1693,8 +1693,10 @@ eight steps of the file's own, because the panel's size follows a splitter drag 
 of textures reallocated per frame of a drag would make it the most expensive gesture in the window.
 
 Zero-copy is possible — a shared handle out of D3D11, imported into wgpu — and is deliberately not
-done: it can only work on one backend, and it would cost the `AZUR_GLOW=1` escape hatch that
-[the renderer](#the-one-that-was-not-ours) keeps. An egui texture works on both.
+done, though the reason has narrowed: it can only work on one backend, which used to cost the
+`AZUR_BACKEND` escape hatches that [the renderer](#the-one-that-was-not-ours) kept. Those are gone
+and Vulkan is the only backend now, so what is left against it is that a `wgpu-hal` import is
+`unsafe`, pins a wgpu version, and saves a readback that has never shown up in a frame time.
 
 **The device is never given back**, and that is deliberate rather than sloppy. Releasing a D3D11 device
 Media Foundation has been decoding on hangs inside the display driver — measured, with a debugger on
@@ -4380,15 +4382,27 @@ screenshot, all of them antialiasing, measured flat across a full minute of cont
 The fourth column is what moved it to Vulkan, and
 [the blur that no screenshot could show](#the-blur-that-no-screenshot-could-show) is that story.
 
-Three escape hatches, all named for the design system rather than for this program, because all
-three Azur applications read the same ones — the choices live in `azur_egui_theme::render` and
-what they protect is the token set:
+One escape hatch, named for the design system rather than for this program, because all three Azur
+applications read the same one — the choice lives in `azur_egui_theme::render` and what it protects
+is the token set:
 
 | | what it does | why it exists |
 | --- | --- | --- |
-| `AZUR_GLOW=1` | back to the leaking OpenGL painter | a machine where `wgpu` will not start at all |
-| `AZUR_BACKEND=gl` \| `d3d12` | another backend, still `wgpu` | a window that comes back from sleep unable to draw — an OpenGL context is the most fragile of the three across a suspend or a GPU switch — and telling this program's fault from a driver's, since a window soft on Vulkan too is soft for another reason |
 | `AZUR_ADAPTER=low` | render on the integrated GPU | about 100 MB lighter, and lossless *here*; whether it is on another machine depends on how the displays are wired, so it is opt-in |
+
+There were three, and what happened to the other two is one decision applied twice. `AZUR_GLOW=1`
+went back to the leaking OpenGL painter for a machine where `wgpu` would not start at all, and
+`AZUR_BACKEND=gl` or `=d3d12` changed backend without leaving `wgpu`. Nobody ever reported the
+machine any of them was for, and a size audit priced the standby: 181,476 bytes of `egui_glow`,
+`glutin` and `glow`, 531,456 for wgpu's own GL backend, and 407,396 for `wgpu-hal::dx12` and the
+HLSL writer it needs — 1.1 MB of every copy of this program, held against a driver nobody has met,
+for the two rows of the table above that lose the hairlines anyway.
+
+All three are gone, and the names with them: a name wgpu cannot serve is worse than no name, since
+`Backends::DX12` with no D3D12 compiled finds no adapter and the window simply never opens. Both
+names now fall through to Vulkan and say so on the console. **The cost is real and worth stating: a
+machine with no working Vulkan driver will not open this window at all.** That is the trade — the
+table is the argument that there was only ever one row worth shipping.
 
 Whether it *is* that, this program now says rather than leaves you guessing. wgpu reports a lost
 device exactly once and only to somebody who asked, so it is asked: a lost device, a lost

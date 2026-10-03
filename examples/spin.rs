@@ -3,11 +3,16 @@
 //! Scrolling this program's listing grows the process by megabytes a second, at a rate
 //! proportional to how much is on screen, with every cache in it pinned and the Rust heap
 //! flat. That points at the paint path — but "the paint path" includes egui's tessellator,
-//! eframe's `glow` backend and the GL driver, none of which this program wrote.
+//! eframe's backend and the graphics driver, none of which this program wrote.
 //!
 //! So this is the control: an eframe window with no part of this application in it, drawing a
 //! comparable amount of text and asking for a repaint every frame. If it grows too, the
 //! answer is not in `src/`.
+//!
+//! This is what settled it: the same forty lines grew under `glow` and were flat under `wgpu`,
+//! which is why the application ships `wgpu` and why `glow` is no longer compiled in at all. The
+//! `SPIN_GLOW=1` half of the experiment is therefore gone with it — reproducing that half again
+//! means putting eframe's `glow` feature back in `Cargo.toml` first.
 //!
 //! ```text
 //! cargo run --release --example spin
@@ -19,11 +24,7 @@ fn main() -> eframe::Result {
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default().with_inner_size([900.0, 700.0]),
             multisampling: 0,
-            renderer: if std::env::var_os("SPIN_WGPU").is_some() {
-                eframe::Renderer::Wgpu
-            } else {
-                eframe::Renderer::Glow
-            },
+            renderer: eframe::Renderer::Wgpu,
             ..Default::default()
         },
         Box::new(|_| Ok(Box::<Spin>::default())),

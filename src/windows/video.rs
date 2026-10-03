@@ -31,10 +31,14 @@
 //!
 //! # What is deliberately not here
 //!
-//! **No zero-copy into wgpu.** The shared-handle route — an `NT` handle out of D3D11, imported
-//! into wgpu's Vulkan device through `create_texture_from_hal` — would save the readback and cost
-//! the `AZUR_GLOW=1` escape hatch, since it can only work on one backend. An egui texture works
-//! on both, which is the trade `azur_egui_theme::render` has already made everywhere else.
+//! **No zero-copy into wgpu, though the reason has weakened.** The shared-handle route — an `NT`
+//! handle out of D3D11, imported into wgpu's Vulkan device through `create_texture_from_hal` —
+//! would save the readback, and what ruled it out was that it can only work on one backend while
+//! this program could be asked for three. It cannot any more: `azur_egui_theme::render` now
+//! compiles Vulkan alone, so "only works on Vulkan" has stopped being a disqualification. What is
+//! left against it is narrower and still enough for now — a `wgpu-hal` import is `unsafe`, ties
+//! this module to a wgpu version, and the readback it saves has never shown up in a frame time.
+//! Worth revisiting if it ever does.
 
 use std::cell::Cell;
 use std::sync::mpsc::{channel, Receiver, Sender};

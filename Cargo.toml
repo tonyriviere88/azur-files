@@ -66,25 +66,50 @@ resvg = { version = "0.48", default-features = false }
 # and the one-pass and backtracking engines — leaving the PikeVM, which is slower per byte and a
 # fraction of the code. Which is the right trade here and only here: the haystack is one text
 # preview, capped at `preview::TEXT_CAP` (1 MiB), where the plain (non-regex) search does not use
-# this crate at all. `unicode-case` is what makes the match-case toggle mean anything outside ASCII,
-# and `unicode-perl` is `\d`, `\w` and `\s` — the three escapes anybody typing a pattern will reach
-# for first.
+# this crate at all.
+#
+# `unicode-case` is what makes the match-case toggle mean anything outside ASCII, and `unicode-perl`
+# is `\d`, `\w` and `\s` — the three escapes anybody typing a pattern will reach for first.
+#
+# Both stay, and that was measured rather than assumed. They are 179,612 bytes of Unicode tables in
+# `regex-syntax` alone and 249,856 of this executable, which is the largest single saving left in
+# the binary — and there is no way to take it that a find bar survives. Dropping them and asking
+# the engine for ASCII semantics with `.unicode(false)` makes `.` match a byte instead of a
+# character, so `regex` refuses to compile any pattern containing one rather than risk slicing a
+# string mid-sequence: `preview::tests::a_regex_is_a_pattern_and_a_literal_is_not` catches it.
+# Dropping them and leaving Unicode mode on only moves the breakage to `\d`, `\w`, `\s` and `\b`,
+# which stop compiling — and the whole-word toggle wraps every pattern in `\b`. See
+# `preview::search`, which documents the same conclusion from the other side.
 regex = { version = "1", default-features = false, features = [
     "std",
     "unicode-case",
     "unicode-perl",
 ] }
 
-# `wgpu`, with `glow` kept as an escape hatch — `main::reporting_wgpu` has the measurements. In
-# short: `egui_glow`'s painter leaks a couple of kilobytes per draw call per frame, which
-# scrolling turns into 7 MB a second, and `wgpu` does not. Both are compiled in so `AZUR_GLOW=1`
-# can go back on a machine where this one misbehaves. Which backend `wgpu` presents on is
+# `wgpu`, and only `wgpu` — `main::reporting_wgpu` has the measurements. In short: `egui_glow`'s
+# painter leaks a couple of kilobytes per draw call per frame, which scrolling turns into 7 MB a
+# second, and `wgpu` does not. `glow` used to be compiled in beside it so `AZUR_GLOW=1` could go
+# back on a machine where this one misbehaves; it is gone, because keeping a second renderer for a
+# machine nobody has seen cost 181,476 bytes and the escape hatch that matters — a different
+# *backend* — is `AZUR_BACKEND=d3d12`, which stays. Which backend `wgpu` presents on is
 # `azur_egui_theme::render`'s decision, not this crate's: the compositor resamples OpenGL and
 # D3D12 windows, and a design system specified in one-pixel strokes does not survive that.
+#
+# **`wgpu_no_default_features`, not `wgpu`.** They sound like opposites and are not: this is the
+# feature that brings in `dep:wgpu`, `dep:egui-wgpu` and `dep:pollster` *without* also enabling
+# `egui-wgpu/default`, which is what eframe's own `wgpu` feature does — and `egui-wgpu/default`
+# contains `wgpu/default`, which is every backend wgpu has. Taking eframe's `wgpu` feature here
+# would silently re-enable all of them and undo the feature set `azur-egui-theme` pins, which is
+# where the backend decision belongs. Measured: 531,456 bytes of this executable.
+#
+# `default_fonts` is gone too. It embedded four TrueType files — NotoEmoji, Ubuntu-Light,
+# emoji-icon-font and Hack, 1,414,020 bytes, the largest data objects in the binary — as the
+# fallback behind whatever `azur_egui_theme::fonts` loads from the system. This program is
+# Windows-only in practice and Segoe UI and Consolas are always there, so the fallback was paying
+# 7% of the executable to cover a font read that does not fail. What it also covered was emoji,
+# which Segoe UI does not carry: a filename with one in it now draws a missing-glyph box.
 eframe = { version = "0.35", default-features = false, features = [
-    "wgpu",
-    "glow",
-    "default_fonts",
+    "wgpu_no_default_features",
     "x11",
     "wayland",
 ] }
@@ -143,6 +168,16 @@ windows = { version = "0.62", features = [
     # live. See `shell::over_network`.
     "Win32_System_WindowsProgramming",
     "Win32_System_IO",
+    # `SECURITY_ATTRIBUTES`, which is the last parameter of `CreateFileW`, `CreateEventW` and
+    # `CreateJobObjectW` — so without this feature those three are `configured out` and
+    # `windows/watch.rs`, `windows/com.rs` and `windows/job.rs` do not compile.
+    #
+    # It belonged here from the start and was missing: it arrived through `wgpu-hal`, whose D3D12
+    # backend wanted it, and this crate compiled on the strength of a feature a *graphics* backend
+    # happened to enable on the shared `windows` crate. Dropping D3D12 for its 407,396 bytes is
+    # what surfaced that — feature unification makes this class of accident silent until the crate
+    # that was carrying you leaves.
+    "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_UI_Controls",
     "Win32_UI_Input_KeyboardAndMouse",
@@ -189,9 +224,42 @@ windows-sys = { version = "0.61", features = [
 
 [profile.release]
 opt-level = 3
-lto = "thin"
+# `fat`, not `thin`, and the difference is 1,163,264 bytes of executable — measured on this crate,
+# not quoted from anywhere. It costs build time and only build time: 3m37s against 1m25s from cold.
+# A release build is not what anybody waits on here — `cargo claude-*` and `cargo build` are, and
+# both are still `dev` — so the trade is a slower `cargo deploy` for an executable an eighth
+# smaller.
+lto = "fat"
 codegen-units = 1
 strip = true
+
+# **`z` for the code that runs once.** `opt-level = 3` is what makes a listing of 100k entries
+# feel like a listing, and every crate below is one that speed cannot reach: a shader is
+# translated once at pipeline creation, a pattern is compiled once per keystroke of a find, an SVG
+# is parsed once per preview. None of them is on the frame path, and optimising them for speed
+# buys nothing anybody can perceive.
+#
+# Worth 1,098,240 bytes together, which is within 65,024 of what `lto = "fat"` is worth and costs
+# 30 seconds of build time rather than two minutes. The two are very nearly additive: 2,205,696
+# together, 12.3% of the executable this landed on.
+#
+# `naga` is the whole prize — 2,057,000 bytes of WGSL parser, SPIR-V writer and IR validator that
+# run while the window is still cloaked. `tiny-skia` and `resvg` are deliberately *not* here: they
+# rasterise, which is real per-pixel work, and `image`'s codecs are not here for the same reason.
+[profile.release.package.naga]
+opt-level = "z"
+[profile.release.package.regex-syntax]
+opt-level = "z"
+[profile.release.package.regex-automata]
+opt-level = "z"
+[profile.release.package.usvg]
+opt-level = "z"
+[profile.release.package.roxmltree]
+opt-level = "z"
+[profile.release.package.simplecss]
+opt-level = "z"
+[profile.release.package.svgtypes]
+opt-level = "z"
 
 # A file explorer is only worth using at speed, and an unoptimised `sort_by` over
 # 100k entries is visible. Optimise the dependencies even in a debug build.
