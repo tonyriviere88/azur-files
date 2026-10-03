@@ -38,7 +38,11 @@
 //! is now **a button per view** — see [`nothing_to_show`] — because the classifier works from the
 //! *name* and a name is a guess: a `.dat` that is a JPEG, a `.bin` that is a PE image, a log with an
 //! extension nobody has heard of. The guess being overridable is worth more than the guess being
-//! better, and the choice is remembered for that one file only. [`Preview::force`] is the whole of it.
+//! better. [`Slot::force`] is the whole of it.
+//!
+//! **A choice that works is then remembered for the extension**, until the window closes: a `.toto`
+//! that played as a video makes the next `.toto` open as a video too, in every pane. See
+//! [`Remembered`] for why it stops there and is never written to the settings.
 //!
 //! # What goes on the bar, and what goes first when it will not fit
 //!
@@ -344,6 +348,52 @@ struct Forced {
     /// because [`Preview::follow`] is the only place the file's own kind is ever known, and by the
     /// time the button is pressed a second time that answer has been overridden for several frames.
     own: preview::Kind,
+    /// The file's extension, lowercased: what [`Remembered`] files the choice under once it works.
+    /// Worked out once here rather than from `path` on every frame the choice is checked.
+    ext: String,
+}
+
+/// The views picked for an extension that turned out to work, for as long as the window is open.
+///
+/// **Per extension, because that is what the classifier gets wrong.** A name nobody has heard of is
+/// the same guess for every file carrying it, so a `.toto` that played as a video says something
+/// about the next `.toto` — where a choice about one `.png` that failed to decode would not.
+///
+/// **Only a choice that worked**: a picture, a text body, a walked graph, or a video that showed a
+/// frame — see [`Slot::working`]. A wrong guess that came back `Format error` teaches nothing. And
+/// only for a file the classifier had no answer for ([`preview::Kind::Shell`] or
+/// [`preview::Kind::Unknown`]) and that has an extension: a file with none has nothing to share.
+///
+/// **Never written to the settings.** A folder of `.dat` is a folder of *something*, and what the
+/// last folder of them was is a guess about this one; a guess that outlived the window would go on
+/// being made against files it was never about, with nothing on screen saying why. Pressing the
+/// view's button again on any file of that extension forgets it — see [`Slot::force`].
+///
+/// One per window, owned by [`crate::app::App`] and lent to each slot as it follows the selection.
+#[derive(Default)]
+pub struct Remembered(std::collections::HashMap<String, preview::Kind>);
+
+impl Remembered {
+    /// The choice to apply to this file, if its extension has one and its name has no answer of
+    /// its own.
+    fn over(&self, ask: &Ask) -> Option<Forced> {
+        let Ask::One(path, own @ (preview::Kind::Shell | preview::Kind::Unknown)) = ask else {
+            return None;
+        };
+        // Asked every frame of every file with no answer, so the allocation below is only paid
+        // once something has been remembered.
+        if self.0.is_empty() {
+            return None;
+        }
+        let ext = preview::extension_of(path);
+        let kind = *self.0.get(&ext)?;
+        Some(Forced {
+            path: path.clone(),
+            kind,
+            own: *own,
+            ext,
+        })
+    }
 }
 
 /// Which tile a widget belongs to: the pane it is in, and the tile's place in the panel.
@@ -406,6 +456,17 @@ struct Slot {
     find: Find,
     /// The view a button under `No preview for a .zip` asked for. See [`Slot::force`].
     forced: Option<Forced>,
+    /// An extension whose remembered view was just taken off by pressing its button again, for
+    /// [`Slot::follow`] to forget. Carried rather than done on the spot because the press is drawn
+    /// and [`Remembered`] is not the drawing's to change.
+    unpicked: Option<String>,
+    /// The header's view-as button is down: the canvas shows the chooser instead of the file.
+    ///
+    /// **Over any view, not only a failed one**, because a view that *worked* can still be the wrong
+    /// one — a `.toto` the sniffer read as text that is really a picture, or one [`Remembered`] opened
+    /// as a video that is not. Without this the chooser is only reachable from a dead end. Let go by
+    /// a pick, by the button again, and by the tile moving to another file.
+    choosing: bool,
 }
 
 /// One folder's preview panel: up to [`MOST`] files, tiled.
@@ -579,6 +640,7 @@ impl Slot {
         // And nor does the view somebody picked for the file that is going. See [`Self::force`]: it
         // is a choice about one file, and this is the panel letting go of that file.
         self.forced = None;
+        self.choosing = false;
     }
 
     /// What the keyboard is on, offered every frame while the panel is open.
@@ -589,10 +651,12 @@ impl Slot {
     /// about, so a picture left next to a different selection would be read as being that
     /// selection's. A panel across the whole window could keep the last thing it was shown; this
     /// one cannot.
-    pub fn follow(&mut self, what: Option<Ask>, now: f64) {
+    pub fn follow(&mut self, what: Option<Ask>, now: f64, remembered: &mut Remembered) {
+        // What the last frame's choice turned out to be worth, before it is applied to anything.
+        self.remember(remembered);
         // A view somebody asked for beats the one the file's name implies — for that file, and for as
         // long as the keyboard stays on it. See [`Self::force`].
-        let what = what.map(|ask| self.forced_over(ask));
+        let what = what.map(|ask| self.forced_over(ask, remembered));
         let Some(ask) = what else {
             // The extension is the useful half of "nothing to show here".
             let ext = self
@@ -623,16 +687,57 @@ impl Slot {
     ///
     /// The override is dropped the moment the question is about anything else, which is what keeps
     /// [`Forced`] from leaking onto the next file: this is called with the classifier's own answer
-    /// every frame, so "anything else" includes the keyboard moving one row down.
-    fn forced_over(&mut self, ask: Ask) -> Ask {
-        let Some(forced) = &self.forced else {
-            return ask;
-        };
+    /// every frame, so "anything else" includes the keyboard moving one row down. What replaces it is
+    /// whatever [`Remembered`] holds for the new file's extension, set up as though its button had
+    /// been pressed — so the chooser shows it pressed, and pressing it takes it off.
+    fn forced_over(&mut self, ask: Ask, remembered: &Remembered) -> Ask {
         match ask {
-            Ask::One(path, _) if path == forced.path => Ask::One(path, forced.kind),
+            Ask::One(path, _) if self.forced.as_ref().is_some_and(|forced| forced.path == path) => {
+                let kind = self.forced.as_ref().expect("just matched").kind;
+                Ask::One(path, kind)
+            }
             other => {
-                self.forced = None;
-                other
+                self.forced = remembered.over(&other);
+                match &self.forced {
+                    Some(forced) => Ask::One(forced.path.clone(), forced.kind),
+                    None => other,
+                }
+            }
+        }
+    }
+
+    /// File a picked view under its extension once it has shown something, and forget one that was
+    /// taken off. See [`Remembered`].
+    fn remember(&mut self, remembered: &mut Remembered) {
+        if let Some(ext) = self.unpicked.take() {
+            remembered.0.remove(&ext);
+        }
+        let Some(forced) = &self.forced else {
+            return;
+        };
+        // **The content has to be the answer to the pick**, not the one before it: between the press
+        // and the read being asked for, `of` and `content` are still the previous view's, and a
+        // picture on show while Text was being asked for is not Text working.
+        let answered = self.pending.is_none()
+            && self.awaiting.is_none()
+            && matches!(&self.of, Some(Ask::One(path, kind))
+                if *path == forced.path && *kind == forced.kind);
+        if !answered || forced.ext.is_empty() || !self.working() {
+            return;
+        }
+        if remembered.0.get(&forced.ext) != Some(&forced.kind) {
+            remembered.0.insert(forced.ext.clone(), forced.kind);
+        }
+    }
+
+    /// Whether what is on show is something rather than a complaint. A video counts once it has a
+    /// frame, or is a sound track with no picture to wait for — see [`preview::Player::opening`].
+    fn working(&self) -> bool {
+        match &self.content {
+            Content::Picture(_) | Content::Text(_) | Content::Binary(_) => true,
+            Content::Video(player) => !player.opening() && player.failed().is_none(),
+            Content::Nothing | Content::Unsupported(_) | Content::Reading | Content::Failed(_) => {
+                false
             }
         }
     }
@@ -644,9 +749,9 @@ impl Slot {
     /// this panel can show perfectly well and whose extension says nothing. So the guess is
     /// overridable, and [`Self::forced_over`] is where the override wins.
     ///
-    /// Only for a single file: a comparison is two pictures and already has its view. Nothing is
-    /// persisted, and the choice dies with the selection — the next `.dat` is a fresh question,
-    /// because a folder of them is exactly as likely to be a folder of something else.
+    /// Only for a single file: a comparison is two pictures and already has its view. The choice
+    /// dies with the selection unless it works, and then it outlives it for that extension until the
+    /// window closes — see [`Remembered`]. Nothing is written to the settings.
     fn force(&mut self, kind: preview::Kind) {
         let Some(Ask::One(path, showing)) = self.of.clone() else {
             return;
@@ -666,12 +771,66 @@ impl Slot {
             .as_ref()
             .is_some_and(|forced| forced.path == path && forced.kind == kind);
         let kind = if held { own } else { kind };
+        let ext = preview::extension_of(&path);
+        // Taken off is taken off for the extension too, or the next frame would put it straight back.
+        if held {
+            self.unpicked = Some(ext.clone());
+        }
         self.forced = (kind != own).then(|| Forced {
             path: path.clone(),
             kind,
             own,
+            ext,
         });
+        // A pick is the answer the chooser was up for, wherever it was pressed.
+        self.choosing = false;
         self.ask_now(Ask::One(path, kind));
+    }
+
+    /// Whether the header's view-as button belongs on this tile: one file, whose *name* had no answer
+    /// — [`preview::Kind::Shell`] or [`preview::Kind::Unknown`] — and a canvas not already showing the
+    /// chooser.
+    ///
+    /// **Only for those**, because they are the files whose view was a guess to begin with. A `.png`
+    /// is shown as a picture because it is one, and a button on every preview offering to read it as
+    /// a binary would be a control for a question nobody has.
+    ///
+    /// And not while the canvas is the chooser anyway — `No preview for a .zip`, or a picked view that
+    /// failed — where the button would open what is already open. Still offered while `choosing`, so
+    /// the same button puts the file back.
+    fn choosable(&self) -> bool {
+        let Some(Ask::One(path, showing)) = &self.of else {
+            return false;
+        };
+        let own = match &self.forced {
+            Some(forced) if forced.path == *path => forced.own,
+            _ => *showing,
+        };
+        if !matches!(own, preview::Kind::Shell | preview::Kind::Unknown) {
+            return false;
+        }
+        if self.choosing {
+            return true;
+        }
+        let picked = self.forced_kind().is_some();
+        match &self.content {
+            Content::Unsupported(_) => false,
+            Content::Failed(_) => !picked,
+            Content::Video(player) => {
+                !(self.forced_kind() == Some(preview::Kind::Video) && player.failed().is_some())
+            }
+            _ => true,
+        }
+    }
+
+    /// Put the chooser up over the file, or take it down. See [`Slot::choosing`].
+    fn choose(&mut self) {
+        self.choosing = !self.choosing;
+        // Nothing ticks a player whose canvas is not drawn, so one left running under the chooser
+        // would go on being heard with nothing on screen to stop it. Paused, as an unseen tab is.
+        if self.choosing {
+            self.out_of_sight();
+        }
     }
 
     /// The view this file was told to use, if it was told one. For the button that says so.
@@ -707,6 +866,7 @@ impl Slot {
     /// A read has been started for what [`Self::settle`] handed back.
     pub fn asked(&mut self, ask: Ask, token: u64) {
         self.of = Some(ask);
+        self.choosing = false;
         self.awaiting = Some(token);
         self.content = Content::Reading;
     }
@@ -718,6 +878,7 @@ impl Slot {
     /// was there before, which is the whole of the teardown for arrowing from one clip to the next.
     pub fn plays(&mut self, ask: Ask, player: preview::Player) {
         self.of = Some(ask);
+        self.choosing = false;
         self.awaiting = None;
         self.content = Content::Video(player);
     }
@@ -729,6 +890,7 @@ impl Slot {
     /// the canvas would be.
     pub fn refused(&mut self, ask: Ask, why: String) {
         self.of = Some(ask);
+        self.choosing = false;
         self.awaiting = None;
         self.content = Content::Failed(why);
     }
@@ -948,14 +1110,14 @@ impl Preview {
     /// [`Ask`] holds one or two `PathBuf`s; borrowing the list meant cloning all of them on every
     /// frame to hand `follow` something it owns, and in the steady state — the selection has not
     /// changed, which is nearly always — every one of those clones was dropped again unused.
-    pub fn follow_all(&mut self, asks: Vec<Ask>, now: f64) {
+    pub fn follow_all(&mut self, asks: Vec<Ask>, now: f64, remembered: &mut Remembered) {
         self.fit(asks.len());
         if asks.is_empty() {
-            self.slots[0].follow(None, now);
+            self.slots[0].follow(None, now, remembered);
             return;
         }
         for (slot, ask) in self.slots.iter_mut().zip(asks) {
-            slot.follow(Some(ask), now);
+            slot.follow(Some(ask), now, remembered);
         }
     }
 
@@ -1057,9 +1219,11 @@ impl Preview {
     /// Follow one file, and settle one file. For the tests about the *debounce*, which is per slot:
     /// the wait belongs to a tile and one tile is the shape those tests are written against. The
     /// panel itself always goes through [`Self::follow_all`] and [`Self::settle_all`].
+    ///
+    /// With nothing remembered from one call to the next, so what these tests pick stays theirs.
     #[cfg(test)]
     pub fn follow(&mut self, what: Option<Ask>, now: f64) {
-        self.follow_all(what.into_iter().collect(), now);
+        self.follow_all(what.into_iter().collect(), now, &mut Remembered::default());
     }
 
     #[cfg(test)]
@@ -1477,6 +1641,13 @@ fn tile_content(
     let one = matches!(slot.of, Some(Ask::One(..)));
     let forced = slot.forced_kind();
     let mut picked = None;
+
+    // **The header's view-as button, down**: the chooser in place of whatever the file is showing,
+    // and nothing else — no find bar over it, since the text it would search is not on screen. A view
+    // that was picked is the pressed button, and pressing it again goes back to what the name gets.
+    if slot.choosing {
+        return nothing_to_show(ui, t, canvas, spot, "Show this file as", one, forced);
+    }
 
     // The two halves of the slot that are looked at together, and the only place they are: the search
     // is *about* the content, and the content is what the canvas draws.

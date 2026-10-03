@@ -78,10 +78,39 @@ pub(super) fn header(
     }
     let mut right = close.left() - PAD;
 
+    // **Which view this is, as a question**, immediately inside close and ahead of every view's own
+    // controls: it is about the file rather than about how one view reads it, and it is the one
+    // control that stays put as the view underneath it changes. Only for a file whose name had no
+    // answer — see [`Slot::choosable`].
+    if slot.choosable() {
+        let at = button(right);
+        if tool_button(
+            ui,
+            t,
+            at,
+            Id::new(("preview-view-as", pane)),
+            &crate::icons::view_as,
+            "Show this file as something else",
+            true,
+            slot.choosing,
+            surface,
+        )
+        .clicked()
+        {
+            slot.choose();
+        }
+        right = at.left() - PAD;
+    }
+
     // The view's own toggle, immediately inside the close button: showing both sources of a
     // comparison, or numbering the lines of a text file. Never both — they belong to different
     // views — so they share the slot.
+    //
+    // **None of them while the chooser is up**, nor find or zoom below: each acts on a canvas that is
+    // not on screen, and a button whose effect cannot be seen is one that seems not to work.
+    let viewing = !slot.choosing;
     match &mut slot.content {
+        _ if !viewing => {}
         Content::Picture(picture) => {
             // **A picture git has moved on from gets the same toggle a text file does**, and it is
             // the same preference behind it: one answer to "show me what changed", whatever kind of
@@ -286,7 +315,7 @@ pub(super) fn header(
     // A button and not a shortcut. `Ctrl+F` is the pane's filter box and has been since long before
     // this panel existed — a preview that took it would be taking the keyboard away from the window
     // it lives in, for a bar that only exists while one kind of file is selected.
-    if matches!(slot.content, Content::Text(_)) {
+    if viewing && matches!(slot.content, Content::Text(_)) {
         let at = button(right);
         if tool_button(
             ui,
@@ -317,7 +346,7 @@ pub(super) fn header(
     // side is never this narrow — `MIN_PANEL_W` is sized from `ACTIONS` for exactly this reason —
     // but a panel along the bottom is as wide as its pane, and a pane can be squeezed.
     if let Content::Picture(picture) = &mut slot.content {
-        if right - rect.left() > ACTIONS {
+        if viewing && right - rect.left() > ACTIONS {
             for (glyph, tip, step) in [
                 (
                     &azur_icons::plus as azur_egui_theme::icons::Icon<'_>,

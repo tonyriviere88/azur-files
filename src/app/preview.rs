@@ -100,7 +100,7 @@ impl App {
             // The blend is only on offer while the selection is the two pictures it was asked about,
             // so this is where a latch that has outlived them is dropped.
             tab.preview.allow_compare(can_compare);
-            tab.preview.follow_all(asks, now);
+            tab.preview.follow_all(asks, now, &mut self.preview_as);
             let (ready, left) = tab.preview.settle_all(now);
             // Read out of the panel before the loop below borrows `self` again for the muting
             // decision, which is the whole reason it is a local.

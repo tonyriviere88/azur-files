@@ -563,6 +563,169 @@ fn a_view_picked_for_one_file_does_not_follow_the_keyboard() {
     assert!(it.focused().forced_kind().is_none() && it.focused().forced.is_none());
 }
 
+/// **A view picked for an extension nobody has heard of, once it works, is the view for the next file
+/// with that extension** — and only once it works, and only until its button is pressed again.
+#[test]
+fn a_view_that_worked_is_remembered_for_the_extension() {
+    let mut it = Preview {
+        open: true,
+        ..Default::default()
+    };
+    let mut remembered = Remembered::default();
+    let one = PathBuf::from(r"C:\stuff\one.toto");
+    let two = PathBuf::from(r"C:\stuff\two.toto");
+    let shown = |path: &PathBuf| Ask::One(path.clone(), preview::Kind::Shell);
+    let body = || {
+        Content::Text(Text {
+            body: "hello".to_owned(),
+            spans: Vec::new(),
+            doc: None,
+            truncated: false,
+            code: true,
+            lang: syntax::Lang::None,
+            changes: None,
+            view: None,
+            view_for: None,
+        })
+    };
+    // What [`Slot::arrived`] does with an answer, minus the answer having to be a real one.
+    let land = |it: &mut Preview, content: Content| {
+        it.focused_mut().awaiting = None;
+        it.focused_mut().content = content;
+    };
+
+    // The first file, which the shell had nothing for.
+    it.follow_all(vec![shown(&one)], 10.0, &mut remembered);
+    it.asked(0, shown(&one), 1);
+    land(&mut it, Content::Unsupported("toto".to_owned()));
+
+    // Picked, and it failed: nothing learnt. The next file is still a fresh question.
+    it.focused_mut().force(preview::Kind::Picture);
+    it.settle(10.0);
+    it.asked(0, Ask::One(one.clone(), preview::Kind::Picture), 2);
+    land(&mut it, Content::Failed("Format error".to_owned()));
+    it.follow_all(vec![shown(&one)], 11.0, &mut remembered);
+    it.follow_all(vec![shown(&two)], 12.0, &mut remembered);
+    assert_eq!(it.focused().forced_kind(), None, "a failed pick was remembered");
+
+    // Back on the first, picked as text, and it worked.
+    it.follow_all(vec![shown(&one)], 13.0, &mut remembered);
+    it.asked(0, shown(&one), 3);
+    it.focused_mut().force(preview::Kind::Text);
+    it.settle(13.0);
+    it.asked(0, Ask::One(one.clone(), preview::Kind::Text), 4);
+    land(&mut it, body());
+    it.follow_all(vec![shown(&one)], 14.0, &mut remembered);
+
+    // **The next `.toto` is asked for as text** without anybody pressing anything, and the chooser
+    // would show Text pressed.
+    it.follow_all(vec![shown(&two)], 15.0, &mut remembered);
+    assert_eq!(it.focused().forced_kind(), None, "not on show yet");
+    assert_eq!(
+        it.settle(15.0 + FOLLOW_DELAY * 2.0).0,
+        Some(Ask::One(two.clone(), preview::Kind::Text))
+    );
+    it.asked(0, Ask::One(two.clone(), preview::Kind::Text), 5);
+    assert_eq!(it.focused().forced_kind(), Some(preview::Kind::Text));
+
+    // A different panel — another pane, another tab — gets the same answer from the same window.
+    let mut other = Preview {
+        open: true,
+        ..Default::default()
+    };
+    other.follow_all(vec![shown(&one)], 16.0, &mut remembered);
+    assert_eq!(
+        other.settle(16.0 + FOLLOW_DELAY * 2.0).0,
+        Some(Ask::One(one.clone(), preview::Kind::Text))
+    );
+
+    // A different extension is not affected.
+    let elsewhere = PathBuf::from(r"C:\stuff\three.titi");
+    it.follow_all(vec![shown(&elsewhere)], 17.0, &mut remembered);
+    assert_eq!(it.settle(17.0 + FOLLOW_DELAY * 2.0).0, Some(shown(&elsewhere)));
+
+    // **Pressing it again forgets it**, for this file and for the extension — otherwise the next frame
+    // would put it straight back and there would be no way to the shell's answer.
+    it.follow_all(vec![shown(&two)], 20.0, &mut remembered);
+    it.settle(20.0 + FOLLOW_DELAY * 2.0);
+    it.asked(0, Ask::One(two.clone(), preview::Kind::Text), 6);
+    land(&mut it, body());
+    it.focused_mut().force(preview::Kind::Text);
+    assert_eq!(it.settle(21.0).0, Some(shown(&two)));
+    it.asked(0, shown(&two), 7);
+    it.follow_all(vec![shown(&two)], 22.0, &mut remembered);
+    assert_eq!(it.settle(23.0), (None, None), "the forgotten view came back");
+    assert_eq!(it.focused().forced_kind(), None);
+    other.follow_all(vec![shown(&two)], 30.0, &mut remembered);
+    assert_eq!(other.settle(30.0 + FOLLOW_DELAY * 2.0).0, Some(shown(&two)));
+}
+
+/// **The header's view-as button is offered over a view that worked**, for a file whose name had no
+/// answer, and nowhere it would do nothing. Pressing it puts the chooser up; a pick, or the tile moving
+/// on, takes it down again.
+#[test]
+fn a_view_that_worked_can_be_changed_from_the_header() {
+    let mut it = Preview {
+        open: true,
+        ..Default::default()
+    };
+    let odd = PathBuf::from(r"C:\stuff\notes.toto");
+    let named = Ask::One(odd.clone(), preview::Kind::Shell);
+    let text = || {
+        Content::Text(Text {
+            body: "words".to_owned(),
+            spans: Vec::new(),
+            doc: None,
+            truncated: false,
+            code: true,
+            lang: syntax::Lang::None,
+            changes: None,
+            view: None,
+            view_for: None,
+        })
+    };
+
+    // The sniffer read it as text. The name had no answer, so the button is there.
+    it.asked(0, named.clone(), 1);
+    it.focused_mut().awaiting = None;
+    it.focused_mut().content = text();
+    assert!(it.focused().choosable(), "no way to show it as anything else");
+
+    it.focused_mut().choose();
+    assert!(it.focused().choosing);
+    assert!(it.focused().choosable(), "the button has to stay to put the file back");
+    it.focused_mut().choose();
+    assert!(!it.focused().choosing, "the button again did not put the file back");
+
+    // A pick takes the chooser down, and becomes the read.
+    it.focused_mut().choose();
+    it.focused_mut().force(preview::Kind::Picture);
+    assert!(!it.focused().choosing, "a pick left the chooser up");
+    assert_eq!(it.settle(1.0).0, Some(Ask::One(odd.clone(), preview::Kind::Picture)));
+
+    // As does the tile getting an answer about anything at all — the keyboard moving on included.
+    it.focused_mut().choose();
+    it.asked(0, Ask::One(odd.clone(), preview::Kind::Picture), 2);
+    assert!(!it.focused().choosing, "the chooser outlived the file it was about");
+
+    // **Not where the canvas is the chooser already**: a pick that failed offers it in place.
+    it.focused_mut().awaiting = None;
+    it.focused_mut().content = Content::Failed("Format error".to_owned());
+    assert!(!it.focused().choosable(), "a second way to open what is already open");
+    // Nor over `No preview for a .toto`, for the same reason.
+    it.asked(0, named.clone(), 3);
+    it.focused_mut().forced = None;
+    it.focused_mut().content = Content::Unsupported("toto".to_owned());
+    assert!(!it.focused().choosable());
+
+    // **And not for a file whose name is the answer.** A `.png` is a picture because it is one.
+    let png = Ask::One(PathBuf::from(r"C:\pics\a.png"), preview::Kind::Picture);
+    it.asked(0, png, 4);
+    it.focused_mut().awaiting = None;
+    it.focused_mut().content = text();
+    assert!(!it.focused().choosable(), "offered over a file its name already answers");
+}
+
 /// Closing lets go of what the panel was holding, and a duplicated tab does not inherit it.
 #[test]
 fn a_shut_panel_holds_nothing() {
@@ -1073,11 +1236,11 @@ fn the_panel_holds_one_slot_per_file_up_to_four() {
     let ask = |name: &str| Ask::One(PathBuf::from(format!(r"C:\pics\{name}.png")), preview::Kind::Picture);
 
     // A panel with nothing selected still has one tile to say so in.
-    it.follow_all(Vec::new(), 0.0);
+    it.follow_all(Vec::new(), 0.0, &mut Remembered::default());
     assert_eq!(it.count(), 1);
 
     let four = [ask("a"), ask("b"), ask("c"), ask("d")];
-    it.follow_all(four.to_vec(), 10.0);
+    it.follow_all(four.to_vec(), 10.0, &mut Remembered::default());
     assert_eq!(it.count(), 4);
 
     // Every tile settles on its own file, and each is a request of its own.
@@ -1095,12 +1258,12 @@ fn the_panel_holds_one_slot_per_file_up_to_four() {
 
     // Past four the panel does not grow: a select-all is not a request for forty previews.
     let five: Vec<Ask> = "abcde".chars().map(|c| ask(&c.to_string())).collect();
-    it.follow_all(five.clone(), 20.0);
+    it.follow_all(five.clone(), 20.0, &mut Remembered::default());
     assert_eq!(it.count(), MOST);
 
     // And the focus comes back with the selection when it shrinks under it.
     it.focus = 3;
-    it.follow_all(four[..2].to_vec(), 30.0);
+    it.follow_all(four[..2].to_vec(), 30.0, &mut Remembered::default());
     assert_eq!(it.count(), 2);
     assert_eq!(it.focused_at(), 1, "the focus stayed off the end of the slots");
 
@@ -1123,7 +1286,7 @@ fn a_payload_lands_in_the_tile_that_asked_for_it() {
     };
     let ask = |name: &str| Ask::One(PathBuf::from(format!(r"C:\pics\{name}.txt")), preview::Kind::Text);
     let two = [ask("first"), ask("second")];
-    it.follow_all(two.to_vec(), 0.0);
+    it.follow_all(two.to_vec(), 0.0, &mut Remembered::default());
     let (ready, _) = it.settle_all(FOLLOW_DELAY * 2.0);
     assert_eq!(ready.len(), 2);
     it.asked(0, two[0].clone(), 11);
@@ -1138,7 +1301,7 @@ fn a_payload_lands_in_the_tile_that_asked_for_it() {
     // The second tile's answer is what the second tile shows.
     assert_eq!(it.showing_all(), vec![two[0].first(), two[1].first()]);
     // And a request whose tile has gone is dropped rather than landing on a survivor.
-    it.follow_all(two[..1].to_vec(), 100.0);
+    it.follow_all(two[..1].to_vec(), 100.0, &mut Remembered::default());
     it.asked(1, two[1].clone(), 44);
     assert!(!it.wants(44), "a request for a tile that no longer exists was kept");
 }

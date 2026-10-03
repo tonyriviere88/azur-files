@@ -219,6 +219,10 @@ pub struct App {
     /// Where every pane's preview panel goes and how much room it takes: the window's
     /// preference, one of it. Whether one is *showing* is the tab's — see `Tab::preview`.
     preview: crate::ui::preview::Layout,
+    /// The view each unrecognised extension turned out to preview as, once somebody picked one that
+    /// worked. For as long as the window is open and deliberately no longer — see
+    /// [`crate::ui::preview::Remembered`], and not in [`Self::settings`].
+    preview_as: crate::ui::preview::Remembered,
     /// How much of a pane the console panel takes, as a fraction. The window's preference for the
     /// same reason the preview's share is: one number, whichever pane you drag it in.
     console_share: f32,
@@ -644,6 +648,7 @@ impl App {
             sidebar_width: config.sidebar_width,
             sidebar_shown: config.sidebar_shown,
             preview: config.preview,
+            preview_as: Default::default(),
             console_share: config.console_share,
             console_shell: config.console_shell,
             flat_mode: config.flat_mode,

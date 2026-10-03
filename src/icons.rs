@@ -157,6 +157,26 @@ pub fn file(p: &Painter, rect: Rect, color: Color32) {
     page(p, &Grid::new(rect), color);
 }
 
+/// Two arrows passing each other — *show this file as something else*.
+///
+/// It was first drawn as a page with the two arrows inside it, and at the bar's 14 pixels the arrows
+/// were a smudge in a rectangle: there is no room inside a page outline for anything that has to be
+/// read as a direction. So it is the swap on its own, at the full stroke, with open chevrons for heads
+/// — the same weight as the find glass and the close cross it sits between.
+///
+/// The ink spans 2.5..13.5 across and 2..14 down, symmetric about the centre of the grid, so centring
+/// the box centres the drawing — see [`pencil`].
+pub fn view_as(p: &Painter, rect: Rect, color: Color32) {
+    let g = Grid::new(rect);
+    let stroke = g.stroke(color);
+    // Right along the top.
+    path(p, vec![g.at(2.5, 5.0), g.at(13.0, 5.0)], stroke);
+    path(p, vec![g.at(10.5, 2.0), g.at(13.5, 5.0), g.at(10.5, 8.0)], stroke);
+    // Left along the bottom.
+    path(p, vec![g.at(13.5, 11.0), g.at(3.0, 11.0)], stroke);
+    path(p, vec![g.at(5.5, 8.0), g.at(2.5, 11.0), g.at(5.5, 14.0)], stroke);
+}
+
 /// A document: a page with writing on it.
 pub fn document(p: &Painter, rect: Rect, color: Color32) {
     let g = Grid::new(rect);
