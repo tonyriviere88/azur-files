@@ -367,10 +367,10 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn a_shortcut_to_a_folder_resolves_to_the_folder_and_one_to_a_file_does_not() {
-        let root = std::env::temp_dir().join(format!("yafe-lnk-{}", std::process::id()));
+        let root = crate::sandbox::dir("lnk");
         let folder = root.join("somewhere");
         let file = root.join("something.txt");
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
         std::fs::create_dir_all(&folder).expect("a directory in the temp folder");
         std::fs::write(&file, b"x").expect("a file in it");
 
@@ -401,7 +401,7 @@ mod tests {
         // in `folder_target` is for.
         assert_eq!(folder_target(&file), None);
         assert_eq!(folder_target(&folder), None);
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
     }
 
     /// A real reparse point, where the machine allows one to be made.
@@ -413,10 +413,10 @@ mod tests {
     /// no business doing; they are read by the same one syscall.
     #[test]
     fn a_symlink_reports_where_it_leads() {
-        let root = std::env::temp_dir().join(format!("yafe-link-{}", std::process::id()));
+        let root = crate::sandbox::dir("link");
         let target = root.join("target");
         let link = root.join("link");
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
         std::fs::create_dir_all(&target).expect("a directory in the temp folder");
 
         #[cfg(windows)]
@@ -426,7 +426,7 @@ mod tests {
 
         if made.is_err() {
             println!("no privilege to create a symlink here; skipping");
-            let _ = std::fs::remove_dir_all(&root);
+            crate::sandbox::remove(&root);
             return;
         }
         let got = reparse_target(&link).expect("a symlink has a target");
@@ -444,7 +444,7 @@ mod tests {
             kind_of(dir.ext(row), dir.entries[row].is_link()),
             Some(Kind::Reparse)
         );
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
     }
 
     /// A junction's target comes back without the prefix that gets a path past the parser.

@@ -237,9 +237,9 @@ mod tests {
     #[test]
     #[cfg(windows)]
     fn a_typed_path_is_normalised_on_the_way_in() {
-        let temp = std::env::temp_dir();
+        let temp = crate::sandbox::dir("typed-path");
         let slashed = temp.to_string_lossy().replace('\\', "/");
-        let resolved = resolve_input(&slashed).expect("the temp directory exists");
+        let resolved = resolve_input(&slashed).expect("the sandbox directory exists");
         assert!(
             !resolved.to_string_lossy().contains('/'),
             "`{}` still has a forward slash in it",

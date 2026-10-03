@@ -219,6 +219,25 @@ impl Operations {
             return;
         }
 
+        // Past the guard above, so this job is about to become real work by the shell's hand.
+        // `FOR_REAL` says a test *meant* to do that; it says nothing about *where*, and where is
+        // the part that cost this repository its working tree. Every path the job names, not just
+        // the folders it will re-read: a delete names the items, and it is the items that go.
+        #[cfg(test)]
+        {
+            let mut paths = job.touches();
+            match &job {
+                Job::Copy { items, into } | Job::Move { items, into } => {
+                    paths.extend(items.iter().cloned());
+                    paths.push(into.clone());
+                }
+                Job::Delete { items, .. } => paths.extend(items.iter().cloned()),
+                Job::Rename { item, .. } => paths.push(item.clone()),
+                Job::NewFolder { parent, .. } => paths.push(parent.clone()),
+            }
+            crate::sandbox::guard(&format!("the shell job {:?}", job.describe()), &paths);
+        }
+
         // Taken here and dropped on the job's own thread, so that a directory a drop claimed
         // into goes when the job that consumes it is done — and goes there rather than on the
         // UI thread, because removing a staged archive is real work. Built after the guard
@@ -757,9 +776,8 @@ mod tests {
         // asking anything, so the same call can be watched through the gate shut and open.
         #[cfg(windows)]
         {
-            let mut root = std::env::temp_dir();
-            root.push(format!("yafe-guard-{}", std::process::id()));
-            let _ = std::fs::remove_dir_all(&root);
+            let root = crate::sandbox::dir("guard");
+            crate::sandbox::remove(&root);
             std::fs::create_dir_all(&root).expect("temp dir");
 
             let make = |ops: &mut Operations| {
@@ -791,7 +809,7 @@ mod tests {
                      testing nothing"
                 );
             }
-            let _ = std::fs::remove_dir_all(&root);
+            crate::sandbox::remove(&root);
         }
 
         assert!(
@@ -815,8 +833,7 @@ mod tests {
         let _serialised = crate::shell::serialised();
         crate::shell::init();
 
-        let mut root = std::env::temp_dir();
-        root.push(format!("yafe-ops-{}", std::process::id()));
+        let root = crate::sandbox::dir("ops");
         let from = root.join("from");
         let into = root.join("into");
         std::fs::create_dir_all(&from).expect("temp dir");
@@ -878,7 +895,7 @@ mod tests {
         }
         assert!(into.join("made").is_dir(), "the folder should have been made");
 
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
     }
 
 
@@ -905,7 +922,7 @@ mod tests {
             .join("target")
             .join("sandbox")
             .join("dialogs");
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
         let from = root.join("from");
         let into = root.join("into");
         std::fs::create_dir_all(&from).expect("sandbox");
@@ -968,7 +985,7 @@ mod tests {
             println!("  {what}: finished as {outcome:?}");
         }
 
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
     }
 
     /// Run a job on its own thread, closing any window the shell raises, and report both
@@ -1105,7 +1122,7 @@ mod tests {
             );
         }
 
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
     }
 
     #[test]
@@ -1164,7 +1181,7 @@ mod tests {
             "the shell named the copy `{copy}`, which does not look like Explorer's"
         );
 
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
     }
 
     /// A fresh, empty folder under `target/sandbox`, which is expendable.
@@ -1176,7 +1193,7 @@ mod tests {
             .join("target")
             .join("sandbox")
             .join(name);
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
         std::fs::create_dir_all(&root).expect("sandbox");
         root
     }

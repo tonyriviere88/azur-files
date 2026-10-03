@@ -6656,8 +6656,26 @@ mod click_tests {
 
         let mut h = Harness::new();
         let pane = h.app.panes[0].id;
-        // `src`, for the reason the list-mode test uses it: the crate root has `target` in it.
-        let sources = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+        // A tree of its own, in the sandbox, rather than this crate's `src`.
+        //
+        // It used to read `src`, and that made the test a hostage of the source layout: adding one
+        // file at the top of `src` moved every row down by one and pushed `ui\filelist.rs` off the
+        // bottom of the window, so a test about *indentation* failed because of a file it never
+        // named. Eight rows, shaped like what it asserts, and nothing outside the sandbox.
+        let sources = crate::sandbox::fresh("tree");
+        for folder in ["fs", "ui"] {
+            std::fs::create_dir_all(sources.join(folder)).expect("a fixture folder");
+        }
+        for file in [
+            "fs/dir.rs",
+            "fs/sort.rs",
+            "ui/filelist.rs",
+            "ui/menu.rs",
+            "main.rs",
+            "theme.rs",
+        ] {
+            std::fs::write(sources.join(file), b"// a row\n").expect("a fixture file");
+        }
         let ctx = h.ctx.clone();
         h.app.perform(
             &ctx,
@@ -6971,14 +6989,14 @@ mod click_tests {
     #[cfg(windows)]
     #[test]
     fn opening_a_folder_shortcut_stays_in_this_window() {
-        let root = std::env::temp_dir().join(format!("yafe-open-lnk-{}", std::process::id()));
+        let root = crate::sandbox::dir("open-lnk");
         let folder = root.join("somewhere");
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
         std::fs::create_dir_all(&folder).expect("a directory in the temp folder");
         let link = root.join("somewhere.lnk");
         if !crate::shell::links::write_shortcut(&link, &folder) {
             println!("the shell would not write a shortcut here; skipping");
-            let _ = std::fs::remove_dir_all(&root);
+            crate::sandbox::remove(&root);
             return;
         }
 
@@ -7059,7 +7077,7 @@ mod click_tests {
         );
         assert_eq!(h.app.panes[0].tab().path, folder);
 
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
     }
 
     /// **The filter waits for the typing to stop, and each keystroke restarts the wait.**
@@ -7758,8 +7776,8 @@ mod click_tests {
     /// an unrelated word.
     #[test]
     fn a_markdown_file_is_rendered_and_the_toggle_shows_its_source() {
-        let root = std::env::temp_dir().join(format!("yafe-md-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = crate::sandbox::dir("md");
+        crate::sandbox::remove(&root);
         std::fs::create_dir_all(&root).expect("a directory in the temp folder");
         std::fs::write(
             root.join("notes.md"),
@@ -7896,7 +7914,7 @@ mod click_tests {
             "the line-number toggle did not come back over the markup"
         );
 
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
     }
 
     /// **The preview button's context menu**: show or hide, and then the three positions.
@@ -7982,8 +8000,8 @@ mod click_tests {
     /// that is where epaint puts it: a text selection is vertices in the row it belongs to.
     #[test]
     fn a_double_click_in_the_preview_selects_the_word_under_it() {
-        let root = std::env::temp_dir().join(format!("yafe-sel-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = crate::sandbox::dir("sel");
+        crate::sandbox::remove(&root);
         std::fs::create_dir_all(&root).unwrap();
         let path = root.join("notes.txt");
         std::fs::write(&path, "alpha beta gamma\ndelta epsilon zeta\n").unwrap();
@@ -7999,16 +8017,23 @@ mod click_tests {
         );
         h.settle();
         h.app.open_preview_here();
-        for _ in 0..40 {
+        // Waited for by asking whether it is on screen yet, not by spending a fixed 200 ms and
+        // hoping. The file is read on a worker thread, so the fixed budget was a race that this
+        // test won on its own and lost in the suite, where the rest of it has the machine busy.
+        let mut body_at = None;
+        for _ in 0..240 {
             h.frame(Vec::new());
+            body_at = h
+                .texts()
+                .into_iter()
+                .find(|(_, text)| text.starts_with("alpha beta gamma"));
+            if body_at.is_some() {
+                break;
+            }
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         // Where the body was drawn, found by its own text rather than by arithmetic over the panel.
-        let (at, body) = h
-            .texts()
-            .into_iter()
-            .find(|(_, text)| text.starts_with("alpha beta gamma"))
-            .expect("the body is not on screen");
+        let (at, body) = body_at.expect("the body is not on screen");
         let over = at + vec2(20.0, 8.0);
         h.frame(vec![Event::PointerMoved(over)]);
         assert_eq!(
@@ -8071,7 +8096,7 @@ mod click_tests {
                 "the selection was gone {after} frame(s) later"
             );
         }
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
     }
 
     /// **A row says what it is when the pointer rests on it**, including what git says.
@@ -8083,8 +8108,8 @@ mod click_tests {
     #[test]
     #[cfg(windows)]
     fn a_row_says_what_it_is_when_the_pointer_rests_on_it() {
-        let root = std::env::temp_dir().join(format!("yafe-tip-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = crate::sandbox::dir("tip");
+        crate::sandbox::remove(&root);
         std::fs::create_dir_all(&root).unwrap();
         // A size with a grouping comma in it, and a name longer than a narrow Name column.
         std::fs::write(root.join("a-rather-long-name.txt"), vec![b'x'; 9605]).unwrap();
@@ -8199,7 +8224,7 @@ mod click_tests {
                 .any(|text| text.contains("9,605 bytes")),
             "the tooltip is up while the button is down: {while_down:?}"
         );
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
 
         // ---- And what git says, which is a line the row can only draw as a badge ----
         //
@@ -8306,8 +8331,8 @@ mod click_tests {
     /// answer.
     #[test]
     fn two_selected_pictures_are_compared_in_three_views() {
-        let root = std::env::temp_dir().join(format!("yafe-diff-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = crate::sandbox::dir("diff");
+        crate::sandbox::remove(&root);
         std::fs::create_dir_all(&root).expect("a directory in the temp folder");
         // Three of them, because the last assertion is about what *three* selected pictures do and
         // `select_all` over two would still be a pair.
@@ -8429,7 +8454,7 @@ mod click_tests {
                 .is_none_or(|(_, shown)| shown == 1),
             "three selected pictures produced a comparison"
         );
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
     }
 
     /// Let the focused pane's preview panel notice the selection and finish reading.
@@ -8443,6 +8468,14 @@ mod click_tests {
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
         assert!(!h.app.preview_pending(), "the read never came back");
+        // **The read landing and the read being drawn are different frames.** The loop above stops
+        // on the frame the worker's result arrived in, and that frame was already painted from what
+        // the panel had before it — so a caller reading `h.texts()` straight afterwards sees the
+        // previous contents. It showed up as preview tests that passed alone and failed in the
+        // suite, where they are slow enough for the result to arrive a frame later.
+        for _ in 0..2 {
+            h.frame(Vec::new());
+        }
     }
 
     /// **The zoom field's list opens, and the field lets the keyboard go again.**
@@ -8453,8 +8486,8 @@ mod click_tests {
     /// arrow keys, all of them go to the field instead.
     #[test]
     fn the_zoom_field_opens_its_list_and_gives_the_keyboard_back() {
-        let root = std::env::temp_dir().join(format!("yafe-zoom-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = crate::sandbox::dir("zoom");
+        crate::sandbox::remove(&root);
         std::fs::create_dir_all(&root).expect("a directory in the temp folder");
         image::RgbaImage::from_pixel(80, 60, image::Rgba([30, 90, 200, 255]))
             .save(root.join("swatch.png"))
@@ -8569,7 +8602,7 @@ mod click_tests {
             vec!["TogglePreview"],
             "the shortcut went to the field rather than the window"
         );
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
     }
 
     /// Where the zoom field starts, which is where its list is anchored.
@@ -10361,8 +10394,8 @@ mod click_tests {
     /// does not depend on what is installed on the machine running the suite.
     #[test]
     fn the_dropdown_holds_ten_offers_and_scrolls_the_rest() {
-        let root = std::env::temp_dir().join(format!("yafe-offers-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = crate::sandbox::dir("offers");
+        crate::sandbox::remove(&root);
         let names: Vec<String> = (1..=14).map(|i| format!("folder-{i:02}")).collect();
         for name in &names {
             std::fs::create_dir_all(root.join(name)).expect("a directory in the temp folder");
@@ -10448,8 +10481,8 @@ mod click_tests {
     /// the long one, which is exactly why every capture of this looked right.
     #[test]
     fn a_dropdown_that_was_short_grows_back() {
-        let root = std::env::temp_dir().join(format!("yafe-grow-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = crate::sandbox::dir("grow");
+        crate::sandbox::remove(&root);
         let names: Vec<String> = (1..=14).map(|i| format!("folder-{i:02}")).collect();
         for name in &names {
             std::fs::create_dir_all(root.join(name)).expect("a directory in the temp folder");
@@ -10504,7 +10537,7 @@ mod click_tests {
             "the dropdown is {grown} tall, which is room for more than {shown} rows"
         );
 
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
     }
 
     /// `Enter` on a highlighted offer goes there, without asking the disk whether the text names
@@ -10729,7 +10762,7 @@ mod click_tests {
             .join("target")
             .join("sandbox")
             .join("new-through-filter");
-        let _ = std::fs::remove_dir_all(&dir);
+        crate::sandbox::remove(&dir);
         std::fs::create_dir_all(&dir).expect("sandbox");
         std::fs::write(dir.join("already.txt"), b"x").expect("a file");
 
@@ -10787,7 +10820,7 @@ mod click_tests {
             "the snapshot has to be consumed, or the filter stays bypassed for good"
         );
 
-        let _ = std::fs::remove_dir_all(&dir);
+        crate::sandbox::remove(&dir);
     }
 
     /// The whole chain behind `New > Text Document`: the shell makes the file, the watcher notices,
@@ -10810,7 +10843,7 @@ mod click_tests {
             .join("target")
             .join("sandbox")
             .join("new-menu");
-        let _ = std::fs::remove_dir_all(&dir);
+        crate::sandbox::remove(&dir);
         std::fs::create_dir_all(&dir).expect("sandbox");
         std::fs::write(dir.join("already.txt"), b"x").expect("a file");
 
@@ -10915,7 +10948,7 @@ mod click_tests {
         );
         assert_eq!(still, leaf, "and the text has to be untouched");
 
-        let _ = std::fs::remove_dir_all(&dir);
+        crate::sandbox::remove(&dir);
     }
 
     /// Which items get the short menu, and that a short one admits to being short.
@@ -11131,7 +11164,7 @@ mod click_tests {
             .join("target")
             .join("sandbox")
             .join("samefolder");
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
         std::fs::create_dir_all(&root).expect("sandbox");
         std::fs::write(root.join("one.txt"), b"one").expect("write");
 
@@ -11242,7 +11275,7 @@ mod click_tests {
         }
 
         clipboard::clear();
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
     }
 
     /// Which action each of the clipboard events becomes, and Shift+Delete among them.
@@ -11660,7 +11693,7 @@ mod click_tests {
             .join("target")
             .join("sandbox")
             .join("newfolder");
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
         std::fs::create_dir_all(&root).expect("sandbox");
         // One already there, so the shell has to pick a different name and this cannot pass by
         // guessing "New folder".
@@ -11706,7 +11739,7 @@ mod click_tests {
             );
         }
 
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
     }
 
     /// Dropping onto a folder row means *into that folder*.
@@ -11789,7 +11822,7 @@ mod click_tests {
             .join("target")
             .join("sandbox")
             .join("empty");
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
         std::fs::create_dir_all(&root).expect("sandbox");
 
         let mut h = Harness::new();
@@ -11817,7 +11850,7 @@ mod click_tests {
             "a right click in an empty folder produced {raised:?}"
         );
 
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
     }
 
     /// A right click in a row asks about the file if it lands on it, and about the folder if not.
@@ -11937,7 +11970,7 @@ mod click_tests {
             .join("target")
             .join("sandbox")
             .join(name);
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
         std::fs::create_dir_all(&root).expect("sandbox");
         for i in 0..files {
             std::fs::write(root.join(format!("file-{i:02}.txt")), b"x").expect("a file");
@@ -12054,8 +12087,8 @@ mod click_tests {
             "coming back to the first tab lost where it was"
         );
 
-        let _ = std::fs::remove_dir_all(&one);
-        let _ = std::fs::remove_dir_all(&two);
+        crate::sandbox::remove(&one);
+        crate::sandbox::remove(&two);
     }
 
     /// A change made by anybody re-reads the folder on its own.
@@ -12098,7 +12131,7 @@ mod click_tests {
             );
         }
 
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
     }
 
     /// A folder that reads quickly says nothing about reading.
@@ -12167,7 +12200,7 @@ mod click_tests {
             "a scan a second old still has not admitted to waiting"
         );
 
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
     }
 
     /// The listing keeps three rows of nothing under it, in a folder of any size.
@@ -12183,7 +12216,7 @@ mod click_tests {
             .join("target")
             .join("sandbox")
             .join("tall");
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
         std::fs::create_dir_all(&root).expect("sandbox");
         for i in 0..60 {
             std::fs::write(root.join(format!("file-{i:02}.txt")), b"x").expect("a file");
@@ -12235,7 +12268,7 @@ mod click_tests {
             "the space under the last file gave a file's menu"
         );
 
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
     }
 
     /// Copy, cut, paste and delete, driven the way the keyboard drives them, on real files.
@@ -12274,7 +12307,7 @@ mod click_tests {
             .join("target")
             .join("sandbox")
             .join("keys");
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
         let from = root.join("from");
         let into = root.join("into");
         std::fs::create_dir_all(&from).expect("sandbox");
@@ -12416,7 +12449,7 @@ mod click_tests {
         );
 
         clipboard::clear();
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
     }
 
     #[test]

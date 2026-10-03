@@ -768,8 +768,7 @@ mod tests {
 
     #[test]
     fn an_empty_directory_is_not_an_error() {
-        let mut path = std::env::temp_dir();
-        path.push(format!("yafe-empty-{}", std::process::id()));
+        let path = crate::sandbox::dir("empty");
         std::fs::create_dir_all(&path).expect("temp dir");
 
         let dir = scan(&path);
@@ -781,7 +780,7 @@ mod tests {
             dir.error
         );
 
-        let _ = std::fs::remove_dir(&path);
+        crate::sandbox::remove_dir(&path);
     }
 
     /// The claim this whole module exists to make, checked rather than asserted.
@@ -796,8 +795,7 @@ mod tests {
     fn scan_speed() {
         const COUNT: usize = 60_000;
 
-        let mut root = std::env::temp_dir();
-        root.push(format!("yafe-bench-{}", std::process::id()));
+        let root = crate::sandbox::dir("bench");
         std::fs::create_dir_all(&root).expect("temp dir");
 
         // Names of mixed length and extension, so the transcode and the extension
@@ -968,6 +966,6 @@ mod tests {
             "{per_entry_ns:.0} ns per entry — something has started doing per-file work"
         );
 
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
     }
 }

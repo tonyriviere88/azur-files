@@ -1052,8 +1052,8 @@ mod tests {
     /// invoked is whatever the developer has, which is the point.
     #[test]
     fn a_real_repository_answers_for_its_own_files() {
-        let root = std::env::temp_dir().join(format!("yafe-git-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = crate::sandbox::dir("git");
+        crate::sandbox::remove(&root);
         std::fs::create_dir_all(root.join("sub")).expect("a temp folder");
 
         let run = |args: &[&str]| {
@@ -1117,7 +1117,7 @@ mod tests {
         // inside somebody's repository is not this test's to know.
         assert!(under_a_git_dir(&root.join("sub")));
 
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
     }
 
     /// What one folder's worth of git actually costs, on whatever repository this is run in.
@@ -1189,8 +1189,8 @@ mod tests {
     fn what_head_has_of_a_file() {
         // Its own folder, not [`a_real_repository_answers_for_its_own_files`]'s: two tests in one
         // process share a directory name at their peril.
-        let root = std::env::temp_dir().join(format!("yafe-blob-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = crate::sandbox::dir("blob");
+        crate::sandbox::remove(&root);
         std::fs::create_dir_all(&root).expect("a temp folder");
 
         let run = |args: &[&str]| {
@@ -1251,7 +1251,7 @@ mod tests {
             "the bytes a checkout would write, not the ones the object holds"
         );
 
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
     }
 
     /// Real `git diff -U0` output, from a file whose eight lines were changed in all three ways: one

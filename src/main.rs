@@ -69,6 +69,9 @@ mod markdown;
 mod pane;
 mod pe;
 mod preview;
+/// Where a test may touch the disk, and the guard that holds it there.
+#[cfg(test)]
+mod sandbox;
 mod shell;
 mod syntax;
 mod theme;

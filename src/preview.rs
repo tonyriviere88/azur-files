@@ -957,7 +957,7 @@ mod tests {
     use std::path::{PathBuf, MAIN_SEPARATOR};
 
     fn scratch(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("yafe-preview-{}", std::process::id()));
+        let root = crate::sandbox::dir("preview");
         std::fs::create_dir_all(&root).expect("a directory in the temp folder");
         root.join(name)
     }
@@ -1161,9 +1161,9 @@ mod tests {
             panic!("not text");
         };
         assert!(!text.truncated);
-        let _ = std::fs::remove_file(path);
-        let _ = std::fs::remove_file(long);
-        let _ = std::fs::remove_file(exact);
+        crate::sandbox::remove_file(&path);
+        crate::sandbox::remove_file(&long);
+        crate::sandbox::remove_file(&exact);
     }
 
     /// An extensionless file is text if it reads as text, and refused if it does not.
@@ -1200,7 +1200,7 @@ mod tests {
 
         assert_eq!(sniff(Path::new("no-such-file-at-all")), None);
         for path in [readme, blob, latin, cut] {
-            let _ = std::fs::remove_file(path);
+            crate::sandbox::remove_file(&path);
         }
     }
 
@@ -1252,7 +1252,7 @@ mod tests {
         std::fs::write(&lie, b"this is not a PNG").expect("a file");
         assert!(matches!(read(&Ask::One(lie.clone(), Kind::Picture)), Payload::Failed(_)));
         for path in [path, big, lie] {
-            let _ = std::fs::remove_file(path);
+            crate::sandbox::remove_file(&path);
         }
     }
 
@@ -1284,8 +1284,8 @@ mod tests {
         let broken = scratch("broken.svg");
         std::fs::write(&broken, b"<svg").expect("a file");
         assert!(matches!(read(&Ask::One(broken.clone(), Kind::Picture)), Payload::Failed(_)));
-        let _ = std::fs::remove_file(path);
-        let _ = std::fs::remove_file(broken);
+        crate::sandbox::remove_file(&path);
+        crate::sandbox::remove_file(&broken);
     }
 
     /// Which files are set in monospace, and which are not.
@@ -1416,7 +1416,7 @@ mod tests {
             Payload::Failed(_)
         ));
         for path in [a, b, faint, lie] {
-            let _ = std::fs::remove_file(path);
+            crate::sandbox::remove_file(&path);
         }
     }
 
@@ -1428,8 +1428,8 @@ mod tests {
     /// nothing older of comes back as one picture rather than as a failure.
     #[test]
     fn a_picture_is_compared_with_the_one_in_the_last_commit() {
-        let root = std::env::temp_dir().join(format!("yafe-imgdiff-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = crate::sandbox::dir("imgdiff");
+        crate::sandbox::remove(&root);
         std::fs::create_dir_all(&root).expect("a temp folder");
 
         let run = |args: &[&str]| {
@@ -1486,7 +1486,7 @@ mod tests {
         std::fs::write(&lie, b"not a PNG").expect("a file");
         assert!(matches!(read(&Ask::AgainstHead(lie)), Payload::Failed(_)));
 
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
     }
 
     #[test]

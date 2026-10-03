@@ -1071,8 +1071,8 @@ mod tests {
     /// the folder the copy is in.
     #[test]
     fn the_binarys_own_folder_is_looked_in_first() {
-        let root = std::env::temp_dir().join(format!("yafe-pe-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&root);
+        let root = crate::sandbox::dir("pe");
+        crate::sandbox::remove(&root);
         std::fs::create_dir_all(&root).expect("a directory in the temp folder");
         let copy = root.join("yafe-fixture.dll");
         std::fs::copy(me(), &copy).expect("a copy of the test binary");
@@ -1096,7 +1096,7 @@ mod tests {
         let graph = walk(&copy, BUDGET, PATIENCE);
         assert_eq!(graph.root().state, State::Found);
         assert!(graph.modules.len() > 2);
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
     }
 
     /// What a walk of a real binary actually costs, and what it comes back with.

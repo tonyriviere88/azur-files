@@ -744,7 +744,18 @@ impl Held {
 }
 
 /// Run a shell command. Puts up dialogs, so it belongs on the modal thread.
+///
+/// Under `cfg(test)` the folder and the selection must be inside [`crate::sandbox`]. A verb list
+/// read from a real folder contains Delete, and `InvokeCommand` runs whatever it is handed without
+/// a confirmation this program ever sees — which is how `probe_invokable`, pointed at this
+/// repository, deleted it. `shell::ops::FOR_REAL` guards `IFileOperation` and never saw this call.
 pub fn invoke(parent: &Path, items: &[PathBuf], command: &Command, owner: super::Owner) {
+    #[cfg(test)]
+    {
+        let mut paths = vec![parent.to_path_buf()];
+        paths.extend(items.iter().cloned());
+        crate::sandbox::guard("IContextMenu::InvokeCommand", &paths);
+    }
     #[cfg(windows)]
     if let Command::Shell { verb, id } = command {
         win::invoke(parent, items, verb.as_deref(), *id, owner);
@@ -1389,8 +1400,7 @@ mod tests {
         let _serialised = crate::shell::serialised();
         crate::shell::init();
 
-        let mut dir = std::env::temp_dir();
-        dir.push(format!("yafe-folder-menu-{}", std::process::id()));
+        let dir = crate::sandbox::dir("folder-menu");
         std::fs::create_dir_all(&dir).expect("temp dir");
 
         // `build` fills every submenu on the way, which is what makes New's contents visible.
@@ -1479,15 +1489,14 @@ mod tests {
         );
         eprintln!("New offers {} file types: {types:?}", types.len());
 
-        let _ = std::fs::remove_dir_all(&dir);
+        crate::sandbox::remove(&dir);
     }
 
     /// A temp folder with a file and a subfolder in it, for the tests that need something
     /// real to right-click.
     #[cfg(windows)]
     fn scratch(name: &str) -> (PathBuf, PathBuf, PathBuf) {
-        let mut dir = std::env::temp_dir();
-        dir.push(format!("yafe-{name}-{}", std::process::id()));
+        let dir = crate::sandbox::dir(name);
         std::fs::create_dir_all(&dir).expect("temp dir");
         let file = dir.join("one.txt");
         std::fs::write(&file, b"x").expect("write");
@@ -1544,7 +1553,7 @@ mod tests {
              extensions: {filled:?}"
         );
 
-        let _ = std::fs::remove_dir_all(&dir);
+        crate::sandbox::remove(&dir);
     }
 
     /// The asynchronous half: the builder answers by channel, and a submenu asked for
@@ -1612,7 +1621,7 @@ mod tests {
             _ => panic!("expected the submenu"),
         }
 
-        let _ = std::fs::remove_dir_all(&dir);
+        crate::sandbox::remove(&dir);
     }
 
     /// Where the time in a context menu actually goes.
@@ -1678,7 +1687,7 @@ mod tests {
             }
         }
 
-        let _ = std::fs::remove_dir_all(&dir);
+        crate::sandbox::remove(&dir);
     }
 
     /// The reduced menu has to still be a menu — the shell's own verbs, all of them working.
@@ -1729,7 +1738,7 @@ mod tests {
         );
         eprintln!("full {} verbs, reduced {} verbs", full.len(), fast.len());
 
-        let _ = std::fs::remove_dir_all(&dir);
+        crate::sandbox::remove(&dir);
     }
 
     /// A menu the shell is taking for ever over must not be able to hold up the next one.
@@ -1821,7 +1830,7 @@ mod tests {
         );
         eprintln!("the second menu took {took:?} while the first had {STALL} ms left to run");
 
-        let _ = std::fs::remove_dir_all(&dir);
+        crate::sandbox::remove(&dir);
     }
 
     /// Where the time goes on a file the shell has to reach across a network for.
@@ -1948,7 +1957,7 @@ mod tests {
         );
 
         crate::shell::clipboard::clear();
-        let _ = std::fs::remove_dir_all(&dir);
+        crate::sandbox::remove(&dir);
     }
 
     /// New is spotted by verb, because a label is whatever language Windows is in.
@@ -1986,14 +1995,25 @@ mod tests {
         let _serialised = crate::shell::serialised();
         crate::shell::init();
         let (dir, file, _) = scratch("invokable");
-        let dir = std::env::var_os("YAFE_PROBE")
-            .map(PathBuf::from)
-            .unwrap_or(dir);
+        // **`YAFE_PROBE` is checked before it is used, not after.** This test used to take the
+        // variable, enumerate the menu, and finish with `std::fs::remove_dir_all(&dir)` to clear
+        // the scratch folder up. Given `YAFE_PROBE=D:\Sources\MyTools\yet-another-file-explorer`
+        // that last line deleted the repository. The cleanup is guarded now
+        // ([`crate::sandbox::remove`]), so the damage cannot repeat either way — but failing here
+        // says which variable is wrong before anything has run, rather than after.
+        let dir = match std::env::var_os("YAFE_PROBE") {
+            Some(given) => {
+                let given = PathBuf::from(given);
+                crate::sandbox::guard("YAFE_PROBE", &[given.clone()]);
+                given
+            }
+            None => dir,
+        };
         eprintln!("--- the folder's background menu of {}", dir.display());
         super::win::probe_invokable(&dir, &[]);
         eprintln!("--- a text file");
         super::win::probe_invokable(&dir, std::slice::from_ref(&file));
-        let _ = std::fs::remove_dir_all(&dir);
+        crate::sandbox::remove(&dir);
     }
 
     #[test]
@@ -2037,8 +2057,7 @@ mod tests {
         let _serialised = crate::shell::serialised();
         crate::shell::init();
 
-        let mut dir = std::env::temp_dir();
-        dir.push(format!("yafe-menu-{}", std::process::id()));
+        let dir = crate::sandbox::dir("menu");
         std::fs::create_dir_all(&dir).expect("temp dir");
         let file = dir.join("one.txt");
         std::fs::write(&file, b"x").expect("write");
@@ -2093,7 +2112,7 @@ mod tests {
             "the folder's background menu came back empty"
         );
 
-        let _ = std::fs::remove_dir_all(&dir);
+        crate::sandbox::remove(&dir);
     }
 
     #[test]
@@ -2101,8 +2120,7 @@ mod tests {
     fn submenus_are_populated_rather_than_left_empty() {
         let _serialised = crate::shell::serialised();
         crate::shell::init();
-        let mut dir = std::env::temp_dir();
-        dir.push(format!("yafe-submenu-{}", std::process::id()));
+        let dir = crate::sandbox::dir("submenu");
         std::fs::create_dir_all(&dir).expect("temp dir");
         let file = dir.join("one.txt");
         std::fs::write(&file, b"x").expect("write");
@@ -2129,6 +2147,6 @@ mod tests {
             }
         }
 
-        let _ = std::fs::remove_dir_all(&dir);
+        crate::sandbox::remove(&dir);
     }
 }

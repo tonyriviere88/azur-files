@@ -480,6 +480,10 @@ pub fn sweep() {
         if pid == std::process::id() || running(pid) {
             continue;
         }
+        // Deliberately *not* `crate::sandbox::remove`: this is the running program clearing its
+        // own staging directories out of `%TEMP%`, not a test tidying a fixture. The sandbox rule
+        // is about where tests are allowed to reach, and a guard here would both fail to compile
+        // in a release build and panic on the one job this function exists to do.
         let _ = std::fs::remove_dir_all(&path);
     }
 }

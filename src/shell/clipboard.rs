@@ -602,8 +602,7 @@ mod tests {
         let _serialised = crate::shell::serialised();
         crate::shell::init();
 
-        let mut here = std::env::temp_dir();
-        here.push(format!("yafe-clip-{}", std::process::id()));
+        let here = crate::sandbox::dir("clip");
         std::fs::create_dir_all(&here).expect("temp dir");
         let one = here.join("one.txt");
         let two = here.join("two.txt");
@@ -637,7 +636,7 @@ mod tests {
             win::data_object(&[], Effect::Copy).is_err(),
             "and nothing is not something to put on a clipboard"
         );
-        let _ = std::fs::remove_dir_all(&here);
+        crate::sandbox::remove(&here);
     }
 
     /// The same, but through the real clipboard, which is what a paste into Explorer
@@ -657,8 +656,7 @@ mod tests {
         crate::shell::init();
         win::settle();
 
-        let mut here = std::env::temp_dir();
-        here.push(format!("yafe-clip-real-{}", std::process::id()));
+        let here = crate::sandbox::dir("clip-real");
         std::fs::create_dir_all(&here).expect("temp dir");
         let one = here.join("one.txt");
         std::fs::write(&one, b"1").expect("write");
@@ -670,7 +668,7 @@ mod tests {
         assert_eq!(read.items.len(), 1);
 
         clear();
-        let _ = std::fs::remove_dir_all(&here);
+        crate::sandbox::remove(&here);
     }
 
     /// A zip holding one stored `inner.txt`, so the test that needs a non-file shell item
@@ -705,7 +703,7 @@ mod tests {
             .join("target")
             .join("sandbox")
             .join("zip");
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
         std::fs::create_dir_all(&root).expect("sandbox");
         let zip = root.join("bundle.zip");
         std::fs::write(&zip, ZIP_WITH_ONE_ENTRY).expect("write the zip");
@@ -736,7 +734,7 @@ mod tests {
             );
         }
 
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
     }
 
     /// Interoperability, across a process boundary, in both directions.
@@ -765,7 +763,7 @@ mod tests {
             .join("target")
             .join("sandbox")
             .join("interop");
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
         std::fs::create_dir_all(&root).expect("sandbox");
         let one = root.join("one.txt");
         let two = root.join("two.txt");
@@ -840,7 +838,7 @@ mod tests {
         assert_eq!(names, ["one.txt", "two.txt"], "{:?}", read.items);
 
         clear();
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
     }
 
     /// The end of a cut: the clipboard is emptied, and only when it is still the same cut.
@@ -856,7 +854,7 @@ mod tests {
             .join("target")
             .join("sandbox")
             .join("cut");
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
         std::fs::create_dir_all(&root).expect("sandbox");
         let one = root.join("one.txt");
         let other = root.join("other.txt");
@@ -887,7 +885,7 @@ mod tests {
         );
 
         clear();
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
     }
 
     /// Puts two files on the clipboard and returns, so the process exits with them on it.
@@ -912,7 +910,7 @@ mod tests {
             .join("target")
             .join("sandbox")
             .join("survives");
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
         std::fs::create_dir_all(&root).expect("sandbox");
         let one = root.join("survivor.txt");
         std::fs::write(&one, b"1").expect("write");
@@ -951,7 +949,7 @@ mod tests {
             .join("target")
             .join("sandbox")
             .join("consecutive");
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
         std::fs::create_dir_all(&root).expect("sandbox");
         let a = root.join("a.txt");
         let b = root.join("b.txt");
@@ -976,7 +974,7 @@ mod tests {
         }
 
         clear();
-        let _ = std::fs::remove_dir_all(&root);
+        crate::sandbox::remove(&root);
     }
 
     #[test]
