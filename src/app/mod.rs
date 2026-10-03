@@ -108,6 +108,43 @@ impl Dragging {
     }
 }
 
+/// What came back from a thread that was pulling a file out of an archive.
+///
+/// Deliberately not an [`Action`]: the failure arm has nowhere to go but the status line, and
+/// widening the action enum with a variant only this can produce would put a case into
+/// [`App::perform`]'s match that nothing else could ever reach.
+enum Extracted {
+    /// On a disk now, at this path. Handed straight back to [`Action::Open`], which is how a
+    /// `.zip` inside a `.zip` comes to be browsable: what arrives here is an ordinary file.
+    Ready(std::path::PathBuf),
+    /// Extracted so they can be copied out — `Ctrl+C` inside an archive. The clipboard is written
+    /// when these land, and not before: a `CF_HDROP` naming files that do not exist yet is a paste
+    /// that fails in another program.
+    Copied(Vec<std::path::PathBuf>),
+    /// Extracted so a **drop** can be finished, the same drop carried back with real paths in it.
+    /// Handed to [`App::land`] again, which is where the two passes are explained.
+    Landed(Box<crate::shell::dnd::Dropped>),
+    /// Why not, in words for the status line.
+    Failed(String),
+}
+
+/// What to do with the entries once they are on a disk.
+///
+/// Three callers, one worker — see [`App::out_of_archive`]. It is an enum rather than the flag it
+/// grew out of because the third arm carries something: a drop has a destination and an effect and a
+/// button that was held, and all of it has to survive the extraction to be acted on afterwards.
+enum Then {
+    /// Open the one file that was asked for.
+    Open,
+    /// Put them all on the clipboard.
+    Clipboard,
+    /// Finish the drop they were dragged into.
+    ///
+    /// Boxed because it is much the largest of the three and this enum is moved into the worker: the
+    /// other two arms should not each cost a `Dropped`'s worth of stack.
+    Land(Box<crate::shell::dnd::Dropped>),
+}
+
 pub struct App {
     theme: Theme,
     /// Set once per theme change; installing a style every frame would throw away
@@ -239,6 +276,13 @@ pub struct App {
     cut: Vec<PathBuf>,
     /// The last thing that went wrong, for the status line.
     notice: Option<String>,
+    /// How far an archive extraction has got, in words — empty when none is running.
+    ///
+    /// Rebuilt from [`crate::archive::extract::doing`] once a frame rather than pushed from the
+    /// worker, because the worker counts in 8 KB blocks: a message per block would be thousands of
+    /// wake-ups for a readout that can only change sixty times a second. The buffer is kept and
+    /// rewritten for the reason [`crate::fs::fmt`] gives about the listing's own figures.
+    extracting: String,
     /// Where a drag from outside is hovering, in points, for the pane highlight.
     drop_hover: Option<(i32, i32)>,
     /// What a drop where it is hovering would do, in words — see
@@ -309,6 +353,16 @@ pub struct App {
     window_position: Option<[f32; 2]>,
     /// Collected during drawing, drained after.
     actions: Vec<Action>,
+    /// Files pulled out of an archive, arriving from the thread that pulled them.
+    ///
+    /// Opening a file inside a `.zip` is the one gesture in this program that needs real work done
+    /// before it can be acted on — the bytes have to be on a disk before anything can open them,
+    /// and for a solid `.7z` that means decompressing several entries. Doing it where the click
+    /// happens would freeze the window for as long as it took, so it happens on a thread and the
+    /// answer comes back here. See [`Self::open_from_archive`].
+    extracted: std::sync::mpsc::Receiver<Extracted>,
+    /// The other end, cloned into each of those threads.
+    extractions: std::sync::mpsc::Sender<Extracted>,
     /// One buffer every formatted cell in the window is written through.
     scratch: String,
     /// Where each pane was drawn, for the docking gesture and for keyboard focus.
@@ -479,6 +533,10 @@ impl App {
             }
         }
 
+        // Both ends kept: the sender is cloned into each extraction thread, and holding one here
+        // means the receiver never sees the channel close just because no extraction is running.
+        let (extractions, extracted) = std::sync::mpsc::channel();
+
         Self {
             theme,
             installed: false,
@@ -508,6 +566,7 @@ impl App {
             history: crate::shell::ops::history::History::default(),
             cut: Vec::new(),
             notice: None,
+            extracting: String::new(),
             drop_hover: None,
             drop_telling: None,
             drop_silent: false,
@@ -547,6 +606,8 @@ impl App {
             window_size: config.window,
             window_position: config.position,
             actions: Vec::new(),
+            extracted,
+            extractions,
             scratch: String::with_capacity(64),
             pane_rects: Vec::new(),
             tab_slots: Vec::new(),
@@ -685,6 +746,82 @@ impl App {
     /// last thing it drew, and without a word from it that is indistinguishable from a hang.
     pub fn report(&mut self, what: String) {
         self.notice = Some(what);
+    }
+
+    /// Put a file that is inside an archive onto a disk, and open it when it is there.
+    ///
+    /// The answer comes back as [`Extracted::Ready`] and is handed to [`Action::Open`] *again*, on
+    /// the next frame. That second pass is what makes the feature compose rather than special-case:
+    /// the extracted path is an ordinary file, so a document opens with its application and a
+    /// **nested archive is browsable**, because by then it is a real archive on a real disk. See
+    /// [`crate::archive::split`], which explains why nesting could not be done any other way.
+    fn open_from_archive(&mut self, ctx: &egui::Context, path: std::path::PathBuf) {
+        self.out_of_archive(ctx, vec![path], Then::Open);
+    }
+
+    /// Copy files out of an archive onto the clipboard — `Ctrl+C` on a selection inside one.
+    ///
+    /// The only way out of an archive that this program offers, and enough of one: what lands on the
+    /// clipboard is real files, so pasting them works in Explorer, in a save dialog, in another copy
+    /// of this program, and in anything else that takes a `CF_HDROP`.
+    fn copy_out_of_archive(&mut self, ctx: &egui::Context, paths: Vec<std::path::PathBuf>) {
+        self.report("Copying out of the archive…".to_owned());
+        self.out_of_archive(ctx, paths, Then::Clipboard);
+    }
+
+    /// Put files that are inside an archive onto a disk, and then do [`Then`] with them.
+    ///
+    /// **The one worker every route out of an archive goes through** — opening, `Ctrl+C`, and a drop
+    /// — which is what keeps the decompression off the UI thread in all three. Each has its own way
+    /// of picking the work back up; see the three arms of [`Then`], and [`App::land`] for the one
+    /// whose answer re-enters where it left.
+    ///
+    /// Detached, like every other worker in this program: there is nothing useful to do with a
+    /// half-extracted file when the window has closed, and joining would hold the process open for
+    /// as long as the decompression had left to run — the argument [`crate::loader::Loader`]'s
+    /// `Drop` sets out at length.
+    fn out_of_archive(&mut self, ctx: &egui::Context, paths: Vec<std::path::PathBuf>, then: Then) {
+        let answers = self.extractions.clone();
+        let ctx = ctx.clone();
+        let spawned = std::thread::Builder::new()
+            .name("extract".to_owned())
+            .spawn(move || {
+                crate::fs::scan::silence_device_dialogs();
+                // **One call for the whole selection**, not one per file: a solid `.7z` is
+                // decompressed from the start of its block for each separate read, so asking file by
+                // file turns a copy of 300 entries into 300 walks of the archive. See
+                // [`crate::archive::extract::all`].
+                //
+                // It also fails as a unit, which is what a clipboard needs: half a selection on it
+                // would be a paste that quietly loses files.
+                let answer = match crate::archive::extract::all(&paths) {
+                    Ok(done) => match then {
+                        Then::Clipboard => Extracted::Copied(done),
+                        Then::Open => match done.into_iter().next() {
+                            Some(one) => Extracted::Ready(one),
+                            None => Extracted::Failed("Nothing to open".to_owned()),
+                        },
+                        // The same drop, now naming files that exist. **In the order asked**, which
+                        // is what [`crate::archive::extract::all`] guarantees and what lets the list
+                        // be swapped whole: a drop is not positional but a mixed selection would
+                        // otherwise have its real paths shuffled among its extracted ones.
+                        Then::Land(mut dropped) => {
+                            dropped.items = done;
+                            Extracted::Landed(dropped)
+                        }
+                    },
+                    Err(why) => Extracted::Failed(why),
+                };
+                if answers.send(answer).is_ok() {
+                    ctx.request_repaint();
+                }
+            });
+        // A machine that will not give us a thread means the double click did nothing, which the
+        // next one can try again. Nothing else in the window is affected, and inventing a second
+        // failure path for a case nobody has seen would be worse than this line.
+        if spawned.is_err() {
+            self.report("Could not start reading this archive".to_owned());
+        }
     }
 
     // ---------------------------------------------------------------------

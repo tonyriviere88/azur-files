@@ -28,6 +28,18 @@ pub const FLAG_SYSTEM: u16 = 1 << 2;
 pub const FLAG_LINK: u16 = 1 << 3;
 /// `FILE_ATTRIBUTE_READONLY`.
 pub const FLAG_READONLY: u16 = 1 << 4;
+/// The size is not knowable without decompressing the whole entry.
+///
+/// Only ever set by [`crate::archive`], and only for the single-stream formats — a lone `.bz2`,
+/// `.zst` or `.lzma`, whose container records the compressed length and nothing about what comes
+/// out of it. (A `.gz` is not one of them: its footer carries the uncompressed size, so it gets a
+/// real one.)
+///
+/// The alternative was `0`, which the details view would render as `0 B` — a definite claim, and a
+/// false one, about a file that may be a gigabyte. So the cell goes **blank** instead, exactly as
+/// it already does for a directory, and for the same reason: this row has no size to show rather
+/// than a size of nothing. See [`Entry::is_unsized`].
+pub const FLAG_UNSIZED: u16 = 1 << 5;
 
 /// One name in a [`Dir`], plus everything the details view and the sort need.
 ///
@@ -70,6 +82,12 @@ impl Entry {
     #[inline]
     pub fn is_link(&self) -> bool {
         self.flags & FLAG_LINK != 0
+    }
+
+    /// Whether [`Entry::size`] means nothing for this row. See [`FLAG_UNSIZED`].
+    #[inline]
+    pub fn is_unsized(&self) -> bool {
+        self.flags & FLAG_UNSIZED != 0
     }
 }
 

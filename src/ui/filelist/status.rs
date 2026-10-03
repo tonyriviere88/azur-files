@@ -407,13 +407,48 @@ pub(crate) fn status_line(
         }
     }
 
+    // **Inside an archive, a mark at the left end of this group.**
+    //
+    // The one thing on this line that is about *where you are* rather than about what is in the
+    // folder, and it earns its place by explaining the rest of the window: it is why Delete, Rename
+    // and Paste refuse, and why the shell's context menu does not come up. See [`crate::archive`].
+    //
+    // **A word and not a glyph.** A mark on a bar full of numbers is a thing to be decoded, and a
+    // status line carries no legend; the one fact on this line that is not arithmetic is the one that
+    // least deserves to need a hover. `bar.warning` is the yellow, and the right yellow twice over:
+    // it is the only warm hue here, and it is the only one of the four measured against both themes'
+    // bars in `every_ink_on_the_status_line_can_be_read`. The file-kind `theme.archive` a `.zip` row
+    // wears is teal, and was never measured on a bar at all.
+    //
+    // Its width is **reserved before the runs are laid out**, which is the whole of the arithmetic
+    // below. The right-hand group is drawn from the edge inwards, so the leftmost thing in it is
+    // ordinarily the first to be dropped by a narrow pane — and an indicator that vanishes exactly
+    // when the bar gets tight is worse than no indicator, because its absence then means two
+    // different things. So the counts, the size and the timing give way to it rather than the other
+    // way about, the timing first: how long a folder took to read is the least of what somebody needs
+    // to know about a folder they cannot write to.
+    //
+    // `inside_archive` and not `split`: the latter answers by extension alone, so a real folder
+    // somebody called `stuff.zip` would fly this mark over a directory it does not describe. See
+    // [`crate::archive::is_virtual`], which sets out why the confirmation is a cache lookup and not
+    // a `metadata` call.
+    //
+    // The word is laid out here rather than below, because its width is what the loop has to know —
+    // and it travels *with* the archive it is about, so there is no pair of options to keep in step.
+    let mark = crate::archive::inside_archive(&tab.path)
+        .map(|inside| (inside, ink("Archive", t.bar.warning)));
+    // The word and the group gap after it, or nothing at all.
+    let marked = mark
+        .as_ref()
+        .map_or(0.0, |(_, galley)| galley.size().x + space::S3);
+
     let mut right = edge;
     let mut counted: Option<Rect> = None;
     for (which, run) in runs.iter().enumerate() {
         let width: f32 = run.iter().map(|galley| galley.size().x).sum();
         // Whatever is further left than the first thing that will not fit goes too: it is further
         // from the edge, so drawing it would leave a hole where this one would have been.
-        if right - width < left + GROUP_GAP {
+        if right - width < left + GROUP_GAP + marked {
             break;
         }
         let mut x = right - width;
@@ -429,6 +464,31 @@ pub(crate) fn status_line(
             x += step;
         }
         right -= width;
+    }
+
+    // The word itself, immediately left of whatever survived — which is what makes it the leftmost
+    // thing in this group however much of the group there is room for. Drawn after the loop rather
+    // than inside it because its position is the group's left edge, and that is not known until the
+    // last run has taken its width.
+    //
+    // On the same baseline as every other word on the line, through `galley_on_baseline`, and not
+    // centred in the band: see [`status_geometry`].
+    if let Some((inside, galley)) = mark {
+        let x = right - marked;
+        let width = galley.size().x;
+        galley_on_baseline(&painter, x, baseline, galley);
+        // The word's own box, so the tooltip is on the thing that says it rather than on a
+        // glyph-sized patch of it.
+        let over = Rect::from_min_max(pos2(x, band.top()), pos2(x + width, band.bottom()));
+        let hit = ui.interact(over, Id::new(("status-archive", pane)), Sense::hover());
+        let name = crate::fs::display_name(&inside.file);
+        azur_egui_theme::components::tooltip(
+            hit,
+            &format!(
+                "Inside {name}, which this program only reads\n\
+                 Copy files out with Ctrl+C, or drag them"
+            ),
+        );
     }
 
     if let Some(at) = counted {

@@ -428,6 +428,30 @@ impl Previews {
 
 /// Do the reading. On a worker, always.
 fn read(ask: &Ask) -> Payload {
+    // **A file inside an archive is put on a disk first, and nothing below this line knows.**
+    //
+    // Every loader in this module takes a path and opens it, which is exactly right and cannot work
+    // for `D:\dl\pkg.zip\logo.png`, where there are no bytes until something decompresses them. One
+    // substitution here buys the whole panel — pictures, text, the syntax highlighting, the find
+    // bar, the hex view, the shell's own thumbnails — without a single loader learning what an
+    // archive is. See [`crate::archive::extract`].
+    //
+    // Safe to do here and nowhere else: this function only ever runs on the preview worker, so a
+    // solid `.7z` that has to be half unpacked to reach one file costs that thread and not the
+    // window.
+    let owned;
+    let ask = if crate::archive::is_virtual(ask.first()) {
+        match materialise(ask) {
+            Ok(real) => {
+                owned = real;
+                &owned
+            }
+            Err(why) => return Payload::Failed(why),
+        }
+    } else {
+        ask
+    };
+
     let (path, kind) = match ask {
         Ask::One(path, kind) => (path.as_path(), *kind),
         Ask::Pair(a, b) => return diff::compare(a, b),
@@ -463,6 +487,27 @@ fn read(ask: &Ask) -> Payload {
         // frame of a film where a player was meant to be, and not a window that closes.
         Kind::Video => visual::load(path),
         Kind::Shell => visual::load(path),
+    }
+}
+
+/// The same question, against real files: whatever [`Ask`] is pointing at inside an archive,
+/// extracted and pointed at where it landed.
+///
+/// The *names* are unchanged by this — an extracted entry keeps its own leaf name — so
+/// [`Ask::title`] says the same thing either way, and the panel's header goes on showing the path
+/// the user navigated to rather than a temp directory: this copy never leaves [`read`].
+fn materialise(ask: &Ask) -> Result<Ask, String> {
+    let real = |path: &Path| crate::archive::extracted(path);
+    match ask {
+        Ask::One(path, kind) => Ok(Ask::One(real(path)?, *kind)),
+        Ask::Pair(a, b) => Ok(Ask::Pair(real(a)?, real(b)?)),
+        // A file in an archive has no `HEAD` to be compared against, and no way to acquire one: git
+        // tracks working trees, and an archive is not one. Not reachable by clicking — the diff
+        // button only appears for a file with a git status, and [`crate::git`] is not asked about a
+        // path inside an archive at all — so this is the belt to that braces.
+        Ask::AgainstHead(_) => {
+            Err("A file inside an archive has no version history to compare against".to_owned())
+        }
     }
 }
 

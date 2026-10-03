@@ -97,8 +97,46 @@ pub fn drag_out(items: &[PathBuf], ui_thread: u32, shared: Arc<Mutex<Shared>>) -
     if items.is_empty() {
         return None;
     }
-    let data = data_object(items)?;
-    let source: IDropSource = Source { shared }.into();
+    // **The virtual-file object first, and the shell's only if the selection is real.**
+    //
+    // Not a preference so much as the only order that works: `data_object` cannot represent a path
+    // inside an archive at all, and [`virtual_files::Offered::over`] answers `None` for anything that
+    // is not one. So the two are exhaustive and disjoint, and the branch is which kind of selection
+    // this is rather than which kind of drag is wanted.
+    //
+    // Both are built *here*, before `DoDragDrop`, and both are cheap: the shell's costs a
+    // `SHParseDisplayName` per item, and the archive's costs a read of an index the listing has
+    // already cached. Nothing is decompressed until the drop. See [`virtual_files`].
+    let offered = virtual_files::Offered::over(items);
+
+    /// Empties [`Shared::carrying`] however this function leaves, panic in the modal loop included.
+    ///
+    /// A guard and not a line at the end, because a list left behind would be handed to the *next*
+    /// drag that arrives with no paths of its own — one out of 7-Zip, say — which would then extract
+    /// this window's last selection instead of what it was really holding.
+    struct Carried(Arc<Mutex<Shared>>);
+    impl std::ops::Drop for Carried {
+        fn drop(&mut self) {
+            if let Ok(mut shared) = self.0.lock() {
+                shared.carrying.clear();
+            }
+        }
+    }
+
+    // **What this drag is carrying, for this window's own drop target to use instead of asking for
+    // it.** Only for a virtual selection, and only for the length of the drag — see
+    // [`Shared::carrying`], which is where the freeze it removes is written down.
+    let _carried = offered.is_some().then(|| {
+        if let Ok(mut shared) = shared.lock() {
+            shared.carrying = items.to_vec();
+        }
+        Carried(shared.clone())
+    });
+    let data = match offered {
+        Some(offered) => offered,
+        None => data_object(items)?,
+    };
+    let source: IDropSource = Source { shared: shared.clone() }.into();
 
     /// Undoes the attachment however this function leaves.
     struct Attached(u32, u32);
@@ -152,8 +190,17 @@ pub fn drag_out(items: &[PathBuf], ui_thread: u32, shared: Arc<Mutex<Shared>>) -
     }
 }
 
+/// Files inside an archive, offered as virtual files rather than as paths.
+#[path = "virtual_files.rs"]
+mod virtual_files;
+
 /// The shell's own data object for a selection, so a target gets every format
 /// Explorer would have offered rather than only the one this program knows about.
+///
+/// **`None` for anything that is not a real file**, which is not a failure so much as the boundary
+/// between this and [`virtual_files`]: `SHParseDisplayName` refuses a path naming no file, so a
+/// selection inside an archive comes back with no PIDLs and therefore no object. [`drag_out`] tries
+/// the virtual-file object first for exactly that reason.
 fn data_object(items: &[PathBuf]) -> Option<IDataObject> {
     use windows::core::PCWSTR;
     use windows::Win32::UI::Shell::Common::ITEMIDLIST;
@@ -234,6 +281,31 @@ impl Target {
     /// then do with them is the code under test: which effect comes out, which drops are refused,
     /// and what the pointer is told. Without this, every callback test is a drag carrying nothing,
     /// which is the one case that refuses nothing.
+    /// The same, holding a **promise**: a drag whose source has no paths to give, which is what a
+    /// drag out of an archive is.
+    ///
+    /// Separate from [`Self::holding`] rather than a fifth argument to it, because the two differ in
+    /// what the `items` *are* — names there, paths here — and a `bool` at four call sites would not
+    /// say so. See [`Incoming::promised`].
+    #[cfg(test)]
+    pub fn promising(
+        shared: Arc<Mutex<Shared>>,
+        wake: egui::Context,
+        names: Vec<PathBuf>,
+    ) -> Self {
+        Self {
+            shared,
+            held: Mutex::new(Some(Incoming {
+                items: names,
+                temporary: true,
+                all_folders: false,
+                promised: true,
+            })),
+            hwnd: 0,
+            wake,
+        }
+    }
+
     #[cfg(test)]
     pub fn holding(
         shared: Arc<Mutex<Shared>>,
@@ -247,6 +319,7 @@ impl Target {
                 items,
                 temporary: false,
                 all_folders,
+                promised: false,
             })),
             hwnd: 0,
             wake,
@@ -262,16 +335,33 @@ impl Target {
 /// `CF_HDROP` by extracting files to a temporary folder, because until it has it has no
 /// paths to put in one. This was being called from `effect_at`, which runs on every
 /// `DragOver`, so a drag crossing the window asked the source to render its data dozens of
-/// times a second.
+/// times a second. Which is also why the format it is asked in is a decision and not an
+/// implementation detail: see [`Incoming::read`].
 ///
 /// Which cuts the other way too, and is why this is not what the drop then acts on: a
 /// source is entitled to have nothing to give until the drop is real, and answering a
 /// speculative request during the drag is the part it is allowed to skip. `Drop` asks
 /// again for that reason and falls back to this only if the second answer is empty.
 struct Incoming {
-    /// Every path the data object offered, via `CF_HDROP`. Empty is not an error — see
-    /// above.
+    /// Every path the data object offered — or, when the source had none to give, the names it
+    /// promised instead. Empty is not an error, and see [`Incoming::promised`] for the difference.
     items: Vec<PathBuf>,
+    /// Whether `items` are those promised **names** rather than real paths.
+    ///
+    /// They answer everything the drag itself asks, and each of the four is worth checking against
+    /// [`virtual_files::Promised::items`] being relative:
+    ///
+    /// | asked | answer for a name like `src\main.rs` |
+    /// | --- | --- |
+    /// | [`super::carrying`] | `main.rs`, or a count — the right words either way |
+    /// | [`super::refuses`] | nothing: no relative name can *be* an absolute destination, or contain one |
+    /// | [`super::does_nothing`] | nothing: its parent is `src`, which is no folder on this disk |
+    /// | [`super::default_effect`] | a copy, there being no volume in it — and `temporary` says so first |
+    ///
+    /// What they cannot do is be dropped, which is what this flag is for: the fallback in
+    /// [`IDropTarget_Impl::Drop`] would otherwise hand a copy the name `src\main.rs` and let it
+    /// resolve against whatever the working directory happens to be.
+    promised: bool,
     /// Whether those paths are a temporary the source is going to take back — see
     /// [`super::under_temp`].
     ///
@@ -290,14 +380,64 @@ struct Incoming {
 }
 
 impl Incoming {
+    /// What a drag is carrying, asked for in the cheapest format the source offers it in.
+    ///
+    /// **The order is the whole of this function.** Each step past the first is reached only when the
+    /// one before it answered nothing, and a step the source does not have costs one `QueryGetData`
+    /// — two integer comparisons:
+    ///
+    /// 1. [`shell_paths_of`] — real paths out of `CFSTR_SHELLIDLIST`, which is what a shell drag
+    ///    carries and what Explorer's own targets read. Cheap, because the PIDLs are how the drag
+    ///    was built in the first place.
+    /// 2. [`virtual_files::promised`] — a source with no real paths to give, describing files that
+    ///    do not exist yet.
+    /// 3. [`paths_of`] — `CF_HDROP`. **The one that can cost an extraction**, and last for that
+    ///    reason: see [`virtual_files::Promised`], which is the several seconds this order is here
+    ///    to stop.
+    ///
+    /// # Why the first step is not the second
+    ///
+    /// It reads as redundant — a real file has real paths, so why ask twice — and it is not:
+    /// **the shell's own data object offers `CFSTR_FILEDESCRIPTORW` for ordinary files on a disk.**
+    /// Descriptors are not the mark of a virtual source; they are a format the shell serves for
+    /// anything at all.
+    ///
+    /// So descriptors-first took the promised branch for every drag out of Explorer, and that branch
+    /// answers with relative names, no refusals and a forced copy: dragging a folder onto itself
+    /// stopped being refused, and an unmodified drag within one volume stopped being a move. Found
+    /// by `the_shell_s_own_data_object_arrives_as_real_paths`, which is where it stays found.
     fn read(data: Option<&IDataObject>) -> Self {
-        let items = data.and_then(paths_of).unwrap_or_default();
+        if let Some(items) = data.and_then(shell_paths_of) {
+            return Self::of_real(items);
+        }
+        // Only now, with the real-path formats exhausted: asking a virtual source for paths is
+        // asking it to extract — see [`virtual_files::Promised`].
+        if let Some(promised) = data.and_then(virtual_files::promised) {
+            return Self {
+                items: promised.items,
+                // **Always**, and not because the files are under `%TEMP%` — nothing has been
+                // written anywhere yet. It is the same conclusion for the same reason: what a
+                // virtual source offers is a materialisation rather than the user's own files, so
+                // the same-volume rule is answering a question nobody asked, and a move reported to
+                // a source that has nothing to delete is at best meaningless. See
+                // [`super::under_temp`], which is this signal read off the paths afterwards.
+                temporary: true,
+                all_folders: promised.all_folders,
+                promised: true,
+            };
+        }
+        Self::of_real(data.and_then(paths_of).unwrap_or_default())
+    }
+
+    /// The two questions asked of a list of real paths, whichever format they arrived in.
+    fn of_real(items: Vec<PathBuf>) -> Self {
         let temporary = items.iter().any(|item| super::under_temp(item));
         let all_folders = items.iter().all(|item| item.is_dir());
         Self {
             items,
             temporary,
             all_folders,
+            promised: false,
         }
     }
 }
@@ -704,22 +844,42 @@ impl IDropTarget_Impl for Target_Impl {
             chosen
         };
 
+        // The drag is over, so this target is done with what it read when the drag arrived — taken
+        // out of the lock whichever list it held, and **kept only if it was paths**: a promise is a
+        // list of relative names, not a fallback. See [`Incoming::promised`].
+        let held = self.held.lock().ok().and_then(|mut held| held.take());
+        let promised = held.as_ref().is_some_and(|incoming| incoming.promised);
+        let cached = held
+            .filter(|incoming| !incoming.promised)
+            .map(|incoming| incoming.items)
+            .unwrap_or_default();
+
+        // **This window's own archive selection, taken rather than asked for** — see
+        // [`Shared::carrying`], which is the freeze this avoids and why it can only be avoided for
+        // our own drags. Empty for every other drag, which falls through to the render below exactly
+        // as before.
+        let carrying = if promised {
+            self.shared
+                .lock()
+                .map(|shared| shared.carrying.clone())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
         // Asked for again here rather than reused from `DragEnter`, because for a source
         // that renders on demand *this* is the call that matters: 7-Zip extracts the
         // archive to answer it, and has nothing to give until the drop is real. Reusing
         // the drag-time read left the drop with an empty list, so nothing was extracted
         // and nothing was copied. The drag-time read stays as the fallback, for a source
         // that renders once and not again.
-        let cached = self
-            .held
-            .lock()
-            .ok()
-            .and_then(|mut held| held.take())
-            .map(|incoming| incoming.items)
-            .unwrap_or_default();
-        let items = match data.as_ref().and_then(paths_of) {
-            Some(fresh) if !fresh.is_empty() => fresh,
-            _ => cached,
+        let items = if !carrying.is_empty() {
+            carrying
+        } else {
+            match data.as_ref().and_then(paths_of) {
+                Some(fresh) if !fresh.is_empty() => fresh,
+                _ => cached,
+            }
         };
         // Converted before the lock is taken, not inside it.
         let at = self.in_client(pt);
@@ -763,6 +923,71 @@ impl IDropTarget_Impl for Target_Impl {
             });
         }
         Ok(())
+    }
+}
+
+/// Every path a data object is offering, via `CFSTR_SHELLIDLIST` — the format a drag out of the
+/// shell carries, and the cheap way to the same answer [`paths_of`] renders for.
+///
+/// `None` unless **every** item resolves to a path on a filesystem, which is what makes this a test
+/// as well as a read: a shell drag out of a virtual folder — Explorer's own view of a `.zip`, a
+/// camera, a phone — carries PIDLs that name no file, and half an answer would be worse than none.
+/// The caller falls through to the descriptors, which is what such a source has to offer instead.
+/// See [`Incoming::read`] for why the order matters.
+///
+/// # Through `IShellItemArray`, and not by parsing the `HIDA`
+///
+/// The format is a count and a list of offsets into a block of PIDLs, and the block was written by
+/// whichever program started the drag. `SHCreateShellItemArrayFromDataObject` does that parse, with
+/// the shell's own bounds checks, and hands back items — so the untrusted arithmetic is not this
+/// program's. It is gated on `QueryGetData` above so that it is only ever called on an object that
+/// really has the format: a helper that fell back to `CF_HDROP` on its own would undo the whole
+/// point of asking in this order.
+///
+/// `SIGDN_FILESYSPATH` is a question about the PIDL rather than about the disk — it does not stat
+/// anything, which matters here for the reason it matters everywhere in this program: these
+/// callbacks run on the UI thread, and a drag whose source is a dead share must not stall the
+/// window.
+fn shell_paths_of(data: &IDataObject) -> Option<Vec<PathBuf>> {
+    use windows::Win32::System::Com::{CoTaskMemFree, FORMATETC, TYMED_HGLOBAL};
+    use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
+    use windows::Win32::UI::Shell::{
+        IShellItemArray, SHCreateShellItemArrayFromDataObject, CFSTR_SHELLIDLIST, SIGDN_FILESYSPATH,
+    };
+
+    // Registered rather than predefined, so the number has to be asked for — once, for the reason
+    // `virtual_files::Formats` gives about its own three: it is a syscall, and this is on the path
+    // of every drag that so much as touches the window.
+    static SHELLIDLIST: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
+    let format = FORMATETC {
+        // SAFETY: a static, null-terminated name from the `windows` crate.
+        cfFormat: *SHELLIDLIST
+            .get_or_init(|| unsafe { RegisterClipboardFormatW(CFSTR_SHELLIDLIST) as u16 }),
+        ptd: std::ptr::null_mut(),
+        dwAspect: 1,
+        lindex: -1,
+        tymed: TYMED_HGLOBAL.0 as u32,
+    };
+    // SAFETY: a live object for the length of the call; the `FORMATETC` outlives both uses. Every
+    // string the shell allocates below is freed with `CoTaskMemFree`, once.
+    unsafe {
+        if data.QueryGetData(&format) != S_OK {
+            return None;
+        }
+        let items: IShellItemArray = SHCreateShellItemArrayFromDataObject(data).ok()?;
+        let count = items.GetCount().ok()?;
+        let mut paths = Vec::with_capacity(count as usize);
+        for at in 0..count {
+            let item = items.GetItemAt(at).ok()?;
+            // An item with no filesystem path is a virtual one, and that abandons the whole answer
+            // rather than returning the rest of it.
+            let wide = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
+            // Read and freed before the `?`, so the one failure left cannot leak the string.
+            let text = wide.to_string().ok();
+            CoTaskMemFree(Some(wide.0 as *const std::ffi::c_void));
+            paths.push(PathBuf::from(text?));
+        }
+        (!paths.is_empty()).then_some(paths)
     }
 }
 

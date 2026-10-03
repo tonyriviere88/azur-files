@@ -30,7 +30,17 @@ impl App {
             let tab = pane.tab_mut();
             // A listing has to exist first: git is asked about the folder that is *on screen*, and
             // "This PC" — the synthetic listing with an empty path — is not a folder at all.
-            if tab.git_asked || tab.dir.is_none() || tab.path.as_os_str().is_empty() {
+            //
+            // Nor is a folder inside an archive, and that one has to be excluded explicitly rather
+            // than left to fail: `git status` against `D:\dl\pkg.zip\src` would walk *up* from a
+            // path that does not exist, find the repository the archive happens to be sitting in,
+            // and report that repository's marks against rows they have nothing to do with. A wrong
+            // answer, arrived at confidently — which is worse than none.
+            if tab.git_asked
+                || tab.dir.is_none()
+                || tab.path.as_os_str().is_empty()
+                || crate::archive::is_virtual(&tab.path)
+            {
                 continue;
             }
             tab.git_asked = true;

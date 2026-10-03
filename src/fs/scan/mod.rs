@@ -55,7 +55,7 @@ pub use win::silence_device_dialogs;
 /// Read `path` into a [`Dir`]. Never fails: an unreadable directory comes back as
 /// an empty one carrying the reason.
 ///
-/// Two paths are not directories at all and are answered without touching the filesystem API:
+/// Three paths are not directories at all and are answered without asking the filesystem for one:
 ///
 /// - **An empty path** is the synthetic "This PC" listing of volumes.
 /// - **A bare `\\server`** is the machine's list of shares. A server is not a directory —
@@ -64,6 +64,9 @@ pub use win::silence_device_dialogs;
 ///   See [`super::drives::server_dir`]: that call goes to the network and can take twenty-two
 ///   seconds to fail, which is affordable here and nowhere else, because this function only ever
 ///   runs on a [`crate::loader`] worker.
+/// - **A path with an archive in it** — `D:\dl\pkg.tar.gz\src` — is read out of the archive. See
+///   [`crate::archive`], and note that the same "only ever on a worker" argument is what lets that
+///   one inflate a tarball to answer.
 pub fn scan(path: &Path) -> Dir {
     let started = Instant::now();
     if path.as_os_str().is_empty() {
@@ -71,6 +74,12 @@ pub fn scan(path: &Path) -> Dir {
     }
     if let Some(server) = super::drives::unc_server(path) {
         return super::drives::server_dir(&server, path, started);
+    }
+    // Ahead of the real scan, because `D:\pkg.zip\src` is a path the filesystem has no answer for
+    // at all — and `None` here means the archive was only ever an extension's worth of a guess, so
+    // the real scan is right. See [`crate::archive::listing`].
+    if let Some(dir) = crate::archive::listing(path, started) {
+        return dir;
     }
     scan_real(path, started)
 }
@@ -212,6 +221,13 @@ pub fn scan_deep(root: &Path, budget: usize, patience: std::time::Duration) -> D
     // back the shares, exactly as it gives back the volumes for This PC.
     if let Some(server) = super::drives::unc_server(root) {
         return super::drives::server_dir(&server, root, started);
+    }
+    // An archive's [`crate::archive::Index`] is *already* the flattened form — every entry with its
+    // full interior path — so this is the one place where flattening is cheaper than listing a
+    // folder rather than far more expensive. No walk, no threads, and the budget and patience below
+    // do not apply because there is nothing left to bound. See [`crate::archive::flattened`].
+    if let Some(dir) = crate::archive::flattened(root, started) {
+        return dir;
     }
 
     walk(root, budget, patience, hands())

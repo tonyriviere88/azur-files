@@ -7,12 +7,15 @@ use super::*;
 
 impl App {
     /// Put the selection on the clipboard, as a cut or as a copy.
-    pub(super) fn put_on_clipboard(&mut self, pane: PaneId, cutting: bool) {
+    ///
+    /// The context is only needed for a selection inside an archive, which has to be extracted on a
+    /// thread before there is anything a clipboard can name — see [`App::put_these_on_clipboard`].
+    pub(super) fn put_on_clipboard(&mut self, ctx: &egui::Context, pane: PaneId, cutting: bool) {
         let paths = self
             .pane_mut(pane)
             .map(|p| p.tab().selection_paths())
             .unwrap_or_default();
-        self.put_these_on_clipboard(paths, cutting);
+        self.put_these_on_clipboard(ctx, paths, cutting);
     }
 
     /// The same, on paths named outright.
@@ -21,11 +24,36 @@ impl App {
     /// redirected into it — see [`App::ours_rather_than_the_shell_s`] — and the menu carries the
     /// items it was raised over rather than reading them back off the pane. One implementation, so
     /// that Ctrl+X and the menu's Couper cannot come to mean two different things.
-    pub(super) fn put_these_on_clipboard(&mut self, paths: Vec<PathBuf>, cutting: bool) {
+    pub(super) fn put_these_on_clipboard(
+        &mut self,
+        ctx: &egui::Context,
+        paths: Vec<PathBuf>,
+        cutting: bool,
+    ) {
         use crate::shell::clipboard::{put, Effect};
 
         if paths.is_empty() {
             self.notice = Some("Nothing selected".to_owned());
+            return;
+        }
+        // **Inside an archive there is nothing yet to put on a clipboard.** A `CF_HDROP` is a list of
+        // file names, and `D:\dl\pkg.zip\src\main.rs` is not one — pasting it anywhere would fail in
+        // whichever program tried. So a copy becomes an extraction first, and the clipboard is
+        // written when the real files exist: [`App::copy_out_of_archive`], whose answer comes back
+        // through this same function with paths that are real.
+        //
+        // A **cut** is refused outright. It is not a copy with a flag: it is a promise that pasting
+        // will *remove* the originals, and nothing in this program writes to an archive — see
+        // [`crate::archive`], where that is scope and format both. Explorer refuses it on a zip for
+        // the same reason.
+        if paths.iter().any(|path| crate::archive::is_virtual(path)) {
+            if cutting {
+                self.notice =
+                    Some("Files cannot be moved out of an archive. Copy them instead.".to_owned());
+            } else {
+                // Re-entered from `Extracted::Copied` with real paths, so this cannot recurse.
+                self.copy_out_of_archive(ctx, paths);
+            }
             return;
         }
         let effect = if cutting { Effect::Move } else { Effect::Copy };
@@ -294,9 +322,6 @@ impl App {
 
     /// Act on files dropped onto a pane, and highlight the one being hovered.
     pub(super) fn collect_drops(&mut self, ctx: &egui::Context) {
-        use crate::shell::clipboard::Effect;
-        use crate::shell::ops::Job;
-
         // The highlight, while a drag is over the window. A repaint is asked for
         // because the OLE callbacks run outside egui's own event flow and nothing else
         // would wake it.
@@ -322,103 +347,126 @@ impl App {
         }
 
         for dropped in self.drops.take_drops() {
-            // Where the drop actually landed, decided when the pointer was there rather than
-            // worked out again now. It was worked out again, from the pane under the pointer,
-            // and so a drop onto a *folder row* went into the folder being shown instead of into
-            // the folder it was dropped on — the one thing dragging onto a folder means.
-            let into = match dropped.onto {
-                // Onto the sidebar: pin the folders and move nothing.
-                //
-                // **A drag with a file anywhere in it never gets here** — the pointer refuses it
-                // while the drag is still moving, and the drop is answered with no effect at all;
-                // see [`crate::shell::dnd::refuses`]. So `is_dir` is the guard for a drop whose
-                // items have changed under it since, and not the rule: the rule is that a selection
-                // is pinnable or it is refused, rather than half of it going in quietly.
-                crate::shell::dnd::Onto::Bookmarks => {
-                    for item in dropped.items {
-                        if item.is_dir() {
-                            self.perform(ctx, Action::AddBookmark(item));
-                        }
-                    }
-                    continue;
-                }
-                // Onto a group's row: into that group. Which group was decided when the pointer
-                // was over it, like everything else about where a drop landed — and the list
-                // cannot have changed since, because a drag holds the pointer.
-                crate::shell::dnd::Onto::BookmarkGroup(group) => {
-                    for item in dropped.items {
-                        if item.is_dir() {
-                            self.perform(ctx, Action::AddBookmarkIn { group, path: item });
-                        }
-                    }
-                    continue;
-                }
-                crate::shell::dnd::Onto::Folder(into) => into,
-            };
-            if into.as_os_str().is_empty() {
-                continue;
-            }
-
-            let scale = ctx.pixels_per_point();
-            let at = egui::pos2(
-                dropped.at.0 as f32 / scale,
-                dropped.at.1 as f32 / scale,
-            );
-            // Only to decide which pane the keyboard should follow the drop into; the
-            // destination is `into`.
-            let Some(pane) = self
-                .panes
-                .iter()
-                .find(|p| p.rect.contains(at))
-                .map(|p| p.id)
-            else {
-                continue;
-            };
-            // Dropping a folder into itself is meaningless whatever button carried it, and a drag
-            // holding one was already refused while it was still moving -- so this is the drag that
-            // named its files only now.
-            // A *move* back into the folder the items are already in was refused while the drag was
-            // still moving; a copy there is `one - Copy.txt`, a shortcut there is `one.txt.lnk`, and
-            // a right drag is a question nobody has answered yet — so all three of those keep
-            // everything they are carrying.
-            let keep = dropped.asked || dropped.effect != Effect::Move;
-            let items = Self::droppable(dropped.items, &into, keep);
-            if items.is_empty() {
-                continue;
-            }
-            self.focused = pane;
-            // A right-button drag asks rather than assumes, which is what Windows does and the
-            // whole reason anybody drags with the right button.
-            if dropped.asked {
-                use crate::shell::menu::{Entry, Own};
-                // Explorer's own four, in Explorer's own order.
-                let own = [Own::CopyHere, Own::MoveHere, Own::LinkHere, Own::Cancel]
-                    .into_iter()
-                    .map(Entry::own)
-                    .collect();
-                self.close_menu();
-                // Built here rather than through the builder: these are this program's own
-                // entries and there is nothing to ask the shell about, so the menu is ready now.
-                // Token 0 matches no build, which is exactly right -- no answer is coming, and
-                // the depth is the same nothing: every entry here is this program's own, so
-                // there is no shell menu for one of them ever to be resolved against.
-                self.menu = Some(crate::ui::menu::Open::new(
-                    pane,
-                    at,
-                    items,
-                    into,
-                    own,
-                    crate::shell::menu::Depth::Full,
-                    0,
-                ));
-                continue;
-            }
-            let job = match dropped.effect {
-                Effect::Move => Job::Move { items, into },
-                Effect::Copy => Job::Copy { items, into },
-                Effect::Link => Job::Link { items, into },
-            };
-            self.ops.start(job, self.owner, ctx);
+            self.land(ctx, dropped);
         }
+    }
+
+    /// Act on one completed drop.
+    ///
+    /// # Entered twice for a drop out of an archive
+    ///
+    /// The drop arrives naming paths *inside* the archive — [`crate::shell::dnd::Shared::carrying`]
+    /// explains why it must — so this starts the extraction on a worker and returns, and the answer
+    /// comes back as [`Extracted::Landed`]: the same [`crate::shell::dnd::Dropped`] with real paths in
+    /// it. The second pass then runs the whole of the rest of this, the right-button menu included,
+    /// knowing nothing about archives.
+    ///
+    /// The same shape as [`App::open_from_archive`], and for the same reason: a second pass composes,
+    /// where a special case inside each branch would have to be got right in each of them.
+    pub(super) fn land(&mut self, ctx: &egui::Context, dropped: crate::shell::dnd::Dropped) {
+        use crate::shell::clipboard::Effect;
+        use crate::shell::ops::Job;
+
+        // **On a worker, so the window goes on painting** — and painting is what puts the figures on
+        // the status line, which is all somebody who has just dropped 300 files out of a solid `.7z`
+        // has to look at. See [`crate::archive::extract::doing`].
+        //
+        // `any` and not `all`: a drag can mix an archive's entries with real files only through the
+        // right-button menu, and [`crate::archive::extract::all`] hands back a real path unchanged,
+        // so the mixed case needs nothing of its own.
+        if dropped.items.iter().any(|item| crate::archive::is_virtual(item)) {
+            let paths = dropped.items.clone();
+            self.out_of_archive(ctx, paths, Then::Land(Box::new(dropped)));
+            return;
+        }
+        // Where the drop actually landed, decided when the pointer was there rather than
+        // worked out again now. It was worked out again, from the pane under the pointer,
+        // and so a drop onto a *folder row* went into the folder being shown instead of into
+        // the folder it was dropped on — the one thing dragging onto a folder means.
+        let into = match dropped.onto {
+            // Onto the sidebar: pin the folders and move nothing.
+            //
+            // **A drag with a file anywhere in it never gets here** — the pointer refuses it
+            // while the drag is still moving, and the drop is answered with no effect at all;
+            // see [`crate::shell::dnd::refuses`]. So `is_dir` is the guard for a drop whose
+            // items have changed under it since, and not the rule: the rule is that a selection
+            // is pinnable or it is refused, rather than half of it going in quietly.
+            crate::shell::dnd::Onto::Bookmarks => {
+                for item in dropped.items {
+                    if item.is_dir() {
+                        self.perform(ctx, Action::AddBookmark(item));
+                    }
+                }
+                return;
+            }
+            // Onto a group's row: into that group. Which group was decided when the pointer
+            // was over it, like everything else about where a drop landed — and the list
+            // cannot have changed since, because a drag holds the pointer.
+            crate::shell::dnd::Onto::BookmarkGroup(group) => {
+                for item in dropped.items {
+                    if item.is_dir() {
+                        self.perform(ctx, Action::AddBookmarkIn { group, path: item });
+                    }
+                }
+                return;
+            }
+            crate::shell::dnd::Onto::Folder(into) => into,
+        };
+        if into.as_os_str().is_empty() {
+            return;
+        }
+
+        let scale = ctx.pixels_per_point();
+        let at = egui::pos2(dropped.at.0 as f32 / scale, dropped.at.1 as f32 / scale);
+        // Only to decide which pane the keyboard should follow the drop into; the
+        // destination is `into`.
+        let Some(pane) = self.panes.iter().find(|p| p.rect.contains(at)).map(|p| p.id) else {
+            return;
+        };
+        // Dropping a folder into itself is meaningless whatever button carried it, and a drag
+        // holding one was already refused while it was still moving -- so this is the drag that
+        // named its files only now.
+        // A *move* back into the folder the items are already in was refused while the drag was
+        // still moving; a copy there is `one - Copy.txt`, a shortcut there is `one.txt.lnk`, and
+        // a right drag is a question nobody has answered yet — so all three of those keep
+        // everything they are carrying.
+        let keep = dropped.asked || dropped.effect != Effect::Move;
+        let items = Self::droppable(dropped.items, &into, keep);
+        if items.is_empty() {
+            return;
+        }
+        self.focused = pane;
+        // A right-button drag asks rather than assumes, which is what Windows does and the
+        // whole reason anybody drags with the right button.
+        if dropped.asked {
+            use crate::shell::menu::{Entry, Own};
+            // Explorer's own four, in Explorer's own order.
+            let own = [Own::CopyHere, Own::MoveHere, Own::LinkHere, Own::Cancel]
+                .into_iter()
+                .map(Entry::own)
+                .collect();
+            self.close_menu();
+            // Built here rather than through the builder: these are this program's own
+            // entries and there is nothing to ask the shell about, so the menu is ready now.
+            // Token 0 matches no build, which is exactly right -- no answer is coming, and
+            // the depth is the same nothing: every entry here is this program's own, so
+            // there is no shell menu for one of them ever to be resolved against.
+            self.menu = Some(crate::ui::menu::Open::new(
+                pane,
+                at,
+                items,
+                into,
+                own,
+                crate::shell::menu::Depth::Full,
+                0,
+            ));
+            return;
+        }
+        let job = match dropped.effect {
+            Effect::Move => Job::Move { items, into },
+            Effect::Copy => Job::Copy { items, into },
+            Effect::Link => Job::Link { items, into },
+        };
+        self.ops.start(job, self.owner, ctx);
     }
 }

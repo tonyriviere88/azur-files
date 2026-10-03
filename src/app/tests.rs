@@ -963,3 +963,140 @@ fn split_focused_opens_the_folder_already_showing() {
     assert_eq!(app.panes.len(), 2);
     assert_eq!(app.panes[1].tab().path, PathBuf::from("/here"));
 }
+
+/// **The extraction readout**, which is the whole of what a several-second decompression has to show
+/// for itself: the sentence is rebuilt every frame, and every frame asks for the next one.
+///
+/// Driven through [`crate::archive::extract::pretend`] rather than by starting a real extraction and
+/// racing it — see there.
+#[test]
+fn an_extraction_in_flight_says_how_far_it_has_got_and_keeps_the_frames_coming() {
+    let (mut app, _ctx) = app(&["."]);
+    assert!(
+        !app.watch_extraction(),
+        "nothing is being extracted, so no frame need be booked for it"
+    );
+    assert!(app.extracting.is_empty());
+
+    {
+        let _held = crate::archive::extract::pretend(43_200_512, 151_000_000);
+        assert!(
+            app.watch_extraction(),
+            "a frame has to be booked or the figure only moves when something else asks"
+        );
+        assert_eq!(app.extracting, "Extracting 41.2 MB of 144 MB…");
+    }
+
+    // The frame after it ends is the last one that mentions it. A readout left behind would sit there
+    // claiming work that is over — see `the_counter_is_released_when_the_extraction_ends`, which is
+    // the other half of this.
+    assert!(!app.watch_extraction());
+    assert!(app.extracting.is_empty());
+}
+
+/// Which of the three things that can claim the status line wins.
+#[test]
+fn progress_is_said_over_a_notice_and_under_a_file_operation() {
+    use super::frame::status_override;
+
+    // `Ctrl+C` inside an archive sets its notice first and the figures arrive after, so this pair is
+    // the ordering that matters: the sentence must give way to the numbers rather than mask them.
+    assert_eq!(
+        status_override(None, "Extracting 4.88 KB…", Some("Copying out of the archive…")),
+        Some("Extracting 4.88 KB…")
+    );
+    // And a shell operation over both, being the only one of the three that is moving files.
+    assert_eq!(
+        status_override(Some("Copying 4 items…"), "Extracting 4.88 KB…", Some("Failed")),
+        Some("Copying 4 items…")
+    );
+    // Then the ordinary cases, so the chain is not just its own precedence.
+    assert_eq!(status_override(None, "", Some("Failed")), Some("Failed"));
+    assert_eq!(status_override(None, "", None), None);
+}
+
+/// **A drop out of an archive is extracted before anything is copied**, and on a worker.
+///
+/// [`App::land`]'s two passes, asserted as two: the first must start no file operation at all, the
+/// files it would name not existing yet, and the second — the same drop, carried back with real paths
+/// — must be the one that does. The layer below is
+/// `a_drop_out_of_an_archive_extracts_nothing_in_the_callback`.
+#[test]
+fn a_drop_out_of_an_archive_is_extracted_before_it_is_copied() {
+    use std::io::Write as _;
+
+    let root = crate::sandbox::fresh("land-drop");
+    let pkg = root.join("pkg.zip");
+    {
+        let file = std::fs::File::create(&pkg).expect("sandbox");
+        let mut writer = zip::ZipWriter::new(file);
+        let stored =
+            zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        for (entry, body) in [("a.txt", "first"), ("b.txt", "second")] {
+            writer.start_file(entry, stored).expect("zip");
+            writer.write_all(body.as_bytes()).expect("zip");
+        }
+        writer.finish().expect("zip");
+    }
+    let into = root.join("elsewhere");
+    std::fs::create_dir_all(&into).expect("sandbox");
+    let picked = vec![pkg.join("a.txt"), pkg.join("b.txt")];
+    // Listed first, because a path is only virtual once the archive behind it has been read — see
+    // [`crate::archive::is_virtual`], which is a cache lookup and not a stat.
+    crate::fs::scan::scan(&pkg);
+    assert!(
+        picked.iter().all(|item| crate::archive::is_virtual(item)),
+        "the fixture is not inside an archive, so this would test the ordinary path"
+    );
+
+    let (mut app, ctx) = app(&["."]);
+    // A pane with a rectangle, since the drop is resolved against where it landed and a pane that
+    // has never been drawn has none.
+    app.panes[0].rect = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(100.0, 100.0));
+    let dropped = crate::shell::dnd::Dropped {
+        items: picked.clone(),
+        effect: crate::shell::clipboard::Effect::Copy,
+        at: (10, 10),
+        onto: crate::shell::dnd::Onto::Folder(into.clone()),
+        asked: false,
+    };
+
+    app.land(&ctx, dropped);
+    assert!(
+        app.ops.in_progress().is_none(),
+        "a copy was started while the files were still inside the archive: {:?}",
+        app.ops.in_progress()
+    );
+
+    // A wait on a worker, which is the one thing this test cannot do without — the extraction is on
+    // a thread precisely so that the drop does not block the window.
+    let answer = app
+        .extracted
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the extraction never answered");
+    let Extracted::Landed(landed) = answer else {
+        panic!("the drop came back as something other than a drop");
+    };
+    assert_eq!(landed.items.len(), 2, "one answer per path dropped");
+    for path in &landed.items {
+        assert!(path.is_file(), "{} must exist by now", path.display());
+        assert!(
+            path.starts_with(crate::archive::extract::temp_root()),
+            "{} is not in the temp root",
+            path.display()
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(&landed.items[0]).expect("read back"),
+        "first",
+        "and in the order they were dropped, since that is all that pairs them up"
+    );
+
+    // The second pass: the same drop, and now there is something to copy.
+    app.land(&ctx, *landed);
+    let started = app.ops.in_progress().unwrap_or_default().to_owned();
+    assert!(
+        started.starts_with("Copying"),
+        "the second pass has to be the one that copies, and it said {started:?}"
+    );
+}

@@ -171,19 +171,34 @@ fn the_preview_panel_takes_room_from_the_listing_and_its_close_button_gives_it_b
         // about nine rows where the one down the side holds twenty-five. See
         // `crate::ui::deps::View::first_foldable`, where both halves of that are written down.
         let fits = ((panel.height() - crate::ui::preview::HEADER) / crate::ui::deps::ROW) as usize;
-        let row = h.app.panes[0]
+        let (row, name) = h.app.panes[0]
             .tab()
             .preview
             .dependency_first_foldable(fits)
             .unwrap_or_else(|| {
                 panic!("{at:?}: none of the {fits} rows on show can be unfolded at all")
             });
-        let first_import = pos2(
-            panel.left() + 80.0,
-            panel.top()
-                + crate::ui::preview::HEADER
-                + crate::ui::deps::ROW * (row as f32 + 0.5),
+        // **Clicked where the row was drawn, and not where the constants say it should have been.**
+        // Which is the third time this test has been caught by the same thing, and the first time it
+        // stops being able to happen: the position used to be `panel.top() + HEADER + ROW * row`, and
+        // the panel's rows do not start at `HEADER` — there is a seam above the header, so every click
+        // landed one row low. It passed anyway for as long as the row below the intended one also
+        // happened to be foldable, and stopped the day this crate gained an import that put an api
+        // set there. See `crate::ui::deps::View::first_foldable`, which hands back the name for this.
+        let drawn: Vec<egui::Pos2> = h
+            .texts()
+            .into_iter()
+            .filter(|(pos, text)| *text == name && panel.contains(*pos))
+            .map(|(pos, _)| pos)
+            .collect();
+        assert_eq!(
+            drawn.len(),
+            1,
+            "{at:?}: row {row} is `{name}`, and the panel draws that name {} times — the click below              would be a guess between them",
+            drawn.len()
         );
+        // A few points into the row, the text being drawn just inside its top edge.
+        let first_import = pos2(panel.left() + 80.0, drawn[0].y + crate::ui::deps::ROW / 4.0);
         // **Settled first.** The panel has just been filled by a worker thread, and a click on a
         // row of it in the same breath is a click on a view that is still arriving: co-executing
         // with the other two tests in this group, this went from unfolding the row to doing

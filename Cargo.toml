@@ -86,6 +86,131 @@ regex = { version = "1", default-features = false, features = [
     "unicode-perl",
 ] }
 
+# Opening an archive like a folder — `archive/`. Six crates, and one rule picked every one of
+# them: **no C library**, which is the same rule the codec list above is built on. An archive
+# reader is a decompressor fed by a file this program did not write, which is the most
+# attacker-shaped input a file manager takes in; `unsafe` in a C bzip2 is a memory-safety bug in
+# *this* process, and the pure-Rust port is a panic that `archive::guarded` turns into a listing
+# that says why. Every format below therefore decompresses in Rust, and the two that could only
+# be had from C — RAR, whose only implementation is `unrar` and is not free software, and ISO —
+# are simply not supported. They stay `Kind::Archive` in `fs::fmt` and open with whatever the
+# machine has, which is what they did before.
+#
+# | format | who reads it | listing costs |
+# | --- | --- | --- |
+# | `.zip` (and `.jar`, `.apk`, …) | `zip` | a seek to the central directory |
+# | `.7z` | `sevenz-rust2` | a seek to the end header |
+# | `.tar` | `tar` | a walk of every header |
+# | `.tar.gz`, `.tgz` | `tar` + `flate2` | **the whole file, decompressed** |
+# | `.tar.bz2`, `.tar.xz`, `.tar.zst` | `tar` + `bzip2` / `lzma-rust2` / `ruzstd` | the same |
+# | `.gz`, `.xz`, `.bz2`, `.zst` alone | the stream crates | nothing — one entry, named by the file |
+#
+# That third column is the whole reason `archive::Index` exists and is cached per *archive* rather
+# than per folder: a `.zip` has a directory to seek to, and a `.tar.gz` has nothing but the bytes,
+# so listing one subfolder of it means inflating everything up to that point. Reading it once and
+# answering every folder from memory is the difference between navigating a source tarball and
+# waiting on each click.
+#
+# `zip` carries the feature set worth reading twice, because its default is four C libraries deep:
+# `zstd` is the C one (`ruzstd` below is the Rust decoder, and it is wired to the tar side only —
+# a zstd-compressed *zip entry* is refused by name rather than silently skipped), and `deflate`
+# means `deflate-zopfli` plus `flate2/zlib-rs`. That second one is the trap: `flate2` is **already
+# in this graph** behind `png`, on its `miniz_oxide` backend, and features unify — asking for
+# `zlib-rs` here would swap the backend under `image`'s PNG decoding as a side effect of adding an
+# archive reader. `deflate-flate2` is the one that takes `flate2` as it already is.
+zip = { version = "7.2", default-features = false, features = [
+    # Reading, on the backend `png` already brought — see above. `zopfli` is a *compressor* and
+    # nothing here compresses.
+    "deflate-flate2",
+    # Pure Rust despite the name: `bzip2` 0.6's default backend is `libbz2-rs-sys`, the Rust port,
+    # and `bzip2-sys` is the opt-in C one. Confirmed against the feature table rather than assumed,
+    # because the two names suggest the opposite of what they do.
+    "bzip2",
+    # Rare methods, both pure Rust and both cheap: `deflate64` is what a >4 GB Windows-made zip
+    # can use, and PPMd is what 7-Zip writes into a `.zip` when told to.
+    "deflate64",
+    "ppmd",
+] }
+# **No `lzma` and no `xz` here, and that is a resolver decision rather than a taste one.**
+# `lzma-rust2` is pre-1.0, so each of its minors is its own semver range and cargo cannot unify
+# them — and the three consumers in this graph each ask for a different one: `zip` 7.2 wants
+# `0.15`, `sevenz-rust2` 0.20 wants `0.16`, and the newest is `0.18`. Taking all three linked
+# **three copies of one LZMA decoder** into the executable, which is the kind of thing this file
+# exists to catch.
+#
+# So the direct dependency below is pinned to `0.16` to unify with `sevenz-rust2`, and these two
+# features are dropped to keep `zip` from dragging in a second. What that costs is *extraction* of
+# an LZMA- or xz-compressed entry **inside a .zip**, which 7-Zip can write but almost nothing does;
+# the entry still lists, at its real name, size and date, because a zip's central directory is
+# stored uncompressed and reading it does not depend on the methods inside. `archive::extract` says
+# which method it will not decompress, by name.
+#
+# What is *not* given up is any common use of LZMA: `.7z` and `.tar.xz` are what actually carry it,
+# and both go through the single copy below.
+# No `aes-crypto`: an encrypted entry needs a password, and there is nowhere in this program to
+# type one. `archive::Index` reports such an entry as encrypted and lists it at its stored size,
+# which is more use than a listing that omits it.
+
+# The `.tar` half. A tar is a stream with no index — `tar` walks it header to header, which is
+# exactly what `Index` does once per archive.
+#
+# `default-features = false` drops `xattr`, whose only job is restoring extended attributes while
+# *unpacking* on Unix. Nothing here unpacks through this crate — `archive::extract` writes the bytes
+# itself, because it has to place them under one temp directory of its own choosing rather than
+# wherever the archive's paths point.
+tar = { version = "0.4", default-features = false }
+
+# `.gz`, and the `.tar.gz` that is most of what a source download is. **Already in this graph**
+# behind `png` (see `zip` above), so this line costs the declaration and not the crate — and its
+# default `miniz_oxide` backend is the pure-Rust one, which is why it was already acceptable here.
+flate2 = "1"
+
+# `.bz2` and `.tar.bz2`. Default features deliberately: that is `libbz2-rs-sys`, the Rust port,
+# and `features = ["bzip2-sys"]` would be the C library. See the `zip` block.
+bzip2 = "0.6"
+
+# `.xz`, `.tar.xz` and `.lzma`. **`0.16` and not the current `0.18`**, which is the version
+# `sevenz-rust2` asks for: pinning to it makes this the one copy of the LZMA decoder in the
+# executable rather than a second one beside it. See the note under `zip` above, which is where the
+# rest of that reasoning lives.
+#
+# `default-features = false` drops `encoder` (nothing here writes an archive), `optimization`
+# (which is the encoder's) and `lzip` (`.lz`, a container nobody has shipped this decade). `xz`
+# pulls `sha2` for the container's integrity check, which is the format's and not optional.
+lzma-rust2 = { version = "0.16", default-features = false, features = [
+    "std",
+    "xz",
+] }
+
+# `.zst` and `.tar.zst`, decode only, in Rust — which is the whole reason it is here rather than
+# the `zstd` crate that `zip`'s own `zstd` feature would have brought. See the `zip` block.
+ruzstd = "0.8"
+
+# `.7z`. Pure Rust, and the one format on the list with no other pure-Rust implementation.
+#
+# `default-features = false` drops `compress`, which is `lzma-rust2/encoder` — this reads archives
+# and never writes one — and `aes256`, for the reason under `zip`: no password can be typed here.
+# `bzip2` and `ppmd` are methods a `.7z` may use besides LZMA2, and both are crates already above.
+#
+# **`deflate` is deliberately absent, and it is the subtlest line in this file.** This crate does
+# not depend on `flate2` the way everything else here does — it pins it as
+# `flate2 = { version = "1", features = ["zlib-rs"] }`, a hard-coded backend rather than a choice
+# left to whoever is building. Cargo unifies features across the graph, so enabling `deflate` here
+# does not add a decoder for `.7z` and stop: it turns `zlib-rs` on in the *one* `flate2` this
+# executable contains, and `flate2` prefers a zlib backend over `miniz_oxide` when both are
+# compiled. `png` and `tiff` reach that same `flate2`. So one archive feature would have quietly
+# swapped the inflate implementation underneath the preview panel's PNG decoding, and linked a
+# second deflate library beside the one already there to do it.
+#
+# What leaving it out costs is extraction of a *Deflate-compressed entry inside a `.7z`*, which is
+# a combination 7-Zip has to be told to produce — LZMA2 is its default and `bzip2` above covers the
+# other common choice. As with the zip methods, the entry still lists; only its bytes are refused,
+# by name. See the `zip` block, which is the same trade for the same reason.
+sevenz-rust2 = { version = "0.20", default-features = false, features = [
+    "bzip2",
+    "ppmd",
+] }
+
 # `wgpu`, and only `wgpu` — `main::reporting_wgpu` has the measurements. In short: `egui_glow`'s
 # painter leaks a couple of kilobytes per draw call per frame, which scrolling turns into 7 MB a
 # second, and `wgpu` does not. `glow` used to be compiled in beside it so `AZUR_GLOW=1` could go
@@ -271,6 +396,23 @@ opt-level = "z"
 # 100k entries is visible. Optimise the dependencies even in a debug build.
 [profile.dev.package."*"]
 opt-level = 2
+
+[dev-dependencies]
+# **A 7z *writer*, for the tests only.** `archive/tests.rs` builds each archive it reads rather than
+# checking binary fixtures into the repository, which is what keeps those tests readable — the
+# archive under test is the twelve lines above the assertion. Every other format's encoder is
+# already reachable: `zip` and `tar` ship writers, and `flate2` and `bzip2` compress as well as
+# decompress. `.7z` is the one that does not, its encoder being behind the `compress` feature that
+# the real dependency above turns off.
+#
+# A dev-dependency's features unify with the normal one *when building tests*, and not otherwise, so
+# this adds `lzma-rust2/encoder` to `cargo test` and nothing at all to the shipped executable. Which
+# is worth checking rather than assuming, and `cargo tree -e features` is where.
+sevenz-rust2 = { version = "0.20", default-features = false, features = [
+    "bzip2",
+    "ppmd",
+    "compress",
+] }
 
 [build-dependencies]
 # Puts the `.ico` into the executable's own resources, which is the only way Explorer, a

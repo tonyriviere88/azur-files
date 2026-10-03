@@ -175,12 +175,21 @@ impl View {
     /// `d3d11.dll` for the video player: two more imports at the top of the table pushed the first
     /// foldable one out of sight, and a test about whether a click reaches a row failed because the
     /// row it had chosen was not there to be reached.
+    /// **Its name comes back with it**, and that is the third half of the same lesson. Knowing
+    /// *which* row to click is no use without knowing where it was drawn, and a caller that works
+    /// that out from [`ROW`] and the panel's own constants is off by however much furniture sits
+    /// between the panel's edge and the first row — which is exactly the mistake that made a click
+    /// intended for row one land on row two. The name is what a test can find among the drawn text,
+    /// so the click goes where the row actually is.
     #[cfg(test)]
-    pub fn first_foldable(&self, rows: usize) -> Option<usize> {
-        self.rows
+    pub fn first_foldable(&self, rows: usize) -> Option<(usize, &str)> {
+        let at = self
+            .rows
             .iter()
             .take(rows)
-            .position(|row| row.expandable && !row.open && !row.cyclic)
+            .position(|row| row.expandable && !row.open && !row.cyclic)?;
+        let module = self.rows.get(at).map(|row| row.module)?;
+        Some((at, self.graph.modules.get(module)?.name.as_str()))
     }
 
     /// Fold a module open or shut.

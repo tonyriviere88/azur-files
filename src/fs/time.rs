@@ -31,6 +31,35 @@ pub const UNIX_EPOCH_FILETIME: u64 = 116_444_736_000_000_000;
 /// Seconds between the `FILETIME` epoch and the Unix epoch.
 const FILETIME_TO_UNIX_SECS: i64 = 11_644_473_600;
 
+/// The write time out of a [`std::fs::Metadata`], as a raw `FILETIME`.
+///
+/// Nothing else in this program needs one: the scanner is handed `FILETIME`s by the enumeration
+/// itself, which is the whole point of [`crate::fs::scan`], and asking `metadata()` per row is the
+/// 202× mistake that module is built to avoid. This exists for [`crate::archive`], which stats one
+/// file — the archive — to key its cache on, and wants the timestamp in the same units as
+/// everything else here.
+///
+/// `0` when the platform will not say, which is [`LocalZone::convert`]'s "no date".
+pub fn filetime_of(found: &std::fs::Metadata) -> u64 {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        found.last_write_time()
+    }
+    #[cfg(not(windows))]
+    {
+        found
+            .modified()
+            .ok()
+            .and_then(|at| at.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|since| {
+                (since.as_secs() + FILETIME_TO_UNIX_SECS as u64).saturating_mul(10_000_000)
+                    + since.subsec_nanos() as u64 / 100
+            })
+            .unwrap_or(0)
+    }
+}
+
 #[cfg(windows)]
 #[path = "../windows/time.rs"]
 mod win;
@@ -102,6 +131,43 @@ impl LocalZone {
         let utc = (filetime / 10_000_000) as i64 - FILETIME_TO_UNIX_SECS;
         let offset = self.offset_at(utc);
         Some(civil(utc + offset as i64 * 60))
+    }
+
+    /// Local civil time back to a raw `FILETIME` — the inverse of [`LocalZone::convert`].
+    ///
+    /// Here for exactly one input: **a zip entry's timestamp is a DOS timestamp**, which is local
+    /// wall-clock time with no zone recorded anywhere in the format. Every other date in this
+    /// program arrives as a `FILETIME` already — the enumeration hands one over, a tar stores Unix
+    /// seconds UTC, a `.7z` stores a `FILETIME` outright — and [`crate::fs::dir::Entry::modified`]
+    /// is a `FILETIME`, so a zip's dates have to come the other way through the same rules or they
+    /// arrive an offset out. Which is visible: an hour or two wrong on every row of every zip, in
+    /// the one column where being nearly right looks like being right.
+    ///
+    /// # Its inaccuracy is the module's, plus one hour a year
+    ///
+    /// The zone offset depends on the instant, and the instant is what is being worked out, so
+    /// this resolves the offset from standard local time exactly as [`LocalZone::offset_at`]
+    /// already does for the forward direction. That is exact except inside the hour a transition
+    /// moves, where a local wall-clock time is either ambiguous (it happens twice) or does not
+    /// exist at all — which is a property of wall-clock time and not of this function. The
+    /// ambiguous hour resolves to daylight time and the missing one to standard.
+    ///
+    /// `0` — [`LocalZone::convert`]'s "no date", which draws as a dash — for anything at or before
+    /// the `FILETIME` epoch, which no zip can legitimately carry: a DOS timestamp cannot express a
+    /// year before 1980.
+    pub fn filetime_from_local(&self, at: DateTime) -> u64 {
+        let local = days_from_civil(at.year, at.month, at.day) * 86_400
+            + at.hour as i64 * 3_600
+            + at.minute as i64 * 60
+            + at.second as i64;
+        // Standard time to pick the year and the daylight window, which is the same approximation
+        // `offset_at` makes about its own argument.
+        let offset = self.offset_at(local - self.std_offset as i64 * 60);
+        let utc = local - offset as i64 * 60;
+        if utc <= -FILETIME_TO_UNIX_SECS {
+            return 0;
+        }
+        ((utc + FILETIME_TO_UNIX_SECS) as u64).saturating_mul(10_000_000)
     }
 
     /// Which of the two offsets is in force at a UTC instant.

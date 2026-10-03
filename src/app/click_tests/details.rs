@@ -515,3 +515,62 @@ fn the_listing_keeps_room_under_it_for_the_folder() {
 
     crate::sandbox::remove(&root);
 }
+
+/// **What a several-second decompression has to show for itself**, on the pixels: the figure is on
+/// the status line, it displaces the arithmetic that was there, and it goes when the work does.
+///
+/// Read off the painted text rather than off [`App::extracting`], because the sentence existing and
+/// the sentence being drawn are different claims and it is the second one that was asked for — the
+/// same reason `the_measured_total_is_on_the_status_line` reads the figure back this way.
+///
+/// The extraction is a [`crate::archive::extract::pretend`] rather than a real one. Catching a real
+/// decompression mid-flight would mean racing a worker thread from the test, and a test that waits
+/// for a race is one that fails on a faster machine.
+#[test]
+fn an_extraction_in_flight_is_drawn_on_the_status_line() {
+    let mut h = Harness::new();
+    h.settle();
+
+    let on_the_line = |h: &Harness| -> Vec<String> {
+        let floor = h.pane_rect(0).bottom() - crate::ui::filelist::STATUS_HEIGHT;
+        h.texts()
+            .iter()
+            .filter(|(at, _)| at.y > floor)
+            .map(|(_, text)| text.clone())
+            .collect()
+    };
+    // The figures it is about to replace. Asserted first so that their absence below is a change
+    // rather than a fixture that never had them.
+    assert!(
+        on_the_line(&h).iter().any(|text| text.ends_with(" ms")),
+        "the fixture's status line has no scan figure to displace: {:?}",
+        on_the_line(&h)
+    );
+
+    let sentence = "Extracting 41.2 MB of 144 MB…";
+    {
+        let _held = crate::archive::extract::pretend(43_200_512, 151_000_000);
+        h.frame(Vec::new());
+        let drawn = on_the_line(&h);
+        assert!(
+            drawn.iter().any(|text| text == sentence),
+            "`{sentence}` is not on the status line; it has {drawn:?}"
+        );
+        assert!(
+            !drawn.iter().any(|text| text.ends_with(" ms")),
+            "how long the folder took is not what somebody waiting on an archive needs: {drawn:?}"
+        );
+    }
+
+    // And off again on the very next frame, so nothing is left claiming work that is over.
+    h.frame(Vec::new());
+    let after = on_the_line(&h);
+    assert!(
+        !after.iter().any(|text| text == sentence),
+        "the readout outlived the extraction: {after:?}"
+    );
+    assert!(
+        after.iter().any(|text| text.ends_with(" ms")),
+        "and the figures it displaced have to come back: {after:?}"
+    );
+}

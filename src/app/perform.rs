@@ -8,6 +8,25 @@ use super::*;
 
 impl App {
     pub(super) fn apply(&mut self, ctx: &egui::Context) {
+        // Files that finished coming out of an archive since the last frame. Queued as ordinary
+        // actions so that opening one is the same code path as opening anything else — see
+        // [`App::open_from_archive`].
+        while let Ok(answer) = self.extracted.try_recv() {
+            match answer {
+                Extracted::Ready(path) => self.actions.push(Action::Open(path)),
+                // The real paths, not the ones inside the archive: what goes on the clipboard has to
+                // be something another program can open. A cut is never one of these — see
+                // [`App::put_these_on_clipboard`], which refuses it.
+                Extracted::Copied(paths) => self.put_these_on_clipboard(ctx, paths, false),
+                // The drop that was waiting on it, taken from the top with real paths — see
+                // [`App::land`], which is also what sent this. The one thing that has to be said
+                // about re-entering it: the items are no longer virtual, so it cannot come back here
+                // a third time.
+                Extracted::Landed(dropped) => self.land(ctx, *dropped),
+                Extracted::Failed(why) => self.report(why),
+            }
+        }
+
         let actions = std::mem::take(&mut self.actions);
         for action in actions {
             self.perform(ctx, action);
@@ -197,6 +216,12 @@ impl App {
                     // once-only rule is what stops a cancel from looping.
                     self.connecting.forget(&path);
                     self.loader.invalidate(&path);
+                    // **And the archive behind it, if this is a folder inside one.** Dropping the
+                    // listing alone would re-read it straight back out of the cached index, so F5
+                    // inside a `.zip` would show exactly what it showed before — which is wrong in
+                    // the one case somebody presses F5 for: the archive has been rebuilt since.
+                    // Takes any path and does nothing for a path with no archive in it.
+                    crate::archive::forget(&path);
                     if let Some(p) = self.pane_mut(pane) {
                         let tab = p.tab_mut();
                         // Keep the cursor where it was: a refresh should not move
@@ -516,13 +541,13 @@ impl App {
             }
             Action::RememberLayout => self.config_dirty = true,
 
-            Action::Cut(pane) => self.put_on_clipboard(pane, true),
-            Action::Copy(pane) => self.put_on_clipboard(pane, false),
+            Action::Cut(pane) => self.put_on_clipboard(ctx, pane, true),
+            Action::Copy(pane) => self.put_on_clipboard(ctx, pane, false),
             Action::Paste(pane) => self.paste_into(pane, ctx),
             // The context menu's Couper, Copier and Coller, which name what they act on rather
             // than reading it off a pane. See `ours_rather_than_the_shell_s`.
-            Action::CutItems(items) => self.put_these_on_clipboard(items, true),
-            Action::CopyItems(items) => self.put_these_on_clipboard(items, false),
+            Action::CutItems(items) => self.put_these_on_clipboard(ctx, items, true),
+            Action::CopyItems(items) => self.put_these_on_clipboard(ctx, items, false),
             Action::PasteIntoFolder(into) => self.paste_into_folder(into, ctx),
             Action::Delete { pane, permanent } => {
                 let items = self
@@ -571,6 +596,18 @@ impl App {
                 }
             }
             Action::BeginRename(pane) => {
+                // Refused before the editor opens rather than after it is filled in. The rename
+                // would be refused either way — [`crate::shell::ops::Jobs::start_then`] is the guard
+                // that matters — but letting somebody type a new name and press Enter to be told
+                // "no" is a worse way to say it than not offering the box.
+                let inside = self
+                    .pane_mut(pane)
+                    .map(|p| crate::archive::is_virtual(&p.tab().path))
+                    .unwrap_or(false);
+                if inside {
+                    self.report("Files inside an archive cannot be renamed".to_owned());
+                    return;
+                }
                 if let Some(p) = self.pane_mut(pane) {
                     p.tab_mut().begin_rename();
                 }
@@ -645,6 +682,14 @@ impl App {
                 self.ops.start(job, self.owner, ctx);
             }
             Action::DragOut { pane, items } => {
+                // **A selection inside an archive drags out like any other**, and nothing here has to
+                // know that. `CF_HDROP` cannot carry a path that names no file, so the drag source
+                // offers Windows' virtual-file formats instead and decompresses at the drop rather
+                // than at the gesture — see [`crate::windows::dnd`]'s `virtual_files`, where the
+                // whole mechanism lives. The one thing this arm must *not* do is extract anything
+                // first: that would put the cost back on the UI thread, which is what the data
+                // object exists to avoid.
+                //
                 // Started here and now rather than parked for later: the drag has its own
                 // thread, so nothing about it re-enters this pass. One at a time, since the
                 // second would be following a button the first is already holding — and only
@@ -668,36 +713,66 @@ impl App {
                 items,
                 at,
             } => self.shell_menu(pane, items, at, ctx),
-            // **A shortcut to a folder opens here, not in Explorer.** Handing it to the shell is
-            // what `.lnk` files get by default, and for a folder that means a second file
-            // manager opening over the top of this one — which is not what clicking a row in
-            // this window can be allowed to do. Every route into this arm gets it: a double
-            // click, `Enter`, and a path typed into the bar.
+            // **An archive opens here too, as a folder.** `pkg.zip` is a file to the operating
+            // system and a place to this program: the same double click that steps into a directory
+            // steps into one of these, which is what Explorer has always done for a `.zip` and what
+            // [`crate::archive`] does for eleven more formats. The test is on the extension alone
+            // and touches no disk — a folder that happens to be *named* `stuff.zip` never arrives
+            // here, because the listing already knows it is a directory and sent a `Navigate`.
             //
-            // A directory *reparse point* — a junction or a directory symlink — never comes
-            // through here at all: the enumeration reports it as a directory, so it is a
-            // `Navigate` before this is reached.
-            //
-            // The pane is the focused one because that is where the gesture was: a click on a
-            // row focuses its pane first, and `Enter` acts on the focused pane by definition.
-            Action::Open(path) => match crate::shell::links::folder_target(&path) {
-                Some(folder) => {
+            // A file **inside** an archive is the other half, and it cannot be opened where it is:
+            // there are no bytes behind its path until something decompresses them. That is a
+            // thread's work, so it goes to one, and the answer comes back around to this same arm
+            // with a real path. See [`App::open_from_archive`].
+            Action::Open(path) => match crate::archive::split(&path) {
+                Some(inside) if inside.is_root() => {
                     let pane = self.focused;
-                    self.perform(ctx, Action::Navigate { pane, path: folder });
+                    self.perform(ctx, Action::Navigate { pane, path });
                 }
-                None => fs::shell::open(&path),
+                Some(_) => self.open_from_archive(ctx, path),
+                // **A shortcut to a folder opens here, not in Explorer.** Handing it to the shell
+                // is what `.lnk` files get by default, and for a folder that means a second file
+                // manager opening over the top of this one — which is not what clicking a row in
+                // this window can be allowed to do. Every route into this arm gets it: a double
+                // click, `Enter`, and a path typed into the bar.
+                //
+                // A directory *reparse point* — a junction or a directory symlink — never comes
+                // through here at all: the enumeration reports it as a directory, so it is a
+                // `Navigate` before this is reached.
+                //
+                // The pane is the focused one because that is where the gesture was: a click on a
+                // row focuses its pane first, and `Enter` acts on the focused pane by definition.
+                None => match crate::shell::links::folder_target(&path) {
+                    Some(folder) => {
+                        let pane = self.focused;
+                        self.perform(ctx, Action::Navigate { pane, path: folder });
+                    }
+                    None => fs::shell::open(&path),
+                },
             },
             // The same, in a tab of its own — a middle click on a folder shortcut. A shortcut to
             // a *file* does nothing here rather than opening it somewhere it cannot be shown: a
             // new tab is a place, and a file is not one.
             Action::OpenNewTab(path) => {
-                if let Some(folder) = crate::shell::links::folder_target(&path) {
-                    let pane = self.focused;
+                let pane = self.focused;
+                // An archive is a place, so it gets a tab of its own from a middle click exactly as
+                // a folder does. A *file inside* one is not a place and is left alone here, which is
+                // the same silence a middle click on any other file gets — see the arm above, where
+                // that distinction is `is_root`.
+                if crate::archive::browsable(&path) {
+                    self.perform(ctx, Action::NavigateNewTab { pane, path });
+                } else if let Some(folder) = crate::shell::links::folder_target(&path) {
                     self.perform(ctx, Action::NavigateNewTab { pane, path: folder });
                 }
             }
-            Action::Reveal(path) => fs::shell::reveal(&path),
-            Action::OpenTerminal(path) => fs::shell::open_terminal(&path),
+            // **Both of these are asked of the operating system, so both take the archive instead of
+            // what is inside it.** Explorer cannot select an entry that is not a file and a shell has
+            // nowhere to start in a folder that is not a directory; handing either a virtual path
+            // fails with a shrug. The archive *is* on a real disk, and revealing it or opening a
+            // terminal beside it is the nearest true answer to what was asked — and better than a
+            // greyed-out entry, because it is the thing the user would have picked next anyway.
+            Action::Reveal(path) => fs::shell::reveal(&nearest_real(&path)),
+            Action::OpenTerminal(path) => fs::shell::open_terminal(&nearest_real(&path)),
             // The paths as text, one per line — `Ctrl+Shift+C`, and the context menu's
             // `Copy path(s)`, which is this same action so that the two cannot drift.
             //
@@ -840,5 +915,20 @@ impl App {
                 }
             }
         }
+    }
+}
+
+/// The nearest path the operating system will accept: the path itself, or the **archive** holding it.
+///
+/// For the two actions that are questions for the shell rather than for this program — Reveal and
+/// Open terminal. Neither can be answered about a path inside an archive, because there is no such
+/// file and no such directory, and both have a sensible true answer one level out: the archive is a
+/// real file in a real folder. See the arms that use it.
+fn nearest_real(path: &std::path::Path) -> std::path::PathBuf {
+    // Confirmed rather than guessed from the extension, or a real folder named `stuff.zip` would
+    // have Reveal point Explorer at the folder instead of at the file inside it that was asked for.
+    match crate::archive::inside_archive(path) {
+        Some(inside) => inside.file,
+        None => path.to_path_buf(),
     }
 }

@@ -250,6 +250,14 @@ impl App {
                 .filter_map(|tab| tab.git.as_ref())
                 .map(|repo| repo.dot_git.clone()),
         );
+        // **Not a path inside an archive**, which is not a directory and cannot be handed to
+        // `ReadDirectoryChangesW`. Dropped here rather than refused deeper down because the watch
+        // keeps a handle per folder and a failed open would be retried on every frame that renews
+        // the set. What *would* be worth noticing — the archive file itself being rewritten — is
+        // caught by the listing's own key instead: see [`crate::archive::CACHE`], whose entries
+        // carry the size and timestamp they were read at, so F5 re-reads and a stale index cannot
+        // outlive the file it came from.
+        folders.retain(|path| !crate::archive::is_virtual(path));
         folders.dedup();
         self.watch.keep(&folders);
 

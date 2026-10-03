@@ -493,6 +493,12 @@ impl Measurement {
     /// gains text, never loses it.
     pub fn shown(&self, dir: &Dir, entry: usize) -> Option<u64> {
         let record = dir.entries.get(entry)?;
+        // An entry whose size could only be learnt by decompressing it — see
+        // [`crate::fs::dir::FLAG_UNSIZED`]. The same silence a folder keeps, for the same reason,
+        // and here rather than at the cells because this function is the only thing they ask.
+        if record.is_unsized() {
+            return None;
+        }
         if !record.is_dir() {
             return Some(record.size);
         }

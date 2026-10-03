@@ -6,7 +6,52 @@
 
 use super::*;
 
+/// How often a frame is booked while an archive is being extracted.
+///
+/// The work is on a worker thread and this window is idle between events, so without a frame asked
+/// for the figure would only advance when something *else* wanted one — a mouse twitch, usually,
+/// which is exactly the "is it doing anything?" that a readout is there to answer. Ten a second:
+/// faster than a number this size is worth re-reading, and slower than a decompressor fills a buffer.
+const EXTRACTION_STEP: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// What the status line says in place of counting files, if anything.
+///
+/// Three claims on one slot, in order of what the reader most needs. **Progress beats a notice**,
+/// which is not merely a preference: `Ctrl+C` inside an archive sets *Copying out of the archive…*
+/// the moment it starts, and that sentence would otherwise mask the figures saying the copy is
+/// getting somewhere. It has the gap before the first bytes, and then gives way.
+///
+/// A shell operation stays in front of both, because it is the only one of the three that is moving
+/// somebody's files about.
+pub(super) fn status_override<'a>(
+    running: Option<&'a str>,
+    extracting: &'a str,
+    notice: Option<&'a str>,
+) -> Option<&'a str> {
+    running
+        .or((!extracting.is_empty()).then_some(extracting))
+        .or(notice)
+}
+
 impl App {
+    /// Refresh [`App::extracting`] from the counter, and say whether a frame should be booked to keep
+    /// it moving.
+    ///
+    /// Pulled from the counter once a frame rather than pushed from the worker, because the worker
+    /// counts in 8 KB blocks: a message per block would be thousands of wake-ups for a readout that
+    /// can only change sixty times a second.
+    pub(super) fn watch_extraction(&mut self) -> bool {
+        self.extracting.clear();
+        match crate::archive::extract::doing() {
+            Some(doing) => {
+                doing.write(&mut self.extracting);
+                true
+            }
+            // Cleared above, so the frame an extraction ends on is the last one that mentions it.
+            None => false,
+        }
+    }
+
     pub fn frame(&mut self, ui: &mut Ui) {
         let ctx = ui.ctx().clone();
         if !self.installed {
@@ -37,6 +82,12 @@ impl App {
         let now = ctx.input(|i| i.time);
         if self.settling.observe(Shape::of(&ctx), now) {
             ctx.request_repaint();
+        }
+        // **How far an archive extraction has got**, refreshed here and drawn by the pane's status
+        // line — the same place a copy in progress reports from. See [`App::watch_extraction`], which
+        // is also where the interval comes from.
+        if self.watch_extraction() {
+            ctx.request_repaint_after(EXTRACTION_STEP);
         }
         // `--walk`: step to the next folder by itself, so a real window can be measured
         // browsing rather than sitting still.
@@ -79,12 +130,17 @@ impl App {
                 self.settling.reported_at = now;
                 let (private, gdi, user) = process_memory();
                 let (dirs, entries) = self.loader.held();
+                // Beside the folder cache and separate from it, because they answer the two halves
+                // of "memory grows as I browse" that look identical from the outside: a session that
+                // walked through a few tarballs is holding their indexes, which are not folders.
+                let (archives, in_archives) = crate::archive::held();
                 let (kinds, paths, textures) = self.icons.held();
                 let (known, pictures, pages, spare) = self.thumbs.held();
                 let (gaveup, queued) = self.thumbs.stuck();
                 println!(
                     "{now:8.1}  private {:>7} KB   gdi {gdi:>5}   user {user:>4}   \
                      cache {dirs:>3} folders / {entries:>8} entries   \
+                     archives {archives:>2} / {in_archives:>7} entries   \
                      icons {kinds:>4} kinds / {paths:>5} paths / {textures:>4} textures /                      {} bitmaps / {} uploads   \
                      thumbs {known:>4} known / {pictures:>4} drawn / {gaveup:>4} gaveup / {queued:>3} queued / {:>4} asks / {pages} pages / {spare:>4} spare / {} fetched / {} uploads",
                     private / 1024,
@@ -669,6 +725,7 @@ impl App {
             links,
             cut,
             notice,
+            extracting,
             ops,
             preview,
             flat_mode,
@@ -680,9 +737,7 @@ impl App {
         } = self;
         let (flat_mode, regroup, slashes) = (*flat_mode, *regroup, *forward_slashes);
         let auto_tiles = *auto_tiles;
-        // A copy in progress, or the last thing that went wrong: whichever there is,
-        // the pane's status line says so instead of counting files.
-        let status = ops.in_progress().or(notice.as_deref());
+        let status = status_override(ops.in_progress(), extracting, notice.as_deref());
         let pane = &mut panes[index];
         let tab = pane.tab_mut();
 

@@ -323,7 +323,10 @@ impl Job {
     /// the items that go. Kept here beside them so a job added later has one obvious place to
     /// say what it would touch, rather than a `match` in the middle of a guard nobody reads
     /// until it is too late.
-    #[cfg(test)]
+    /// No longer test-only: [`Jobs::start_then`] asks the same question of every job, to refuse one
+    /// that names a path inside an archive. Which is the same argument the doc above makes for this
+    /// existing at all — one place that can say what a job would touch, rather than a `match` in the
+    /// middle of a guard nobody reads until it is too late.
     pub(crate) fn every_path(&self) -> Vec<PathBuf> {
         let mut paths = self.touches();
         match self {
@@ -419,6 +422,38 @@ impl Operations {
         let touched = job.touches();
         let tx = self.tx.clone();
         let ctx = ctx.clone();
+
+        // **Nothing inside an archive is the shell's to touch.** `IFileOperation` is being handed
+        // `D:\dl\pkg.zip\src\main.rs`, which is not a file — so a delete would either fail with a
+        // number or, far worse, resolve to the *archive* and take all of it. Nothing in this program
+        // writes into an archive at all: see [`crate::archive`], where that is scope and format
+        // both, a `.tar.gz` having no way to change one member without being rebuilt whole.
+        //
+        // Here rather than at the arms in [`crate::app::App::perform`] for the same reason the two
+        // guards below are here: this is the one funnel every copy, move, delete, rename, shortcut
+        // and new folder passes through, and a rule at the call sites is a rule the next call site
+        // forgets. Refused through the same channel a failure comes back on, so the words reach the
+        // status line by the route that was already built for them — and with `job: None`, so a
+        // refusal cannot be offered to `Ctrl+Z` as something to undo.
+        if let Some(refused) = job
+            .every_path()
+            .iter()
+            .find(|path| crate::archive::is_virtual(path))
+        {
+            let what = crate::fs::display_name(refused);
+            let _ = tx.send(Done {
+                job: None,
+                touched,
+                error: Some(format!(
+                    "{what} is inside an archive, which this program only reads. \
+                     Copy it out first."
+                )),
+                aborted: false,
+                after,
+                outcome: Outcome::default(),
+            });
+            return;
+        }
 
         // **Not from a test, unless a test asked for it.** See [`FOR_REAL`]. This is the choke
         // point every copy, move, delete, rename and new folder goes through, which is why the

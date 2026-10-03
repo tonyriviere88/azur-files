@@ -496,6 +496,26 @@ pub struct Shared {
     ///   is nothing to promise and no mistake to point at either. [`Self::telling`] is `None` for
     ///   this one, and the highlight stands down from this flag instead.
     pub silent: bool,
+    /// What a drag **this window started** is carrying, when what it is carrying has no paths behind
+    /// it: a selection inside an archive.
+    ///
+    /// # The freeze this exists to remove
+    ///
+    /// `CF_HDROP` is a list of paths, so a virtual source can only answer one by extracting — see
+    /// [`crate::windows::virtual_files`]. `Drop` asked for exactly that, on the UI thread, inside the
+    /// message pump: the whole selection came out of the archive with the window unable to paint, and
+    /// then the copy started. Seconds of a dead window between letting go and anything happening,
+    /// which is also the one moment the extraction readout would have had something to say.
+    ///
+    /// So for its own drags this window does not ask. It already knows what it picked up — these are
+    /// the paths [`drag_out`] was given — and handing them straight to the drop lets the extraction
+    /// happen where every other one in this program happens: on a worker, with the frame loop free to
+    /// draw how far it has got. See [`crate::app::App::land`].
+    ///
+    /// Empty for a drag out of another program, which is the case this cannot help: only the source
+    /// knows what it is offering, and asking it is the blocking call. A drag out of 7-Zip into this
+    /// window still waits.
+    pub carrying: Vec<PathBuf>,
     /// Completed drops, waiting to be acted on.
     pub dropped: Vec<Dropped>,
 }

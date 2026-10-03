@@ -119,6 +119,20 @@ impl App {
                 // Opened muted unless it is the focused tile's — every clip plays, one is audible,
                 // and [`crate::ui::preview::show`] keeps that true as the focus moves.
                 let player = match &ask {
+                    // **The one preview an archive does not get.** Every other kind is read on a
+                    // worker, where [`crate::archive::extract`] can put the bytes on a disk first —
+                    // but a player is opened here, on the UI thread, and extracting a film to do it
+                    // would freeze the window for as long as the film took to decompress. Media
+                    // Foundation would refuse the path anyway; refusing it here is the same outcome
+                    // with a sentence that says what to do about it.
+                    crate::preview::Ask::One(path, crate::preview::Kind::Video)
+                        if crate::archive::is_virtual(path) =>
+                    {
+                        Some(Err(
+                            "A video inside an archive cannot be played. Copy it out first."
+                                .to_owned(),
+                        ))
+                    }
                     crate::preview::Ask::One(path, crate::preview::Kind::Video) => {
                         Some(crate::preview::Player::open(
                             path,

@@ -953,11 +953,15 @@ pub(crate) fn rows(
             // left to the action, which resolves it the same way opening one does; a shortcut to
             // a file lands there and does nothing, which is what a middle click on any other
             // file does.
+            //
+            // An archive counts as a folder here, because it is one to this program — see
+            // [`crate::archive`]. Asked by extension and so free, unlike the shortcut test beside
+            // it, which reads the file.
             if response.middle_clicked() {
                 if let Some(path) = tab.target_at(position) {
                     if tab.is_dir_at(position) {
                         out.push(Action::NavigateNewTab { pane, path });
-                    } else if tab.is_shortcut_at(position) {
+                    } else if crate::archive::browsable(&path) || tab.is_shortcut_at(position) {
                         out.push(Action::OpenNewTab(path));
                     }
                 }

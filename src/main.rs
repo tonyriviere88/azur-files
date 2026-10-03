@@ -80,6 +80,8 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+/// Reading an archive as though it were a folder.
+mod archive;
 mod brand;
 mod config;
 mod console;
@@ -716,6 +718,15 @@ impl eframe::App for Window {
         if self.shot.is_none() {
             self.app.save_settings();
         }
+        // Whatever was pulled out of an archive to be previewed or opened. After `shell::flush`
+        // above, deliberately: a copy taken out of an archive and left on the clipboard names these
+        // files, and rendering the clipboard is what makes the paste that follows this window's
+        // closing still work.
+        //
+        // Best-effort, and one directory per process — see [`archive::extract::temp_root`], which is
+        // why this cannot remove another window's files and why a file still open in the application
+        // that opened it is simply left for `%TEMP%` to deal with.
+        archive::extract::cleanup();
     }
 }
 

@@ -5,7 +5,12 @@
       "Bash(cd \"D:/Sources/MyTools/yet-another-file-explorer\" && sed -n '/fn retire/,/fn fill/p' src/shell/menu/mod.rs | head -70)",
       "Bash(cd \"D:/Sources/MyTools/yet-another-file-explorer\" && sed -n '/^pub\\(crate\\) fn claim\\\\|^pub fn claim/,/^}/p' src/shell/dnd.rs)",
       "Bash(sed -i 's/crate::shell::icons::Icons::new\\(\\)/crate::shell::icons::Icons::new\\(ctx\\)/' src/app/mod.rs)",
-      "Bash(sed -i 's/let mut icons = Icons::new\\(\\);/let mut icons = Icons::new\\(\\\\&ctx\\);/' src/shell/icons/tests.rs)"
+      "Bash(sed -i 's/let mut icons = Icons::new\\(\\);/let mut icons = Icons::new\\(\\\\&ctx\\);/' src/shell/icons/tests.rs)",
+      "Bash(mkdir -p C:/Users/RIVT/AppData/Local/Temp/claude/d--Sources-MyTools-yet-another-file-explorer/1b18a681-4cf6-49bc-b814-d41543ffef92/scratchpad/demo/pkg/src/ui C:/Users/RIVT/AppData/Local/Temp/claude/d--Sources-MyTools-yet-another-file-explorer/1b18a681-4cf6-49bc-b814-d41543ffef92/scratchpad/demo/pkg/docs)",
+      "Bash(cd C:/Users/RIVT/AppData/Local/Temp/claude/d--Sources-MyTools-yet-another-file-explorer/1b18a681-4cf6-49bc-b814-d41543ffef92/scratchpad/demo)",
+      "Bash(printf 'fn main\\(\\) { println!\\(\"hi\"\\); }\\\\n')",
+      "Bash(printf '// the user interface\\\\npub mod list;\\\\n')",
+      "Bash(printf '# Guide\\\\n\\\\nSome words.\\\\n')"
     ],
     "additionalDirectories": [
       "D:\\Sources\\MyTools\\yet-another-file-explorer\\src\\shell\\ops",

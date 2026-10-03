@@ -1189,11 +1189,13 @@ pub fn show(
                     }
                 }
             }
+            // An archive opens in its own tab like a folder, for the reason the details view's
+            // copy of this says: it is a place to this program. See [`crate::archive`].
             if response.middle_clicked() {
                 if let Some(path) = tab.target_at(position) {
                     if tab.is_dir_at(position) {
                         out.push(Action::NavigateNewTab { pane, path });
-                    } else if tab.is_shortcut_at(position) {
+                    } else if crate::archive::browsable(&path) || tab.is_shortcut_at(position) {
                         out.push(Action::OpenNewTab(path));
                     }
                 }

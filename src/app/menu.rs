@@ -30,6 +30,21 @@ impl App {
             // that would mean anything here.
             return;
         }
+        // **And no menu inside an archive**, for the same reason one level further on: the shell is
+        // being asked about `D:\dl\pkg.zip\src\main.rs`, and there is no such file.
+        // `SHParseDisplayName` refuses it, so there is no `IContextMenu` to query and the menu that
+        // came up would be empty — or worse, the menu for the *archive*, whose Delete would delete
+        // the whole thing.
+        //
+        // Nothing is lost that this program had to give. The note on [`crate::shell::menu::Own`]
+        // sets out the position: a context menu here *is* Windows' menu, every command it carries
+        // is on a keyboard shortcut too, and the shortcuts that make sense inside an archive still
+        // work — `Ctrl+C` copies the files out (see [`crate::app::App::collect_operations`]) and
+        // `Ctrl+Shift+C` copies their paths. The ones that do not are refused with a sentence
+        // rather than left to fail.
+        if crate::archive::is_virtual(&folder) {
+            return;
+        }
 
         // Whatever was open, or on its way, is not what was asked for.
         self.close_menu();

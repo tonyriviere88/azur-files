@@ -480,9 +480,11 @@ impl Slot {
     /// [`crate::ui::deps::View::first_foldable`], which is where the reason this is needed is
     /// written down.
     #[cfg(test)]
-    pub fn dependency_first_foldable(&self, rows: usize) -> Option<usize> {
+    pub fn dependency_first_foldable(&self, rows: usize) -> Option<(usize, String)> {
         match &self.content {
-            Content::Binary(view) => view.first_foldable(rows),
+            Content::Binary(view) => view
+                .first_foldable(rows)
+                .map(|(at, name)| (at, name.to_owned())),
             _ => None,
         }
     }
@@ -1075,7 +1077,7 @@ impl Preview {
     }
 
     #[cfg(test)]
-    pub fn dependency_first_foldable(&self, rows: usize) -> Option<usize> {
+    pub fn dependency_first_foldable(&self, rows: usize) -> Option<(usize, String)> {
         self.focused().dependency_first_foldable(rows)
     }
 
