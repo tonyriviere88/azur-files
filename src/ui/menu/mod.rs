@@ -470,6 +470,57 @@ fn pinned_from(entries: &[Entry]) -> usize {
     }
 }
 
+/// The line at the foot of a group of ours, saying how to get an entry out of it.
+///
+/// A right click is the one gesture in this menu that rearranges it rather than running something
+/// (see [`movable`]), and nothing else on screen says it exists. Only on a group `regroup` made —
+/// `More apps`, `More actions`, `7-Zip` — because those are the levels whose entries a right click
+/// moves; Windows' own submenus refuse it, and a hint there would promise a gesture that does
+/// nothing.
+fn pin_hint(menu: &Open, path: &[usize]) -> Option<&'static str> {
+    (!path.is_empty() && menu.entry(path).is_some_and(|entry| entry.kind.is_ours()))
+        .then_some("Right click to pin")
+}
+
+/// The hint's height: one caption line with `space-1` either side. Stated beside [`draw_hint`],
+/// which allocates it, for the reason [`separator_height`] gives.
+fn hint_height() -> f32 {
+    space::S1 * 2.0 + azur_egui_theme::tokens::typography::LINE_CAPTION
+}
+
+/// The hint's text, laid out: the caption font in italics and secondary ink. One function for
+/// [`draw_hint`] and [`measure`], so the width the menu is sized for is the width that is drawn.
+fn hint_job(t: &Theme, hint: &str, color: Color32) -> egui::text::LayoutJob {
+    let mut job = egui::text::LayoutJob::default();
+    job.append(
+        hint,
+        0.0,
+        egui::TextFormat {
+            font_id: t.fonts.caption.clone(),
+            color,
+            italics: true,
+            ..Default::default()
+        },
+    );
+    job
+}
+
+/// The hint itself, set against the right edge where a shortcut would end. Allocated with
+/// `Sense::hover` and nothing more, so it is not an entry — no highlight, no click, and the
+/// keyboard cursor never lands on it because it is not in the level's entries.
+fn draw_hint(ui: &mut Ui, t: &Theme, hint: &str) {
+    use azur_egui_theme::components::{galley_on_baseline, row_baseline};
+
+    let (rect, _) =
+        ui.allocate_exact_size(vec2(ui.available_width(), hint_height()), egui::Sense::hover());
+    let row = azur_egui_theme::components::menu_item_metrics();
+    let painter = ui.painter();
+    let galley = painter.layout_job(hint_job(t, hint, t.text.secondary));
+    let baseline = row_baseline(painter, &t.fonts.caption, rect.top(), rect.height());
+    let x = rect.right() - row.padding - galley.size().x;
+    galley_on_baseline(painter, x, baseline, galley);
+}
+
 /// Whether this is one of this program's own entries that belongs to the pinned tail.
 ///
 /// Named rather than "any [`Command::Own`]", because most of them are not: `Copy here`, `Move here`
@@ -532,13 +583,16 @@ pub fn show(ui: &mut Ui, t: &Theme, menu: &mut Open) -> Outcome {
             break;
         }
 
-        let size = measure(&ctx, t, &entries, screen);
+        let hint = pin_hint(menu, &path);
+        let size = measure(&ctx, t, &entries, hint, screen);
         let origin = place(anchor, size, screen, level_depth == 0);
         let appearing = !menu.shown.contains(&path);
         on_screen.push(path.clone());
-        // Where the scrolling part of this level ends and its pinned tail begins.
+        // Where the scrolling part of this level ends and its pinned tail begins. The hint, when
+        // there is one, is under the tail and so is charged to it.
         let pin = pinned_from(&entries);
-        let pinned_height = stack_height(&entries[pin..]);
+        let pinned_height =
+            stack_height(&entries[pin..]) + if hint.is_some() { hint_height() } else { 0.0 };
 
         let response = egui::Area::new(Id::new(("shell-menu", level_depth)))
             .order(Order::Foreground)
@@ -637,6 +691,9 @@ pub fn show(ui: &mut Ui, t: &Theme, menu: &mut Open) -> Outcome {
                             },
                             &mut out,
                         ));
+                        if let Some(hint) = hint {
+                            draw_hint(&mut rows, t, hint);
+                        }
                         // What the child used, so the frame wraps the rows rather than
                         // collapsing to nothing behind them.
                         ui.advance_cursor_after_rect(rows.min_rect());
@@ -1009,7 +1066,13 @@ fn draw_tiles(
 /// Capped at the screen, which is also what makes the level scroll: the rows go in a
 /// scroll area of exactly this height, so a menu longer than the window keeps its last
 /// entry reachable instead of drawing it past the edge.
-fn measure(ctx: &egui::Context, t: &Theme, entries: &[Entry], screen: Rect) -> Vec2 {
+fn measure(
+    ctx: &egui::Context,
+    t: &Theme,
+    entries: &[Entry],
+    hint: Option<&str>,
+    screen: Rect,
+) -> Vec2 {
     // `Menu { min-width: 180px }`, and a cap so one long "Open with" entry does not
     // stretch the menu across the window.
     const MIN: f32 = 180.0;
@@ -1073,6 +1136,12 @@ fn measure(ctx: &egui::Context, t: &Theme, entries: &[Entry], screen: Rect) -> V
             let submenu = matches!(entry.kind, Kind::Submenu { .. });
             widest = widest.max(row.width(label, shortcut, submenu));
         }
+        // The hint under a group of ours, which sits against the right edge and so needs no icon
+        // column. See [`draw_hint`].
+        if let Some(hint) = hint {
+            let caption = fonts.layout_job(hint_job(t, hint, Color32::WHITE)).size().x;
+            widest = widest.max(row.width_without_icons(caption, 0.0, false));
+        }
         widest
     });
 
@@ -1082,7 +1151,9 @@ fn measure(ctx: &egui::Context, t: &Theme, entries: &[Entry], screen: Rect) -> V
     // entry exactly its galley width leaves it a fraction short, and it ellipsizes.
     let width = (width + space::S2 * 2.0).ceil().clamp(MIN, MAX);
 
-    let height = (stack_height(entries) + space::S2 * 2.0).min(screen.height() - space::S3 * 2.0);
+    let hint = if hint.is_some() { hint_height() } else { 0.0 };
+    let height =
+        (stack_height(entries) + hint + space::S2 * 2.0).min(screen.height() - space::S3 * 2.0);
     vec2(width, height)
 }
 

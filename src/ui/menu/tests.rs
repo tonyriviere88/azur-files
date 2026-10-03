@@ -299,7 +299,7 @@ fn a_menu_longer_than_the_screen_is_capped_and_drawn_the_size_it_measured() {
         });
     }
 
-    let expected = measure(&ctx, &theme, &open.entries, screen);
+    let expected = measure(&ctx, &theme, &open.entries, None, screen);
     assert!(
         expected.y < row_height() * 12.0,
         "twelve rows should not fit in a 200-point window, or this proves nothing"
@@ -587,7 +587,7 @@ fn a_capped_menu_keeps_its_pinned_tail_and_still_comes_out_the_size_it_measured(
     let screen = Rect::from_min_size(Pos2::ZERO, vec2(400.0, 200.0));
     let ctx = pass(&mut open, screen, 4);
 
-    let expected = measure(&ctx, &Theme::dark(), &open.entries, screen);
+    let expected = measure(&ctx, &Theme::dark(), &open.entries, None, screen);
     assert!(
         expected.y < stack_height(&open.entries),
         "sixteen entries should not fit a 200-point window, or this proves nothing"
