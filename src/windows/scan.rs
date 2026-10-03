@@ -51,7 +51,7 @@ pub(super) fn scan_real(path: &Path, started: Instant) -> Dir {
                 name,
                 (data.nFileSizeHigh as u64) << 32 | data.nFileSizeLow as u64,
                 filetime(&data.ftLastWriteTime),
-                flags_of(data.dwFileAttributes),
+                flags_of(data.dwFileAttributes, data.dwReserved0),
             );
         }
         if unsafe { FindNextFileW(handle, &mut data) } == 0 {
@@ -141,9 +141,14 @@ pub(super) fn filetime(ft: &windows_sys::Win32::Foundation::FILETIME) -> u64 {
     (ft.dwHighDateTime as u64) << 32 | ft.dwLowDateTime as u64
 }
 
+/// The `FLAG_*` set for one find record.
+///
+/// `tag` is the find data's `dwReserved0`, which holds the reparse tag when the attributes say there
+/// is one and is meaningless otherwise. It is read for one family: `IO_REPARSE_TAG_CLOUD_*` is
+/// `0x9000_001A` with a provider's own nibble at bits 12–15, and every one of them is a placeholder.
 #[cfg(windows)]
 #[inline]
-pub(super) fn flags_of(attrs: u32) -> u16 {
+pub(super) fn flags_of(attrs: u32, tag: u32) -> u16 {
     use windows_sys::Win32::Storage::FileSystem as fs;
     let mut flags = 0;
     if attrs & fs::FILE_ATTRIBUTE_DIRECTORY != 0 {
@@ -155,11 +160,32 @@ pub(super) fn flags_of(attrs: u32) -> u16 {
     if attrs & fs::FILE_ATTRIBUTE_SYSTEM != 0 {
         flags |= FLAG_SYSTEM;
     }
-    if attrs & fs::FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        flags |= FLAG_LINK;
-    }
     if attrs & fs::FILE_ATTRIBUTE_READONLY != 0 {
         flags |= FLAG_READONLY;
+    }
+    if attrs & fs::FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        const IO_REPARSE_TAG_CLOUD: u32 = 0x9000_001A;
+        // **A placeholder is not a link.** It is the file itself, kept by a sync provider, and a
+        // synced folder has to be walked, measured and flattened like any other — which is how every
+        // one of them was treated before [`expose_placeholders`], while Windows hid the tag.
+        flags |= if tag & 0xFFFF_0FFF == IO_REPARSE_TAG_CLOUD {
+            FLAG_PLACEHOLDER
+        } else {
+            FLAG_LINK
+        };
+    }
+    if attrs
+        & (fs::FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS
+            | fs::FILE_ATTRIBUTE_RECALL_ON_OPEN
+            | fs::FILE_ATTRIBUTE_OFFLINE)
+        != 0
+    {
+        flags |= FLAG_ONLINE;
+    }
+    // Both at once is what OneDrive leaves on a file it does not sync at all — its own
+    // `desktop.ini` reads `0x180026` — so it is neither of the two states.
+    if attrs & (fs::FILE_ATTRIBUTE_PINNED | fs::FILE_ATTRIBUTE_UNPINNED) == fs::FILE_ATTRIBUTE_PINNED {
+        flags |= FLAG_PINNED;
     }
     flags
 }
@@ -185,6 +211,35 @@ pub(crate) fn error_text(code: u32) -> String {
         1223 => "Cancelled".to_owned(),
         other => format!("Could not read this folder (error {other})"),
     }
+}
+
+/// See cloud-files placeholders for what they are, the way Explorer does.
+///
+/// **Windows disguises them from this process otherwise.** An executable with no manifest runs in
+/// `PHCM_DISGUISE_PLACEHOLDER`, measured: the find data of a OneDrive folder then carries no
+/// reparse attribute and a reparse tag of `0`, and a hydrated file reads as a plain `0x20`. Two
+/// things went wrong under that, and both are fixed by this one call:
+///
+/// - **The Status column could not tell a synced folder from any other** unless something in it
+///   happened to be cloud-only or pinned — see [`crate::fs::dir::FLAG_PLACEHOLDER`], which is the
+///   tag this makes visible.
+/// - **The shell code running in this process read cloud-only files as if they were on the disk.**
+///   Properties opened the file's own property handler, and reading it is what downloads it. With
+///   placeholders exposed the shell treats them as Explorer's own process does, and leaves them in
+///   the cloud.
+///
+/// Process-wide, and before any other thread exists; a thread left at its default follows it.
+#[cfg(windows)]
+pub fn expose_placeholders() {
+    // Declared here rather than taken from `windows-sys`, which only has it behind the driver kit's
+    // `Wdk_Storage_FileSystem` feature — a feature for one function.
+    #[link(name = "ntdll", kind = "raw-dylib")]
+    extern "system" {
+        fn RtlSetProcessPlaceholderCompatibilityMode(mode: i8) -> i8;
+    }
+    const PHCM_EXPOSE_PLACEHOLDERS: i8 = 2;
+    // SAFETY: no arguments beyond the mode; the previous mode it returns is not needed.
+    unsafe { RtlSetProcessPlaceholderCompatibilityMode(PHCM_EXPOSE_PLACEHOLDERS) };
 }
 
 /// Ask Windows not to put up an "insert a disk" dialog behind our back.

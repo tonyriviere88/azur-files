@@ -31,6 +31,7 @@ use crate::ui::{filelist, GUTTER};
 
 mod action;
 mod capture;
+mod cloud;
 mod connect;
 mod diff;
 mod frame;
@@ -212,6 +213,9 @@ pub struct App {
     /// answered yet" leave a tab looking identical, which is exactly the state a capture must not
     /// wait forever in.
     git_waiting: usize,
+    /// Asks the sync provider about the entries of a synced folder, once per view of it. The
+    /// answers live on the tabs — [`Tab::cloud`] — like git's. See [`crate::shell::cloud`].
+    cloud: crate::shell::cloud::Cloud,
     /// Where every pane's preview panel goes and how much room it takes: the window's
     /// preference, one of it. Whether one is *showing* is the tab's — see `Tab::preview`.
     preview: crate::ui::preview::Layout,
@@ -610,6 +614,7 @@ impl App {
             measuring: Vec::new(),
             git: crate::git::Git::new(ctx),
             git_waiting: 0,
+            cloud: crate::shell::cloud::Cloud::new(ctx),
             previews: crate::preview::Previews::new(ctx),
             owner: crate::shell::Owner::default(),
             connecting: connect::Connecting::default(),

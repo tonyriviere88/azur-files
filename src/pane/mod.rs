@@ -478,6 +478,17 @@ pub struct Tab {
     /// [`crate::app::App::collect_changes`], where both halves are read.
     pub git_settled_at: Option<f64>,
 
+    /// What the sync provider says about each entry of a synced folder, by entry index — the
+    /// Status column's answer for the rows the attributes could not give one. See
+    /// [`crate::fs::dir::Sync`] for which rows those are, and [`crate::shell::cloud`] for the asking.
+    ///
+    /// **The listing's lifetime, like [`Tab::git`]**: empty until the first answer lands, then one
+    /// byte per entry, and dropped with the listing it indexes. A re-read — which is what pinning
+    /// or freeing a file causes, through the watcher — asks again.
+    pub cloud: Vec<Option<crate::fs::dir::Sync>>,
+    /// Whether this view of this folder has asked the provider yet.
+    pub cloud_asked: bool,
+
     /// Display order: indices into `dir.entries`, sorted and filtered.
     pub order: Vec<u32>,
     /// A number no build of [`Tab::order`] has had before.
@@ -578,7 +589,7 @@ pub struct Tab {
 
     /// Column widths. The first is Name, which flexes; the rest are measured from
     /// their content the first time a listing is drawn.
-    pub widths: [f32; 4],
+    pub widths: [f32; Column::COUNT],
     /// Cleared whenever the listing changes, so the fitted columns are re-measured.
     pub widths_measured: bool,
 
@@ -682,9 +693,10 @@ pub struct Tab {
     pub diff: Option<crate::diff::Side>,
 }
 
-/// Widths for the three fitted columns before anything has been measured. Only
-/// visible for the frame between a listing arriving and being drawn.
-const DEFAULT_WIDTHS: [f32; 4] = [240.0, 88.0, 130.0, 132.0];
+/// Widths for the fitted columns before anything has been measured. Only
+/// visible for the frame between a listing arriving and being drawn — and Status is
+/// nothing until then, so an unsynced folder never shows a blank one for that frame.
+const DEFAULT_WIDTHS: [f32; Column::COUNT] = [240.0, 0.0, 88.0, 130.0, 132.0];
 
 /// What a folder diff's tab is called until both halves have landed and it can name them.
 pub const DIFF_TITLE: &str = "Folder diff";
@@ -784,6 +796,8 @@ impl Tab {
             git_asked: false,
             git_answered: false,
             git_settled_at: None,
+            cloud: Vec::new(),
+            cloud_asked: false,
             order: Vec::new(),
             order_gen: next_order_gen(),
             tree: Vec::new(),

@@ -178,6 +178,7 @@ impl App {
         // **Delivery is at the *end* of the frame** rather than here beside the icons' — see
         // [`crate::shell::thumbs::Thumbs::poll`], which is where that has to happen and why.
         self.thumbs.only(&views);
+        self.cloud.only(&views);
         self.deliver_icons();
         self.deliver_links();
         self.collect_previews(&ctx, now);
@@ -233,6 +234,9 @@ impl App {
         // frame — the branch and the marks then arrive one answer later rather than one navigation
         // later.
         self.collect_git(now);
+        // The same moment for the same reason: a synced listing that landed this frame is asked
+        // about this frame. See [`crate::shell::cloud`].
+        self.collect_cloud();
         // And after both, for the same reason: a listing that landed this frame is a folder to start
         // counting this frame, and a folder counted this frame is one whose bars are right on the
         // frame it appears in rather than one behind. See [`crate::sizes`].

@@ -24,7 +24,8 @@ pub const FLAG_DIR: u16 = 1 << 0;
 pub const FLAG_HIDDEN: u16 = 1 << 1;
 /// `FILE_ATTRIBUTE_SYSTEM`.
 pub const FLAG_SYSTEM: u16 = 1 << 2;
-/// A reparse point: symlink, junction or a cloud placeholder.
+/// A reparse point: symlink, junction, mount point. **Not** a cloud placeholder, which is the file
+/// itself rather than a pointer elsewhere — see [`FLAG_PLACEHOLDER`].
 pub const FLAG_LINK: u16 = 1 << 3;
 /// `FILE_ATTRIBUTE_READONLY`.
 pub const FLAG_READONLY: u16 = 1 << 4;
@@ -40,6 +41,64 @@ pub const FLAG_READONLY: u16 = 1 << 4;
 /// it already does for a directory, and for the same reason: this row has no size to show rather
 /// than a size of nothing. See [`Entry::is_unsized`].
 pub const FLAG_UNSIZED: u16 = 1 << 5;
+/// A cloud-files placeholder: the reparse tag is `IO_REPARSE_TAG_CLOUD_*`, which is what OneDrive
+/// (and any other provider built on the Cloud Files API) leaves on every file and folder it syncs.
+///
+/// Read off the find data's `dwReserved0`, which carries the tag for a reparse point — so knowing
+/// that a folder is synced costs nothing the scan was not already given. See [`Sync`].
+pub const FLAG_PLACEHOLDER: u16 = 1 << 6;
+/// The content is in the cloud and not on this disk: `FILE_ATTRIBUTE_RECALL_ON_DATA_ACCESS`,
+/// `RECALL_ON_OPEN` or `OFFLINE`. Explorer's blue cloud.
+pub const FLAG_ONLINE: u16 = 1 << 7;
+/// Kept on this device whatever happens to free space: `FILE_ATTRIBUTE_PINNED` without `UNPINNED`.
+/// Explorer's solid green tick, "Always keep on this device".
+pub const FLAG_PINNED: u16 = 1 << 8;
+
+/// Where a synced file's content is, as Explorer's Status column says it.
+///
+/// Two sources, and they answer different rows:
+///
+/// - **A file answers from its attributes**, in [`Entry::sync`] — the three flags above, all read
+///   from the scan that already happened. Free, and right on the frame the listing lands.
+/// - **A folder cannot.** OneDrive leaves every folder `0x410` whatever is under it: the green tick
+///   on a folder is the provider's own summary of its contents, and only the provider knows it. So a
+///   folder's state is asked of the shell's property store — `System.StorageProviderState`, the
+///   property Explorer's column is — off the UI thread. See [`crate::shell::cloud`].
+///
+/// The shell's answer, when it arrives, wins for a file too: it is the only source that knows about
+/// an upload still pending or a file the provider could not sync.
+///
+/// **Declared in the order the column sorts in**: what is furthest from this disk first, then the
+/// states with something wrong, so a click on the header gathers those together.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum Sync {
+    /// Available when online: nothing on this disk but the name.
+    Online,
+    /// On this disk, and the provider may free it again.
+    Local,
+    /// Always kept on this device.
+    Pinned,
+    /// On its way up or down.
+    Syncing,
+    /// The provider has something to say about it, short of failing.
+    Warning,
+    /// The provider could not sync it.
+    Error,
+}
+
+impl Sync {
+    /// Explorer's own words for the state, for the tooltip.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Online => "Available when online",
+            Self::Local => "Available on this device",
+            Self::Pinned => "Always available on this device",
+            Self::Syncing => "Sync pending",
+            Self::Warning => "Needs attention",
+            Self::Error => "Sync error",
+        }
+    }
+}
 
 /// One name in a [`Dir`], plus everything the details view and the sort need.
 ///
@@ -89,6 +148,23 @@ impl Entry {
     pub fn is_unsized(&self) -> bool {
         self.flags & FLAG_UNSIZED != 0
     }
+
+    /// Where a synced entry's content is, as far as its attributes say. See [`Sync`].
+    ///
+    /// `None` for anything that is not a placeholder, and for a folder that is neither pinned nor
+    /// waiting to be populated — its attributes say nothing about it, and the shell has to be asked.
+    #[inline]
+    pub fn sync(&self) -> Option<Sync> {
+        if self.flags & FLAG_PINNED != 0 {
+            Some(Sync::Pinned)
+        } else if self.flags & FLAG_ONLINE != 0 {
+            Some(Sync::Online)
+        } else if self.flags & FLAG_PLACEHOLDER != 0 && !self.is_dir() {
+            Some(Sync::Local)
+        } else {
+            None
+        }
+    }
 }
 
 /// A scanned directory: immutable, shared, and the unit the cache stores.
@@ -123,6 +199,10 @@ pub struct Dir {
     /// because a listing that is missing rows and does not admit it is the one kind of
     /// wrong answer a file manager must not give.
     pub truncated: bool,
+    /// Some entry is a cloud-files placeholder, so this is a folder a sync provider looks after and
+    /// the details view shows a Status column. Decided while the entries were pushed, so asking costs
+    /// nothing per frame. See [`Sync`].
+    pub synced: bool,
     /// How long the scan took. Shown in the status bar, which is the only honest
     /// way to claim the word "fast".
     pub scan_micros: u64,
@@ -234,6 +314,7 @@ impl Dir {
             error: Some(error.into()),
             credentials: false,
             truncated: false,
+            synced: false,
             scan_micros: 0,
         }
     }
@@ -257,6 +338,7 @@ pub struct DirBuilder {
     dir_count: u32,
     file_count: u32,
     total_size: u64,
+    synced: bool,
 }
 
 impl DirBuilder {
@@ -272,6 +354,7 @@ impl DirBuilder {
             dir_count: 0,
             file_count: 0,
             total_size: 0,
+            synced: false,
         }
     }
 
@@ -352,6 +435,7 @@ impl DirBuilder {
             }
         };
 
+        self.synced |= flags & (FLAG_PLACEHOLDER | FLAG_ONLINE | FLAG_PINNED) != 0;
         if is_dir {
             self.dir_count += 1;
         } else {
@@ -408,6 +492,7 @@ impl DirBuilder {
             error: None,
             credentials: false,
             truncated: false,
+            synced: self.synced,
             scan_micros,
         }
     }

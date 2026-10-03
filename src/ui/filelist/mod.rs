@@ -172,7 +172,7 @@ pub fn show(
     // needs a painter — so this happens first, once per listing. Skipped entirely for tiles: it is a
     // pass over the folder for three widths nothing is going to use.
     let widths = if tiles {
-        [0.0; 4]
+        [0.0; Column::COUNT]
     } else {
         if !tab.widths_measured {
             measure_columns(ui, t, tab, scratch);

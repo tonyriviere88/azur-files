@@ -303,7 +303,7 @@ pub(crate) fn rows(
     pane: PaneId,
     tab: &mut Tab,
     focused: bool,
-    widths: &[f32; 4],
+    widths: &[f32; Column::COUNT],
     icons_cache: &mut crate::shell::icons::Icons,
     links_cache: &mut crate::shell::links::Links,
     cut: &[std::path::PathBuf],
@@ -461,6 +461,9 @@ pub(crate) fn rows(
         // What git said about this folder, taken once. An `Arc` clone rather than a borrow, because
         // the loop below needs `&mut Tab` for the icon and shortcut columns it fills in as it goes.
         let git = tab.git.clone();
+        // A Status glyph per visible row of a synced folder, painted with the badges below and for the
+        // same reason — nothing that is not the font atlas gets drawn inside the loop.
+        let mut sync_marks: Vec<(Rect, crate::fs::dir::Sync, Color32, bool)> = Vec::new();
         // What a row actually has *ink* on, cell by cell, so a click can tell "on the file" from
         // "on the row it happens to be in". Two gestures ask:
         //
@@ -571,7 +574,9 @@ pub(crate) fn rows(
             // otherwise the Type, Size or Modified cell that does not match. Everything that does
             // steps back; a cut still dims, since that is about this side.
             let inks = match tab.diff.as_ref().and_then(|d| d.mark(&dir, entry_index)) {
-                Some(mark) if !pending_cut => t.diff_inks(mark, widths[2] > 0.0),
+                Some(mark) if !pending_cut => {
+                    t.diff_inks(mark, widths[Column::Type.index()] > 0.0)
+                }
                 _ => crate::theme::DiffInks::plain(name_color, meta_color),
             };
             let (name_color, meta_color) = (inks.name, inks.meta);
@@ -837,17 +842,34 @@ pub(crate) fn rows(
                 );
             }
 
+            // ---- Status ----
+            //
+            // Only a synced folder has the column at all, so every other listing skips this on the
+            // width alone. A painted glyph, like the git badge — nothing here is a texture, so the
+            // row loop's one draw call stays one.
+            if widths[Column::Status.index()] > 0.0 {
+                // No fitting against the cell: the column is never narrower than the 48 a drag
+                // stops at, which is room for the glyph and its padding either side.
+                if let Some(state) = tab.sync_of(entry_index) {
+                    let glyph = icon_rect(meta_row, edges[1] + CELL_PAD, GLYPH);
+                    sync_marks.push((glyph, state, under, dim));
+                    if inked {
+                        ink.push(Rect::from_x_y_ranges(glyph.x_range(), row.y_range()));
+                    }
+                }
+            }
+
             // ---- Size ----
             //
             // A file's own bytes, as ever — and, while the status line's measure button is on, a
             // folder's counted ones with a bar under them saying how much of the listing that is.
             // `Tab::size_shown` is what decides whether there is a number at all; `None` is the
             // blank cell a folder has always had. See [`crate::sizes`].
-            if widths[1] > 0.0 {
+            if widths[Column::Size.index()] > 0.0 {
                 if let Some(bytes) = tab.size_shown(entry_index) {
                     let cell = Rect::from_min_max(
-                        pos2(edges[1] + CELL_PAD, meta_row.top()),
-                        pos2(edges[2] - CELL_PAD, meta_row.bottom()),
+                        pos2(edges[2] + CELL_PAD, meta_row.top()),
+                        pos2(edges[3] - CELL_PAD, meta_row.bottom()),
                     );
                     // Under the text rather than behind it, and on `row` rather than the cell: the
                     // bar belongs to the row's own bottom edge, in the slack a caption line leaves
@@ -885,12 +907,12 @@ pub(crate) fn rows(
             }
 
             // ---- Type ----
-            if widths[2] > 0.0 {
+            if widths[Column::Type.index()] > 0.0 {
                 scratch.clear();
                 fmt::type_label(dir.ext(entry_index), entry.is_dir(), scratch);
                 let cell = Rect::from_min_max(
-                    pos2(edges[2] + CELL_PAD, meta_row.top()),
-                    pos2(edges[3] - CELL_PAD, meta_row.bottom()),
+                    pos2(edges[3] + CELL_PAD, meta_row.top()),
+                    pos2(edges[4] - CELL_PAD, meta_row.bottom()),
                 );
                 let galley = truncated(
                     ui.painter(),
@@ -911,12 +933,12 @@ pub(crate) fn rows(
             }
 
             // ---- Modified ----
-            if widths[3] > 0.0 {
+            if widths[Column::Modified.index()] > 0.0 {
                 scratch.clear();
                 fmt::modified(entry.modified, zone, scratch);
                 let cell = Rect::from_min_max(
-                    pos2(edges[3] + CELL_PAD, meta_row.top()),
-                    pos2(edges[4] - CELL_PAD, meta_row.bottom()),
+                    pos2(edges[4] + CELL_PAD, meta_row.top()),
+                    pos2(edges[5] - CELL_PAD, meta_row.bottom()),
                 );
                 let galley = truncated(
                     ui.painter(),
@@ -951,6 +973,10 @@ pub(crate) fn rows(
             for (rect, state, under) in &badges {
                 icons::git_badge(painter, *rect, *state, t.git(*state), *under);
             }
+        }
+        for (rect, state, under, dim) in &sync_marks {
+            let ink = if *dim { t.text.disabled } else { t.sync(*state) };
+            icons::sync_status(ui.painter(), *rect, *state, ink, *under);
         }
 
         // And last of all, over everything including its own row's other columns.
@@ -1383,6 +1409,11 @@ pub(crate) fn row_tooltip(
         .and_then(|repo| repo.state(dir.name(entry_index)))
     {
         about.push(("Git", state.describe(entry.is_dir()).to_owned()));
+    }
+    // And the Status column in words, because a glyph is the one cell nobody can copy the meaning
+    // out of.
+    if let Some(state) = tab.sync_of(entry_index) {
+        about.push(("Status", state.describe().to_owned()));
     }
     Some(about)
 }

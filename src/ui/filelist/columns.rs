@@ -10,9 +10,12 @@ pub const HEADER_HEIGHT: f32 = typography::LINE_BODY + space::S2 * 2.0;
 /// Room for the sort triangle beside a header label.
 pub(crate) const SORT_ARROW: f32 = 10.0 + space::S2;
 
-/// Measure the three fitted columns against the listing's own content.
+/// Measure the fitted columns against the listing's own content.
 ///
-/// Cheap because none of the three needs every entry looked at:
+/// Cheap because none of them needs every entry looked at:
+///
+/// - **Status** is a glyph under its header, and only there at all in a synced folder — see
+///   [`crate::fs::Dir::synced`], decided when the listing was read.
 ///
 /// - **Modified** is a fixed-width format, so one measurement of the template does.
 /// - **Size** is measured from the one value whose formatted text is longest, found
@@ -42,6 +45,7 @@ pub(crate) fn measure_columns(ui: &Ui, t: &Theme, tab: &mut Tab, scratch: &mut S
 
     let mut size_width: f32 = 0.0;
     let mut type_width: f32 = 0.0;
+    let synced = tab.dir.as_ref().is_some_and(|dir| dir.synced);
 
     if let Some(dir) = tab.dir.clone() {
         // Size: the longest formatted string, found without formatting them all.
@@ -99,6 +103,11 @@ pub(crate) fn measure_columns(ui: &Ui, t: &Theme, tab: &mut Tab, scratch: &mut S
 
     let date_width = measure(fmt::DATE_TEMPLATE);
 
+    tab.widths[Column::Status.index()] = if synced {
+        (header_of(Column::Status).max(GLYPH) + CELL_PAD * 2.0).ceil()
+    } else {
+        0.0
+    };
     tab.widths[Column::Size.index()] =
         (size_width.max(header_of(Column::Size)) + CELL_PAD * 2.0).ceil();
     tab.widths[Column::Type.index()] =
@@ -108,20 +117,20 @@ pub(crate) fn measure_columns(ui: &Ui, t: &Theme, tab: &mut Tab, scratch: &mut S
     tab.widths_measured = true;
 }
 
-/// Widths for this frame: the three fitted columns as stored, and whatever is left
+/// Widths for this frame: the fitted columns as stored, and whatever is left
 /// for Name.
 ///
-/// When the pane is too narrow for all four, the fitted columns give way from the
-/// right — Type first, then Modified — because a name you cannot read is worse
+/// When the pane is too narrow for all of them, the fitted columns give way —
+/// Type first, then Modified, then Status — because a name you cannot read is worse
 /// than a date you cannot see.
-pub(crate) fn resolved_widths(tab: &Tab, total: f32) -> [f32; 4] {
+pub(crate) fn resolved_widths(tab: &Tab, total: f32) -> [f32; Column::COUNT] {
     let mut widths = tab.widths;
     const NAME_MIN: f32 = 120.0;
+    let fitted = |widths: &[f32; Column::COUNT]| widths[1..].iter().sum::<f32>();
 
-    let fitted = widths[1] + widths[2] + widths[3];
-    let mut spare = total - fitted;
+    let mut spare = total - fitted(&widths);
     if spare < NAME_MIN {
-        for column in [Column::Type, Column::Modified, Column::Size] {
+        for column in [Column::Type, Column::Modified, Column::Status, Column::Size] {
             if spare >= NAME_MIN {
                 break;
             }
@@ -130,14 +139,14 @@ pub(crate) fn resolved_widths(tab: &Tab, total: f32) -> [f32; 4] {
             widths[index] = 0.0;
         }
     }
-    widths[0] = (total - widths[1] - widths[2] - widths[3]).max(NAME_MIN);
+    widths[0] = (total - fitted(&widths)).max(NAME_MIN);
     widths
 }
 
-/// The left edge of each column, given the resolved widths.
-pub(crate) fn column_x(rect: Rect, widths: &[f32; 4]) -> [f32; 5] {
-    let mut edges = [rect.left(); 5];
-    for i in 0..4 {
+/// The left edge of each column, given the resolved widths, and the right edge of the last.
+pub(crate) fn column_x(rect: Rect, widths: &[f32; Column::COUNT]) -> [f32; Column::COUNT + 1] {
+    let mut edges = [rect.left(); Column::COUNT + 1];
+    for i in 0..Column::COUNT {
         edges[i + 1] = edges[i] + widths[i];
     }
     edges
@@ -150,7 +159,7 @@ pub(crate) fn header_strip(
     rect: Rect,
     pane: PaneId,
     tab: &mut Tab,
-    widths: &[f32; 4],
+    widths: &[f32; Column::COUNT],
     out: &mut Vec<Action>,
 ) {
     ui.painter().rect_filled(rect, CornerRadius::ZERO, t.surfaces.header);

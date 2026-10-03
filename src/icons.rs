@@ -1085,6 +1085,64 @@ pub fn git_badge(p: &Painter, rect: Rect, state: crate::git::State, disc: Color3
     }
 }
 
+/// A sync state, as the Status column shows it: Explorer's own marks, drawn on the grid.
+///
+/// - **Online** is a cloud's outline — nothing here but the name.
+/// - **Local** is a ring with a tick in it, and **Pinned** the same tick knocked out of a solid
+///   disc: Explorer's pair, where filling the mark in is what "always" adds.
+/// - **Syncing** is [`refresh`]'s arrow, **Warning** and **Error** a disc with the mark knocked out
+///   of it — the exclamation mark [`git_badge`] uses for a conflict, and a cross.
+///
+/// `under` is what the row is filled with, and is what the knocked-out shapes are drawn in, so the
+/// marks read as holes in the disc on a selected row as well as on a plain one.
+pub fn sync_status(p: &Painter, rect: Rect, state: crate::fs::dir::Sync, ink: Color32, under: Color32) {
+    use crate::fs::dir::Sync;
+    let g = Grid::new(rect);
+    let center = g.at(8.0, 8.0);
+    let radius = g.scale * 6.0;
+    let mark = Stroke::new((g.scale * 1.6).max(1.2), under);
+    let tick = [g.at(5.0, 8.2), g.at(7.1, 10.3), g.at(11.2, 5.9)];
+    match state {
+        Sync::Online => {
+            // The cloud is filled in `ink` and filled again in `under`, one line-width in, which
+            // is how an outline of three overlapping circles comes out without the seams a stroke
+            // around each would leave inside it. Centred by its ink: 2.2–13.8 across, 4–12 down.
+            let w = (g.scale * 1.5).max(1.0);
+            let lobes = [(4.8, 9.4, 2.6), (8.2, 7.6, 3.6), (11.4, 9.6, 2.4)];
+            let base = g.rect(4.8, 9.0, 11.4, 12.0);
+            for (color, inset) in [(ink, 0.0), (under, w)] {
+                for (x, y, r) in lobes {
+                    p.circle_filled(g.at(x, y), r * g.scale - inset, color);
+                }
+                p.rect_filled(
+                    Rect::from_min_max(base.min, pos2(base.max.x, base.max.y - inset)),
+                    CornerRadius::ZERO,
+                    color,
+                );
+            }
+        }
+        Sync::Local => {
+            p.circle_stroke(center, radius - g.scale * 0.6, g.stroke(ink));
+            path(p, tick.to_vec(), g.stroke(ink));
+        }
+        Sync::Pinned => {
+            p.circle_filled(center, radius, ink);
+            path(p, tick.to_vec(), mark);
+        }
+        Sync::Syncing => refresh(p, rect, ink),
+        Sync::Warning => {
+            p.circle_filled(center, radius, ink);
+            path(p, vec![g.at(8.0, 4.4), g.at(8.0, 8.8)], mark);
+            p.circle_filled(g.at(8.0, 11.2), g.scale * 1.1, under);
+        }
+        Sync::Error => {
+            p.circle_filled(center, radius, ink);
+            path(p, vec![g.at(5.6, 5.6), g.at(10.4, 10.4)], mark);
+            path(p, vec![g.at(10.4, 5.6), g.at(5.6, 10.4)], mark);
+        }
+    }
+}
+
 /// Refresh: a nearly-closed circle with an arrowhead.
 pub fn refresh(p: &Painter, rect: Rect, color: Color32) {
     let g = Grid::new(rect);

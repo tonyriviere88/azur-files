@@ -161,6 +161,9 @@ mod counting {
 static ALLOCATOR: counting::Counting = counting::Counting;
 
 fn main() -> eframe::Result {
+    // Before anything reads a file or starts a thread: what the scan and the shell are told about
+    // a OneDrive file depends on it. See the function.
+    fs::scan::expose_placeholders();
     // Set on the main thread as well as on each worker: any call that touches an
     // empty removable drive can otherwise raise a modal from inside the syscall.
     fs::scan::silence_device_dialogs();
@@ -748,6 +751,7 @@ impl eframe::App for Window {
             || self.app.git_pending()
             || self.app.sizes_pending()
             || self.app.thumbs_pending()
+            || self.app.cloud_pending()
             || self.app.diff_pending()
             // The pick above, once it has had the frames to be attempted in. Waiting on it any earlier
             // would be waiting on the capture counter that opens the panel, and that counter only

@@ -73,6 +73,9 @@ impl Tab {
         self.git_asked = false;
         self.git_answered = false;
         self.git_settled_at = None;
+        // And for the sync provider, for the same reason.
+        self.cloud = Vec::new();
+        self.cloud_asked = false;
         self.selected_count = 0;
         self.selected_size = 0;
         self.cursor = None;
@@ -299,6 +302,15 @@ impl Tab {
         self.scroll_y = 0.0;
         self.scroll_to = Some(0.0);
         None
+    }
+
+    /// What the Status column says about one entry: the provider's answer where it has given one,
+    /// and the entry's own attributes until then. See [`crate::fs::dir::Sync`].
+    pub fn sync_of(&self, entry: usize) -> Option<crate::fs::dir::Sync> {
+        if let Some(&Some(answer)) = self.cloud.get(entry) {
+            return Some(answer);
+        }
+        self.dir.as_ref()?.entries.get(entry)?.sync()
     }
 
     /// Whether the listing is showing a question only git can answer. See [`Lens::Git`].

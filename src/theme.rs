@@ -1201,6 +1201,21 @@ impl Theme {
         }
     }
 
+    /// The ink a Status glyph is drawn in: Explorer's own mapping, onto Azur's status roles.
+    ///
+    /// Blue for the cloud and for a transfer, which are facts about where the content is; green for
+    /// content on this disk, which is Explorer's green tick; amber and red for the two states the
+    /// provider is asking somebody to look at.
+    pub fn sync(&self, state: crate::fs::dir::Sync) -> Color32 {
+        use crate::fs::dir::Sync;
+        match state {
+            Sync::Online | Sync::Syncing => self.status.info,
+            Sync::Local | Sync::Pinned => self.status.success,
+            Sync::Warning => self.status.warning,
+            Sync::Error => self.status.danger,
+        }
+    }
+
     /// The inks a folder diff draws a row in. See [`crate::diff`].
     ///
     /// **Only a real difference is in colour.** A name with no counterpart on the other side is

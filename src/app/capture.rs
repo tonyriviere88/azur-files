@@ -424,6 +424,12 @@ impl App {
         self.thumbs.pending()
     }
 
+    /// Whether a capture should keep waiting for the sync provider, so a shot of a synced folder
+    /// shows its Status column filled in rather than its folders blank.
+    pub fn cloud_pending(&self) -> bool {
+        self.cloud.pending()
+    }
+
     /// Whether a capture should keep waiting for the console: a shell still to start, or a command
     /// still to answer.
     ///

@@ -11,6 +11,7 @@
 //! | module | what it is |
 //! | --- | --- |
 //! | [`icons`] | the system image list, cached by file type |
+//! | [`cloud`] | `System.StorageProviderState` — the sync provider's Status column |
 //! | [`links`] | `IShellLink` — what a shortcut points at |
 //! | [`clipboard`] | `CF_HDROP` and `Preferred DropEffect` — cut, copy, paste |
 //! | [`ops`] | `IFileOperation` — copy, move, delete, rename, new folder |
@@ -34,6 +35,7 @@
 //! here goes through, and the note on [`Modal`].
 
 pub mod clipboard;
+pub mod cloud;
 pub mod dnd;
 pub mod icons;
 pub mod links;

@@ -40,7 +40,7 @@ use super::dir::{Dir, DirBuilder, FLAG_DIR, FLAG_HIDDEN, FLAG_LINK, FLAG_READONL
 // Only the Windows enumeration has an attribute word to read it out of; nothing portable
 // reports it, so the portable scanner below never sets it.
 #[cfg(windows)]
-use super::dir::FLAG_SYSTEM;
+use super::dir::{FLAG_ONLINE, FLAG_PINNED, FLAG_PLACEHOLDER, FLAG_SYSTEM};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
@@ -50,7 +50,7 @@ mod win;
 #[cfg(windows)]
 use win::scan_real;
 #[cfg(windows)]
-pub use win::silence_device_dialogs;
+pub use win::{expose_placeholders, silence_device_dialogs};
 
 /// Read `path` into a [`Dir`]. Never fails: an unreadable directory comes back as
 /// an empty one carrying the reason.
@@ -454,6 +454,9 @@ pub const FLATTEN_PATIENCE: std::time::Duration = std::time::Duration::from_secs
 
 #[cfg(not(windows))]
 pub fn silence_device_dialogs() {}
+
+#[cfg(not(windows))]
+pub fn expose_placeholders() {}
 
 // ---------------------------------------------------------------------------
 // Everything else

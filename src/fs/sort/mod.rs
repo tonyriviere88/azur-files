@@ -16,21 +16,34 @@ use azur_egui_theme::filter::Query;
 
 use super::dir::Dir;
 
-/// The four columns of the details view.
+/// The five columns of the details view, left to right.
 ///
 /// The discriminants are spelled out because the view indexes its width array by
 /// them, and a column reordered here would otherwise silently resize the wrong one.
+///
+/// **Status is only there in a synced folder.** Its width is zero anywhere else — see
+/// `ui::filelist::measure_columns`, which decides it off [`Dir::synced`] — so every other
+/// folder looks exactly as it did before there was one.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 #[repr(usize)]
 pub enum Column {
     Name = 0,
-    Size = 1,
-    Type = 2,
-    Modified = 3,
+    Status = 1,
+    Size = 2,
+    Type = 3,
+    Modified = 4,
 }
 
 impl Column {
-    pub const ALL: [Column; 4] = [Self::Name, Self::Size, Self::Type, Self::Modified];
+    pub const ALL: [Column; 5] = [
+        Self::Name,
+        Self::Status,
+        Self::Size,
+        Self::Type,
+        Self::Modified,
+    ];
+    /// How many there are, for the arrays indexed by [`Column::index`].
+    pub const COUNT: usize = Self::ALL.len();
 
     /// Index into a per-column array.
     #[inline]
@@ -41,6 +54,7 @@ impl Column {
     pub fn header(self) -> &'static str {
         match self {
             Self::Name => "Name",
+            Self::Status => "Status",
             Self::Size => "Size",
             Self::Type => "Type",
             Self::Modified => "Modified",
@@ -58,7 +72,7 @@ impl Column {
     /// is biggest" or "what did I just touch", so those start descending — which
     /// is Explorer's behaviour too.
     pub fn starts_ascending(self) -> bool {
-        matches!(self, Self::Name | Self::Type)
+        matches!(self, Self::Name | Self::Type | Self::Status)
     }
 }
 
@@ -508,6 +522,14 @@ fn compare(
         Column::Size => ea.size.cmp(&eb.size),
         Column::Type => ranks[a as usize].cmp(&ranks[b as usize]),
         Column::Modified => ea.modified.cmp(&eb.modified),
+        // What the attributes say, which is every file's answer. A folder's comes from the shell a
+        // moment later and the order is not rebuilt for it, so within the folder block this falls
+        // through to the name — as Size does, for a folder that has not been measured.
+        // An entry with no state goes after every one that has one.
+        Column::Status => {
+            let key = |e: &super::dir::Entry| (e.sync().is_none(), e.sync());
+            key(ea).cmp(&key(eb))
+        }
     };
     let primary = if ascending { primary } else { primary.reverse() };
 

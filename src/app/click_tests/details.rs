@@ -216,6 +216,11 @@ fn every_column_header_is_reachable() {
     let mut h = Harness::new();
     let y = h.header_y(0);
     for (index, column) in crate::fs::Column::ALL.into_iter().enumerate() {
+        // Status is only a column in a synced folder, and the harness's folder is not one.
+        if column == crate::fs::Column::Status {
+            assert_eq!(h.tab(0).widths[index], 0.0, "an unsynced folder grew a Status column");
+            continue;
+        }
         let id = Id::new(("th", h.app.panes[0].id, index));
         let pane = h.pane_rect(0);
         let found = (0..pane.width() as i32)
