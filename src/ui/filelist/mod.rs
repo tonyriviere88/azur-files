@@ -114,6 +114,13 @@ pub fn show(
     // that at zero, and a switch that unlatched itself when the pane was squeezed would be reporting
     // the pane's height as the console's state.
     console_open: bool,
+    // The window's rule for opening a folder as tiles, for the view switch's context menu. Nothing
+    // in a listing reads it — it is consulted once, when a folder lands, by
+    // [`crate::pane::Tab::choose_view`] — so it is here only to be ticked. See [`tiles_menu`].
+    auto_tiles: crate::pane::AutoTiles,
+    // And which file types this machine can draw a picture of, which is the other half of what that
+    // rule counts — the same menu reports what the two of them make of this folder.
+    providers: &mut crate::shell::providers::Providers,
     // The band at the bottom of `rect` that belongs to somebody else — the console panel.
     //
     // The rows stop short of it. Without this they are laid out across the console and the console
@@ -150,7 +157,7 @@ pub fn show(
             header_strip(ui, t, header, pane, tab, &resolved_widths(tab, rect.width()), out);
         }
         status_line(
-            ui, t, floor, pane, tab, console_open, status, now, scratch, out,
+            ui, t, floor, pane, tab, console_open, auto_tiles, providers, status, now, scratch, out,
         );
         return outcome;
     }
@@ -260,7 +267,7 @@ pub fn show(
     }
 
     status_line(
-        ui, t, floor, pane, tab, console_open, status, now, scratch, out,
+        ui, t, floor, pane, tab, console_open, auto_tiles, providers, status, now, scratch, out,
     );
     outcome
 }

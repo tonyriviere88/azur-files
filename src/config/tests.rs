@@ -41,6 +41,14 @@ fn the_window_comes_back_the_way_it_was_left() {
         flat_mode: crate::pane::FlatMode::Tree,
         regroup: false,
         forward_slashes: true,
+        // Both away from their defaults again: the rule is *on* by default and the threshold is
+        // `TILES_THRESHOLD`, so a round trip that used either would prove nothing. There is no third
+        // key — whether the count asks this machine about `.pdf` and `.3dr` is not a setting, it is
+        // what the count *is*. See [`crate::shell::providers`].
+        auto_tiles: crate::pane::AutoTiles {
+            on: false,
+            threshold: 35.0,
+        },
         ..Config::default()
     };
 
@@ -89,6 +97,27 @@ fn the_window_comes_back_the_way_it_was_left() {
         "a `view=` key is being written: {}",
         saved.to_text()
     );
+    // What *is* here about rows and tiles: the rule for choosing between them as a folder opens,
+    // which is a habit and not an answer — see the module header. Its default is **on**, so it is the
+    // `0` that has to survive and the *missing* line that has to come back on — the third flag here
+    // read as "anything but 0", beside `regroup` and `diff`. And the threshold an older file comes
+    // back with has to be the default rather than a zero read off a line that is not there: a rule
+    // that is on by default against a threshold of 0 would make a grid of every folder with one
+    // picture in it.
+    assert!(!back.auto_tiles.on, "the `0` did not survive");
+    assert_eq!(back.auto_tiles.threshold, 35.0);
+    assert!(older.auto_tiles.on, "on by default");
+    assert_eq!(older.auto_tiles.threshold, crate::pane::TILES_THRESHOLD);
+    // Whole percent in the file, because that is what the slider produces and what somebody
+    // editing the file by hand would write.
+    assert!(
+        saved.to_text().contains("tiles_threshold=35"),
+        "the threshold is not written as a percentage: {}",
+        saved.to_text()
+    );
+    // And a hand-edited nonsense value cannot make the rule mean something it has no name for.
+    let edited = Config::parse("auto_tiles=1\ntiles_threshold=900\n");
+    assert_eq!(edited.auto_tiles.threshold, 100.0);
     // Which slash the path field writes. The other way round from the two above — its default is
     // *off*, so it is the missing line that has to come back false and the `1` that has to
     // survive. A preference nobody can keep is worse than no preference: the whole point of it is

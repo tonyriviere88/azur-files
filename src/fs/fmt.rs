@@ -125,6 +125,28 @@ pub fn kind_of(ext: &str, is_dir: bool) -> Kind {
     file_type(ext).map_or(Kind::Other, |(_, kind)| kind)
 }
 
+/// Whether a file of this type is **itself a picture**, by name alone.
+///
+/// The first of the two questions [`crate::pane::AutoTiles`] counts to decide whether a folder is
+/// worth opening as tiles. [`Kind::Image`] and [`Kind::Video`] are pictures, and between them they
+/// are what a folder of photographs, scans, screenshots, renders or clips is made of — which is the
+/// case the tiles exist for. One binary search in [`TYPES`], no I/O and nothing asked of the shell.
+///
+/// # And what this cannot answer, which is the other question
+///
+/// A `.pdf`, a `.docx`, a `.psd`, a `.3dr`: whether a tile shows a page or a model of one is not a
+/// fact about the type at all, it is a fact about **what is installed** — so no table shipped with
+/// this program can say, and one that guessed would be wrong on half the machines it ran on. That
+/// question is [`crate::shell::providers`]', which asks the registry once per type, and the count is
+/// the two of them together. See [`crate::pane::Tab::picture_rows`], which is the only caller of
+/// either.
+///
+/// So a `false` here means "not a picture *by name*" and never "no picture": everything under
+/// [`Kind::Document`], [`Kind::Model`] and the rest gets its answer from the machine instead.
+pub fn shows_a_picture(ext: &str, is_dir: bool) -> bool {
+    matches!(kind_of(ext, is_dir), Kind::Image | Kind::Video)
+}
+
 /// Write the Type cell.
 pub fn type_label(ext: &str, is_dir: bool, out: &mut String) {
     if is_dir {
@@ -350,6 +372,26 @@ mod tests {
         out.clear();
         type_label("anything", true, &mut out);
         assert_eq!(out, "File folder");
+    }
+
+    /// What [`shows_a_picture`] says yes to, and — the half that matters — what it says no to.
+    ///
+    /// The list of maybes is the point of the test. Each of `.pdf`, `.docx` and `.dwg` may well draw
+    /// a page or a model on this machine and draw nothing on the next one, so none of them may be
+    /// what tips a folder into the tiles; a change that let one in would make the threshold mean
+    /// something different per desk. See the function's own doc.
+    #[test]
+    fn only_pictures_and_video_count_as_a_picture() {
+        for ext in ["png", "jpg", "JPEG", "svg", "gif", "psd", "raw", "heic", "mp4", "mkv", "webm"] {
+            assert!(shows_a_picture(ext, false), "`{ext}` should count");
+        }
+        for ext in ["pdf", "docx", "pptx", "xlsx", "dwg", "stl", "e57", "txt", "md", "rs", "zip", ""] {
+            assert!(!shows_a_picture(ext, false), "`{ext}` should not count");
+        }
+        assert!(
+            !shows_a_picture("png", true),
+            "a folder called `x.png` is a folder"
+        );
     }
 
     #[test]

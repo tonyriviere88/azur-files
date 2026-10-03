@@ -1,5 +1,10 @@
 //! The status line under a listing: the counts, how long the read took, the view switch, and
 //! what git says about the folder.
+//!
+//! The view switch carries a menu of its own — [`tiles_menu`], where "open a folder like this for
+//! me" is turned on and given a threshold. It is the only thing on this bar that is a *setting*
+//! rather than a control or a fact, and it is here because a right click on the switch is where
+//! somebody looks for the settings of switching.
 
 use super::*;
 
@@ -84,6 +89,14 @@ pub(crate) fn status_line(
     pane: PaneId,
     tab: &Tab,
     console_open: bool,
+    // The window's rule for opening a folder as tiles, for the view switch's own menu — which is
+    // where it is ticked and dragged. By value: the menu reports what was chosen as an [`Action`]
+    // like every other control in this window, so nothing here writes a setting. See [`tiles_menu`].
+    auto: crate::pane::AutoTiles,
+    // Which file types this machine can draw a picture of, so the menu can say what the rule makes of
+    // this folder. `&mut` because asking is what fills the cache — the same shape as the icon and
+    // thumbnail services this listing already takes.
+    providers: &mut crate::shell::providers::Providers,
     override_text: Option<&str>,
     now: f64,
     scratch: &mut String,
@@ -118,7 +131,7 @@ pub(crate) fn status_line(
     let middle = (line.center().y - SWITCH * 0.5).round();
     let tiles = tab.view_mode.is_icons();
     let view = Rect::from_min_size(pos2(line.left() + space::S2, middle), vec2(SWITCH, SWITCH));
-    if crate::ui::tool_button(
+    let switched = crate::ui::tool_button(
         ui,
         t,
         view,
@@ -132,14 +145,15 @@ pub(crate) fn status_line(
         true,
         tiles,
         t.bg.layer_alt,
-    )
-    .clicked()
-    {
+    );
+    if switched.clicked() {
         out.push(Action::SetView {
             pane,
             mode: tab.view_mode.toggled(),
         });
     }
+    // And its own menu, which is where "do this for me" lives. See [`tiles_menu`].
+    tiles_menu(ui, t, &switched, tab, auto, providers, out);
 
     // `space-2` between the two and `space-3` after them: they are one group — the pane's own two
     // switches — and the gap inside a group has to read as smaller than the gap that follows it.
@@ -340,6 +354,131 @@ pub(crate) fn status_line(
         let hit = ui.interact(at, Id::new(("status-counts", pane)), Sense::hover());
         azur_egui_theme::components::tooltip(hit, &tip);
     }
+}
+
+/// The view switch's own menu: **whether this window picks the view for you, and when.**
+///
+/// The fourth menu of this shape in the program and it follows the three that came first — see
+/// [`crate::ui::breadcrumb::flatten_menu`], which says it at length. **Sticky**, because these are
+/// settings rather than commands and a menu that vanished on the tick would have to be reopened to
+/// see what the tick did. **Hung off the control the setting is about**, because a right click on the
+/// thing that switches the view is where somebody looks for the settings of switching the view — and
+/// because there is no room on a 22-point bar for a checkbox and a slider, nor any reason to spend
+/// it: this is a question asked once and then left alone.
+///
+/// # The slider stays usable while the tick is off
+///
+/// Deliberately, and it is the same rule `Regroup single folders` follows: a setting that greys out
+/// in the state you are not in is a setting you cannot find when you go looking for why the last
+/// folder opened the way it did. The threshold is remembered either way — see
+/// [`crate::config::Config::auto_tiles`] — so somebody can set the number first and then turn the
+/// rule on, which is the order most people will do it in anyway.
+///
+/// # Nothing here changes the folder behind the menu
+///
+/// Which is worth knowing while reading it, because every other menu in this window does. What this
+/// sets is how the *next* folder opens — see [`crate::pane::AutoTiles`] and
+/// [`Action::SetAutoTiles`] — so the tick and the drag are both quiet, and the switch above them is
+/// still what changes the view you are looking at.
+///
+/// # And it says what it makes of the folder you are in
+///
+/// The last line of it is the rule's own arithmetic over the listing behind the menu: what share of
+/// its rows count as pictures. **The menu is the instrument**, which is the point — a threshold is a
+/// number nobody can pick in the abstract, so open a folder, right-click, and read what the rule makes
+/// of it before choosing where to put the slider.
+///
+/// It is a walk over the display order, so it is paid **only while this menu is open** and never in an
+/// ordinary frame. On a flattened tree of two hundred thousand rows that is a few milliseconds a frame
+/// for as long as somebody holds the menu up, which is the right place to spend it and the only place
+/// the figure can come from.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn tiles_menu(
+    ui: &Ui,
+    t: &Theme,
+    trigger: &egui::Response,
+    tab: &Tab,
+    auto: crate::pane::AutoTiles,
+    providers: &mut crate::shell::providers::Providers,
+    out: &mut Vec<Action>,
+) {
+    use azur_egui_theme::components::{menu_divider, ContextMenu, MenuItem, Size, Slider};
+
+    use crate::ui::breadcrumb::ticked;
+
+    ContextMenu::new(trigger)
+        .sticky(true)
+        .show(ui.ctx(), |ui| {
+            if ui
+                .add(ticked(
+                    MenuItem::new("Automatically switch to thumbnail view"),
+                    auto.on,
+                ))
+                .clicked()
+            {
+                out.push(Action::SetAutoTiles(!auto.on));
+            }
+            // The rule, and then the number it is a rule over — behind a rule of its own, because the
+            // slider is not a second entry on the same list: it is what the entry above means.
+            menu_divider(ui);
+            // A menu sets its own row spacing to zero, because entries that touch are entries the
+            // pointer cannot cross into nothing. A slider is not an entry: left at zero its label sits
+            // on the divider and its rail on the frame's own margin, which reads as a control that has
+            // been squeezed in. So it gets `space-1` either side and nothing else does.
+            ui.add_space(space::S1);
+            // A copy, because the value belongs to `App` and is written by the action below rather
+            // than by the widget. Whatever the drag leaves is what the next frame draws, since the
+            // action is performed before it.
+            let mut threshold = auto.threshold;
+            // `Small`, which is the size the rest of this window's chrome is drawn at — a `Medium`
+            // rail in a menu of 24-point rows reads as a control that has wandered in from a form.
+            //
+            // Whole fives. A slider in a menu is around 260 points wide, so a percent is under three
+            // points of travel and nobody is choosing 63 rather than 65; what a step buys is a value
+            // that comes back the same after the pointer is lifted, and a settings file with `60` in
+            // it rather than `59.7`.
+            let dragged = ui.add(
+                Slider::new(&mut threshold, 0.0..=100.0)
+                    .label("Pictures in the folder")
+                    .suffix("%")
+                    .step(5.0)
+                    .decimals(0)
+                    .size(Size::Small),
+            );
+            if dragged.changed() {
+                out.push(Action::SetTilesThreshold(threshold));
+            }
+            ui.add_space(space::S1);
+
+            // ---- What the rule makes of the folder behind the menu -------
+            //
+            // Computed here rather than carried in, because it is a question about *this* listing —
+            // which is the whole reason the line exists: a threshold is a number nobody can pick in
+            // the abstract. See this function's own doc for what the walk costs and why here is where
+            // to spend it.
+            //
+            // In the caption role and `text-tertiary`, which is what the bar underneath this menu
+            // dresses its own figures in: this is a reading, not a control and not a heading, and it
+            // must not compete with the entry and the slider it is a consequence of.
+            let (pictures, rows) = tab.picture_rows(providers);
+            let reading = if rows == 0 {
+                "Nothing here to count".to_owned()
+            } else {
+                format!(
+                    "Here: {:.0}% — {pictures} of {rows} row{}",
+                    pictures as f32 / rows as f32 * 100.0,
+                    plural(rows as u32)
+                )
+            };
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(reading)
+                        .font(t.fonts.caption.clone())
+                        .color(t.text.tertiary),
+                );
+            });
+            ui.add_space(space::S1);
+        });
 }
 
 /// The branch, how far it is from its remote, and how much is changed — laid out to the right from

@@ -16,6 +16,7 @@
 //! | [`ops`] | `IFileOperation` — copy, move, delete, rename, new folder |
 //! | [`menu`] | `IContextMenu` — the real menu, extensions included |
 //! | [`dnd`] | OLE drag and drop, as a source and as a target |
+//! | [`providers`] | which file types this machine can draw a picture of, by registration |
 //!
 //! # Threading
 //!
@@ -37,6 +38,7 @@ pub mod icons;
 pub mod links;
 pub mod menu;
 pub mod ops;
+pub mod providers;
 pub mod thumbs;
 
 #[cfg(windows)]

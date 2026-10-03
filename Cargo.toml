@@ -147,6 +147,11 @@ windows-sys = { version = "0.61", features = [
     "Win32_Storage_FileSystem",
     "Win32_System_Diagnostics_Debug",
     "Win32_System_Com",
+    # `RegOpenKeyExW` and `RegQueryValueExW`, for one question asked of `HKEY_CLASSES_ROOT`: does
+    # this machine have a thumbnail provider registered for this file type. Four key reads and no
+    # COM, which is what makes it answerable on the UI thread — see `shell::providers`, and note
+    # that the alternative (`GetImage` on a real file) costs 12–22 ms and runs a stranger's DLL.
+    "Win32_System_Registry",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
     "Win32_System_Time",

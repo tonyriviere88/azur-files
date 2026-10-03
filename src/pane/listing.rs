@@ -154,6 +154,82 @@ impl Tab {
         }
     }
 
+    /// Open a folder as tiles if what just arrived is mostly pictures.
+    ///
+    /// **Called once per opening, straight after [`Tab::apply`]** — see [`App::collect_scans`] and
+    /// [`App::start_scans`], which are the two places a listing lands. The flag is taken rather than
+    /// read, so a refresh, a file operation and the watcher all leave the view exactly as the reader
+    /// left it: whether this is an opening at all is [`Tab::opening`]'s business, and the rule is
+    /// [`AutoTiles`]'s.
+    ///
+    /// [`App::collect_scans`]: crate::app::App
+    /// [`App::start_scans`]: crate::app::App
+    ///
+    /// Nothing but the mode is touched. A folder that has just been opened is already scrolled to
+    /// the top with its cursor wherever [`Tab::apply`] put it — and the tiles are laid out from that
+    /// same order — so the scroll fix-up [`crate::app::Action::SetView`] has to do has nothing to do
+    /// here: there is no place in the listing to lose, because nobody has read it yet.
+    pub fn choose_view(
+        &mut self,
+        auto: AutoTiles,
+        providers: &mut crate::shell::providers::Providers,
+    ) {
+        if !std::mem::take(&mut self.opening) {
+            return;
+        }
+        // Nothing is counted while the rule is off. Which is not merely an optimisation: the walk is a
+        // pass over the display order, and on a flattened tree of two hundred thousand rows that is
+        // milliseconds nobody has asked for on the frame a folder appears.
+        if !auto.on {
+            return;
+        }
+        let (pictures, rows) = self.picture_rows(providers);
+        if auto.reached(pictures, rows) {
+            self.view_mode = ViewMode::Icons;
+        }
+    }
+
+    /// How many of the rows on show are pictures, and how many rows there are: the two numbers
+    /// [`AutoTiles`] is a rule over.
+    ///
+    /// **Over the display order rather than over the whole folder**, which is what makes the
+    /// threshold a claim about what somebody is looking at. A folder of two hundred photographs with
+    /// a `desktop.ini` and a `Thumbs.db` in it is a folder of photographs — those two are hidden, so
+    /// they are not rows — and the same folder filtered down to six `.txt` files is not.
+    ///
+    /// Folders count as rows and never as pictures. That is the numerator's whole job here: one
+    /// picture in a folder of ninety-nine subfolders is one percent and stays a listing, where
+    /// counting files alone would call it a hundred percent and show a grid of folder tiles.
+    ///
+    /// **A picture is anything that would show as one**, which takes two questions: this program's own
+    /// type table, and then — for everything the table will not claim — whether *this machine* has a
+    /// thumbnail provider for it, which is [`crate::shell::providers`] and is where the `.pdf`, the
+    /// `.psd` and the `.3dr` are answered.
+    pub fn picture_rows(
+        &self,
+        providers: &mut crate::shell::providers::Providers,
+    ) -> (usize, usize) {
+        let Some(dir) = &self.dir else { return (0, 0) };
+        let mut pictures = 0;
+        for &row in &self.order {
+            let entry = row as usize;
+            let is_dir = dir.entries[entry].is_dir();
+            let ext = dir.ext(entry);
+            // The table first, always, and the machine only for what it does not claim. Which is the
+            // order that keeps this cheap: a folder of photographs never asks the registry anything,
+            // and a folder of `.rs` files asks about `rs` exactly once per session.
+            //
+            // A folder is never a picture whichever way it is asked — the shell does have a thumbnail
+            // for one, and it is a picture *of the folder*, which is not what is being counted here.
+            let counted = crate::fs::fmt::shows_a_picture(ext, is_dir)
+                || (!is_dir && providers.has_one(ext));
+            if counted {
+                pictures += 1;
+            }
+        }
+        (pictures, self.order.len())
+    }
+
     /// Every name in the listing, spelled the way [`Tab::apply`] compares them.
     ///
     /// The whole listing and not just the rows on show: a filter hides rows, and a hidden row is

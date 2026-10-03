@@ -70,6 +70,22 @@ pub enum Action {
     /// Show a chain of folders with nothing in them but each other as one row, or stop — the
     /// window's preference again, so every pane showing a tree follows.
     SetRegroup(bool),
+    /// Judge a folder as it opens and show it as tiles if it is mostly pictures, or stop.
+    ///
+    /// The window's preference, and the one on this list that deliberately **does nothing to what is
+    /// on screen** — see [`crate::pane::AutoTiles`]. `SetFlatMode` and `SetRegroup` above take effect
+    /// at once on every pane, because what they change is how a listing that is already here is
+    /// arranged; this changes how the *next* folder opens. A rule about opening that re-arranged the
+    /// folders already open would move the thing somebody is reading, and would then be arguing with
+    /// the switch four points to the left of it on the same bar.
+    ///
+    /// Ticked in the view switch's own context menu — see [`crate::ui::filelist::tiles_menu`], which
+    /// is also where [`Self::SetTilesThreshold`] is dragged.
+    SetAutoTiles(bool),
+    /// And how much of a folder has to be pictures for that, as a percentage. The other half of
+    /// [`Self::SetAutoTiles`], with everything said there applying — including that it changes
+    /// nothing on screen.
+    SetTilesThreshold(f32),
     /// Write `/` rather than `\` between the parts of a path in the path field, or stop. The
     /// window's preference again, and the path field's own context menu is where it is ticked —
     /// see [`crate::ui::breadcrumb::slash_menu`].
@@ -187,6 +203,8 @@ impl Action {
             Self::SetFlatMode(_) => "SetFlatMode",
             Self::SetView { .. } => "SetView",
             Self::SetRegroup(_) => "SetRegroup",
+            Self::SetAutoTiles(_) => "SetAutoTiles",
+            Self::SetTilesThreshold(_) => "SetTilesThreshold",
             Self::SetForwardSlashes(_) => "SetForwardSlashes",
             Self::SetLens { .. } => "SetLens",
             Self::ToggleCollapsed { .. } => "ToggleCollapsed",

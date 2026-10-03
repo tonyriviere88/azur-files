@@ -11,11 +11,18 @@ impl App {
     pub(super) fn collect_scans(&mut self) {
         // Collected first so the loader is not borrowed while the panes are.
         let arrived: Vec<_> = self.loader.drain().collect();
+        let auto = self.auto_tiles;
+        let Self { panes, providers, .. } = self;
         for loaded in arrived {
-            for pane in &mut self.panes {
+            for pane in panes.iter_mut() {
                 for tab in &mut pane.tabs {
                     if tab.awaiting == Some(loaded.token) {
                         tab.apply(loaded.dir.clone());
+                        // And, if this is a folder being *opened*, whether it is one to open as
+                        // tiles — which only the listing that just arrived can say. See
+                        // [`crate::pane::Tab::choose_view`]; every other reason a listing lands here
+                        // is the same folder again, and leaves the view alone.
+                        tab.choose_view(auto, providers);
                     }
                 }
             }
@@ -255,7 +262,8 @@ impl App {
     /// The cache is probed synchronously first, which is what makes Back, Forward
     /// and revisiting a folder appear in the same frame as the click.
     pub(super) fn start_scans(&mut self, ctx: &egui::Context, now: f64) {
-        let Self { panes, loader, .. } = self;
+        let auto = self.auto_tiles;
+        let Self { panes, loader, providers, .. } = self;
         let mut asked = false;
         for pane in panes.iter_mut() {
             for tab in pane.tabs.iter_mut() {
@@ -273,7 +281,14 @@ impl App {
                     continue;
                 }
                 match loader.cached(&tab.path) {
-                    Some(dir) => tab.apply(dir),
+                    Some(dir) => {
+                        tab.apply(dir);
+                        // The cache's answer is a listing arriving, exactly as a worker's is — and
+                        // this is the path Back, Forward and a revisited folder take, which is
+                        // rather more than half of the openings there are. Missing it here would
+                        // make the rule work only on folders that happened to be cold.
+                        tab.choose_view(auto, providers);
+                    }
                     None => {
                         tab.awaiting = Some(ask_for(tab, loader));
                         // When it was asked for, which is what decides whether the listing

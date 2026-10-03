@@ -139,6 +139,16 @@ pub struct App {
     /// path is going after it leaves here rather than about the folder in front of you. Ticked in
     /// the field's own context menu. See [`crate::config::Config::forward_slashes`].
     forward_slashes: bool,
+    /// Whether a folder that is opened becomes tiles on its own, and at what share of pictures.
+    ///
+    /// The window's preference again, and read in exactly one place — [`crate::pane::Tab::choose_view`],
+    /// on the frame a folder's listing lands. Nothing else consults it, which is what keeps "only when
+    /// opening a folder" a property of the code rather than of a comment. See
+    /// [`crate::pane::AutoTiles`].
+    auto_tiles: crate::pane::AutoTiles,
+    /// Which file types this machine can draw a picture of, asked once per type and kept for the
+    /// session. Only read when [`App::auto_tiles`]' probe is on — see [`crate::shell::providers`].
+    providers: crate::shell::providers::Providers,
     /// Reads whatever the preview panels are pointed at, off the UI thread.
     previews: crate::preview::Previews,
     /// The window the shell parents its own dialogs to.
@@ -388,6 +398,8 @@ impl App {
             flat_mode: config.flat_mode,
             regroup: config.regroup,
             forward_slashes: config.forward_slashes,
+            auto_tiles: config.auto_tiles,
+            providers: crate::shell::providers::Providers::new(),
             // The window as the settings file describes it, and not as this program is about to
             // find it: a maximised window never writes the other two — see `Self::frame` — so
             // starting them empty threw away the size and the place the window would go back to
@@ -436,6 +448,7 @@ impl App {
             flat_mode: self.flat_mode,
             regroup: self.regroup,
             forward_slashes: self.forward_slashes,
+            auto_tiles: self.auto_tiles,
             sections: self.sections,
             panes: Vec::new(),
             layout: None,

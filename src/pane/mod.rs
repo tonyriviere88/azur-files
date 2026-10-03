@@ -197,6 +197,10 @@ impl Lens {
 /// is — was tried first and is wrong here for that reason. Which way you want a *tree* shown is a
 /// habit; whether a folder is worth looking at as pictures is a fact about the folder.
 ///
+/// **[`AutoTiles`] is the one thing that reads that fact for you**, and it is not a setting for this
+/// value: it is a rule applied to the listing as it lands, so what is remembered between sessions is
+/// the rule and never the answer. See [`Tab::choose_view`].
+///
 /// A refresh keeps it, because a refresh is the same folder read again rather than a different one,
 /// and so does [`Tab::toggle_flat`] — flattening is another question about the folder you are already
 /// looking at.
@@ -222,6 +226,99 @@ impl ViewMode {
     #[inline]
     pub fn is_icons(self) -> bool {
         matches!(self, Self::Icons)
+    }
+}
+
+/// When a folder opens as tiles without anybody pressing the switch: **a rule, not a remembered
+/// mode.**
+///
+/// [`ViewMode`] argues that whether a folder is worth looking at as pictures is a fact about *that
+/// folder* and so is never carried anywhere — and that argument is what leaves the switch to be
+/// pressed by hand in every folder of photographs somebody opens. This is the other way to honour
+/// it: the fact is *read off the folder* as its listing lands. A folder whose rows are mostly
+/// pictures opens as tiles; the folder you open out of it is judged for itself, from nothing.
+///
+/// So what the settings file remembers is this rule, and never a `view=`. See
+/// [`crate::config::Config::auto_tiles`], which is where that distinction is spelled out again from
+/// the file's side.
+///
+/// # Four properties worth stating, because each was a choice
+///
+/// **On arrival only.** Ticking the box or dragging the slider changes nothing that is already on
+/// screen — see [`crate::app::Action::SetAutoTiles`]. A rule about how folders *open* that reached
+/// back and re-arranged the folders already open would be a setting that moves the thing you are
+/// reading, and the switch on the status line would then be arguing with it.
+///
+/// **A picture is whatever would show as one**, which is two questions rather than one:
+/// [`crate::fs::fmt::shows_a_picture`] for the types that are pictures by name, and
+/// [`crate::shell::providers`] for the ones only this machine can answer for — a `.pdf` where a reader
+/// is installed, a `.psd`, a `.3dr` where Cyclone 3DR is. Both, always. A rule that counted only the
+/// first would call a folder of documents 0% on a machine that draws every one of them, which is a
+/// rule about this program's own table rather than about the folder.
+///
+/// **On by default**, which is not this file's usual answer and is the same exception
+/// [`crate::config::Config::regroup`] is: the rule earns its default by what it does when it is
+/// *wrong*, and what it does when it is wrong is show a folder as tiles that you wanted as rows —
+/// one click on the switch four points to the left of the menu, in the folder you are already looking
+/// at. Against that, off by default means every folder of photographs anybody opens needs that same
+/// click, forever, and most people never find out it could have been otherwise. A default that costs
+/// one click when it guesses wrong is not the same kind of default as one that changes what a path
+/// bar writes.
+///
+/// **Something has to be a picture.** At a threshold of 0 the rule is "as soon as there is one",
+/// which is what the bottom of the slider should mean — not "every folder, including the empty
+/// ones", which is what a bare `share >= 0` would give.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct AutoTiles {
+    /// Whether a folder is judged at all when it opens.
+    pub on: bool,
+    /// How much of the folder has to be pictures, as a **percentage** of the rows on show.
+    ///
+    /// A percentage rather than a fraction because it is what the slider shows and what the
+    /// settings file carries — `tiles_threshold=60` is a line somebody can read and edit, and
+    /// `0.6` is a line they have to decode.
+    pub threshold: f32,
+}
+
+/// How much of a folder has to be pictures before it opens as tiles, until somebody moves the
+/// slider.
+///
+/// A folder is not a gallery because a third of it happens to be screenshots, and it plainly is one
+/// at nine tenths. Sixty is above "a fair few" and below "nearly all": it catches a camera's
+/// download folder with its stray `.txt` in it, and leaves a source folder holding a dozen icons in
+/// the details view where its names and dates are.
+pub const TILES_THRESHOLD: f32 = 60.0;
+
+impl Default for AutoTiles {
+    fn default() -> Self {
+        Self {
+            on: true,
+            threshold: TILES_THRESHOLD,
+        }
+    }
+}
+
+impl AutoTiles {
+    /// Whether a folder of `pictures` picture files out of `rows` rows is one to open as tiles.
+    ///
+    /// `false` for a folder with nothing in it and for one with no picture at all, whatever the
+    /// threshold says — see the type's own doc for why 0% cannot mean "always".
+    pub fn reached(self, pictures: usize, rows: usize) -> bool {
+        if !self.on || pictures == 0 || rows == 0 {
+            return false;
+        }
+        pictures as f32 / rows as f32 * 100.0 >= self.threshold
+    }
+
+    /// The threshold as it may be stored: anything outside the slider's own range is not a
+    /// percentage, and a hand-edited settings file is allowed to be wrong without changing what the
+    /// rule means.
+    pub fn clamped(threshold: f32) -> f32 {
+        if threshold.is_finite() {
+            threshold.clamp(0.0, 100.0)
+        } else {
+            TILES_THRESHOLD
+        }
     }
 }
 
@@ -442,6 +539,19 @@ pub struct Tab {
 
     /// Whether this tab is showing its folder as rows or as tiles. See [`ViewMode`].
     pub view_mode: ViewMode,
+    /// Whether the next listing to arrive is the folder being **opened**, and so may still choose
+    /// which of the two views it opens in. See [`AutoTiles`] and [`Tab::choose_view`].
+    ///
+    /// **The whole of "only when opening a folder" is this one flag.** A listing arrives for four
+    /// different reasons and only one of them is an opening: a navigation, an `F5`, a file operation
+    /// that ended in a re-read, and [`crate::watch`] noticing somebody else write into the folder.
+    /// The last three are *the same folder again*, and a rule that fired on those would take the
+    /// view back off anybody who had pressed the switch — silently, and at the moment a build
+    /// happened to touch the folder they were reading.
+    ///
+    /// So it is set by [`Tab::new`] and by [`Tab::go_to`], which are the two ways a tab comes to be
+    /// pointing at a folder it has not shown yet, and consumed by the first listing that lands.
+    pub opening: bool,
     /// Where the tiles go, when it is showing tiles.
     ///
     /// Cached rather than worked out per frame, because in a tree it is not arithmetic: a folder's
@@ -646,6 +756,9 @@ impl Tab {
             widths_measured: false,
             // Details, always: nothing is remembered and nothing is inherited. See [`ViewMode`].
             view_mode: ViewMode::default(),
+            // And this folder has not been looked at yet, so the listing that lands may still make
+            // it the tiles. See [`AutoTiles`].
+            opening: true,
             grid: crate::ui::grid::Layout::default(),
             reveal: None,
             keep_selected: Vec::new(),
@@ -693,6 +806,10 @@ impl Tab {
         // The grid's own geometry is deliberately not carried across: it is a cache over an order
         // this tab is about to build for itself, and one frame of arithmetic beats a stale copy.
         tab.view_mode = self.view_mode;
+        // And it is not opening: the view above is the one the original is showing, chosen or judged
+        // already, and a copy of a folder somebody has switched to rows must not be judged back into
+        // tiles. See [`Tab::opening`].
+        tab.opening = false;
         // And which listing the funnel is showing, for the same reason as the flatten it comes with:
         // a duplicate of a pane showing what changed is a pane showing what changed. See [`Lens`].
         tab.lens = self.lens;

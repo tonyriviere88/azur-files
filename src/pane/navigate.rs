@@ -123,8 +123,14 @@ impl Tab {
         // And neither do the tiles, for the same reason as the two above: a folder of photographs is
         // worth looking at as pictures and the folder you open out of it is a different question. So
         // every folder opens in the details view — see [`ViewMode`], which is also why there is no
-        // setting for this.
+        // setting for this *value*.
         self.view_mode = ViewMode::Details;
+        // What there is a setting for is the rule, and this is where a folder becomes eligible for
+        // it: the listing that lands next is a folder nobody has looked at yet, so it may still be
+        // read as a folder of pictures and opened as tiles. See [`Tab::choose_view`] and
+        // [`AutoTiles`] — and note that the line above is not undone by it, only overruled: a folder
+        // that is not mostly pictures opens in the details view, as it always has.
+        self.opening = true;
         // **A flatten does not come along to the next folder**, for the same reason the
         // filter does not: both are a question asked of the folder you were looking at,
         // and the answer to a question about somewhere else is not the same answer. It

@@ -60,6 +60,270 @@ fn in_the_grid_the_arrows_move_by_a_line_of_tiles() {
     assert_eq!(h.tab(0).cursor, Some(1), "a row is one step in the details view");
 }
 
+/// **The rule as a fresh profile has it, and the menu that turns it off and on again** — ticked,
+/// dragged, and obeyed.
+///
+/// Five claims, and every one of them needs a driven frame.
+///
+/// **A folder of pictures opens as tiles out of the box**, because the rule is on by default — see
+/// [`crate::pane::AutoTiles`]. That is the first assertion in the test and it is the one a change to
+/// the default would break.
+///
+/// **The menu is reachable.** It hangs off an 18-point switch in a 22-point bar that the window's
+/// bottom resize band overlaps, and that band is registered last — so the switch is swept for before
+/// anything is asserted, exactly as `the_view_switch_is_reachable_and_its_tiles_can_be_clicked` does
+/// for the left button. Swept while the switch is *latched*, too, since the folder came up as tiles.
+///
+/// **The slider inside it works.** A widget in a popup that cannot be dragged is the other failure
+/// that reads perfectly correctly in the source: the rail is swept for too, because where a slider's
+/// input row falls under its own header is arithmetic this test would only be restating.
+///
+/// **The tick changes nothing on screen**, which is the whole of [`crate::pane::AutoTiles`]'s
+/// contract and the one thing about it somebody could reasonably expect to go the other way. The
+/// folder in front of the menu is four fifths pictures and stays as it is either way it is ticked.
+///
+/// **And the next folder obeys whatever the menu was left saying.** Away and back rather than a
+/// refresh, because those are two different things and only one of them is an opening — the round trip
+/// also puts the judgement on the *cached* path, which is the one `Back`, `Forward` and a revisited
+/// folder take.
+#[test]
+fn the_view_switchs_menu_decides_when_a_folder_opens_as_tiles() {
+    // Zero-byte files with the right names: the rule reads the type off the extension — see
+    // `fs::fmt::shows_a_picture` — so nothing here has to be a real picture.
+    //
+    // **The rows that must not count carry an extension nobody could have registered a thumbnail
+    // provider for**, and that is not decoration. The count asks this machine about every type the
+    // table will not claim, so a `.txt` here would make every figure below depend on what happens to
+    // be installed where the suite is running. `.zzznotatype` is the same answer on every machine.
+    let root = crate::sandbox::fresh("auto-tiles");
+    let gallery = root.join("gallery");
+    let sources = root.join("sources");
+    for (dir, pictures) in [(&gallery, 8), (&sources, 2)] {
+        std::fs::create_dir_all(dir).expect("the sandbox is writable");
+        for i in 0..pictures {
+            std::fs::write(dir.join(format!("shot-{i}.png")), b"").expect("writable");
+        }
+        for i in 0..(10 - pictures) {
+            std::fs::write(dir.join(format!("notes-{i}.zzznotatype")), b"").expect("writable");
+        }
+    }
+
+    let mut h = Harness::new();
+    let pane = h.app.panes[0].id;
+    let ctx = h.ctx.clone();
+    // Its own, rather than the window's: `h.tab(0)` borrows the app, and the cache is only a cache —
+    // a fresh one gives the same answers about the same machine.
+    let mut providers = crate::shell::providers::Providers::new();
+
+    // A fresh profile, so the rule is on and the threshold is `TILES_THRESHOLD`.
+    assert!(h.app.auto_tiles.on, "a fresh profile has the rule off");
+    assert_eq!(h.app.auto_tiles.threshold, crate::pane::TILES_THRESHOLD);
+
+    // The gallery, opened by a window nobody has configured: four fifths pictures, so **tiles**.
+    h.app.perform(&ctx, Action::Navigate { pane, path: gallery.clone() });
+    h.settle();
+    assert_eq!(
+        h.tab(0).picture_rows(&mut providers),
+        (8, 10),
+        "the fixture is not what this test needs"
+    );
+    assert_eq!(
+        h.tab(0).view_mode,
+        crate::pane::ViewMode::Icons,
+        "a folder of pictures did not open as tiles on a fresh profile"
+    );
+
+    // ---- The menu ------------------------------------------------------
+    let rect = h.pane_rect(0);
+    let bar = rect.bottom() - crate::ui::filelist::STATUS_HEIGHT * 0.5;
+    let id = Id::new(("view-switch", pane));
+    let switch = (0..60)
+        .step_by(2)
+        .map(|dx| pos2(rect.left() + dx as f32, bar))
+        .find(|at| h.hovers(id, *at))
+        .expect("the view switch is not reachable along its own bar");
+    h.click_with(switch, PointerButton::Secondary, Modifiers::NONE);
+
+    let text_at = |h: &Harness, label: &str| {
+        h.texts()
+            .into_iter()
+            .find(|(_, text)| text == label)
+            .map(|(at, _)| at)
+    };
+    // Where a label has come to rest, once the menu has stopped moving. **The settling is not
+    // politeness.** This menu changes height as its own settings are ticked — the probe adds a line
+    // reporting what it cost, and unticking takes it away again — and it opens *above* the bar it
+    // hangs off, so every row in it moves when it does. A position read from the frame before a
+    // change is a position something else has moved into: as a click, one that quietly does nothing;
+    // as a slider's rail, a drag over the wrong strip of the menu.
+    let settled_at = |h: &mut Harness, label: &str| -> Pos2 {
+        let mut settled = None;
+        for _ in 0..8 {
+            h.frame(Vec::new());
+            let now = text_at(h, label);
+            if now.is_some() && now == settled {
+                break;
+            }
+            settled = now;
+        }
+        settled.unwrap_or_else(|| {
+            panic!(
+                "no `{label}` on the menu: {:?}",
+                h.texts().into_iter().map(|(_, t)| t).collect::<Vec<_>>()
+            )
+        })
+    };
+    let click_entry = |h: &mut Harness, label: &str| -> Vec<&'static str> {
+        let at = settled_at(h, label);
+        // A couple of points into the label, which is inside the entry whatever its padding is.
+        h.click_at(pos2(at.x + 2.0, at.y + 6.0))
+    };
+
+    // **Off first**, since the rule is already on: the tick has to work in the direction somebody who
+    // does not want it will press it, and that is the direction a `!` in the wrong place would break.
+    const TICK: &str = "Automatically switch to thumbnail view";
+    let done = click_entry(&mut h, TICK);
+    assert!(
+        done.contains(&"SetAutoTiles"),
+        "clicking `{TICK}` did nothing, got {done:?}"
+    );
+    assert!(!h.app.auto_tiles.on, "the entry did not turn the rule off");
+    // A setting, so it is part of what the window writes down. Asked of `settings()` rather than of
+    // `config_dirty`, which the frame after the one that sets it has already cleared.
+    assert!(!h.app.settings().auto_tiles.on, "and it was not written down");
+
+    // **Nothing behind the menu moved.** The folder it was raised over is the one this rule picked up
+    // a moment ago, and it is still tiles — because the rule is about *opening* a folder, so turning it
+    // off cannot un-open one.
+    assert_eq!(
+        h.tab(0).view_mode,
+        crate::pane::ViewMode::Icons,
+        "unticking the rule re-arranged the folder that was already on screen"
+    );
+
+    // And back on, which is both halves of a tick.
+    let done = click_entry(&mut h, TICK);
+    assert!(done.contains(&"SetAutoTiles"), "got {done:?}");
+    assert!(h.app.auto_tiles.on, "the entry does not tick back on");
+    assert_eq!(
+        h.tab(0).view_mode,
+        crate::pane::ViewMode::Icons,
+        "ticking it back on re-arranged the folder that was already on screen"
+    );
+
+    // **And it says what it makes of the folder it was raised over**, which is the instrument the
+    // whole menu is there to be: eight of its ten rows are pictures and the other two are of a type
+    // no machine can claim, so eighty percent on every machine.
+    let reading = h
+        .texts()
+        .into_iter()
+        .map(|(_, text)| text)
+        .find(|text| text.starts_with("Here:"))
+        .unwrap_or_else(|| {
+            panic!(
+                "the menu does not say what the rule makes of this folder: {:?}",
+                h.texts().into_iter().map(|(_, t)| t).collect::<Vec<_>>()
+            )
+        });
+    assert_eq!(reading, "Here: 80% — 8 of 10 rows");
+
+    // ---- The slider, swept for under its own header ---------------------
+    //
+    // Sticky, so the menu is still up after the tick — which is what makes this one gesture rather
+    // than two, and is the reason the menu is sticky at all.
+    const RAIL: &str = "Pictures in the folder";
+    // Both read after the menu has settled where the ticks left it — see `settled_at`.
+    let value = settled_at(&mut h, "60%");
+    // The rail runs the width of the menu's *content*, which is where the slider's own label starts —
+    // further left than the entries above it, whose labels are indented by the tick's gutter.
+    let rail_left = settled_at(&mut h, RAIL).x;
+    // Both labels fit the menu they are in. Worth an assertion because the menu is sized from what
+    // its *entries* asked for — `MenuItem` is the only thing that feeds the width probe — so the
+    // slider is along for the ride and a label a few points too long would come out as
+    // `Pictures in the fol…` beside a number, which reads as a control that has been cut off.
+    let cropped = h.cropped();
+    for label in [TICK, RAIL] {
+        assert!(
+            !cropped.iter().any(|text| text == label),
+            "`{label}` does not fit the menu it is in"
+        );
+    }
+
+    let mut dragged = None;
+    for dy in (6..34).step_by(2) {
+        let y = value.y + dy as f32;
+        // From the left end of the rail to past its right one, so the value can only come out at
+        // the top of the range — a drag that happened to land where the value already was would
+        // report nothing changed and prove nothing.
+        // A few points in from the rail's left end rather than exactly on it: the menu's own frame
+        // margin is not the slider, which is a press that lands on nothing — found the hard way
+        // against the real window.
+        let done = h.drag(pos2(rail_left + 8.0, y), pos2(value.x + 60.0, y));
+        if done.contains(&"SetTilesThreshold") {
+            dragged = Some(y);
+            break;
+        }
+    }
+    dragged.unwrap_or_else(|| {
+        panic!(
+            "no drag under the threshold's own header reached the slider: rail from {rail_left}, \
+             value at {value:?}, menu {:?}",
+            h.texts()
+                .into_iter()
+                .filter(|(_, text)| text.len() > 3)
+                .rev()
+                .take(6)
+                .collect::<Vec<_>>()
+        )
+    });
+    assert_eq!(
+        h.app.auto_tiles.threshold, 100.0,
+        "the rail was dragged to its right end and the threshold did not follow"
+    );
+    assert!(h.app.auto_tiles.on, "the sweep hit the entry above the slider");
+    assert_eq!(h.app.settings().auto_tiles.threshold, 100.0, "and it was not written down");
+
+    // At a hundred percent the gallery is *not* a folder of pictures — eight in ten — so the round
+    // trip below has to leave it in the details view. Which is the slider being read at all.
+    h.app.perform(&ctx, Action::Navigate { pane, path: sources.clone() });
+    h.settle();
+    h.app.perform(&ctx, Action::Navigate { pane, path: gallery.clone() });
+    h.settle();
+    assert_eq!(
+        h.tab(0).view_mode,
+        crate::pane::ViewMode::Details,
+        "four fifths pictures passed a threshold of all of them"
+    );
+
+    // ---- And at a threshold it does pass ------------------------------
+    h.app.perform(&ctx, Action::SetTilesThreshold(60.0));
+    h.app.perform(&ctx, Action::Navigate { pane, path: sources });
+    h.settle();
+    assert_eq!(
+        h.tab(0).view_mode,
+        crate::pane::ViewMode::Details,
+        "two pictures in ten opened as tiles at a threshold of sixty"
+    );
+    h.app.perform(&ctx, Action::Navigate { pane, path: gallery });
+    h.settle();
+    assert_eq!(
+        h.tab(0).view_mode,
+        crate::pane::ViewMode::Icons,
+        "a folder that is four fifths pictures did not open as tiles"
+    );
+    // And the switch is still what takes it back, with the rule leaving it alone from then on.
+    h.app.perform(&ctx, Action::SetView { pane, mode: crate::pane::ViewMode::Details });
+    h.app.panes[0].tab_mut().refresh();
+    h.settle();
+    assert_eq!(
+        h.tab(0).view_mode,
+        crate::pane::ViewMode::Details,
+        "a refresh put the tiles back over somebody who had switched to rows"
+    );
+
+    crate::sandbox::remove(&root);
+}
+
 /// **A scrolled grid switched from one flatten mode to the other still gets its pictures.**
 ///
 /// The bug this is for, and it is a *paint-on-demand* bug rather than a caching one. Scroll a grid

@@ -37,6 +37,12 @@
 //! and going anywhere puts it back. See [`crate::pane::ViewMode`], which carries the argument.
 //! `the_window_comes_back_the_way_it_was_left` checks no `view=` key appears, because a setting
 //! added back by reflex is how that reasoning would be undone without anybody noticing.
+//!
+//! `auto_tiles` and `tiles_threshold` are **not** that key, and the difference is the whole reason
+//! they are allowed here: they remember the *rule* for reading the answer off a folder as it opens,
+//! not an answer. Which is a habit — how much of a folder has to be pictures before you would rather
+//! see them — and the folder in front of you is still what decides. See
+//! [`crate::pane::AutoTiles`].
 
 use std::path::{Path, PathBuf};
 
@@ -90,10 +96,10 @@ pub struct Config {
     /// Whether a tree merges a chain of folders with nothing in them but each other into one row —
     /// `src > main > java`. See [`crate::fs::sort::build_tree_order`].
     ///
-    /// **On**, which is the one preference here whose default is not the quieter option, and
-    /// deliberately: the rows it takes away are rows that never had anything to say, and somebody who
-    /// wants the strict hierarchy is somebody who will go and ask for it. It is in the flatten
-    /// button's own menu beside the two modes.
+    /// **On**, which is one of the two preferences here whose default is not the quieter option — see
+    /// [`Self::auto_tiles`] for the other — and deliberately: the rows it takes away are rows that
+    /// never had anything to say, and somebody who wants the strict hierarchy is somebody who will go
+    /// and ask for it. It is in the flatten button's own menu beside the two modes.
     pub regroup: bool,
     /// Whether the path field writes `/` between the parts of a path instead of `\`.
     ///
@@ -106,6 +112,18 @@ pub struct Config {
     /// slash, and [`crate::fs::normalize`] is what sees to that at the door. Ticked in the
     /// field's own context menu, which is the one control the setting is about.
     pub forward_slashes: bool,
+    /// When a folder opens as tiles rather than as rows without the switch being pressed.
+    ///
+    /// The one setting here that touches [`crate::pane::ViewMode`], and it is a *rule* rather than a
+    /// remembered mode — see the module header, and [`crate::pane::AutoTiles`] for the argument. Two
+    /// keys rather than one pair like `preview=`, because either is worth reading on its own: the
+    /// threshold is remembered while the rule is off, which is what lets somebody turn it back on and
+    /// find the number they chose still there.
+    ///
+    /// **On**, and the second of the two defaults here that are not the quieter option — the other is
+    /// [`Self::regroup`]. So `auto_tiles=` is read as "anything but `0`", which is what makes a
+    /// settings file from before it existed come back with the rule on rather than off.
+    pub auto_tiles: crate::pane::AutoTiles,
     pub sections: Sections,
     /// Window size in points, as last seen.
     pub window: Option<[f32; 2]>,
@@ -163,6 +181,7 @@ impl Default for Config {
             flat_mode: crate::pane::FlatMode::default(),
             regroup: true,
             forward_slashes: false,
+            auto_tiles: crate::pane::AutoTiles::default(),
             sections: Sections::default(),
             window: None,
             position: None,
@@ -267,6 +286,20 @@ impl Config {
                 // Read as "only 1", like the preview's two below: its default is *off*, so a
                 // missing line and a `0` mean the same thing and both have to leave it alone.
                 "forward_slashes" => config.forward_slashes = value == "1",
+                // The same again: opening a folder as tiles on its own is off until somebody asks
+                // for it. See [`crate::pane::AutoTiles`].
+                // Read as "anything but 0", like `regroup` above and `diff` below: its default is
+                // *on*, so a settings file written by a build that predates it has no line for this
+                // and the default has to stand. See [`crate::pane::AutoTiles`].
+                "auto_tiles" => config.auto_tiles.on = value != "0",
+                // And how much of a folder has to be pictures, as a percentage. Kept whatever the
+                // rule above says, so turning it back on finds the number that was chosen — and
+                // clamped, because a hand-edited file is allowed to be wrong.
+                "tiles_threshold" => {
+                    if let Ok(threshold) = value.parse::<f32>() {
+                        config.auto_tiles.threshold = crate::pane::AutoTiles::clamped(threshold);
+                    }
+                }
                 "line_numbers" => config.preview.numbers = value == "1",
                 "markdown_source" => config.preview.markup = value == "1",
                 // The one preview flag whose default is *on*, so it is read as "anything but 0":
@@ -371,6 +404,14 @@ impl Config {
         text.push_str(&format!(
             "forward_slashes={}\n",
             flag(self.forward_slashes)
+        ));
+        text.push_str(&format!("auto_tiles={}\n", flag(self.auto_tiles.on)));
+        // Whole percent: it is what the slider produces — see `ui::filelist::tiles_menu`, whose step
+        // is 5 — and a `59.9999` in a file people are meant to be able to edit would be this program
+        // showing its arithmetic.
+        text.push_str(&format!(
+            "tiles_threshold={:.0}\n",
+            self.auto_tiles.threshold
         ));
         text.push_str(&format!("line_numbers={}\n", flag(self.preview.numbers)));
         text.push_str(&format!("markdown_source={}\n", flag(self.preview.markup)));

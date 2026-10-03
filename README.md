@@ -1698,16 +1698,125 @@ you open out of it want opposite answers, so an answer about one is not an answe
 
 So `Tab::go_to` puts it back to the details view beside the flatten and the filter, which are the other
 two questions asked of a folder rather than of the window, and there is no `view=` key in the settings
-at all: **every folder opens in the details view, every time.** A *refresh* keeps it, because a refresh
-is the same folder read again and every file operation ends in one — a paste that dropped you back into
-rows would be the view undoing itself under your hands — and so does flattening, which is another
-question about the folder you are already looking at. Two panes can therefore be in different views at
-once, which is most of the point.
+at all: **every folder opens in the details view, unless the folder itself says otherwise** — which is
+the next section. A *refresh* keeps it, because a refresh is the same folder read again and every file
+operation ends in one — a paste that dropped you back into rows would be the view undoing itself under
+your hands — and so does flattening, which is another question about the folder you are already looking
+at. Two panes can therefore be in different views at once, which is most of the point.
 
 **There is no column header over tiles**, because four draggable dividers over a grid would be four
 dividers about nothing. That costs one thing and it is worth saying plainly: the header is where sorting
 is done, so in this view the sort is whatever the details view was last set to. It is per tab and it
 survives the switch, so setting it once is enough.
+
+### Letting the folder answer
+
+The argument above is what left the switch to be pressed by hand in every folder of photographs anybody
+opens. So there is one way to have it pressed for you, and it keeps the argument rather than reversing
+it: **the fact is read off the folder as its listing lands.** Right-click the view switch —
+
+```
+┌──────────────────────────────────────────────┐
+│ ✓  Automatically switch to thumbnail view    │
+├──────────────────────────────────────────────┤
+│    Pictures in the folder             60%    │
+│    ▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬▬●─────────────────      │
+│    Here: 80% — 8 of 10 rows                  │
+└──────────────────────────────────────────────┘
+```
+
+— and a folder whose rows are mostly pictures opens as tiles. The folder you open out of it is judged
+for itself, from nothing. What the settings file therefore remembers is the **rule**, never an answer,
+which is why `auto_tiles=` is allowed to be in it while `view=` still is not: how much of a folder has
+to be pictures before you would rather see them is a habit, and the folder in front of you still
+decides.
+
+Four things about it were decisions rather than accidents.
+
+**It happens only when a folder is *opened*.** A listing arrives for four different reasons and only
+one of them is an opening: a navigation, an `F5`, a file operation that ended in a re-read, and
+[the watcher](#never-a-stale-row) noticing somebody else write into the folder. The
+last three are the same folder again, so a rule that fired on those would take the view back off
+anybody who had pressed the switch — silently, at the moment a build happened to touch the folder they
+were reading. `Tab::opening` is the whole of that: set by `Tab::new` and `Tab::go_to`, taken by the
+first listing that lands.
+
+**Ticking the box or dragging the slider changes nothing that is already on screen.** This is the one
+menu in the window whose settings are quiet, and the reason is the same: a rule about how folders
+*open* that reached back and re-arranged the folders already open would move the thing you are reading,
+and would then be arguing with the switch four points to its left.
+
+**What counts is the rows on show, and what counts as a picture is the type.** A folder of two hundred
+photographs with a `desktop.ini` and a `Thumbs.db` in it is a folder of photographs — those two are
+hidden, so they are not rows — and the same folder filtered down to six `.txt` files is not. Folders
+count as rows and never as pictures, which is what stops one photograph in a folder of ninety-nine
+subfolders opening a grid of folder tiles.
+
+**And a picture is anything that would show as one**, which takes two questions rather than one.
+`Kind::Image` and `Kind::Video` in [`fs::fmt`](src/fs/fmt.rs) — the same table the Type column reads —
+answer for the types that are pictures by name. Everything else is [the next
+section](#and-asking-this-machine-about-the-rest): whether a tile shows a page of a `.pdf` or a model of
+a `.3dr` is not a fact about the type at all, so no table shipped here could carry it.
+
+At a threshold of 0 the rule is "as soon as there is one picture", which is what the bottom of the
+slider should mean — not "every folder, including the empty ones".
+
+**On by default**, which is not this program's usual answer and is the same exception `regroup=1` is.
+The rule earns it by what it does when it is *wrong*, and what it does when it is wrong is show a folder
+as tiles that you wanted as rows — one click on the switch four points to the left of the menu, in the
+folder you are already looking at. Against that, off by default means every folder of photographs
+anybody opens needs that same click, forever, and most people never find out it could have been
+otherwise. A default that costs one click when it guesses wrong is not the same kind of default as one
+that changes what a path bar writes.
+
+#### And asking this machine about the rest
+
+A `.pdf` where a reader is installed, a `.psd`, a camera's `.cr2`, a `.3dr` where Cyclone 3DR is: those
+count too, and the only thing that can say so is the machine.
+[`shell::providers`](src/shell/providers.rs) is the whole of it, and two things about how it asks are
+the design.
+
+**Per type, and cached for the session.** The answer belongs to the extension rather than to the file,
+which is the same observation [the icon cache](#the-icon-call-that-froze-the-window) is built on: a
+folder of five hundred `.pdf` files asks once, and a folder of five hundred distinct types is not a
+folder anybody has.
+
+**Off the registry, not off the file.** Reads under `HKEY_CLASSES_ROOT` at four places — the extension's
+own key, its ProgID's, `SystemFileAssociations`, and the perceived-type family — because an extension can
+join the association chain at any point in it, and at each of them under *either* `IThumbnailProvider`
+or the older `IExtractImage`, which Windows still honours. That last one is not history: adding it took
+this machine from 7 of 24 types to **11**, and one of the four it found was `.3dr` — a type whose
+thumbnails Explorer draws perfectly happily, and which this would otherwise have called a no.
+Microseconds either way, nothing loaded and nothing run: **184 µs a type, 4.4 ms for all 24**, and
+`providers_on_this_machine` prints the table for whichever machine you are on:
+
+```
+cargo test --bin azur-file-explorer providers_on_this_machine -- --ignored --nocapture
+```
+
+The *true* answer is `GetImage` on a real file with `SIIGBF_THUMBNAILONLY` — what
+[the tiles themselves use](#explorers-thumbnails-not-a-decoder) — and it is deliberately not this. It
+costs **12–22 ms per type when the answer is no**, which is the answer this needs most often and would
+be spent on the UI thread at the moment a folder opens; it runs a stranger's DLL in this process with
+nothing to cancel; and it needs a file, so a truncated `.pdf` would take `.pdf` out of the count for the
+whole session. What the registry answer gives up is exactness — a registered provider can still fail on
+a particular file, and then that tile shows its icon, which is what a tile with no thumbnail has always
+shown.
+
+**This is the behaviour and not a setting**, and it was a tick for a while. The reasoning for the tick
+was that what it does to the count is a decision about somebody's folders: with an Office and a PDF
+handler installed, a folder of documents becomes a folder of "pictures" and opens as a grid of page-one
+renders. The numbers did not support it — a fifth of a millisecond, once per type per session — and what
+turning it off actually bought was a rule counting *this program's table* instead of what the machine can
+show, which called a folder of documents 0% on a machine that draws every one of them. A setting to
+correct that is a setting to ask people to find. So both questions are always asked, and the threshold is
+the only thing there is to tune.
+
+**Which is what the last line of the menu is for.** `Here: 80% — 8 of 10 rows` is the rule's own
+arithmetic over the listing behind the menu — a threshold is a number nobody can pick in the abstract, so
+open a folder, right-click, and read what the rule makes of it before deciding where the slider goes. It
+is a walk over the display order, so it is paid only while the menu is open and never in an ordinary
+frame.
 
 ### A tree keeps its folders as rows
 
@@ -1887,7 +1996,7 @@ right arithmetic about the folder.
 
 | | |
 | --- | --- |
-| `▦` | rows or tiles — see [Rows or tiles](#rows-or-tiles) |
+| `▦` | rows or tiles — see [Rows or tiles](#rows-or-tiles). **Right-click it** for when to do that on its own: [Letting the folder answer](#letting-the-folder-answer) |
 | `>_` | show or hide this pane's console — the same thing `Ctrl+²` does |
 | ⑂ `master` `↑2` `↓1` `13 changed` | see [Git, by asking git](#git-by-asking-git) |
 | `13 changed` | and it is a **button**: press it for a listing of exactly those thirteen |
@@ -3782,7 +3891,7 @@ That baseline is mostly the GL driver and the shell's own DLLs, not this program
 | [`app.rs`](src/app.rs) | state, and the single place anything changes |
 | [`theme.rs`](src/theme.rs) | Azur's roles, plus the file-kind hues |
 | [`icons.rs`](src/icons.rs) | painted glyphs on a 16-unit grid, for the fallbacks |
-| [`shell/`](src/shell/) | the parts that *are* the shell: icons, clipboard, `IFileOperation`, `IContextMenu` content, OLE drag and drop |
+| [`shell/`](src/shell/) | the parts that *are* the shell: icons, thumbnails and which types have one, clipboard, `IFileOperation`, `IContextMenu` content, OLE drag and drop |
 | [`ui/menu.rs`](src/ui/menu.rs) | drawing that content as our own menu |
 
 Two structural decisions are worth knowing before reading it:
@@ -4184,9 +4293,9 @@ which is what the button produced before there was a choice. See
 [Flattening a folder](#flattening-a-folder).
 
 `regroup=1` is whether a tree shows a chain of folders with nothing in them but each other as one row
-— `src > main > java`. The **second** flag here whose default is on, and read the same way as `diff`
-for the same reason: a settings file from before it existed has no line for it, and what it turns on is
-the absence of rows that never had anything to say. See
+— `src > main > java`. The **second** of the three flags here whose default is on, and read the same way
+as `diff` for the same reason: a settings file from before it existed has no line for it, and what it
+turns on is the absence of rows that never had anything to say. See
 [A chain of folders is one row](#a-chain-of-folders-is-one-row).
 
 `forward_slashes=1` is whether the path field writes `/` between the parts of a path instead of `\`.
@@ -4194,6 +4303,17 @@ Off by default, so a missing line and a `0` mean the same thing — `\` is what 
 everywhere else, and a path bar that disagreed with the rest of the desktop out of the box would be
 this program being clever. Ticked in the field's own context menu, which is the one control it is
 about; see [The path bar](#the-path-bar).
+
+`auto_tiles=1` and `tiles_threshold=60` are the only lines here about rows or tiles, and they are a
+*rule* rather than a remembered mode: a folder whose rows are that much pictures opens as tiles. The
+**third** flag here whose default is on, read as "anything but `0`" like `regroup` and `diff` and for the
+same reason — a settings file from before it existed has no line for it, and the default has to stand.
+Two keys and not one pair like `preview=`, because each is worth reading alone: the threshold is kept
+while the rule is off, which is what lets somebody turn it back on and find the number they chose still
+there. Whole percent, which is what the slider produces. **What counts as a picture is not a setting**:
+the types that are pictures by name, plus whatever this machine has a thumbnail provider for, always.
+Ticked and dragged in the view switch's own context menu; see
+[Letting the folder answer](#letting-the-folder-answer).
 
 ### Coming back the way you left it
 

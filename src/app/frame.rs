@@ -556,9 +556,12 @@ impl App {
             flat_mode,
             regroup,
             forward_slashes,
+            auto_tiles,
+            providers,
             ..
         } = self;
         let (flat_mode, regroup, slashes) = (*flat_mode, *regroup, *forward_slashes);
+        let auto_tiles = *auto_tiles;
         // A copy in progress, or the last thing that went wrong: whichever there is,
         // the pane's status line says so instead of counting files.
         let status = ops.in_progress().or(notice.as_deref());
@@ -571,7 +574,7 @@ impl App {
         );
         let outcome = filelist::show(
             &mut child, t, zone, list, floor, id, tab, focused, icons, links, thumbs, cut, status,
-            console_open, reserved, scratch, actions,
+            console_open, auto_tiles, providers, reserved, scratch, actions,
         );
         // After the listing, so the panel's surface is over it rather than under: the listing
         // reaches for the whole body when it measures its own columns, and a panel drawn first

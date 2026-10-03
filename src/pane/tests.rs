@@ -599,6 +599,220 @@ fn this_pc_is_up_from_everywhere() {
     assert_eq!(tab.trail, PathBuf::from("/z"));
 }
 
+/// A folder of pictures opens as tiles; **the same folder read again does not go back to tiles.**
+///
+/// The second half is the whole of what "only when opening a folder" means, and it is the half that
+/// cannot be read off the source with any confidence: a listing arrives for four different reasons
+/// and three of them are the same folder again. So this drives all four — an opening, a refresh, a
+/// watcher-style re-read, and the folder revisited after going somewhere else — and each time asks
+/// whether the view is the one the *reader* last chose. See [`Tab::opening`].
+#[test]
+fn a_folder_of_pictures_opens_as_tiles_and_a_refresh_leaves_the_view_alone() {
+    use crate::fs::dir::DirBuilder;
+
+    /// Eight pictures and two files that are not: 80%, which is over the default threshold and
+    /// under a hundred, so a rule that had come to mean "all of them" would fail here too.
+    fn gallery() -> Arc<Dir> {
+        let mut builder = DirBuilder::new(r"C:\photos");
+        for i in 0..8 {
+            builder.push(&format!("shot-{i}.jpg"), 1, 0, 0);
+        }
+        builder.push("notes.txt", 1, 0, 0);
+        builder.push("index.html", 1, 0, 0);
+        Arc::new(builder.finish(0))
+    }
+
+    let auto = AutoTiles { on: true, ..AutoTiles::default() };
+    // The fixture's `.txt` and `.html` are not pictures by name, so this machine is asked about them
+    // — see `asking_the_machine_can_only_add_to_the_count`. Whatever it answers, the share is between
+    // 80% and 100%, and every assertion below is about a threshold of 60.
+    let mut providers = crate::shell::providers::Providers::new();
+    let mut tab = Tab::new(r"C:\photos");
+    assert!(tab.opening, "a tab that has shown nothing yet is opening");
+    tab.apply(gallery());
+    let (pictures, rows) = tab.picture_rows(&mut providers);
+    assert!(
+        (8..=10).contains(&pictures) && rows == 10,
+        "the fixture reads as {pictures} of {rows}, and eight of its ten rows are `.jpg`"
+    );
+    tab.choose_view(auto, &mut providers);
+    assert_eq!(
+        tab.view_mode,
+        ViewMode::Icons,
+        "a folder that is four fifths pictures did not open as tiles"
+    );
+    assert!(!tab.opening, "the judgement is once per opening, not once per listing");
+
+    // The reader wants the rows after all. Every re-read from here has to leave that alone.
+    tab.view_mode = ViewMode::Details;
+
+    // `F5`: the listing is dropped and the same folder comes back.
+    tab.refresh();
+    tab.apply(gallery());
+    tab.choose_view(auto, &mut providers);
+    assert_eq!(
+        tab.view_mode,
+        ViewMode::Details,
+        "a refresh put the tiles back over somebody who had just switched to rows"
+    );
+
+    // The watcher, which does not drop the listing first — a build, or another program writing
+    // into the folder. The most dangerous of the four, because nobody asked for it.
+    tab.apply(gallery());
+    tab.choose_view(auto, &mut providers);
+    assert_eq!(
+        tab.view_mode,
+        ViewMode::Details,
+        "something else touching the folder switched the view underneath the reader"
+    );
+
+    // And going away and coming back **is** an opening, so it is judged afresh: the answer is
+    // about the folder, and nothing about the last visit is remembered.
+    tab.navigate(r"C:\src");
+    tab.navigate(r"C:\photos");
+    assert!(tab.opening);
+    tab.apply(gallery());
+    tab.choose_view(auto, &mut providers);
+    assert_eq!(tab.view_mode, ViewMode::Icons);
+}
+
+/// **Asking the machine can only ever add to the count, and never a folder.**
+///
+/// What it *answers* is a fact about the machine the test is running on — whether a `.pdf` reader and
+/// a `.3dr` viewer are installed — so nothing here asserts on which types come back:
+/// `shell::providers::tests::providers_on_this_machine` prints that instead. What is testable is the
+/// shape, and the shape is what a bug would break.
+///
+/// The table's own answer is computed here rather than asked for, because there is no longer a way to
+/// ask [`Tab::picture_rows`] for it: both questions are always put. That is the point of the bound —
+/// whatever the machine says, the count cannot come out *below* what the table already claimed.
+///
+/// And the registry is asked once per **type**: four here, not five rows, because the photograph never
+/// reaches it — the table answers that one first, which is what keeps a folder of pictures free.
+#[test]
+fn asking_the_machine_can_only_add_to_the_count() {
+    use crate::fs::dir::{DirBuilder, FLAG_DIR};
+
+    let mut builder = DirBuilder::new(r"C:\work");
+    builder.push("sub", 0, 0, FLAG_DIR);
+    builder.push("plan.pdf", 1, 0, 0);
+    builder.push("model.3dr", 1, 0, 0);
+    builder.push("sheet.xlsx", 1, 0, 0);
+    builder.push("photo.jpg", 1, 0, 0);
+    builder.push("build.log", 1, 0, 0);
+    let mut tab = Tab::new(r"C:\work");
+    tab.apply(Arc::new(builder.finish(0)));
+
+    // What this program's own table makes of the same rows, walked the same way.
+    let dir = tab.dir.clone().expect("a listing");
+    let by_name = tab
+        .order
+        .iter()
+        .filter(|&&row| {
+            let entry = row as usize;
+            crate::fs::fmt::shows_a_picture(dir.ext(entry), dir.entries[entry].is_dir())
+        })
+        .count();
+    assert_eq!(by_name, 1, "only the photograph is a picture by name");
+
+    let mut providers = crate::shell::providers::Providers::new();
+    let (pictures, rows) = tab.picture_rows(&mut providers);
+    assert_eq!(rows, 6, "the machine changed how many rows there are");
+    assert!(
+        pictures >= by_name,
+        "the count came out below the {by_name} the table had already claimed"
+    );
+    assert!(
+        pictures <= 5,
+        "{pictures} of 6 rows counted, and one of them is a folder"
+    );
+    assert_eq!(
+        providers.asked(),
+        4,
+        "{} types asked about, and there are four the table will not claim",
+        providers.asked()
+    );
+    let _ = tab.picture_rows(&mut providers);
+    assert_eq!(
+        providers.asked(),
+        4,
+        "a second pass over the same folder asked the registry again"
+    );
+}
+
+/// The rule, at its edges. Each of these was a decision rather than an accident.
+#[test]
+fn the_tiles_rule_counts_the_rows_on_show() {
+    use crate::fs::dir::{DirBuilder, FLAG_DIR, FLAG_HIDDEN};
+
+    // A fresh profile has the rule **on** — see [`AutoTiles`], which is one of the two defaults in
+    // this program that are not the quieter option.
+    let fresh = AutoTiles::default();
+    assert!(fresh.on, "the rule is on out of the box");
+    assert_eq!(fresh.threshold, TILES_THRESHOLD);
+    let off = AutoTiles { on: false, ..fresh };
+    assert!(!off.reached(9, 10), "off means off, whatever is in the folder");
+
+    let on = AutoTiles { on: true, threshold: 60.0 };
+    assert!(on.reached(6, 10), "the threshold is a floor, not a fence");
+    assert!(!on.reached(5, 10));
+    assert!(!on.reached(0, 0), "an empty folder is not a folder of pictures");
+    // The bottom of the slider means "as soon as there is one", not "always" — which is the
+    // difference between a useful setting and one that turns every empty folder into a grid.
+    let any = AutoTiles { on: true, threshold: 0.0 };
+    assert!(any.reached(1, 400));
+    assert!(!any.reached(0, 400));
+    assert!(!any.reached(0, 0));
+    // And the top means all of them.
+    let all = AutoTiles { on: true, threshold: 100.0 };
+    assert!(all.reached(4, 4));
+    assert!(!all.reached(3, 4));
+
+    // ---- What counts as a row, and what counts as a picture -------------
+    let mut builder = DirBuilder::new(r"C:\mixed");
+    builder.push("sub", 0, 0, FLAG_DIR);
+    builder.push("clip.mp4", 1, 0, 0);
+    builder.push("photo.JPG", 1, 0, 0);
+    builder.push("scan.pdf", 1, 0, 0);
+    builder.push("Thumbs.db", 1, 0, FLAG_HIDDEN);
+    let mut tab = Tab::new(r"C:\mixed");
+    tab.apply(Arc::new(builder.finish(0)));
+
+    // Asked of the table alone, walked the way [`Tab::picture_rows`] walks: what a `.pdf` counts as is
+    // this machine's business, and `asking_the_machine_can_only_add_to_the_count` is where that half
+    // is pinned. What is being checked here is which *rows* are counted at all.
+    let dir = tab.dir.clone().expect("a listing");
+    let by_name = tab
+        .order
+        .iter()
+        .filter(|&&row| {
+            let entry = row as usize;
+            crate::fs::fmt::shows_a_picture(dir.ext(entry), dir.entries[entry].is_dir())
+        })
+        .count();
+    assert_eq!(
+        (by_name, tab.order.len()),
+        (2, 4),
+        "the video counts, the extension's case does not, the `.pdf` is not a picture by name, the \
+         hidden row is not on show at all — and the folder is a row and not a picture"
+    );
+    // Which is the point of counting rows rather than files: a folder is not a picture, so a
+    // folder full of folders cannot pass the rule on the strength of one photograph.
+    let mut builder = DirBuilder::new(r"C:\tree");
+    for i in 0..99 {
+        builder.push(&format!("f{i:02}"), 0, 0, FLAG_DIR);
+    }
+    builder.push("cover.png", 1, 0, 0);
+    let mut tab = Tab::new(r"C:\tree");
+    tab.apply(Arc::new(builder.finish(0)));
+    tab.choose_view(on, &mut crate::shell::providers::Providers::new());
+    assert_eq!(
+        tab.view_mode,
+        ViewMode::Details,
+        "one picture among ninety-nine folders opened a grid of folder tiles"
+    );
+}
+
 #[test]
 fn a_duplicate_shows_the_same_bar() {
     let mut tab = Tab::new("/a/b/c");

@@ -277,6 +277,23 @@ impl App {
                 }
                 self.config_dirty = true;
             }
+            // Whether a folder that is *opened* becomes tiles on its own, and at what share of
+            // pictures. The window's preference like the two above and written down the same way —
+            // and **the two panes are deliberately not touched**, which is the whole of what makes
+            // this a rule about opening rather than a second view switch. See
+            // [`crate::pane::AutoTiles`], and [`Action::SetAutoTiles`] for why that asymmetry with
+            // the two above is the right way round.
+            //
+            // No listing is re-read either: `Tab::choose_view` reads the listing the tab already has
+            // when the *next* folder lands, so there is nothing here to invalidate.
+            Action::SetAutoTiles(on) => {
+                self.auto_tiles.on = on;
+                self.config_dirty = true;
+            }
+            Action::SetTilesThreshold(threshold) => {
+                self.auto_tiles.threshold = crate::pane::AutoTiles::clamped(threshold);
+                self.config_dirty = true;
+            }
             // Which slash the path field writes. The window's preference like the two above, and
             // written down for the same reason — but this one has to rewrite what is already in a
             // field that is open, because that field is where the menu was just ticked: a setting
