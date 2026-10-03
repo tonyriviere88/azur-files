@@ -338,6 +338,12 @@ windows-sys = { version = "0.61", features = [
     # `fs::drives::list_shares` — three functions out of `mpr.dll`, no COM, and it reads the
     # redirector's own connection table rather than going to the network.
     "Win32_NetworkManagement_WNet",
+    # `SECURITY_ATTRIBUTES`, which is a parameter of `RegCreateKeyExW` — so without this feature
+    # that one function is `configured out` and `windows/winkey.rs` does not compile. The same
+    # accident the `windows` crate's own `Win32_Security` note above describes, met a second time on
+    # the other crate: the pointer is passed as null in every call here, and the feature is still
+    # needed for the type to have a name.
+    "Win32_Security",
     "Win32_Storage_FileSystem",
     "Win32_System_Diagnostics_Debug",
     "Win32_System_Com",
@@ -345,6 +351,11 @@ windows-sys = { version = "0.61", features = [
     # this machine have a thumbnail provider registered for this file type. Four key reads and no
     # COM, which is what makes it answerable on the UI thread — see `shell::providers`, and note
     # that the alternative (`GetImage` on a real file) costs 12–22 ms and runs a stranger's DLL.
+    #
+    # And the write half — `RegCreateKeyExW`, `RegSetValueExW`, `RegDeleteValueW`, `RegDeleteKeyW`
+    # and `RegQueryInfoKeyW` — for the `Win+E` setting, which *is* a registry key and has no other
+    # copy of itself anywhere. Four keys under `HKEY_CURRENT_USER`, no elevation, and nothing that
+    # is not removed again when the tick goes off. See `shell::winkey`.
     "Win32_System_Registry",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",

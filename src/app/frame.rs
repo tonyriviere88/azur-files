@@ -290,6 +290,7 @@ impl App {
             self.focused,
             self.maximized,
             self.sidebar_shown,
+            self.win_key.ours(),
             &self.drag,
             &mut self.icons,
             &mut self.actions,

@@ -301,6 +301,9 @@ pub fn title_bar(
     maximized: bool,
     // Whether the panel down the left is showing, for the entry in the menu under the mark.
     sidebar: bool,
+    // Whether `Win+E` opens this build, for the tick beside it in that same menu. A copy of what
+    // the registry said — see `crate::shell::winkey`, which is where the answer lives.
+    win_key: bool,
     drag: &Option<TabDrag>,
     icons_cache: &mut crate::shell::icons::Icons,
     out: &mut Vec<Action>,
@@ -349,7 +352,7 @@ pub fn title_bar(
         ui.painter(),
         Rect::from_center_size(mark.center(), vec2(16.0, 16.0)),
     );
-    app_menu(ui, &mark_response, t.dark, sidebar, out);
+    app_menu(ui, &mark_response, t.dark, sidebar, win_key, out);
     x = mark.right() + space::S2;
 
     // ---- Window buttons, from the right ---------------------------------
@@ -799,54 +802,12 @@ fn app_menu(
     trigger: &egui::Response,
     dark: bool,
     sidebar: bool,
+    win_key: bool,
     out: &mut Vec<Action>,
 ) {
-    use azur_egui_theme::components::{Menu, MenuItem};
+    use azur_egui_theme::components::{submenu, Menu, MenuItem};
 
     Menu::new(trigger).min_width(220.0).show(ui.ctx(), |ui| {
-        if ui
-            .add(
-                MenuItem::new("Dark theme")
-                    .selected(dark)
-                    .icon(&azur_icons::dot),
-            )
-            .clicked()
-        {
-            out.push(Action::SetTheme { dark: true });
-        }
-        if ui
-            .add(
-                MenuItem::new("Light theme")
-                    .selected(!dark)
-                    .icon(&azur_icons::dot),
-            )
-            .clicked()
-        {
-            out.push(Action::SetTheme { dark: false });
-        }
-        azur_egui_theme::components::menu_divider(ui);
-        // The panel down the left, which is the one piece of furniture in this window with no switch
-        // of its own anywhere on screen — there is nowhere to put one that is not inside the thing
-        // being hidden. Ticked rather than named twice: one entry that says whether the panel is
-        // showing, like the two themes above it, rather than a `Show` and a `Hide` that are never both
-        // true.
-        //
-        // **`Ctrl+B` and not the `Ctrl+Win+←` this was first bound to**, because that combination is
-        // Windows' own "previous virtual desktop" and never reaches this program at all — a menu that
-        // printed a shortcut which does nothing is worse than one that printed none. Both are read; see
-        // [`crate::app::App::window_keys`].
-        if ui
-            .add(
-                MenuItem::new("Left panel")
-                    .shortcut("Ctrl+B")
-                    .selected(sidebar)
-                    .icon(&icons::split_side),
-            )
-            .clicked()
-        {
-            out.push(Action::ToggleSidebar);
-        }
-        azur_egui_theme::components::menu_divider(ui);
         if ui
             .add(MenuItem::new("New tab").shortcut("Ctrl+T").icon(&azur_icons::plus))
             .clicked()
@@ -874,6 +835,30 @@ fn app_menu(
             });
         }
         azur_egui_theme::components::menu_divider(ui);
+        // The panel down the left, which is the one piece of furniture in this window with no switch
+        // of its own anywhere on screen — there is nowhere to put one that is not inside the thing
+        // being hidden. Ticked rather than named twice: one entry that says whether the panel is
+        // showing, rather than a `Show` and a `Hide` that are never both true.
+        //
+        // At the head of the section the window's own shape is in, because that is what it belongs
+        // with: what this hides and what the two entries below it resize are the same window, and the
+        // section above is about panes and tabs *inside* it.
+        //
+        // **`Ctrl+B` and not the `Ctrl+Win+←` this was first bound to**, because that combination is
+        // Windows' own "previous virtual desktop" and never reaches this program at all — a menu that
+        // printed a shortcut which does nothing is worse than one that printed none. Both are read; see
+        // [`crate::app::App::window_keys`].
+        if ui
+            .add(
+                MenuItem::new("Left panel")
+                    .shortcut("Ctrl+B")
+                    .selected(sidebar)
+                    .icon(&icons::split_side),
+            )
+            .clicked()
+        {
+            out.push(Action::ToggleSidebar);
+        }
         if ui
             .add(
                 MenuItem::new("Across every screen")
@@ -894,6 +879,60 @@ fn app_menu(
         {
             out.push(Action::Window(WindowAction::ResetSize));
         }
+        azur_egui_theme::components::menu_divider(ui);
+        // The two themes, behind one entry rather than side by side in the open. They are a *choice
+        // between* two things and not two switches, which a submenu says by shape: one row naming
+        // the question, and the answer a level in. Out here they were the first thing the menu said,
+        // which is a great deal of prominence for something set once.
+        //
+        // The parent carries the same `dot` its options do, rather than for want of a better glyph:
+        // there is no appearance icon in either set, and a row that opens a choice reading in the
+        // same visual family as the choice beats an unrelated shape standing in for one.
+        //
+        // `ui.close()` after the push, per this helper's own documentation — a click in a nested menu
+        // has to bring the whole stack down and not just the level it landed in.
+        submenu(ui, MenuItem::new("Theme").icon(&azur_icons::dot), |ui| {
+            for (label, wants_dark) in [("Dark theme", true), ("Light theme", false)] {
+                if ui
+                    .add(
+                        MenuItem::new(label)
+                            .selected(dark == wants_dark)
+                            .icon(&azur_icons::dot),
+                    )
+                    .clicked()
+                {
+                    out.push(Action::SetTheme { dark: wants_dark });
+                    ui.close();
+                }
+            }
+        });
+        // Windows' own folder key, and **the one entry in this window that changes something outside
+        // it**. It is last but for `Close window`, and that is the reasoning: everything above acts
+        // on this window and stops existing when the window closes, and this one outlives the
+        // process. Ticked when `Win+E` opens this build.
+        //
+        // See [`crate::shell::winkey`], which is where the setting lives and where what is
+        // deliberately *not* claimed alongside it is set out. Worth knowing while reading this line:
+        // the label names the outcome and not the gesture, and **the gesture is only `Win+E`** —
+        // double-clicking a folder, and "show in folder" from a browser's downloads, still open
+        // Explorer.
+        //
+        // No `shortcut("Win+E")`, deliberately. That column means "this key does this here", and
+        // `Win+E` never reaches this program as a keystroke at all — the shell holds it and launches
+        // the executable. Printing it there would be the same class of lie the `Ctrl+B` note above
+        // is about, one step further on: a key that does something, listed against the thing that is
+        // not how it does it.
+        if ui
+            .add(
+                MenuItem::new("Set as default explorer")
+                    .selected(win_key)
+                    .icon(&icons::folder_open),
+            )
+            .clicked()
+        {
+            out.push(Action::SetWinKey(!win_key));
+        }
+        azur_egui_theme::components::menu_divider(ui);
         if ui
             .add(MenuItem::new("Close window").shortcut("Alt+F4").danger(true))
             .clicked()

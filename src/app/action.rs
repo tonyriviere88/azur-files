@@ -238,6 +238,14 @@ pub enum Action {
     /// Remove a group, and the bookmarks in it with it.
     RemoveBookmarkGroup(usize),
     SetTheme { dark: bool },
+    /// Claim `Win+E` — Windows' own folder key — or give it back to Explorer. In the application
+    /// menu under the mark, and nowhere else.
+    ///
+    /// **Not written to the settings file**, unlike every other tick in that menu. The setting is a
+    /// registry key and the registry is the only copy of it; see [`crate::shell::winkey`], which
+    /// argues that at length, and which is also the only thing in this program that changes
+    /// anything outside the window.
+    SetWinKey(bool),
     Window(WindowAction),
 }
 
@@ -320,6 +328,7 @@ impl Action {
             Self::UngroupBookmarks(_) => "UngroupBookmarks",
             Self::RemoveBookmarkGroup(_) => "RemoveBookmarkGroup",
             Self::SetTheme { .. } => "SetTheme",
+            Self::SetWinKey(_) => "SetWinKey",
             Self::Window(_) => "Window",
         }
     }

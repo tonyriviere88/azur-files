@@ -867,6 +867,17 @@ impl App {
                 self.config_dirty = true;
             }
 
+            Action::SetWinKey(on) => {
+                // Nothing is marked dirty and nothing reaches `config.ini`: the registry is the
+                // setting. And the tick is set from what the registry says *afterwards* rather than
+                // from what was asked for — a write refused by policy has to leave it where it was,
+                // which is the whole reason `set` answers with a state rather than with `()`.
+                match crate::shell::winkey::set(on) {
+                    Ok(state) => self.win_key = state,
+                    Err(why) => self.report(why),
+                }
+            }
+
             Action::Window(what) => {
                 use egui::ViewportCommand as Cmd;
                 match what {

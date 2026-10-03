@@ -17,6 +17,7 @@
 //! | [`menu`] | `IContextMenu` — the real menu, extensions included |
 //! | [`dnd`] | OLE drag and drop, as a source and as a target |
 //! | [`providers`] | which file types this machine can draw a picture of, by registration |
+//! | [`winkey`] | `Win+E` — whether Windows' folder key opens this program |
 //!
 //! # Threading
 //!
@@ -40,6 +41,7 @@ pub mod menu;
 pub mod ops;
 pub mod providers;
 pub mod thumbs;
+pub mod winkey;
 
 #[cfg(windows)]
 #[path = "../windows/com.rs"]

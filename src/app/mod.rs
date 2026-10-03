@@ -347,6 +347,15 @@ pub struct App {
     sidebar_shown: bool,
 
     maximized: bool,
+    /// What `Win+E` opens, for the tick in the application menu.
+    ///
+    /// Not a setting of this program's in the way the rest of that menu is — the answer lives in
+    /// the registry, and this is a copy kept only so a menu that redraws every frame is not asking
+    /// the registry sixty times a second. Read once at startup and **re-read after each toggle
+    /// rather than assumed**, because a refused write has to leave the tick where it was: see
+    /// [`crate::shell::winkey::set`], and [`crate::shell::winkey`] on why there is no copy of this
+    /// in the settings file.
+    win_key: crate::shell::winkey::State,
     /// Whose video is filling the screen, if one is.
     ///
     /// **The one state in this program that suppresses the rest of the window.** While it is set the
@@ -624,6 +633,12 @@ impl App {
             // to but the default. What the platform actually did with them is
             // `main::open_maximized`'s business; this is only what is remembered.
             maximized: config.maximized,
+            // `heal` and not `state`: a registration this program made and then broke — the build it
+            // named having been cleaned, moved or deployed elsewhere — leaves `Win+E` putting up
+            // *Application not found*, and the switch that would turn it off is in the executable
+            // that went missing. Startup is the one moment a running copy can put that right. See
+            // `crate::shell::winkey`, which is emphatic about how narrow the repair is.
+            win_key: crate::shell::winkey::heal(),
             fullscreen_video: None,
             window_size: config.window,
             window_position: config.position,
