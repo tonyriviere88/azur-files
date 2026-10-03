@@ -459,6 +459,114 @@ pub fn trash(p: &Painter, rect: Rect, color: Color32) {
     p.line_segment([g.at(9.4, 6.8), g.at(9.1, 11.8)], bar);
 }
 
+// ---------------------------------------------------------------------------
+// The context menu's tile row
+// ---------------------------------------------------------------------------
+//
+// Cut, Copy, Rename, Share and Delete, for the row `crate::shell::menu::regroup` makes out of
+// shell32's own block — see `crate::ui::menu::draw_tiles`.
+//
+// **They have to be drawn here because Windows does not supply them.** The obvious source is the
+// menu item's own bitmap, which is what every other row in that menu uses: `hbmpItem`, read by
+// `shell::menu::win::menu_bitmap`. shell32's verbs have none — measured, on a real menu: `Couper`,
+// `Copier`, `Renommer` and `Supprimer` all come back with an empty `hbmpItem`, because Windows 11
+// draws that row from its own Segoe Fluent glyphs rather than through the menu API. So a tile row
+// fed only by the shell is a row of five captions with a hole above each one.
+//
+// And they are here rather than in `azur_egui_theme::icons`, whose header is explicit about the
+// division: that module is "only about the glyphs the *system* needs — chevrons, checks, window
+// buttons, status marks. Domain icons stay in the application." A pair of scissors is a domain icon.
+//
+// Delete reuses [`trash`], which the Recycle Bin place already needed.
+
+/// Scissors, for Cut.
+pub fn cut(p: &Painter, rect: Rect, color: Color32) {
+    let g = Grid::new(rect);
+    let stroke = g.hairline(color);
+    // The two blades, crossing a little above the middle so the pivot reads as a pivot.
+    p.line_segment([g.at(4.6, 2.2), g.at(10.4, 11.0)], stroke);
+    p.line_segment([g.at(11.4, 2.2), g.at(5.6, 11.0)], stroke);
+    // And the finger loops under them, outlined so they do not read as two blobs.
+    let r = g.scale * 1.9;
+    p.circle_stroke(g.at(5.0, 12.6), r, stroke);
+    p.circle_stroke(g.at(11.0, 12.6), r, stroke);
+}
+
+/// Two sheets, one behind the other, for Copy.
+pub fn copy(p: &Painter, rect: Rect, color: Color32) {
+    let g = Grid::new(rect);
+    let stroke = g.stroke(color);
+    // The sheet behind, drawn first and only where it shows: an L of two segments rather than a
+    // whole rectangle, so there is no line running through the front sheet.
+    path(
+        p,
+        vec![g.at(5.2, 3.4), g.at(11.6, 3.4), g.at(11.6, 4.6)],
+        g.hairline(color),
+    );
+    path(
+        p,
+        vec![g.at(4.0, 4.6), g.at(4.0, 3.4), g.at(5.2, 3.4)],
+        g.hairline(color),
+    );
+    // And the sheet in front, whole.
+    p.rect_stroke(
+        g.rect(4.0, 5.6, 11.0, 13.4),
+        g.radius(1.2),
+        stroke,
+        StrokeKind::Inside,
+    );
+}
+
+/// A pencil over a baseline, for Rename.
+///
+/// Not [`azur_egui_theme::icons::pencil`], which is the edit affordance the path bar uses: this one
+/// sits on a rule, which is what says "the name, edited" rather than "edit something".
+pub fn rename(p: &Painter, rect: Rect, color: Color32) {
+    let g = Grid::new(rect);
+    let stroke = g.hairline(color);
+    // The body, as a quadrilateral from the nib up to the flat end.
+    closed(
+        p,
+        vec![
+            g.at(2.6, 10.4),
+            g.at(9.8, 3.2),
+            g.at(12.0, 5.4),
+            g.at(4.8, 12.6),
+        ],
+        stroke,
+    );
+    // The ferrule, so the flat end does not read as a second nib.
+    p.line_segment([g.at(8.6, 4.4), g.at(10.8, 6.6)], stroke);
+    // And the line being written on.
+    p.line_segment([g.at(2.4, 14.2), g.at(13.6, 14.2)], g.hairline(color));
+}
+
+/// A box with an arrow leaving it, for Share.
+pub fn share(p: &Painter, rect: Rect, color: Color32) {
+    let g = Grid::new(rect);
+    let stroke = g.stroke(color);
+    // Three sides of a tray — open at the top, which is where the arrow goes out.
+    path(
+        p,
+        vec![
+            g.at(5.4, 5.0),
+            g.at(3.0, 5.0),
+            g.at(3.0, 13.6),
+            g.at(13.0, 13.6),
+            g.at(13.0, 5.0),
+            g.at(10.6, 5.0),
+        ],
+        stroke,
+    );
+    // The arrow: a shaft up the middle and a head on it.
+    p.line_segment([g.at(8.0, 10.0), g.at(8.0, 2.6)], stroke);
+    path(
+        p,
+        vec![g.at(5.4, 5.2), g.at(8.0, 2.6), g.at(10.6, 5.2)],
+        stroke,
+    );
+}
+
 /// A five-pointed star, for a bookmark. `filled` is the bookmarked state.
 fn star_shape(p: &Painter, rect: Rect, color: Color32, filled: bool) {
     let g = Grid::new(rect);

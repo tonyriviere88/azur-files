@@ -254,6 +254,17 @@ pub struct App {
     /// opening a folder" a property of the code rather than of a comment. See
     /// [`crate::pane::AutoTiles`].
     auto_tiles: crate::pane::AutoTiles,
+    /// Which context-menu entries the user has moved between a collapsed group and the main menu.
+    ///
+    /// A mirrored setting like the four above rather than something read off [`App::config`], and it
+    /// has to be: `config` is *what this window last wrote* and [`App::settings`] rebuilds the file
+    /// from these fields, so a preference that lived only in `config` would be compared against a
+    /// freshly built `Config` that did not have it — and the save that followed would write it back
+    /// out empty. See [`App::save_settings`].
+    ///
+    /// Read in one place, [`crate::shell::menu::regroup`], through
+    /// `crate::ui::menu::Open::arrange`.
+    menu_moves: crate::shell::menu::Moves,
     /// Which file types this machine can draw a picture of, asked once per type and kept for the
     /// session. Only read when [`App::auto_tiles`]' probe is on — see [`crate::shell::providers`].
     providers: crate::shell::providers::Providers,
@@ -594,6 +605,7 @@ impl App {
             show_hidden: config.show_hidden,
             forward_slashes: config.forward_slashes,
             auto_tiles: config.auto_tiles,
+            menu_moves: config.menu_moves.clone(),
             providers: crate::shell::providers::Providers::new(),
             // The window as the settings file describes it, and not as this program is about to
             // find it: a maximised window never writes the other two — see `Self::frame` — so
@@ -681,6 +693,7 @@ impl App {
             show_hidden: self.show_hidden,
             forward_slashes: self.forward_slashes,
             auto_tiles: self.auto_tiles,
+            menu_moves: self.menu_moves.clone(),
             sections: self.sections,
             panes: Vec::new(),
             layout: None,

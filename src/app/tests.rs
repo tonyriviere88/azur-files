@@ -698,11 +698,32 @@ fn the_shell_s_open_cut_copy_and_paste_act_in_this_explorer() {
         got => panic!("`pintohome` gave {:?}", names(got)),
     }
 
+    // Rename opens *this* program's field, because the shell's own does nothing at all here: its
+    // `rename` starts an inline edit in the view hosting the menu, and a menu built from a bare
+    // shell folder has no view. See `win::flags`, which is also what asks the shell for the entry —
+    // without `CMF_CANRENAME` there is no `rename` verb in the menu to hook.
+    //
+    // One item only. The shell offers the entry on a multiple selection and Explorer answers it by
+    // renaming them all in turn, which is a different feature; left to the shell it does nothing
+    // visible, which is the honest outcome for a gesture this program does not implement.
+    match ours(vec![sub.clone()], "rename").as_slice() {
+        [Action::BeginRename(_)] => {}
+        got => panic!("Rename gave {:?}", names(got)),
+    }
+    assert!(
+        ours(vec![file.clone(), sub.clone()], "rename").is_empty(),
+        "Rename was answered for a multiple selection, which this program has no field for"
+    );
+    assert!(
+        ours(Vec::new(), "rename").is_empty(),
+        "Rename was answered on a background menu, where there is no row to rename"
+    );
+
     // And the whole rest of the menu is Windows'. `openas`, `opennew` and `opencontaining`
     // are here because they *start with* the verb that is hooked, which is the mistake a
     // `starts_with` would make.
     for verb in [
-        "delete", "rename", "properties", "link", "copyaspath", "edit", "print", "runas",
+        "delete", "properties", "link", "copyaspath", "edit", "print", "runas",
         "openas", "opennew", "opencontaining", "pintohomefile", "PinToStartScreen",
         "NewFolder", "ShareX", "{6A1F6B13-3B82-48A1-9E06-7BB0A6D0BFFD}",
     ] {

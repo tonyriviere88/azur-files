@@ -9,6 +9,22 @@ fn entry(label: &str) -> Entry {
         enabled: true,
         checked: false,
         icon: None,
+        default: false,
+        verb: None,
+    }
+}
+
+/// shell32's block as one row of tiles. The labels are what a French Windows writes, because that
+/// is what the row has to fit and the widest of them is what [`measure`] is being asked about.
+fn tiles(labels: &[&str]) -> Entry {
+    Entry {
+        kind: Kind::Tiles(
+            labels
+                .iter()
+                .map(|label| verb(label, &label.to_lowercase()))
+                .collect(),
+        ),
+        ..entry("")
     }
 }
 
@@ -24,6 +40,22 @@ fn verb(label: &str, verb: &str) -> Entry {
     Entry {
         kind: Kind::Command(Command::Shell {
             verb: Some(verb.to_owned()),
+            id: 0,
+            path: Vec::new(),
+            label: label.to_owned(),
+        }),
+        // Both copies of the name, as `win::read` sets them. See `Entry::verb`.
+        verb: Some(verb.to_owned()),
+        ..entry(label)
+    }
+}
+
+/// A shell entry the shell gave **no** canonical verb for — a third of a real menu, and every
+/// `Send to` child. Its `Moves` key is its label; see `Moves::key`.
+fn nameless(label: &str) -> Entry {
+    Entry {
+        kind: Kind::Command(Command::Shell {
+            verb: None,
             id: 0,
             path: Vec::new(),
             label: label.to_owned(),
@@ -76,6 +108,70 @@ fn pass(open: &mut Open, screen: Rect, times: usize) -> egui::Context {
         });
     }
     ctx
+}
+
+/// A right click on a menu row, and whatever the menu made of it.
+///
+/// Move, press, release — three frames, like `click_with` in the app's click tests, because a click
+/// only exists across frames. The outcome is taken from the release frame, which is the one
+/// `secondary_clicked` is true on.
+fn right_click(open: &mut Open, screen: Rect, at: Pos2) -> Outcome {
+    let ctx = egui::Context::default();
+    let theme = Theme::dark();
+    let mut input = egui::RawInput {
+        screen_rect: Some(screen),
+        ..Default::default()
+    };
+    input.viewports.entry(egui::ViewportId::ROOT).or_default().inner_rect = Some(screen);
+
+    // A frame with no events first: the menu is `fresh` on the one it opens and has not laid its rows
+    // out yet, so a click on the very first frame lands on nothing.
+    let mut outcome = Outcome::Open;
+    let events = [
+        vec![],
+        vec![egui::Event::PointerMoved(at)],
+        vec![egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Secondary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        }],
+        vec![egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Secondary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        }],
+    ];
+    for batch in events {
+        let mut frame = input.clone();
+        frame.events = batch;
+        let _ = ctx.run_ui(frame, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| {
+                outcome = show(ui, &theme, open);
+            });
+        });
+    }
+    outcome
+}
+
+/// Where the middle of a row is, by the arithmetic the menu itself lays out with.
+///
+/// The rows are a top-down column with no spacing, inside the popover's `space-2` padding, so the
+/// nth row's top is the sum of the heights above it. Which is exactly what [`stack_height`] adds up
+/// and what [`measure`] places the menu from — so a test that computed this any other way would be
+/// asserting against a second opinion.
+fn row_middle(open: &Open, index: usize) -> Pos2 {
+    let above = stack_height(&open.entries[..index]);
+    let height = match open.entries[index].kind {
+        Kind::Separator => separator_height(),
+        Kind::Tiles(_) => tile_row_height(),
+        _ => row_height(),
+    };
+    pos2(
+        open.at.x + space::S2 + 30.0,
+        open.at.y + space::S2 + above + height / 2.0,
+    )
 }
 
 /// Opening an unfilled submenu asks for it once, by the id the shell handed over, and
@@ -297,6 +393,184 @@ fn properties_and_the_divider_above_it_are_pinned_out_of_the_scrolling_part() {
         Entry::own(Own::Cancel),
     ];
     assert_eq!(pinned_from(&dropped), 4, "a drop menu pinned rows it has no reason to");
+}
+
+/// The tile row is pinned, and it is what the tail begins at.
+///
+/// **It is the reason to pin at all on a menu that has one.** Cut, Copy, Rename and Delete are what
+/// people open a context menu for, and `crate::shell::menu::regroup` puts the row near the bottom —
+/// below Send To, above Create shortcut and Properties. Left in the scrolling part on a machine with
+/// a dozen extensions installed it would be exactly the row you have to scroll to find.
+#[test]
+fn the_tile_row_is_pinned_with_properties_below_it() {
+    let full = vec![
+        entry("Ouvrir"),
+        divider(),
+        entry("Envoyer vers"),
+        divider(),
+        tiles(&["Couper", "Copier", "Renommer", "Partager", "Supprimer"]),
+        verb("Créer un raccourci", "link"),
+        Entry::own(Own::CopyPaths),
+        verb("Propriétés", "properties"),
+    ];
+    // The divider above the row, not the row itself: it belongs to what is below it, the same rule
+    // the Properties case above follows.
+    assert_eq!(
+        pinned_from(&full),
+        3,
+        "the tail should start at the divider above the tile row: {:?}",
+        full.iter().map(|e| e.label.as_str()).collect::<Vec<_>>()
+    );
+
+    // With no Properties and no entry of ours, the row is still the anchor on its own.
+    let bare = vec![entry("Ouvrir"), divider(), tiles(&["Couper", "Copier"])];
+    assert_eq!(pinned_from(&bare), 1);
+}
+
+/// A right click on a row moves it, and only on the rows that are the user's to move.
+///
+/// The whole gesture through the real widget: `secondary_clicked` on a real response, `movable`
+/// deciding, and [`Outcome::Move`] coming back out with the keys the app is to record. What the app
+/// does with them is `App::draw_menu`'s six lines; what is easy to get wrong and impossible to
+/// notice is *which rows offer it*, because a right click that records a preference for an entry
+/// `regroup` will never move looks exactly like one that did nothing.
+#[test]
+fn a_right_click_moves_an_entry_and_only_where_it_can() {
+    let screen = Rect::from_min_size(Pos2::ZERO, vec2(900.0, 700.0));
+    // A banded menu, built the way `regroup` builds one: a default row, a group of ours, a run left
+    // flat, and the anchored tail.
+    let banded = || {
+        vec![
+            // Marked, as `regroup` leaves the top band — whether the shell said so or a stand-in was
+            // chosen. It is what `is_anchored` reads.
+            Entry { default: true, ..verb("Ouvrir", "open") },
+            divider(),
+            Entry {
+                label: "More apps".to_owned(),
+                shortcut: "2".to_owned(),
+                kind: Kind::group(vec![verb("Open with Code", "OpenWithCode"), verb("Zed", "Zed")]),
+                ..entry("More apps")
+            },
+            verb("Restaurer les versions précédentes", "PreviousVersions"),
+            divider(),
+            verb("Envoyer vers", "sendto"),
+            verb("Propriétés", "properties"),
+        ]
+    };
+
+    // The group's own row: everything in it comes out, in one gesture.
+    let mut open = menu(banded());
+    let at = row_middle(&open, 2);
+    match right_click(&mut open, screen, at) {
+        Outcome::Move { keys, into_group } => {
+            assert!(!into_group, "a group's row should promote, not demote");
+            assert_eq!(keys, vec!["OpenWithCode".to_owned(), "Zed".to_owned()]);
+        }
+        _ => panic!("a right click on `More apps` moved nothing"),
+    }
+
+    // A flat entry from a run goes the other way.
+    let mut open = menu(banded());
+    let at = row_middle(&open, 3);
+    match right_click(&mut open, screen, at) {
+        Outcome::Move { keys, into_group } => {
+            assert!(into_group, "a flat run entry should demote");
+            assert_eq!(keys, vec!["PreviousVersions".to_owned()]);
+        }
+        _ => panic!("a right click on a flat run entry moved nothing"),
+    }
+
+    // And the rows that cannot move offer nothing: the anchored bands, and this program's own
+    // entries. `sendto` and `properties` are bands — `regroup` lifts them out before any run is
+    // collapsed, so a preference about either would be inert.
+    for (index, what) in [(0, "the default verb"), (5, "sendto"), (6, "properties")] {
+        let mut open = menu(banded());
+        let at = row_middle(&open, index);
+        assert!(
+            matches!(right_click(&mut open, screen, at), Outcome::Open),
+            "{what} is an anchored band and offered to move anyway"
+        );
+    }
+    let mut open = menu(vec![entry("Copy here"), entry("Move here")]);
+    let at = row_middle(&open, 0);
+    assert!(
+        matches!(right_click(&mut open, screen, at), Outcome::Open),
+        "a right-button drop's own entry offered to move"
+    );
+}
+
+/// A row inside **Windows'** submenu is not offered, because that menu is not ours to rearrange.
+///
+/// The distinction [`Kind::is_ours`] exists for: a filled shell submenu and a group of ours are both
+/// `Kind::Submenu` with no `source` left, and telling them apart by that would have offered to
+/// promote `Send to > Documents`.
+#[test]
+fn a_row_inside_windows_own_submenu_is_not_offered() {
+    let screen = Rect::from_min_size(Pos2::ZERO, vec2(900.0, 700.0));
+    // No canonical verb, which is what a `Send to` child really is — `win::probe_submenu_verbs`
+    // confirms `Envoyer vers` itself has none either. So its `Moves` key is its label.
+    let child = nameless("Documents");
+    let mut open = menu(vec![
+        verb("Ouvrir", "open"),
+        submenu("Envoyer vers", vec![child.clone()]),
+        Entry {
+            kind: Kind::group(vec![child.clone()]),
+            ..entry("More apps")
+        },
+    ]);
+
+    // `submenu()` builds a `Kind::complete`, which is what a *filled* shell submenu is — the case
+    // that used to be indistinguishable from one of ours.
+    assert!(!open.entries[1].kind.is_ours());
+    assert!(open.entries[2].kind.is_ours());
+
+    // Open Windows' one and right-click the row inside it.
+    open.open = vec![1];
+    pass(&mut open, screen, 2);
+    assert!(
+        movable(&open, &[1, 0]).is_none(),
+        "a row inside `Envoyer vers` was offered a move"
+    );
+    // And the same row inside a group of ours is offered.
+    assert_eq!(
+        movable(&open, &[2, 0]),
+        Some((vec!["Documents".to_owned()], false))
+    );
+}
+
+/// The tile row's measured height is the height it allocates.
+///
+/// The same trap [`the_measured_row_heights_are_the_ones_the_components_allocate`] exists for, and a
+/// worse one: a tile row is 42 points against a row's 28, so a level with one in it is placed 14
+/// points out per row of disagreement — and the row is near the *bottom* of the menu, which is the
+/// end that gets clipped.
+#[test]
+fn the_tile_row_is_measured_the_height_it_draws() {
+    let row = tiles(&["Couper", "Copier", "Renommer", "Partager", "Supprimer"]);
+    assert_eq!(
+        stack_height(std::slice::from_ref(&row)),
+        tile_row_height(),
+        "`stack_height` charged a tile row as an ordinary row"
+    );
+
+    // And what `draw_tiles` actually takes, which is the number the other two have to agree with.
+    let ctx = egui::Context::default();
+    let theme = Theme::dark();
+    let menu = menu(vec![row]);
+    let mut taken = 0.0;
+    let _ = ctx.run_ui(Default::default(), |ctx| {
+        egui::Area::new(Id::new("tile-probe")).show(ctx, |ui| {
+            ui.set_width(300.0);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            let top = ui.cursor().top();
+            let Kind::Tiles(inner) = &menu.entries[0].kind else {
+                panic!("not a tile row");
+            };
+            draw_tiles(ui, &theme, &menu, &[0], inner, false, &mut None);
+            taken = ui.cursor().top() - top;
+        });
+    });
+    assert_eq!(taken, tile_row_height());
 }
 
 #[test]

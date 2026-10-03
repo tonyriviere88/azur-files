@@ -317,3 +317,44 @@ fn a_broken_line_costs_only_itself() {
     assert_eq!(back.panes[0].active, 0);
     assert!(!back.dark, "and the line after the mess still applies");
 }
+
+/// The context-menu entries the user has moved survive a write and a read, and are written in an
+/// order that does not change on its own.
+///
+/// The sorting is the half worth a test. Both halves of [`crate::shell::menu::Moves`] are
+/// `HashSet`s, so written in iteration order these lines shuffle between saves — and a settings file
+/// that changes when nothing changed is one nobody can diff, on top of defeating
+/// [`crate::app::App::save_settings`]'s "has this window actually changed anything" comparison,
+/// which is a text compare.
+#[test]
+fn the_moved_context_menu_entries_survive_a_write_and_a_read() {
+    let mut config = Config::default();
+    // Verbs, a CLSID, and a label — the three shapes a key comes in. See `Moves::key`.
+    for key in ["sendto", "{9F156763-7844-4DC4-B2B1-901F640F5155}", "Open with Code"] {
+        config.menu_moves.record(key.to_owned(), false);
+    }
+    config.menu_moves.record("PreviousVersions".to_owned(), true);
+
+    let text = config.to_text();
+    let back = Config::parse(&text);
+    assert_eq!(back.menu_moves, config.menu_moves);
+
+    // Written sorted, and the same twice.
+    let promoted: Vec<&str> = text
+        .lines()
+        .filter_map(|line| line.strip_prefix("menu_promote="))
+        .collect();
+    assert_eq!(
+        promoted,
+        vec![
+            "Open with Code",
+            "sendto",
+            "{9F156763-7844-4DC4-B2B1-901F640F5155}"
+        ]
+    );
+    assert_eq!(text, back.to_text(), "a round trip changed the file");
+
+    // A default config writes no lines at all, so an entry nobody has touched costs nothing.
+    assert!(!Config::default().to_text().contains("menu_promote"));
+    assert!(!Config::default().to_text().contains("menu_demote"));
+}

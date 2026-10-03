@@ -14,7 +14,8 @@ use windows::Win32::UI::Shell::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, DestroyMenu, GetMenuItemCount, GetMenuItemInfoW, HMENU, MENUITEMINFOW,
-    MFS_CHECKED, MFS_DISABLED, MFS_GRAYED, MFT_SEPARATOR, MIIM_BITMAP, MIIM_FTYPE,
+    MFS_CHECKED, MFS_DEFAULT, MFS_DISABLED, MFS_GRAYED, MFT_SEPARATOR, MENU_ITEM_MASK,
+    MIIM_BITMAP, MIIM_FTYPE,
     MIIM_ID, MIIM_STATE, MIIM_STRING, MIIM_SUBMENU, SW_SHOWNORMAL, WM_INITMENUPOPUP,
 };
 
@@ -110,9 +111,29 @@ unsafe fn context_of(parent: &Path, items: &[PathBuf]) -> Option<IContextMenu> {
 ///
 /// `CMF_EXPLORE` on the full one asks for the menu Explorer shows rather than the shorter
 /// one a file dialog gets.
+///
+/// # `CMF_CANRENAME`, and why the menu had no Rename in it
+///
+/// **The shell does not offer `rename` unless it is asked to.** Measured by `probe_banding` on a
+/// text file: without this flag the menu comes back with `cut`, `copy`, `link`, `delete` and
+/// `properties` and no rename verb anywhere in it — which is why the Windows 11 tile row this
+/// program draws was a row of four for as long as the flag was missing. The flag is the caller
+/// saying "the thing showing this menu can rename an item", and the shell adds the entry when it
+/// hears it. Explorer sets it whenever its view can rename; this program can, on `F2`, so it does.
+///
+/// The verb is then answered *here* rather than handed back — see
+/// `crate::app::App::ours_rather_than_the_shell_s`. That is not a preference: the shell's own
+/// `rename` starts an inline edit in the *view* that hosts the menu, and a menu built out of a bare
+/// shell folder has no view, so `InvokeCommand("rename")` has nothing to open. It is the same shape
+/// of problem as [`as_an_item`] documents for Properties on a background menu, and this program has
+/// its own rename field to put the caret in.
+///
+/// Not on [`Depth::Fast`], which is the short menu asked for when a file on a share is taking
+/// seconds to answer: `CMF_DEFAULTONLY` is a request for the default verb, and adding a rename to
+/// that is asking for more work on the one path chosen for asking for less.
 fn flags(depth: Depth) -> u32 {
     match depth {
-        Depth::Full => CMF_NORMAL | CMF_EXPLORE,
+        Depth::Full => CMF_NORMAL | CMF_EXPLORE | windows::Win32::UI::Shell::CMF_CANRENAME,
         Depth::Fast => windows::Win32::UI::Shell::CMF_DEFAULTONLY,
     }
 }
@@ -212,27 +233,10 @@ impl Live {
         let mut entries: Vec<Entry> = Vec::with_capacity(count as usize);
 
         for position in 0..count {
-            let mut info = MENUITEMINFOW {
-                cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
-                fMask: MIIM_FTYPE
-                    | MIIM_STATE
-                    | MIIM_ID
-                    | MIIM_SUBMENU
-                    | MIIM_STRING
-                    | MIIM_BITMAP,
-                ..Default::default()
+            let mask = MIIM_FTYPE | MIIM_STATE | MIIM_ID | MIIM_SUBMENU | MIIM_BITMAP;
+            let Some((info, raw)) = item_at(hmenu, position as u32, mask) else {
+                continue;
             };
-            // Two calls: the first to learn the length, the second to get the text. A
-            // fixed buffer would truncate a long "Open with <application>".
-            if GetMenuItemInfoW(hmenu, position as u32, true, &mut info).is_err() {
-                continue;
-            }
-            let mut text = vec![0u16; info.cch as usize + 1];
-            info.dwTypeData = PWSTR(text.as_mut_ptr());
-            info.cch = text.len() as u32;
-            if GetMenuItemInfoW(hmenu, position as u32, true, &mut info).is_err() {
-                continue;
-            }
 
             if info.fType.0 & MFT_SEPARATOR.0 != 0 {
                 // Two separators running together, or one at either end, are what a
@@ -244,7 +248,6 @@ impl Live {
                 continue;
             }
 
-            let raw = String::from_utf16_lossy(&text[..info.cch as usize]);
             let (label, shortcut) = split_label(&raw);
             if label.is_empty() {
                 continue;
@@ -252,13 +255,31 @@ impl Live {
 
             let enabled = info.fState.0 & (MFS_DISABLED.0 | MFS_GRAYED.0) == 0;
             let checked = info.fState.0 & MFS_CHECKED.0 != 0;
-            // `MFS_DEFAULT` — the entry a double click would have run — is deliberately not
-            // read. It was, and it was drawn as the 2px accent bar a selected row gets, which
-            // put a blue bar down the side of the top row of every context menu in the
-            // program: the default entry is nearly always the first one, so what read as a
-            // selection nobody had made was there every time the menu opened. There is
-            // nothing else it would be used for, so it is not carried.
+            // `MFS_DEFAULT` — the entry a double click would have run. **Read, and never drawn.**
+            //
+            // It was drawn once, as the 2px accent bar a selected row gets, and that was wrong: the
+            // default entry is nearly always the first one, so every context menu in the program
+            // opened with a blue bar down the side of its top row, where it read as a selection
+            // nobody had made rather than as a hint about double-clicking. So for a while it was not
+            // read at all, there being nothing else to do with it.
+            //
+            // There is now. `crate::shell::menu::regroup` bands the menu, and the top band is "the
+            // entry the shell considers default" — a question only the shell can answer, and this
+            // is the answer. Still not drawn; see `crate::shell::menu::Entry::default`.
+            let default = info.fState.0 & MFS_DEFAULT.0 != 0;
             let icon = menu_bitmap(info.hbmpItem);
+
+            // The canonical name, asked for **before** the kinds are told apart — which is the fix
+            // for a submenu row arriving anonymous. It used to be asked for only inside the command
+            // branch below, so `Ouvrir avec` and `7-Zip` never got one: the popup branch is reached
+            // first and returned without asking. They have one. Measured by
+            // [`probe_submenu_verbs`]: `openas` on `wID` 4179 and `SevenZip` on 4214, both of which
+            // were being read and thrown away. See `crate::shell::menu::Entry::verb`, and note that
+            // `Envoyer vers` genuinely has none — a popup with no verb is a real answer, not this
+            // bug wearing a different hat.
+            let verb = (info.wID >= FIRST && info.wID <= LAST)
+                .then(|| canonical_verb(&self.context, (info.wID - FIRST) as usize))
+                .flatten();
 
             let kind = if !info.hSubMenu.is_invalid() && depth < MAX_DEPTH {
                 // Noted rather than read. Whether there is anything in it is not known
@@ -278,7 +299,7 @@ impl Live {
             } else if info.wID >= FIRST && info.wID <= LAST {
                 let offset = info.wID - FIRST;
                 Kind::Command(Command::Shell {
-                    verb: canonical_verb(&self.context, offset as usize),
+                    verb: verb.clone(),
                     id: offset,
                     path: trail.to_vec(),
                     label: label.clone(),
@@ -296,6 +317,8 @@ impl Live {
                 enabled,
                 checked,
                 icon,
+                default,
+                verb,
             });
         }
 
@@ -323,6 +346,34 @@ unsafe fn init_popup(context: &IContextMenu, menu: HMENU, position: u32) {
     }
 }
 
+/// One item of an `HMENU`, read whole: the fields `mask` asked for, and the text.
+///
+/// **Two calls, and the reason is the text.** `MENUITEMINFOW` does not carry a string, it carries a
+/// pointer to a buffer the caller supplies — so the first call is asked with no buffer purely to
+/// learn `cch`, and the second is given one that size. A single call with a fixed buffer truncates,
+/// and what it truncates is `Open with <some application with a long name>`.
+///
+/// The text is returned raw, exactly as the shell wrote it: ampersands, tab, and all. Splitting it is
+/// [`split_label`]'s job and not every caller wants it split.
+///
+/// Its own function because five places do this — the read, the id lookup, and three probes — and it
+/// is a fiddly enough dance that five copies of it is five chances to forget the second call.
+unsafe fn item_at(hmenu: HMENU, position: u32, mask: MENU_ITEM_MASK) -> Option<(MENUITEMINFOW, String)> {
+    let mut info = MENUITEMINFOW {
+        cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
+        // `MIIM_STRING` whether the caller asked or not: without it `cch` comes back as whatever it
+        // was, and the buffer below would be sized from a number nobody set.
+        fMask: mask | MIIM_STRING,
+        ..Default::default()
+    };
+    GetMenuItemInfoW(hmenu, position, true, &mut info).ok()?;
+    let mut text = vec![0u16; info.cch as usize + 1];
+    info.dwTypeData = PWSTR(text.as_mut_ptr());
+    info.cch = text.len() as u32;
+    GetMenuItemInfoW(hmenu, position, true, &mut info).ok()?;
+    Some((info, String::from_utf16_lossy(&text[..info.cch as usize])))
+}
+
 /// The submenu hanging off one position of an `HMENU`, if there is one.
 unsafe fn submenu_at(hmenu: HMENU, position: u32) -> Option<HMENU> {
     let mut info = MENUITEMINFOW {
@@ -345,27 +396,14 @@ unsafe fn commands_of(hmenu: HMENU) -> Vec<(u32, String)> {
     let count = GetMenuItemCount(Some(hmenu)).max(0);
     let mut out = Vec::with_capacity(count as usize);
     for position in 0..count {
-        let mut info = MENUITEMINFOW {
-            cbSize: std::mem::size_of::<MENUITEMINFOW>() as u32,
-            fMask: MIIM_ID | MIIM_STRING | MIIM_SUBMENU,
-            ..Default::default()
-        };
-        if GetMenuItemInfoW(hmenu, position as u32, true, &mut info).is_err() {
+        let Some((info, raw)) = item_at(hmenu, position as u32, MIIM_ID | MIIM_SUBMENU) else {
             continue;
-        }
+        };
         // A popup's `wID` means nothing, and must not be allowed to match.
         if !info.hSubMenu.is_invalid() || info.wID < FIRST || info.wID > LAST {
             continue;
         }
-        let id = info.wID - FIRST;
-        let mut text = vec![0u16; info.cch as usize + 1];
-        info.dwTypeData = PWSTR(text.as_mut_ptr());
-        info.cch = text.len() as u32;
-        if GetMenuItemInfoW(hmenu, position as u32, true, &mut info).is_err() {
-            continue;
-        }
-        let raw = String::from_utf16_lossy(&text[..info.cch as usize]);
-        out.push((id, split_label(&raw).0));
+        out.push((info.wID - FIRST, split_label(&raw).0));
     }
     out
 }
@@ -448,18 +486,408 @@ unsafe fn canonical_verb(context: &IContextMenu, offset: usize) -> Option<String
     (!verb.is_empty()).then_some(verb)
 }
 
+// ---------------------------------------------------------------------------
+// Who registered a verb
+// ---------------------------------------------------------------------------
+
+/// Every CLSID asked about so far, and what it resolved to.
+///
+/// Memoised for the life of the process because the answer cannot change while it is running — a
+/// handler that is reinstalled under the same CLSID is the same product — and because a menu asks
+/// about the same dozen CLSIDs every time it is built. `None` is a real answer and is cached too:
+/// a CLSID with no `InprocServer32` is most often a packaged handler, whose implementation lives in
+/// an appx and is not a DLL path at all, and re-establishing that on every menu would be four
+/// registry reads for the same nothing.
+static MEMO: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<String, Option<Handler>>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// The product that registered this verb, where the verb is a CLSID and the CLSID is a DLL.
+///
+/// # Why a verb is enough to find one
+///
+/// `GetCommandString` answers with a *canonical name*, and for anything registered as an
+/// `IExplorerCommand` — which is how everything written for Windows 11 registers — that name is the
+/// handler's CLSID in braces: `{9F156763-7844-4DC4-B2B1-901F640F5155}` is Open in Terminal. So the
+/// verb this program already reads off every entry is, for a third of a modern menu, a direct index
+/// into `HKCR\CLSID`. Nothing else has to be asked of the shell.
+///
+/// A **static** registry verb — `Open with Zed`, from `HKCR\*\shell\Zed` — has no CLSID and gets
+/// `None`. That is not a failure: `crate::shell::menu::name_of` reads a run with no owner as a run
+/// nobody owns, which is exactly what a pile of unrelated `open with` verbs is.
+pub(super) fn handler_of(verb: &str) -> Option<Handler> {
+    // A CLSID and nothing else. `{` is the cheap test that keeps every ordinary verb — `open`,
+    // `cut`, `properties` — out of the registry entirely.
+    if !verb.starts_with('{') || !verb.ends_with('}') {
+        return None;
+    }
+    if let Ok(memo) = MEMO.lock() {
+        if let Some(found) = memo.get(verb) {
+            return found.clone();
+        }
+    }
+    let handler = resolve_handler(verb);
+    if let Ok(mut memo) = MEMO.lock() {
+        memo.insert(verb.to_owned(), handler.clone());
+    }
+    handler
+}
+
+/// The uncached half of [`handler_of`], which is **two lookups because there are two kinds of
+/// handler** and the modern kind is not where thirty years of documentation says to look.
+///
+/// 1. `CLSID\{..}\InprocServer32` — classic COM. OneDrive's legacy menu, 7-Zip, TortoiseGit.
+///    Gives a DLL path and, through it, a version-info name: `Microsoft OneDrive`, `7-Zip`.
+/// 2. `PackagedCom\ClassIndex\{..}` — an MSIX-packaged handler, which has **no `CLSID` key at
+///    all**. Its one subkey is the package full name.
+///
+/// The second is not an edge case: measured by `probe_banding` on this machine, *every* CLSID verb in
+/// a file's menu — Copilot, Move to OneDrive, File Locksmith, Edit in Notepad, Open with Zed,
+/// PowerRename — resolved to nothing until this was here, because PowerToys, OneDrive's modern
+/// commands and everything from the Store now ship as sparse packages. Only the first lookup existed
+/// to begin with, and the effect was a feature that appeared to work and named nothing.
+fn resolve_handler(clsid: &str) -> Option<Handler> {
+    if let Some(dll) = hkcr(&format!("CLSID\\{clsid}\\InprocServer32")) {
+        let module = PathBuf::from(expand(&dll));
+        // A bare file name means a DLL found on the loader's path — `shell32.dll` and friends —
+        // which is still a usable identity even though no version info will read off it.
+        let name = file_description(&module);
+        return Some(Handler { module, name });
+    }
+    packaged_handler(clsid)
+}
+
+/// An MSIX-packaged handler, named after the package that registered it.
+///
+/// `PackagedCom\ClassIndex\{CLSID}` has exactly one subkey and it is the package full name —
+/// `Microsoft.PowerToys.PowerRenameContextMenu_0.99.1.0_neutral__8wekyb3d8bbwe`. That is the
+/// identity, version and all: two verbs from the same package are the same product, and a package
+/// that updates is a different string for a different build, which costs a re-read and nothing else.
+///
+/// The name is the package name with the version and architecture cut off and the `ContextMenu`
+/// suffix every one of them carries removed — `Microsoft.PowerToys.PowerRename`, then its last
+/// component, `PowerRename`. Not the package's real `DisplayName`, which is an `ms-resource:`
+/// indirection into an appx resource map: reachable, through `SHLoadIndirectString` and a manifest
+/// read, and not worth a file parse and a string-loader for a submenu's caption.
+///
+/// The DLL is *not* used as the identity here even though the key beside this one has it: it is a
+/// bare file name inside the package (`PowerToys.PowerRenameContextMenu.dll`) with no directory, so
+/// two packages shipping the same file name would collide where the package name cannot.
+fn packaged_handler(clsid: &str) -> Option<Handler> {
+    let package = first_subkey(&format!("PackagedCom\\ClassIndex\\{clsid}"))?;
+    // `Name_version_arch__publisher`. Everything from the first `_` is the identity of the *build*
+    // rather than of the product, and it is the product a menu row should be named after.
+    let stem = package.split('_').next().unwrap_or(&package);
+    // The same tidy [`without_boilerplate`] does to a version-info name, and deliberately not the
+    // same function: that one strips ` Shell Extension` from human text, this one strips
+    // `ShellExtension` from a dotted identifier. One function covering both conventions would have to
+    // guess which it was looking at.
+    let stem = stem
+        .strip_suffix("ContextMenu")
+        .or_else(|| stem.strip_suffix("ShellExtension"))
+        .unwrap_or(stem)
+        .trim_end_matches('.');
+    // The last dot-component: `Microsoft.PowerToys.PowerRename` reads as `PowerRename`, which is
+    // what the entry it names is called. Falls back to the whole thing for a package with no dots.
+    let name = stem.rsplit('.').next().unwrap_or(stem);
+    Some(Handler {
+        module: PathBuf::from(&package),
+        name: (!name.is_empty()).then(|| name.to_owned()),
+    })
+}
+
+/// The name of the first subkey under `HKEY_CLASSES_ROOT\<path>`.
+///
+/// For `PackagedCom\ClassIndex\{CLSID}`, whose *only* content is one subkey named after the package
+/// — the value is in the key's name, which is why this reads a name and not a value.
+fn first_subkey(path: &str) -> Option<String> {
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegEnumKeyExW, RegOpenKeyExW, HKEY, HKEY_CLASSES_ROOT, KEY_READ,
+    };
+
+    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut key: HKEY = std::ptr::null_mut();
+    // SAFETY: `wide` is NUL-terminated and outlives the call; `key` is closed on every path out.
+    if unsafe { RegOpenKeyExW(HKEY_CLASSES_ROOT, wide.as_ptr(), 0, KEY_READ, &mut key) } != 0 {
+        return None;
+    }
+    // A package full name. 256 is the documented maximum for a key name.
+    let mut buffer = [0u16; 256];
+    let mut units = buffer.len() as u32;
+    // SAFETY: `buffer` and `units` describe the same allocation, and `units` is updated by the call
+    // to the length written, not counting the terminator.
+    let read = unsafe {
+        RegEnumKeyExW(
+            key,
+            0,
+            buffer.as_mut_ptr(),
+            &mut units,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+        )
+    };
+    // SAFETY: opened above, and not used again.
+    unsafe { RegCloseKey(key) };
+    if read != 0 {
+        return None;
+    }
+    let name = String::from_utf16_lossy(&buffer[..(units as usize).min(buffer.len())]);
+    (!name.is_empty()).then_some(name)
+}
+
+/// A string value's default under `HKEY_CLASSES_ROOT`, `REG_EXPAND_SZ` included.
+///
+/// `crate::shell::providers` has a near-twin of this that filters to `REG_SZ` — right for the
+/// ProgIDs and perceived types it reads, wrong here: an `InprocServer32` is a path, and a path in
+/// the registry is as likely to be written `%SystemRoot%\system32\…` as spelled out.
+fn hkcr(path: &str) -> Option<String> {
+    use windows_sys::Win32::System::Registry::{
+        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CLASSES_ROOT, KEY_READ,
+        REG_EXPAND_SZ, REG_SZ,
+    };
+
+    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut key: HKEY = std::ptr::null_mut();
+    // SAFETY: `wide` is NUL-terminated and outlives the call; `key` is only used once the call has
+    // reported success, and is closed on every path out.
+    if unsafe { RegOpenKeyExW(HKEY_CLASSES_ROOT, wide.as_ptr(), 0, KEY_READ, &mut key) } != 0 {
+        return None;
+    }
+    // A path, so `MAX_PATH` doubled for the `\\?\` case. Anything longer is not one.
+    let mut buffer = [0u16; 560];
+    let mut bytes = std::mem::size_of_val(&buffer) as u32;
+    let mut kind = 0u32;
+    // SAFETY: `buffer` and `bytes` describe the same allocation and `bytes` is updated to what was
+    // written; the value name is null, which asks for the key's own default.
+    let read = unsafe {
+        RegQueryValueExW(
+            key,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            &mut kind,
+            buffer.as_mut_ptr() as *mut u8,
+            &mut bytes,
+        )
+    };
+    // SAFETY: opened above, and not used again.
+    unsafe { RegCloseKey(key) };
+    if read != 0 || (kind != REG_SZ && kind != REG_EXPAND_SZ) {
+        return None;
+    }
+    let units = (bytes as usize / 2).min(buffer.len());
+    let text: String = String::from_utf16_lossy(&buffer[..units]);
+    let text = text.trim_end_matches('\0').trim().to_owned();
+    (!text.is_empty()).then_some(text)
+}
+
+/// `%SystemRoot%\system32\shell32.dll` as a path this process can open.
+///
+/// By hand rather than through `ExpandEnvironmentStringsW`, which would mean enabling
+/// `Win32_System_Environment` for one call that `std::env` can already answer. Unknown names are
+/// left as they were written, which keeps a malformed value recognisable instead of blanking it.
+fn expand(text: &str) -> String {
+    if !text.contains('%') {
+        return text.to_owned();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(open) = rest.find('%') {
+        out.push_str(&rest[..open]);
+        let after = &rest[open + 1..];
+        match after.find('%') {
+            Some(close) => {
+                let name = &after[..close];
+                match std::env::var(name) {
+                    Ok(value) => out.push_str(&value),
+                    // Not a variable this process has. `%` and the name go back verbatim.
+                    Err(_) => {
+                        out.push('%');
+                        out.push_str(name);
+                        out.push('%');
+                    }
+                }
+                rest = &after[close + 1..];
+            }
+            // An unpaired `%`, which is not an expansion at all.
+            None => {
+                out.push('%');
+                out.push_str(after);
+                return out;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// A DLL's `FileDescription` — `Microsoft OneDrive`, `PowerRename Shell Extension`.
+///
+/// The friendliest name a shell extension reliably carries. Its `ProductName` is often the suite
+/// rather than the thing (`Microsoft Windows Operating System`), and its file name is not for
+/// showing anybody, so this is the one worth the two calls.
+///
+/// The language block is asked for rather than assumed: `VarFileInfo\Translation` holds the
+/// translations the file actually has, and a hardcoded `040904B0` misses every DLL that ships one
+/// language and it is not US English — which on a French machine is a good number of them.
+fn file_description(module: &Path) -> Option<String> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileVersionInfoSizeW, GetFileVersionInfoW, VerQueryValueW,
+    };
+
+    let wide = crate::shell::wide(module);
+    // SAFETY: `wide` is NUL-terminated and outlives the call.
+    let size = unsafe { GetFileVersionInfoSizeW(wide.as_ptr(), std::ptr::null_mut()) };
+    if size == 0 {
+        return None;
+    }
+    let mut block = vec![0u8; size as usize];
+    // SAFETY: `block` is `size` bytes, which is what the call above asked for.
+    if unsafe { GetFileVersionInfoW(wide.as_ptr(), 0, size, block.as_mut_ptr() as *mut _) } == 0 {
+        return None;
+    }
+
+    // Whatever `\StringFileInfo\<lang><codepage>\FileDescription` the file has. Every translation
+    // it declares, then the two spellings that are common enough to be worth guessing at when it
+    // declares none.
+    let mut blocks: Vec<String> = translations(&block)
+        .into_iter()
+        .map(|(lang, page)| format!("\\StringFileInfo\\{lang:04x}{page:04x}\\FileDescription"))
+        .collect();
+    blocks.push("\\StringFileInfo\\040904b0\\FileDescription".to_owned());
+    blocks.push("\\StringFileInfo\\000004b0\\FileDescription".to_owned());
+
+    for path in blocks {
+        let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+        let mut value: *mut std::ffi::c_void = std::ptr::null_mut();
+        let mut units = 0u32;
+        // SAFETY: `block` outlives the call and every pointer out of it; `value` points into
+        // `block` and `units` is the count of `u16` there, both written by the call.
+        let ok = unsafe {
+            VerQueryValueW(
+                block.as_ptr() as *const _,
+                wide.as_ptr(),
+                &mut value,
+                &mut units,
+            )
+        };
+        if ok == 0 || value.is_null() || units == 0 {
+            continue;
+        }
+        // SAFETY: the call reports `units` UTF-16 units at `value`, inside `block`.
+        let text = unsafe { std::slice::from_raw_parts(value as *const u16, units as usize) };
+        let text = String::from_utf16_lossy(text);
+        let text = text.trim_end_matches('\0').trim();
+        if !text.is_empty() {
+            return Some(without_boilerplate(text));
+        }
+    }
+    None
+}
+
+/// `Microsoft OneDrive Shell Extension` → `Microsoft OneDrive`, `7-Zip Shell Extension` → `7-Zip`.
+///
+/// Every one of these files describes itself as a shell extension, so saying so on the menu row
+/// names the mechanism rather than the product. [`packaged_handler`] does the same job for a package
+/// name, under the other naming convention — and the row is narrow. Measured spellings, from the
+/// files actually on this machine; anything unrecognised is left exactly as its author wrote it,
+/// which is the right way round for a string being shown to somebody.
+fn without_boilerplate(name: &str) -> String {
+    const NOISE: [&str; 5] = [
+        " Shell Extension",
+        " Context Menu Handler",
+        " Context Menu",
+        " Shell Extensions",
+        " Explorer Extension",
+    ];
+    for suffix in NOISE {
+        if name.len() > suffix.len() && name.to_lowercase().ends_with(&suffix.to_lowercase()) {
+            return name[..name.len() - suffix.len()].trim_end().to_owned();
+        }
+    }
+    name.to_owned()
+}
+
+/// The `(language, code page)` pairs a version block declares, from `\VarFileInfo\Translation`.
+fn translations(block: &[u8]) -> Vec<(u16, u16)> {
+    use windows_sys::Win32::Storage::FileSystem::VerQueryValueW;
+
+    let wide: Vec<u16> = "\\VarFileInfo\\Translation"
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut value: *mut std::ffi::c_void = std::ptr::null_mut();
+    let mut bytes = 0u32;
+    // SAFETY: as `file_description` above — `block` outlives the call, and both out-params are
+    // written by it.
+    let ok = unsafe {
+        VerQueryValueW(
+            block.as_ptr() as *const _,
+            wide.as_ptr(),
+            &mut value,
+            &mut bytes,
+        )
+    };
+    if ok == 0 || value.is_null() {
+        return Vec::new();
+    }
+    // Pairs of `u16`: the language id then the code page.
+    let count = bytes as usize / 4;
+    // SAFETY: the call reports `bytes` bytes at `value`, inside `block`.
+    let pairs = unsafe { std::slice::from_raw_parts(value as *const u16, count * 2) };
+    pairs.chunks_exact(2).map(|pair| (pair[0], pair[1])).collect()
+}
+
 /// A menu item's bitmap as RGBA, when it is a real one.
 ///
-/// `hbmpItem` doubles as a slot for a dozen `HBMMENU_*` magic values — small
-/// integers, not handles — which is what the bound below is filtering out.
+/// `hbmpItem` doubles as a slot for the `HBMMENU_*` family — small integers standing in for a
+/// bitmap, which have to be filtered out before the value is treated as a handle.
+///
+/// # The filter that ate half the icons
+///
+/// This was `(bitmap.0 as isize) <= 16`, on the reasoning that the magic values run from `-1` to `16`
+/// and a real handle is a pointer, so anything at or below the top of that range is not one.
+///
+/// **A GDI handle is not a pointer.** It is a 32-bit value that Windows sign-extends into the
+/// pointer-sized field, so any handle whose 32-bit form has its top bit set arrives as a large
+/// *negative* `isize` — and `<= 16` threw every one of them away. Measured by [`probe_menu_icons`] on
+/// a folder's background menu: `Open with Code` came in on `-1023068341`, `Open with Visual Studio`
+/// on `-821751332`, `Open Git Bash here` on `-335203089`, all three of them perfectly good 16×16
+/// 32bpp bitmaps, all three discarded. `Open Git GUI here` next to them arrived as a positive handle
+/// and drew fine, which is what made the failure look intermittent rather than systematic: whether a
+/// row had an icon came down to whether its handle's high bit happened to be set. Nine of the eleven
+/// rows without an icon on that menu were this.
+///
+/// So the filter is the *set* the documentation actually defines — `HBMMENU_CALLBACK` is `-1` and the
+/// rest are `1` to `11`, with room left over — and nothing else. It cannot reject a real handle,
+/// because GDI does not hand out handles in single digits, and a value that gets past it and is not a
+/// bitmap is caught anyway: `GetObjectW` in `crate::shell::icons::read_bgra` returns zero for a
+/// handle that is not one, and the size bound there catches the rest.
+///
+/// `HBMMENU_CALLBACK` is the one that is a real answer rather than a mistake: it means the owner
+/// intended to draw the icon itself during `WM_DRAWITEM`, which a menu that is never shown never
+/// receives. Nothing to read, and nothing to be done about it here.
 unsafe fn menu_bitmap(
     bitmap: windows::Win32::Graphics::Gdi::HBITMAP,
 ) -> Option<egui::ColorImage> {
-    const LAST_MAGIC: isize = 16;
-    if bitmap.is_invalid() || (bitmap.0 as isize) <= LAST_MAGIC {
+    if bitmap.is_invalid() || stands_in_for_a_bitmap(bitmap.0 as isize) {
         return None;
     }
     crate::shell::icons::bitmap_of(bitmap)
+}
+
+/// Whether an `hbmpItem` is one of the `HBMMENU_*` stand-ins rather than a handle.
+///
+/// Its own function so the set can be tested without a menu — see
+/// `a_gdi_handle_with_its_high_bit_set_is_not_a_magic_value`, which is the fence around the bug
+/// [`menu_bitmap`] describes.
+pub(super) fn stands_in_for_a_bitmap(raw: isize) -> bool {
+    /// Above `HBMMENU_POPUP_MINIMIZE`, which is 11, with slack for a value Windows has not
+    /// documented yet. **Not** a floor on what counts as a handle; see [`menu_bitmap`].
+    const LAST_MAGIC: isize = 16;
+    // Null, `HBMMENU_CALLBACK`, and the positive family. Nothing else — a large negative value is a
+    // sign-extended GDI handle and is exactly what this used to discard.
+    raw == 0 || raw == -1 || (1..=LAST_MAGIC).contains(&raw)
 }
 
 /// What each `CMF_` flag combination costs, and what it leaves out.
@@ -515,6 +943,143 @@ pub(super) fn probe_flags(parent: &Path, items: &[PathBuf]) {
                     .join(" | ")
             );
         }
+    }
+}
+
+/// Whether a **submenu row** carries a canonical verb, which decides whether `Ouvrir avec` can be
+/// anchored by name or only by position.
+///
+/// [`Live::read`] never asks: a submenu takes the `Kind::unfilled` branch before the id branch is
+/// reached, and [`commands_of`] skips popups outright on the grounds that "a popup's `wID` means
+/// nothing". This is the measurement behind that grounds — it prints `wID` and whatever
+/// `GetCommandString` answers for every top-level row, popups included, so the claim is a reading
+/// rather than an assumption. See `crate::shell::menu::regroup`, which has to place `Open with`.
+#[cfg(test)]
+pub(super) fn probe_submenu_verbs(parent: &Path, items: &[PathBuf]) {
+    unsafe {
+        let Some(context) = context_of(parent, items) else {
+            return;
+        };
+        let Ok(hmenu) = CreatePopupMenu() else { return };
+        let _ = context.QueryContextMenu(hmenu, 0, FIRST, LAST, flags(Depth::Full));
+        let count = GetMenuItemCount(Some(hmenu)).max(0);
+        for position in 0..count {
+            let mask = MIIM_ID | MIIM_SUBMENU | MIIM_FTYPE;
+            let Some((info, raw)) = item_at(hmenu, position as u32, mask) else {
+                continue;
+            };
+            if info.fType.0 & MFT_SEPARATOR.0 != 0 {
+                continue;
+            }
+            let label = split_label(&raw).0;
+            let popup = !info.hSubMenu.is_invalid();
+            // Asked whatever the id looks like, which is the point: an out-of-range id with a real
+            // verb behind it would mean the guard in `read` is what is losing the name.
+            let verb = info
+                .wID
+                .checked_sub(FIRST)
+                .and_then(|offset| canonical_verb(&context, offset as usize));
+            eprintln!(
+                "  {label:<44} wID {:<6} {} verb {verb:?}",
+                info.wID,
+                if popup { "POPUP" } else { "     " }
+            );
+        }
+        let _ = DestroyMenu(hmenu);
+    }
+}
+
+/// Why a row has no icon: what the shell put in `hbmpItem`, and what came of reading it.
+///
+/// Three different answers hide behind one blank gutter and they need different fixes, so this
+/// prints them apart: **no handle at all** (the entry supplies its icon by some other route, and
+/// `hbmpItem` was never going to have it), **a `HBMMENU_*` magic value** (a small integer, not a
+/// bitmap — `HBMMENU_CALLBACK` means the owner expected to draw it during `WM_DRAWITEM`, which a menu
+/// that is never shown never gets), or **a real handle that would not convert**, which is the only
+/// one of the three that is this program's bug.
+///
+/// `MFT_OWNERDRAW` is printed too: an entry that draws itself has no label either, and one that
+/// arrives here with an empty label is being dropped by [`Live::read`] rather than mis-drawn.
+#[cfg(test)]
+pub(super) fn probe_menu_icons(parent: &Path, items: &[PathBuf]) {
+    use windows::Win32::Graphics::Gdi::{GetObjectW, BITMAP};
+    use windows::Win32::UI::WindowsAndMessaging::MFT_OWNERDRAW;
+
+    unsafe {
+        let Some(context) = context_of(parent, items) else {
+            return;
+        };
+        let Ok(hmenu) = CreatePopupMenu() else { return };
+        let _ = context.QueryContextMenu(hmenu, 0, FIRST, LAST, flags(Depth::Full));
+        let count = GetMenuItemCount(Some(hmenu)).max(0);
+        let (mut with, mut without) = (0, 0);
+        // What converting them all costs, which is the question behind "should this be async": it
+        // happens on the builder thread, so it is already off the frame, but a cost big enough to
+        // delay the *menu* would want the icons filled in afterwards instead.
+        let mut converting = std::time::Duration::ZERO;
+        for position in 0..count {
+            let mask = MIIM_ID | MIIM_SUBMENU | MIIM_FTYPE | MIIM_BITMAP;
+            let Some((info, text)) = item_at(hmenu, position as u32, mask) else {
+                continue;
+            };
+            if info.fType.0 & MFT_SEPARATOR.0 != 0 {
+                continue;
+            }
+            let label = split_label(&text).0;
+            let raw = info.hbmpItem.0 as isize;
+            let verb = info
+                .wID
+                .checked_sub(FIRST)
+                .and_then(|offset| canonical_verb(&context, offset as usize));
+
+            // What the handle is, and — when it is a real one — what shape of bitmap.
+            let what = if info.hbmpItem.is_invalid() || raw == 0 {
+                "no handle".to_owned()
+            } else if raw == -1 || (1..=16).contains(&raw) {
+                // The `HBMMENU_*` family, and nothing wider — see [`menu_bitmap`], where a bound of
+                // `<= 16` was throwing away every handle with its high bit set. `-1` is
+                // `HBMMENU_CALLBACK`, which means "ask me to draw it" and is unanswerable for a menu
+                // that never pops up.
+                format!("magic {raw}")
+            } else {
+                let mut header = BITMAP::default();
+                let read = GetObjectW(
+                    info.hbmpItem.into(),
+                    std::mem::size_of::<BITMAP>() as i32,
+                    Some((&mut header) as *mut BITMAP as *mut std::ffi::c_void),
+                );
+                let at = std::time::Instant::now();
+                let converted = menu_bitmap(info.hbmpItem).is_some();
+                converting += at.elapsed();
+                if read == 0 {
+                    "handle, but GetObject refused it".to_owned()
+                } else {
+                    format!(
+                        "{}x{} {}bpp -> {}",
+                        header.bmWidth,
+                        header.bmHeight,
+                        header.bmBitsPixel,
+                        if converted { "converted" } else { "**FAILED**" }
+                    )
+                }
+            };
+            if what.starts_with("no handle") || what.starts_with("magic") {
+                without += 1;
+            } else {
+                with += 1;
+            }
+            eprintln!(
+                "  {label:<44} {}{:<34} {}",
+                if info.fType.0 & MFT_OWNERDRAW.0 != 0 { "OWNERDRAW " } else { "" },
+                what,
+                verb.unwrap_or_else(|| "-".to_owned())
+            );
+        }
+        eprintln!(
+            "  {with} rows offered a bitmap, {without} offered none — converting them all took              {:.2} ms",
+            converting.as_secs_f32() * 1e3
+        );
+        let _ = DestroyMenu(hmenu);
     }
 }
 

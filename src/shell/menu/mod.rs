@@ -254,6 +254,15 @@ impl Command {
 pub enum Kind {
     Command(Command),
     Separator,
+    /// shell32's own block — Cut, Copy, Rename, Share, Delete — as one row of icon tiles
+    /// rather than five rows, which is how Windows 11's own menu shows it.
+    ///
+    /// Every child is a [`Kind::Command`]; a tile row is not a level and cannot nest. It exists
+    /// as a `Kind` rather than as a flag on the level because it is one *entry* as far as
+    /// everything that walks a menu is concerned — one thing to measure, one row to allocate,
+    /// one stop for the arrow keys — and only the drawing of it is horizontal. See
+    /// [`tiles_at`] for which verbs go in it and `crate::ui::menu::draw_tiles` for the row.
+    Tiles(Vec<Entry>),
     /// A submenu, which starts out empty.
     ///
     /// Filling one means asking the extension that owns it to populate its `HMENU`, and
@@ -272,6 +281,14 @@ pub enum Kind {
     Submenu {
         children: Vec<Entry>,
         source: Option<u32>,
+        /// Whether this submenu is one [`regroup`] made, rather than one the shell did.
+        ///
+        /// It cannot be told from `source`, which is `None` both for a group of this program's
+        /// making and for a real shell submenu that has since been filled — and the difference
+        /// matters at exactly one point: a right click inside one of ours means "take this entry out
+        /// of the group", and a right click inside `Send to` means nothing at all. Getting that
+        /// wrong would offer to rearrange a menu Windows owns.
+        ours: bool,
     },
 }
 
@@ -281,6 +298,7 @@ impl Kind {
         Self::Submenu {
             children: Vec::new(),
             source: Some(source),
+            ours: false,
         }
     }
 
@@ -289,7 +307,23 @@ impl Kind {
         Self::Submenu {
             children,
             source: None,
+            ours: false,
         }
+    }
+
+    /// A group [`regroup`] collapsed, which is this program's own arrangement of the shell's
+    /// entries and is the user's to undo.
+    pub fn group(children: Vec<Entry>) -> Self {
+        Self::Submenu {
+            children,
+            source: None,
+            ours: true,
+        }
+    }
+
+    /// Whether this is a group of this program's making. See [`Kind::Submenu::ours`].
+    pub fn is_ours(&self) -> bool {
+        matches!(self, Self::Submenu { ours: true, .. })
     }
 
     /// What the shell knows this submenu by, if it is still waiting to be filled.
@@ -313,6 +347,45 @@ pub struct Entry {
     pub checked: bool,
     /// The item's own bitmap, as RGBA, when the shell gave one.
     pub icon: Option<egui::ColorImage>,
+    /// The canonical verb, for **placing** this row. See [`Entry::verb`].
+    ///
+    /// # Why this is not just read off `Command::Shell`
+    ///
+    /// Because a **submenu row has one too**, and for a long time nothing here knew that.
+    /// `win::read` reaches the `Kind::unfilled` branch before the branch that asks for a verb, and
+    /// `win::commands_of` skips popups outright on the stated grounds that "a popup's `wID` means
+    /// nothing" — so `Ouvrir avec` and `7-Zip` arrived anonymous. Measured by
+    /// `win::probe_submenu_verbs`, they are not: `Ouvrir avec` is `openas` and `7-Zip` is
+    /// `SevenZip`, sitting on `wID`s the reader was throwing away. Which mattered the moment
+    /// [`regroup`] had to put `Open with` in a band of its own and could not name it.
+    ///
+    /// So it lives on the entry rather than inside one `Kind`: it survives the `unfilled` →
+    /// `complete` transition that [`crate::ui::menu::Open::filled`] performs, which a field on
+    /// `Kind::Submenu` would have to be carried across by hand every time.
+    ///
+    /// `Command::Shell::verb` is the same string from the same `GetCommandString`, kept separately
+    /// because it goes somewhere this does not: a chosen command travels to
+    /// [`crate::shell::Modal`] on its own, without the `Entry` it came from. One is for showing the
+    /// row, the other for running it.
+    pub verb: Option<String>,
+    /// **The row the menu opens with**: `MFS_DEFAULT` as the shell set it, or the stand-in
+    /// [`regroup`] chose when the shell set it on nothing.
+    ///
+    /// **Read but never drawn**, and the distinction is the whole reason this field is worth
+    /// having. It was drawn once, as the 2px accent bar a selected row gets, which put a blue
+    /// bar down the side of the top row of every menu in the program — the default entry is
+    /// nearly always the first one, so what read as a selection nobody had made was there every
+    /// time. That is still not to be drawn; see the note in `win::read`.
+    ///
+    /// What it is for is [`regroup`], which has to name the one entry that stays at the top of a
+    /// banded menu. The shell's answer is better than any rule this program could write: it is
+    /// `open` on a file, `explore` or `open` on a folder, and whatever an installed extension has
+    /// claimed as the default where one has.
+    ///
+    /// And [`is_anchored`] reads it, which is why `regroup` marks its stand-in as well as passing
+    /// the shell's through: a top row the drawing code did not recognise as a band was a top row
+    /// offering a right click that recorded a preference and moved nothing.
+    pub default: bool,
 }
 
 impl Entry {
@@ -324,6 +397,8 @@ impl Entry {
             enabled: false,
             checked: false,
             icon: None,
+            default: false,
+            verb: None,
         }
     }
 
@@ -336,7 +411,45 @@ impl Entry {
             enabled: true,
             checked: false,
             icon: None,
+            default: false,
+            // This program's own entries are not the shell's and have no canonical name. Which is
+            // also what keeps them out of `Moves` and out of every band; see `Moves::key`.
+            verb: None,
         }
+    }
+
+    /// A submenu of this program's making, holding entries the shell handed over flat.
+    ///
+    /// The children are complete — [`Kind::complete`], not [`Kind::unfilled`] — because they have
+    /// already been read out of the shell's `HMENU`. So a collapsed group opens with no round trip
+    /// to an extension at all, which a real shell submenu cannot do; see [`Live::fill`].
+    fn group(label: String, children: Vec<Entry>) -> Self {
+        Self {
+            label,
+            // How many are in it, in the slot a shortcut would use — right-aligned and in the
+            // caption font, which is exactly the weight a count wants. It answers the only question
+            // a collapsed row raises before you open it, and it costs no width the row was not
+            // already reserving. Windows does not show one; Windows is also not collapsing anything.
+            shortcut: children.len().to_string(),
+            // A group with nothing in it is not offered — see `regroup` — so this is always usable.
+            enabled: true,
+            kind: Kind::group(children),
+            checked: false,
+            icon: None,
+            default: false,
+            // A group is this program's arrangement, not a command the shell knows.
+            verb: None,
+        }
+    }
+
+    /// The verb this entry is known by, where the shell gave one — **submenu rows included**.
+    pub fn verb(&self) -> Option<&str> {
+        self.verb.as_deref()
+    }
+
+    /// Whether this is the shell's own command for `verb`, whatever language the label is in.
+    fn is(&self, verb: &str) -> bool {
+        self.verb().is_some_and(|found| found.eq_ignore_ascii_case(verb))
     }
 }
 
@@ -391,7 +504,7 @@ pub fn with_our_paste(entries: Vec<Entry>, can_paste: bool) -> Vec<Entry> {
 pub fn properties_at(entries: &[Entry]) -> Option<usize> {
     entries.iter().rposition(|entry| match &entry.kind {
         Kind::Command(Command::Shell { verb: Some(verb), .. }) => {
-            verb.eq_ignore_ascii_case("properties")
+            verb.eq_ignore_ascii_case(PROPERTIES)
         }
         _ => false,
     })
@@ -415,6 +528,485 @@ pub fn with_our_copy_paths(mut entries: Vec<Entry>) -> Vec<Entry> {
     let at = properties_at(&entries).unwrap_or(entries.len());
     entries.insert(at, Entry::own(Own::CopyPaths));
     entries
+}
+
+// ---------------------------------------------------------------------------
+// Banding the shell's menu
+// ---------------------------------------------------------------------------
+
+/// Who registered a command, so that a run of entries can be named after the product that put
+/// them there.
+///
+/// Only `IExplorerCommand` handlers have one — their canonical verb *is* a CLSID, which can be
+/// looked up. A static registry verb (`Open with Zed`, from `HKCR\*\shell\Zed`) has no CLSID and
+/// therefore no handler here, which is itself worth knowing: a run of them is a run with no owner.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Handler {
+    /// The DLL the handler lives in. **This is the identity** — two verbs resolving to the same
+    /// module are the same product, and that comparison is a string compare rather than a guess.
+    pub module: PathBuf,
+    /// Its `FileDescription`: `Microsoft OneDrive`, `PowerRename Shell Extension`. For the label
+    /// only, and `None` when the version info would not read — which costs a nice name and
+    /// nothing else, since the grouping is `module`'s job.
+    pub name: Option<String>,
+}
+
+/// Every handler one menu's verbs resolve to, by verb.
+pub type Handlers = std::collections::HashMap<String, Handler>;
+
+/// Resolve the CLSID-shaped verbs in one level of a menu to the products that registered them.
+///
+/// On the builder thread, because it reads the registry and a DLL's version info. Cheap — the
+/// answers are memoised for the life of the process, and a menu asks about a dozen distinct CLSIDs
+/// once — but it is I/O, and no I/O belongs in a frame.
+///
+/// Only the top level. A submenu's entries are never a group: they are already inside one.
+fn handlers_of(entries: &[Entry]) -> Handlers {
+    #[cfg(windows)]
+    {
+        entries
+            .iter()
+            .filter_map(|entry| entry.verb())
+            .filter_map(|verb| win::handler_of(verb).map(|handler| (verb.to_owned(), handler)))
+            .collect()
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = entries;
+        Handlers::new()
+    }
+}
+
+/// Which entries the user has moved between a group and the main menu.
+///
+/// Keyed by [`Moves::key`] — the canonical verb where there is one, the label otherwise. A verb is
+/// stable across locales and across the id renumbering documented on `win::resolve`, which is why
+/// it goes first; the label is for the third of a shell menu that has no verb at all.
+///
+/// Both sets rather than one map because the two are not opposites of a single default: a group's
+/// entries start collapsed or flat depending on how big the group is, so "the user wants this one
+/// out" and "the user wants this one in" are different statements and either can be the one that
+/// disagrees with the default.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Moves {
+    /// Out of its group and onto the main menu.
+    pub promoted: std::collections::HashSet<String>,
+    /// Into its group, off the main menu.
+    pub demoted: std::collections::HashSet<String>,
+}
+
+impl Moves {
+    /// What an entry is remembered by, or `None` for one that cannot be — this program's own
+    /// entries, separators, and the tile row, none of which is the user's to move.
+    pub fn key(entry: &Entry) -> Option<String> {
+        match &entry.kind {
+            Kind::Command(Command::Shell { .. }) | Kind::Submenu { .. } => entry
+                .verb()
+                // An empty verb is not a name. `win::canonical_verb` already refuses one, so this
+                // cannot arrive from the shell — but a key of `""` would match every other entry
+                // the shell gave no verb for, which is the kind of thing worth one `filter`.
+                .filter(|verb| !verb.is_empty())
+                .map(str::to_owned)
+                // The third of a shell menu with no canonical verb at all.
+                .or_else(|| (!entry.label.is_empty()).then(|| entry.label.clone())),
+            _ => None,
+        }
+    }
+
+    /// Remember where the user has put this entry.
+    ///
+    /// Written as "record the state that was asked for" rather than "toggle a bit", because the two
+    /// sets have three states between them — promoted, demoted, and nothing said — and a toggle
+    /// would have to guess which of the two an untouched entry was defaulting to.
+    ///
+    /// Removing from the other set rather than only adding to this one: a key in both would be a
+    /// preference that reads differently depending on which set is consulted first.
+    pub fn record(&mut self, key: String, into_group: bool) {
+        if into_group {
+            self.promoted.remove(&key);
+            self.demoted.insert(key);
+        } else {
+            self.demoted.remove(&key);
+            self.promoted.insert(key);
+        }
+    }
+
+    /// Whether anything has been said about this entry, which is what tells a default apart from
+    /// a choice.
+    fn says(&self, entry: &Entry) -> Option<bool> {
+        let key = Self::key(entry)?;
+        if self.promoted.contains(&key) {
+            Some(false)
+        } else if self.demoted.contains(&key) {
+            Some(true)
+        } else {
+            None
+        }
+    }
+}
+
+/// How many entries a run needs before it is collapsed by default.
+///
+/// **A threshold, and deliberately not a classification.** The runs this is deciding about are
+/// OneDrive's block, the per-`PerceivedType` verbs from `HKCR\SystemFileAssociations\image\shell`,
+/// and the Sharing / File Locksmith / Previous Versions block — and *nothing the menu carries
+/// tells them apart*. Their verbs are CLSIDs or nothing, their owners are a mix of Microsoft and
+/// third parties in every case, and the shell does not say which registry key a verb came from.
+/// So there is no rule here that is right about all of them.
+///
+/// Four gets the two long runs and the "open with" pile right on this machine and collapses the
+/// Sharing block, which is one more than wanted. That is what [`Moves`] is for: the correction is
+/// a right click, once, and it persists. **Do not tune this number to one machine's extension
+/// set** — the next machine has a different one, and a threshold that has been fitted to this one
+/// is a threshold that is wrong everywhere else and looks deliberate.
+const COLLAPSE_FROM: usize = 4;
+
+/// shell32's own block, in the order the tile row draws it.
+///
+/// Windows 11's order, which is not the order the legacy menu lists them in — the point of the row
+/// is to be the row Windows 11 shows, and that one reads Cut, Copy, Rename, Share, Delete.
+///
+/// `link` (Create shortcut) and `properties` are deliberately absent. Properties stays an ordinary
+/// row because it is the anchor everything else about the bottom of this menu hangs off:
+/// [`properties_at`] finds it, [`with_our_copy_paths`] puts an entry above it, and
+/// `crate::ui::menu::pinned_from` keeps both out of the scrolling part. Create shortcut stays a row
+/// because a five-tile row is as wide as this menu gets before its captions ellipsize.
+///
+/// **One spelling for Share, and it is the measured one.** `Windows.ModernShare`, read off this
+/// machine by `probe_banding`.
+///
+/// It had three. `share` and `windows.share` were guesses put here on the reasoning that a verb read
+/// off one Windows is not a verb every Windows uses, so a row of four was worse than a spare
+/// spelling or two. That reasoning is wrong, and the probe is what showed it: **`Windows.Share` is
+/// already taken.** It is the canonical verb of `Accorder l'accès à` — the Sharing *wizard*, a
+/// different command with a different dialog — which the row duly hoisted out of the background menu
+/// and drew as a lone tile captioned "Accorder l'accès à". A guessed verb does not fail by matching
+/// nothing; it fails by matching something else, and a context menu is a bad place to find that out.
+///
+/// So a build that spells Share a third way gets a row of four. That is the honest outcome, and
+/// adding a fifth spelling means measuring it on the machine that uses it.
+///
+/// `rename` is here and is only in the menu because [`win::flags`] asks for `CMF_CANRENAME` — the
+/// shell does not offer it otherwise, which `probe_banding` is also what established. See the note
+/// there, and `crate::app::App::ours_rather_than_the_shell_s` for why the verb is answered here
+/// rather than handed back.
+///
+/// # Why the glyph is in the same table
+///
+/// **Windows supplies no bitmap for any of these five.** Every other row in the menu draws the one
+/// the shell gave it, and measured on a real menu, all five of shell32's verbs come back with an
+/// empty `hbmpItem`: Windows 11 draws its own row from Segoe Fluent glyphs rather than through the
+/// menu API. So the row has to bring its own, and they are here rather than in a second list beside
+/// this one because a second list is a second thing to keep in the same order. It was two lists,
+/// zipped together by position across two functions, which is a way of writing "these agree" that
+/// nothing checks.
+const TILES: [(&str, Glyph); 5] = [
+    ("cut", crate::icons::cut),
+    ("copy", crate::icons::copy),
+    ("rename", crate::icons::rename),
+    ("Windows.ModernShare", crate::icons::share),
+    ("delete", crate::icons::trash),
+];
+
+/// A painter for one tile's icon — the same shape as [`azur_egui_theme::icons::Icon`], as a plain
+/// function pointer so that [`TILES`] can be a `const`.
+pub type Glyph = fn(&egui::Painter, egui::Rect, egui::Color32);
+
+/// The verbs that get a band to themselves, in the order [`regroup`] emits them.
+///
+/// Named here rather than written out at each use so that [`is_anchored`] and `regroup` cannot come
+/// to different answers about what a band is: the one reads the list, the other reads the names.
+/// Getting that wrong is silent — the drawing code offers a right click on a row `regroup` will never
+/// move, records the preference, and the menu comes back identical.
+const BANDS: [&str; 4] = [OPEN_WITH, SEND_TO, SHORTCUT, PROPERTIES];
+
+/// `Ouvrir avec`. **A submenu row, and it has a verb** — which took finding: see [`Entry::verb`].
+const OPEN_WITH: &str = "openas";
+/// `Envoyer vers`, which on this machine has no verb at all and is a band by being a run of one.
+/// Named anyway, because a Windows that does give it one should not put it in a group.
+const SEND_TO: &str = "sendto";
+/// `Créer un raccourci`. Not a tile — see [`TILES`].
+const SHORTCUT: &str = "link";
+/// The anchor the whole bottom of the menu hangs off; see [`properties_at`].
+const PROPERTIES: &str = "properties";
+
+/// Windows' own menu, banded: the anchored verbs flat, the long runs collapsed into submenus of
+/// this program's making, and shell32's block as one row of tiles.
+///
+/// # What this does to the order, and why that is a reversal
+///
+/// `crate::ui::menu::pinned_from` used to say, of moving Properties to the bottom, that showing the
+/// menu in an order Explorer does not is worse than a menu that scrolls. This moves `openas` from
+/// the middle of the menu to the second row, which is exactly that. It is a deliberate reversal and
+/// not an oversight: a 45-row menu whose useful half is past the fold is not "Explorer's order"
+/// in any sense the user benefits from, and Windows 11's own menu does the same hoisting.
+///
+/// What is *not* reordered is anything inside a band. A group holds its run in the order the shell
+/// gave it, and the runs keep their order too — only the anchors are lifted out.
+///
+/// # Why it is pure, and on the UI thread
+///
+/// Naming a group needs the registry, which is why `handlers` is computed on the builder thread and
+/// passed in. Everything else here is arithmetic over a `Vec<Entry>`, so it can run again the
+/// instant the user right-clicks an entry — no shell, no rebuild, no waiting. That is also what
+/// makes it testable without a machine that has OneDrive on it; see the tests.
+///
+/// A menu of nothing but this program's own entries — a right-button drop — is returned untouched.
+pub fn regroup(entries: Vec<Entry>, handlers: &Handlers, moved: &Moves) -> Vec<Entry> {
+    // A drop menu is `Copy here / Move here / Create shortcuts here / Cancel` and has no bands, no
+    // groups and no tile row. Nothing below would find an anchor in it, so it would come out as one
+    // unnamed group of four — which is why this is a guard and not a comment.
+    if !entries.iter().any(|entry| entry.verb().is_some()) {
+        return entries;
+    }
+
+    // The shell's own separator positions are the group boundaries, because that is what they are:
+    // each contributing extension inserts a contiguous run at its own `indexMenu`. See the module
+    // header.
+    let mut runs: Vec<Vec<Entry>> = Vec::new();
+    let mut run: Vec<Entry> = Vec::new();
+    for entry in entries {
+        // `copyaspath` goes here rather than in the caller, because here is where the whole menu is
+        // in one place. This program has its own — `Own::CopyPaths`, which honours
+        // `Config::forward_slashes` where the shell's cannot — and two entries a keystroke apart
+        // that answer the same question differently is worse than either.
+        if entry.is("copyaspath") {
+            continue;
+        }
+        if matches!(entry.kind, Kind::Separator) {
+            if !run.is_empty() {
+                runs.push(std::mem::take(&mut run));
+            }
+            continue;
+        }
+        run.push(entry);
+    }
+    if !run.is_empty() {
+        runs.push(run);
+    }
+
+    // ---- The anchors, lifted out of whichever run they were in --------------
+    //
+    // Which run held the default is noted before it is taken, because it is the one thing that lets
+    // a mixed run be named honestly: that run is the pile of applications registered against this
+    // file type. See [`name_of`].
+    let default_run = runs
+        .iter()
+        .position(|run| run.iter().any(|entry| entry.default));
+    let default = take_where(&mut runs, |entry| entry.default).or_else(|| {
+        // A menu the shell marked nothing default in — a multiple selection, usually. The first
+        // command is what Explorer shows first and what this program showed before it banded
+        // anything, so it is the honest stand-in.
+        //
+        // **And it is marked**, which is not bookkeeping for its own sake: [`is_anchored`] is how
+        // the drawing code knows a row cannot be moved, and it has only the entry to go on. Left
+        // unmarked, the top row of a multiple selection's menu offered a right click that recorded a
+        // preference and changed nothing — because this `take_where` runs before any of
+        // [`Moves`] is consulted, so the entry is lifted either way. See [`Entry::default`].
+        take_where(&mut runs, |entry| entry.verb().is_some()).map(|entry| Entry {
+            default: true,
+            ..entry
+        })
+    });
+    let open_with = take_where(&mut runs, |entry| entry.is(OPEN_WITH));
+    let send_to = take_where(&mut runs, |entry| entry.is(SEND_TO));
+    // In [`TILES`]' order, which is the order the row draws — not the order the shell listed them.
+    let tiles: Vec<Entry> = TILES
+        .iter()
+        .filter_map(|(verb, _)| take_where(&mut runs, |entry| entry.is(verb)))
+        .collect();
+    let link = take_where(&mut runs, |entry| entry.is(SHORTCUT));
+    // The last, in the unlikely event of two — the shell's own is the one at the bottom, which is
+    // the same rule `properties_at` follows.
+    let properties = take_last_where(&mut runs, |entry| entry.is(PROPERTIES));
+
+    // ---- Emit, band by band -------------------------------------------------
+    let mut out: Vec<Entry> = Vec::new();
+    out.extend(default);
+    out.extend(open_with);
+    out.push(Entry::separator());
+
+    // How many runs have already been named `More actions`, so the second one is not the first one
+    // again. Counted over the runs that are *named*, which is the ones that produce a group.
+    let mut unowned = 0;
+    for (at, run) in runs.into_iter().enumerate() {
+        if run.is_empty() {
+            continue;
+        }
+        let collapse = run.len() >= COLLAPSE_FROM;
+        let label = name_of(&run, handlers, default_run == Some(at), unowned);
+        if label.starts_with("More actions") {
+            unowned += 1;
+        }
+        let (grouped, flat): (Vec<Entry>, Vec<Entry>) = run
+            .into_iter()
+            .partition(|entry| moved.says(entry).unwrap_or(collapse));
+        // Flat first, then the group they came out of — so promoting an entry moves it up out of
+        // the submenu rather than to some unrelated part of the menu.
+        let any_flat = !flat.is_empty();
+        out.extend(flat);
+        if !grouped.is_empty() {
+            out.push(Entry::group(label, grouped));
+        }
+        // A rule only where a run put real rows on the menu. Collapsed group rows are peers and sit
+        // together as a block — a divider between two single rows is noise, and three of them turn
+        // the middle of the menu into a ladder.
+        if any_flat {
+            out.push(Entry::separator());
+        }
+    }
+
+    out.push(Entry::separator());
+    out.extend(send_to);
+    out.push(Entry::separator());
+    if !tiles.is_empty() {
+        out.push(Entry {
+            label: String::new(),
+            shortcut: String::new(),
+            kind: Kind::Tiles(tiles),
+            enabled: true,
+            checked: false,
+            icon: None,
+            default: false,
+            verb: None,
+        });
+    }
+    out.extend(link);
+    out.extend(properties);
+    tidy(out)
+}
+
+/// The first entry a run holds that answers `wanted`, taken out of it.
+///
+/// Walks the runs in order, so "the first" means the first in the menu rather than the first in
+/// some run — which matters for the default entry, whose run is not knowable in advance.
+fn take_where(runs: &mut [Vec<Entry>], wanted: impl Fn(&Entry) -> bool) -> Option<Entry> {
+    for run in runs.iter_mut() {
+        if let Some(at) = run.iter().position(&wanted) {
+            return Some(run.remove(at));
+        }
+    }
+    None
+}
+
+/// The **last** such entry, for the one anchor where two can exist and the shell's is the lower:
+/// an extension is free to register a `properties` of its own.
+fn take_last_where(runs: &mut [Vec<Entry>], wanted: impl Fn(&Entry) -> bool) -> Option<Entry> {
+    for run in runs.iter_mut().rev() {
+        if let Some(at) = run.iter().rposition(&wanted) {
+            return Some(run.remove(at));
+        }
+    }
+    None
+}
+
+/// What to call a run when it is collapsed.
+///
+/// **The product that registered it, where one product registered all of it** — `Microsoft
+/// OneDrive`, `7-Zip`, `PowerRename`. That is the good case and it is the reason [`Handler`] exists:
+/// a group named after the thing that put it there is a group you can decide about without opening.
+///
+/// Otherwise a short generic, because the alternative is worse than it looks. Naming a mixed run
+/// after its first entry and a count gives `Modifier avec Photos + 16` — measured, on this machine,
+/// for the run that holds every app registered against `.png` — which reads as a row about Photos
+/// and is a row about seventeen unrelated programs. A label that names one member as if it named the
+/// set is not a shorter truth, it is a different claim.
+///
+/// So: `has_default` distinguishes the one mixed run that *can* be named honestly. The run holding
+/// the shell's default verb is, by construction, the pile of applications that have registered
+/// themselves for this file type — every `Open with …`, `Edit with …`, `Upload with …` — so it is
+/// `More apps`. Every other mixed run is `More actions`, numbered from the second so that two of
+/// them are still two distinguishable rows.
+///
+/// English, among a menu Windows has filled in French, and deliberately: these two strings are this
+/// program's own words and this program's interface is in English throughout. It is the same choice
+/// [`Own::label`] makes and the note there carries the argument.
+fn name_of(run: &[Entry], handlers: &Handlers, has_default: bool, unowned: usize) -> String {
+    // Every verb that resolved to a handler, and whether they all resolved to the *same* one.
+    let mut owners = run
+        .iter()
+        .filter_map(|entry| entry.verb())
+        .filter_map(|verb| handlers.get(verb));
+    if let Some(first) = owners.next() {
+        if owners.all(|other| other.module == first.module) {
+            if let Some(name) = &first.name {
+                return name.clone();
+            }
+            // No version info: the file's own name, which for a shell extension is usually still
+            // recognisable — `FileSyncShell64`, `PowerRenameExt`.
+            if let Some(stem) = first.module.file_stem() {
+                return stem.to_string_lossy().into_owned();
+            }
+        }
+    }
+    if has_default {
+        return "More apps".to_owned();
+    }
+    match unowned {
+        0 => "More actions".to_owned(),
+        n => format!("More actions ({})", n + 1),
+    }
+}
+
+/// Separators, as a menu assembled band by band leaves them: doubled where a band came out empty,
+/// and hanging off either end.
+///
+/// The same tidy `win::read` does to the shell's own `HMENU`, for the same reason — [`regroup`]
+/// pushes a rule after every band because it cannot know whether the next one will have anything in
+/// it, which is much easier to get right than deciding in advance.
+fn tidy(entries: Vec<Entry>) -> Vec<Entry> {
+    let mut out: Vec<Entry> = Vec::with_capacity(entries.len());
+    for entry in entries {
+        if matches!(entry.kind, Kind::Separator)
+            && matches!(out.last(), None | Some(Entry { kind: Kind::Separator, .. }))
+        {
+            continue;
+        }
+        out.push(entry);
+    }
+    while matches!(out.last(), Some(Entry { kind: Kind::Separator, .. })) {
+        out.pop();
+    }
+    out
+}
+
+/// Whether [`regroup`] lifts this entry into a band of its own, and so will not put it in a group
+/// however hard it is right-clicked.
+///
+/// For the drawing code, which offers the move: an entry that cannot be moved should not look as
+/// though it can. Reads the same two lists [`regroup`] does — [`BANDS`] and [`TILES`] — so the
+/// failure mode it exists to prevent cannot come back by one of them being edited alone. A right
+/// click that records a preference and changes nothing is worse than one that plainly does nothing.
+pub fn is_anchored(entry: &Entry) -> bool {
+    entry.default
+        || BANDS.iter().any(|verb| entry.is(verb))
+        || TILES.iter().any(|(verb, _)| entry.is(verb))
+}
+
+/// Which of this program's glyphs stands in for a tile, since Windows supplies none.
+///
+/// **shell32's verbs have no item bitmap.** Every other row in this menu draws the one the shell
+/// gave it — `hbmpItem`, read by `win::menu_bitmap` — and measured on a real menu, `Couper`,
+/// `Copier`, `Renommer` and `Supprimer` all come back with that field empty: Windows 11 draws its own
+/// tile row from Segoe Fluent glyphs rather than through the menu API, so there is nothing to read.
+/// A row fed only by the shell is five captions with a hole over each.
+///
+/// Keyed on the verb, which is the one thing about these five that is the same on every Windows —
+/// `Couper` is not. Where the shell *does* give a bitmap it still wins; see
+/// `crate::ui::menu::draw_tiles`.
+pub fn tile_glyph(entry: &Entry) -> Option<Glyph> {
+    TILES
+        .iter()
+        .find(|(verb, _)| entry.is(verb))
+        .map(|(_, glyph)| *glyph)
+}
+
+/// Where the tile row is in a level, if it has one. For the drawing code, which has to know
+/// before it lays anything out.
+pub fn tiles_at(entries: &[Entry]) -> Option<usize> {
+    entries
+        .iter()
+        .position(|entry| matches!(entry.kind, Kind::Tiles(_)))
 }
 
 #[cfg(test)]
@@ -520,6 +1112,11 @@ pub enum Said {
         token: u64,
         entries: Vec<Entry>,
         depth: Depth,
+        /// Who registered each `IExplorerCommand` verb in `entries`, for [`regroup`] to name the
+        /// groups with. Resolved here rather than on the UI thread because it is registry and
+        /// version-info reads — cheap, but not free, and this thread is where the shell work
+        /// already happens.
+        handlers: Handlers,
     },
     /// One submenu's contents. Empty means the extension really had nothing.
     Filled {
@@ -793,11 +1390,15 @@ fn serve(
                 parent,
                 items,
                 depth,
-            } => Some(Said::Built {
-                token,
-                entries: held.open(token, &parent, &items, depth),
-                depth,
-            }),
+            } => {
+                let entries = held.open(token, &parent, &items, depth);
+                Some(Said::Built {
+                    token,
+                    handlers: handlers_of(&entries),
+                    entries,
+                    depth,
+                })
+            }
             Ask::Fill { token, id } => Some(Said::Filled {
                 token,
                 id,

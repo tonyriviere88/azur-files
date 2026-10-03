@@ -49,7 +49,7 @@ use azur_egui_theme::components::{menu_divider, popover_frame, MenuItem};
 use azur_egui_theme::tokens::{radius, space};
 use egui::{pos2, vec2, Color32, Id, Order, Pos2, Rect, TextureHandle, Ui, Vec2};
 
-use crate::shell::menu::{Command, Entry, Kind, Own};
+use crate::shell::menu::{Command, Entry, Kind, Moves, Own};
 use crate::theme::Theme;
 
 /// A menu on screen.
@@ -61,7 +61,24 @@ pub struct Open {
     /// What it is for. Empty means the folder's own menu.
     pub items: Vec<std::path::PathBuf>,
     pub folder: std::path::PathBuf,
+    /// What is drawn: [`Open::raw`] banded by `regroup` with this program's own entries put in.
+    /// Rebuilt by [`Open::arrange`] and never assigned anywhere else.
     pub entries: Vec<Entry>,
+    /// The shell's own entries, flat, exactly as they were read.
+    ///
+    /// Kept for the whole life of the menu so that a right click can rearrange it without asking
+    /// the shell anything — which is the difference between a rearrangement that happens on the
+    /// click and one that takes the sixth of a second to most of a second the module header
+    /// measures. It is also the only copy that is still in the shell's own order, and so the only
+    /// thing `regroup` can be re-run against: its output is not its own input.
+    raw: Vec<Entry>,
+    /// Who registered each verb, for naming the groups. From the builder thread; see
+    /// [`crate::shell::menu::Handlers`].
+    handlers: crate::shell::menu::Handlers,
+    /// Whether this program's Paste goes on this menu enabled — a background menu with files on the
+    /// clipboard. Remembered rather than re-read so that [`Open::arrange`] does not take the
+    /// desktop's one clipboard on every right click.
+    can_paste: bool,
     /// How much of a menu this is, carried through so that a command chosen here is resolved
     /// against a menu built the same way. See [`crate::shell::menu::invoke`].
     pub depth: crate::shell::menu::Depth,
@@ -69,6 +86,14 @@ pub struct Open {
     pub open: Vec<usize>,
     /// The keyboard highlight, as a path from the root.
     pub cursor: Option<Vec<usize>>,
+    /// Which tile of the tile row the keyboard is on, when [`Open::cursor`] is on that row.
+    ///
+    /// Beside the cursor rather than inside it — a path of one index further down would have been
+    /// the obvious thing — because the tile row is one *row*: Up and Down step over it as a unit,
+    /// and every piece of code that reads `cursor` as "an index into this level" would otherwise
+    /// have had to learn about a path that is one longer than the level it is in. Left and Right are
+    /// the only keys that touch this.
+    tile: usize,
     /// Which build of the shell's menu this is; see [`crate::shell::menu::Builder`].
     pub token: u64,
     /// Submenus the shell should be asked to fill, for the caller to drain and send on.
@@ -107,6 +132,11 @@ pub struct Open {
 }
 
 impl Open {
+    /// A menu whose entries are already exactly what should be drawn.
+    ///
+    /// Which is every menu that did not come from the shell: a right-button drop's four entries are
+    /// this program's own and there is nothing to band. A shell menu is this followed by
+    /// [`Open::banded`].
     pub fn new(
         pane: crate::pane::PaneId,
         at: Pos2,
@@ -121,10 +151,14 @@ impl Open {
             at,
             items,
             folder,
+            raw: entries.clone(),
             entries,
+            handlers: crate::shell::menu::Handlers::new(),
+            can_paste: false,
             depth,
             open: Vec::new(),
             cursor: None,
+            tile: 0,
             token,
             fills: Vec::new(),
             asked: std::collections::HashSet::new(),
@@ -137,7 +171,63 @@ impl Open {
         }
     }
 
+    /// The same menu, banded: Windows' flat list turned into the arrangement this program shows.
+    ///
+    /// Chained onto [`Open::new`] by the one caller that has a shell menu to show —
+    /// `crate::app::App::pump_menu`. Everything it needs that a plain `new` has no use for goes in
+    /// here rather than into seven more parameters on a constructor that five other places call.
+    ///
+    /// `can_paste` is passed in rather than read because reading it takes the desktop's one
+    /// clipboard; see the caller.
+    pub fn banded(
+        mut self,
+        handlers: crate::shell::menu::Handlers,
+        can_paste: bool,
+        moves: &Moves,
+    ) -> Self {
+        self.handlers = handlers;
+        self.can_paste = can_paste;
+        self.arrange(moves);
+        self
+    }
+
+    /// Band the shell's entries and put this program's own two in.
+    ///
+    /// **The one place a menu's contents are decided**, called by [`Open::new`] and again by every
+    /// right click that moves an entry. Two code paths that each arranged the menu their own way is
+    /// exactly how the menu you get by opening one and the menu you get by rearranging one would
+    /// come to differ, and the second is the one nobody would test.
+    ///
+    /// Every path into this menu changes when it is called — the indices the open chain, the
+    /// keyboard cursor, the texture keys and the scroll memory are all made of shift as soon as an
+    /// entry moves between levels — so all of them are dropped. `asked` is *not*: a submenu's fill
+    /// id is the shell's own and rearranging the menu does not change which submenu it names, so
+    /// keeping it is what stops an already-filled `Send to` from being asked for a second time.
+    pub fn arrange(&mut self, moves: &Moves) {
+        let entries = crate::shell::menu::regroup(self.raw.clone(), &self.handlers, moves);
+        // An empty selection is the folder's *background* menu, and that is the one menu the shell
+        // hands over with a gap in it — no Paste. See `crate::shell::menu::Own::Paste`.
+        let entries = if self.items.is_empty() {
+            crate::shell::menu::with_our_paste(entries, self.can_paste)
+        } else {
+            entries
+        };
+        // And `Copy path(s)`, on both menus, just above Properties.
+        self.entries = crate::shell::menu::with_our_copy_paths(entries);
+
+        self.open.clear();
+        self.cursor = None;
+        self.tile = 0;
+        self.textures.clear();
+        self.shown.clear();
+    }
+
     /// The entry at a path, if there is one.
+    ///
+    /// Walks into a tile row as well as into a submenu, so a tile has a path like everything else —
+    /// which is what lets the texture map and the keyboard cursor address one. [`Open::level`] does
+    /// *not*, and the difference is deliberate: a tile row is a row and not a level, and a version
+    /// of this that let one be opened as a level would hang an `egui::Area` off it.
     fn entry(&self, path: &[usize]) -> Option<&Entry> {
         let mut level = &self.entries;
         for (depth, index) in path.iter().enumerate() {
@@ -146,20 +236,37 @@ impl Open {
                 return Some(entry);
             }
             match &entry.kind {
-                Kind::Submenu { children, .. } => level = children,
+                Kind::Submenu { children, .. } | Kind::Tiles(children) => level = children,
                 _ => return None,
             }
         }
         None
     }
 
-    /// The entries at a level.
+    /// The entries at a level — a level being something that gets an `egui::Area` of its own.
+    ///
+    /// A tile row is not one; see [`Open::children`] for the walk that includes it.
     fn level(&self, path: &[usize]) -> Option<&Vec<Entry>> {
         if path.is_empty() {
             return Some(&self.entries);
         }
         match self.entry(path)?.kind {
             Kind::Submenu { ref children, .. } => Some(children),
+            _ => None,
+        }
+    }
+
+    /// Whatever entries hang off a path, tile rows included.
+    ///
+    /// For the walks that are about *entries* rather than about levels — uploading the item
+    /// bitmaps, and nothing else so far. A tile's icon has to be uploaded like any other, and it is
+    /// the one child that [`Open::level`] deliberately will not hand over.
+    fn children(&self, path: &[usize]) -> Option<&Vec<Entry>> {
+        if path.is_empty() {
+            return Some(&self.entries);
+        }
+        match self.entry(path)?.kind {
+            Kind::Submenu { ref children, .. } | Kind::Tiles(ref children) => Some(children),
             _ => None,
         }
     }
@@ -186,7 +293,12 @@ impl Open {
                 }
             }
         }
-        put(&mut self.entries, id, &mut Some(children));
+        // Into the arrangement on screen, so the submenu the user is hovering appears on this frame.
+        put(&mut self.entries, id, &mut Some(children.clone()));
+        // And into the shell's own copy, which is what [`Open::arrange`] rebuilds from. Without
+        // this, moving an entry would throw away every submenu that had been filled and the shell
+        // would be asked for them all over again — up to a tenth of a second each for `Open with`.
+        put(&mut self.raw, id, &mut Some(children));
     }
 
     /// Ask for the open submenu's contents, once.
@@ -211,6 +323,16 @@ pub enum Outcome {
     Closed,
     /// This was chosen.
     Chose(Command),
+    /// A right click asked for these entries to be moved between their group and the main menu.
+    ///
+    /// The menu stays open and is rearranged in place — see `crate::app::App::draw_menu`. Several
+    /// keys because a right click on a group's own row moves everything in it, which is how a group
+    /// that should not have been collapsed is undone in one gesture rather than five.
+    Move {
+        keys: Vec<String>,
+        /// Where they are going. `false` is out onto the main menu.
+        into_group: bool,
+    },
 }
 
 /// One row's height, from the design system rather than from arithmetic repeated here.
@@ -232,19 +354,34 @@ fn separator_height() -> f32 {
     azur_egui_theme::components::menu_divider_height()
 }
 
+/// How tall shell32's block is when it is drawn as one row of tiles: an icon over a caption, with
+/// `space-2` above and below and `space-1` between the two.
+///
+/// Stated here beside [`draw_tiles`], which allocates it, for the reason [`separator_height`]
+/// carries at length: [`measure`] adds these up to place the menu before anything is drawn, so a
+/// height derived anywhere else drifts the moment the drawing changes and puts the whole menu out.
+fn tile_row_height() -> f32 {
+    space::S2 * 2.0 + TILE_ICON + space::S1 + azur_egui_theme::tokens::typography::LINE_CAPTION
+}
+
+/// A tile's icon, at the size the shell's `hbmpItem` actually is.
+///
+/// 16 and not the 20-something Windows 11 draws, because a menu item bitmap is a 16×16 bitmap and
+/// there is nothing else to have: scaling it up would blur the one part of this row that has to
+/// read as Windows' own icon.
+const TILE_ICON: f32 = 16.0;
+
 /// What a run of entries takes, rows and dividers alike.
 ///
-/// The one place the two heights are added up, so [`measure`] and the split between the
+/// The one place the heights are added up, so [`measure`] and the split between the
 /// scrolling part of a level and its pinned tail cannot disagree about what a level is worth.
 fn stack_height(entries: &[Entry]) -> f32 {
     entries
         .iter()
-        .map(|entry| {
-            if matches!(entry.kind, Kind::Separator) {
-                separator_height()
-            } else {
-                row_height()
-            }
+        .map(|entry| match entry.kind {
+            Kind::Separator => separator_height(),
+            Kind::Tiles(_) => tile_row_height(),
+            _ => row_height(),
         })
         .sum()
 }
@@ -263,10 +400,16 @@ fn stack_height(entries: &[Entry]) -> f32 {
 /// verb and never by label, and the code that puts an entry beside it asks the same function — so the
 /// two cannot come to different answers.
 ///
-/// **Nothing is moved.** The tail is a suffix of the entries in the order the shell gave them,
-/// so if an extension has put something below Properties it is pinned too. Lifting Properties
-/// out of the middle and re-hanging it at the bottom would show the menu in an order Explorer
-/// does not, which is worse than a menu that scrolls.
+/// **Nothing is moved *here*.** The tail is a suffix of the entries in whatever order they arrive
+/// in, so if an extension has put something below Properties it is pinned too.
+///
+/// This used to go on to say that lifting an entry out of the middle of the menu and re-hanging it
+/// somewhere else would show the menu in an order Explorer does not, which is worse than a menu that
+/// scrolls. **That has been reversed, deliberately, one layer up**:
+/// [`crate::shell::menu::regroup`] now bands the menu and hoists `openas` to the second row. The
+/// argument that changed is that a 45-row menu whose useful half is below the fold is not "Explorer's
+/// order" in any sense that helps anybody, and Windows 11's own menu hoists the same entry. What is
+/// still true is that *this* function moves nothing: it decides where a suffix begins.
 ///
 /// **This program's own `Copy path(s)` comes with it**, because that is where it was put — between
 /// Properties and the divider above them both, see [`crate::shell::menu::with_our_copy_paths`]. A
@@ -286,13 +429,22 @@ fn pinned_from(entries: &[Entry]) -> usize {
             .checked_sub(1)
             .filter(|&at| ours_beside_properties(&entries[at]))
     });
-    let Some(index) = anchor else {
+    // The tile row is pinned whether or not there is a Properties to hang it off, and it is the
+    // *reason* to pin on a menu that has one: Cut, Copy, Rename and Delete are what people go to a
+    // context menu for, and the whole point of the row is that they are one glance away rather than
+    // one scroll. It sits above `link`, `Copy path(s)` and Properties — see
+    // `crate::shell::menu::regroup` — so it is the earliest row the tail can begin at.
+    let tiles = crate::shell::menu::tiles_at(entries);
+    let Some(index) = anchor.or(tiles) else {
         return entries.len();
     };
-    // Ours first, then the divider above the lot.
+    // Ours first, then the tile row above them, then the divider above the lot.
     let mut from = index;
     while from > 0 && ours_beside_properties(&entries[from - 1]) {
         from -= 1;
+    }
+    if let Some(tiles) = tiles {
+        from = from.min(tiles);
     }
     if from > 0 && matches!(entries[from - 1].kind, Kind::Separator) {
         from - 1
@@ -343,11 +495,8 @@ pub fn show(ui: &mut Ui, t: &Theme, menu: &mut Open) -> Outcome {
     menu.ask();
 
     let screen = ctx.viewport_rect();
-    let mut chosen = None;
+    let mut out = Out::default();
     let mut hovered_any = false;
-    // The chain the pointer is currently over, which becomes the open chain so that
-    // moving off a submenu and onto a sibling closes the old one.
-    let mut wants_open: Option<Vec<usize>> = None;
 
     // Levels are drawn root-first, each anchored to the item that opened it.
     let depth = menu.open.len();
@@ -442,8 +591,7 @@ pub fn show(ui: &mut Ui, t: &Theme, menu: &mut Open) -> Outcome {
                                         first: 0,
                                         scrolls: true,
                                     },
-                                    &mut chosen,
-                                    &mut wants_open,
+                                    &mut out,
                                 )
                             });
                         let mut drawn = scrolling.inner;
@@ -459,8 +607,7 @@ pub fn show(ui: &mut Ui, t: &Theme, menu: &mut Open) -> Outcome {
                                 first: pin,
                                 scrolls: false,
                             },
-                            &mut chosen,
-                            &mut wants_open,
+                            &mut out,
                         ));
                         // What the child used, so the frame wraps the rows rather than
                         // collapsing to nothing behind them.
@@ -493,8 +640,13 @@ pub fn show(ui: &mut Ui, t: &Theme, menu: &mut Open) -> Outcome {
     // area on screen, and must still count as appearing on the frame it finally gets one.
     menu.shown = on_screen.into_iter().collect();
 
-    if let Some(command) = chosen {
+    if let Some(command) = out.chosen {
         return Outcome::Chose(command);
+    }
+    // Before the dismissal check below, which would otherwise take the same right click as a click
+    // outside the menu and close it.
+    if let Some((keys, into_group)) = out.moved {
+        return Outcome::Move { keys, into_group };
     }
 
     // Opening and closing submenus follows the pointer: hovering a submenu opens it,
@@ -504,7 +656,7 @@ pub fn show(ui: &mut Ui, t: &Theme, menu: &mut Open) -> Outcome {
     // `hovered()`, and a menu opens *under* the pointer — so the row it happened to land on top
     // of would take the open chain straight back off the arrow keys, and Right would never get a
     // submenu open at all. The pointer takes over again the moment it actually moves.
-    if let Some(path) = wants_open {
+    if let Some(path) = out.wants_open {
         if !menu.by_key && menu.open != path {
             menu.open = path;
         }
@@ -534,6 +686,18 @@ struct Run<'a> {
     scrolls: bool,
 }
 
+/// What a pass over the rows found, gathered so that the two runs of a level and the several levels
+/// of a menu all report into one place.
+#[derive(Default)]
+struct Out {
+    /// A command was activated, and the menu is over.
+    chosen: Option<Command>,
+    /// The chain the pointer is over, which becomes the open chain.
+    wants_open: Option<Vec<usize>>,
+    /// A right click asked for these keys to be moved. See [`Outcome::Move`].
+    moved: Option<(Vec<String>, bool)>,
+}
+
 /// A run of one level's rows. Returns where each row ended up, so a submenu can be anchored.
 fn draw_level(
     ui: &mut Ui,
@@ -541,8 +705,7 @@ fn draw_level(
     menu: &Open,
     path: &[usize],
     run: Run<'_>,
-    chosen: &mut Option<Command>,
-    wants_open: &mut Option<Vec<usize>>,
+    out: &mut Out,
 ) -> HashMap<usize, Rect> {
     let Run { entries, first, scrolls } = run;
     let mut rects = HashMap::new();
@@ -556,8 +719,21 @@ fn draw_level(
 
         let mut here = path.to_vec();
         here.push(index);
-        let is_submenu = matches!(entry.kind, Kind::Submenu { .. });
         let highlighted = menu.cursor.as_deref() == Some(here.as_slice());
+
+        // shell32's block, as one row rather than five. Its own function because nothing below
+        // applies to it: it has no label, no shortcut, no submenu arrow and no single response.
+        if let Kind::Tiles(tiles) = &entry.kind {
+            let rect = draw_tiles(ui, t, menu, &here, tiles, highlighted, &mut out.chosen);
+            rects.insert(index, rect);
+            if ui.rect_contains_pointer(rect) {
+                // Hovering the row closes whatever submenu was open beside it, like any other row.
+                out.wants_open = Some(path.to_vec());
+            }
+            continue;
+        }
+
+        let is_submenu = matches!(entry.kind, Kind::Submenu { .. });
 
         // The shell's own bitmap for the row, drawn through Azur's icon slot so the
         // layout is the component's rather than something invented here.
@@ -616,7 +792,7 @@ fn draw_level(
         // faithful whether or not this program draws it.
 
         if response.hovered() {
-            *wants_open = Some(if is_submenu {
+            out.wants_open = Some(if is_submenu {
                 here.clone()
             } else {
                 path.to_vec()
@@ -624,15 +800,172 @@ fn draw_level(
         }
         if response.clicked() && entry.enabled {
             match &entry.kind {
-                Kind::Command(command) => *chosen = Some(command.clone()),
+                Kind::Command(command) => out.chosen = Some(command.clone()),
                 // Clicking a submenu row opens it rather than doing nothing, which is
                 // what a pointer expects even though hovering already did it.
-                Kind::Submenu { .. } => *wants_open = Some(here.clone()),
-                Kind::Separator => {}
+                Kind::Submenu { .. } => out.wants_open = Some(here.clone()),
+                Kind::Separator | Kind::Tiles(_) => {}
+            }
+        }
+        // A right click moves the entry between its group and the main menu — the one gesture in
+        // this menu that rearranges it rather than running something. Disabled rows included: a
+        // greyed entry is still one you may want out of a submenu, and nothing is invoked either
+        // way.
+        if response.secondary_clicked() {
+            if let Some(asked) = movable(menu, &here) {
+                out.moved = Some(asked);
             }
         }
     }
     rects
+}
+
+/// What a right click on this row would move, and where to. `None` for a row that is not the
+/// user's to rearrange.
+///
+/// Four kinds of row are refused, and each for its own reason:
+///
+/// - **This program's own entries** and separators and the tile row — [`Moves::key`] has no name
+///   for them, because none of them came from a run.
+/// - **Windows' own submenus and everything inside one.** `Send to > Documents` is Windows'
+///   arrangement of Windows' entries; offering to promote one would be this program rearranging a
+///   menu it does not own. Told apart from a group of ours by [`Kind::is_ours`].
+/// - **The anchored verbs.** `crate::shell::menu::is_anchored` names the ones `regroup` lifts into a
+///   band of their own, and a preference recorded about one of those would be inert — a right click
+///   that appears to do something and does nothing is worse than one that does nothing visibly.
+fn movable(menu: &Open, path: &[usize]) -> Option<(Vec<String>, bool)> {
+    let entry = menu.entry(path)?;
+
+    // A group's own row: the whole group comes out. One gesture to undo a run that should not have
+    // been collapsed, rather than one per entry.
+    if let Kind::Submenu { children, ours: true, .. } = &entry.kind {
+        let keys: Vec<String> = children.iter().filter_map(Moves::key).collect();
+        return (!keys.is_empty()).then_some((keys, false));
+    }
+
+    let key = Moves::key(entry)?;
+    match path.len() {
+        // Inside something. Out of it, but only if the something is ours.
+        2.. => {
+            let parent = menu.entry(&path[..path.len() - 1])?;
+            parent.kind.is_ours().then_some((vec![key], false))
+        }
+        // On the main menu, so into the group its run would have made — unless it is a band.
+        _ => (!crate::shell::menu::is_anchored(entry)).then_some((vec![key], true)),
+    }
+}
+
+/// shell32's Cut / Copy / Rename / Share / Delete as one row of icon tiles, the way Windows 11's
+/// own menu shows them.
+///
+/// Returns the row's rect, which is what a hover is tested against — the row is several responses
+/// and the caller needs one shape.
+///
+/// The tiles divide the row evenly rather than each taking its caption's width. Five equal cells
+/// read as one control; five ragged ones read as five buttons that happen to be adjacent, and the
+/// width they would need is not knowable before [`measure`] has already placed the menu.
+fn draw_tiles(
+    ui: &mut Ui,
+    t: &Theme,
+    menu: &Open,
+    path: &[usize],
+    tiles: &[Entry],
+    highlighted: bool,
+    chosen: &mut Option<Command>,
+) -> Rect {
+    let full = ui.available_width();
+    let (row, _) = ui.allocate_exact_size(vec2(full, tile_row_height()), egui::Sense::hover());
+    let each = full / tiles.len() as f32;
+    // One buffer for the row rather than one per tile: the texture map is keyed by path, and this is
+    // a draw loop. Pushed and popped per tile, like `upload_icons` walks the tree.
+    let mut here = path.to_vec();
+
+    for (index, tile) in tiles.iter().enumerate() {
+        let cell = Rect::from_min_size(
+            pos2(row.left() + each * index as f32, row.top()),
+            vec2(each, row.height()),
+        );
+        // One response per tile, placed by hand: `allocate_exact_size` down a column cannot
+        // produce a row, and `horizontal()` would size the cells to their contents.
+        let response = ui.interact(
+            cell,
+            ui.id().with(("menu-tile", path, index)),
+            egui::Sense::click(),
+        );
+        let lit = tile.enabled && (response.hovered() || (highlighted && menu.tile == index));
+        if lit {
+            ui.painter().rect_filled(
+                cell.shrink(space::S1),
+                egui::CornerRadius::same(radius::SMALL),
+                t.bg.control_hover,
+            );
+        }
+
+        // The icon, centred on the cell and sitting on the top padding. Centred by its box and not
+        // by its ink, which is right for a bitmap: the shell drew it into a 16×16 with whatever
+        // margins it wanted, and second-guessing those would misalign it against the same icon
+        // drawn in Explorer.
+        here.push(index);
+        let texture = menu.textures.get(&here);
+        here.pop();
+        let at = Rect::from_min_size(
+            pos2(cell.center().x - TILE_ICON / 2.0, cell.top() + space::S2),
+            Vec2::splat(TILE_ICON),
+        );
+        if let Some(texture) = texture {
+            ui.painter().image(
+                texture.id(),
+                at,
+                Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)),
+                if tile.enabled {
+                    Color32::WHITE
+                } else {
+                    // Half alpha rather than a tint: the bitmap carries its own colours and a
+                    // greyed entry has to read as the same icon, dimmed.
+                    Color32::from_white_alpha(96)
+                },
+            );
+        } else if let Some(glyph) = crate::shell::menu::tile_glyph(tile) {
+            // Windows gives these five no bitmap at all — see `tile_glyph`, which is where the
+            // measurement is — so this is not a fallback for an unusual machine, it is the normal
+            // path. A painted glyph rather than an image, so it takes the row's own colour and is
+            // sharp at whatever the row height happens to be.
+            glyph(
+                ui.painter(),
+                at,
+                if tile.enabled {
+                    t.text.primary
+                } else {
+                    t.text.disabled
+                },
+            );
+        }
+
+        // And the caption under it, centred, on its baseline — `Align2::CENTER_TOP` puts the
+        // galley's box there, which for a single line of one font is the same thing and is the one
+        // egui offers.
+        ui.painter().text(
+            pos2(
+                cell.center().x,
+                cell.top() + space::S2 + TILE_ICON + space::S1,
+            ),
+            egui::Align2::CENTER_TOP,
+            &tile.label,
+            t.fonts.caption.clone(),
+            if tile.enabled {
+                t.text.primary
+            } else {
+                t.text.disabled
+            },
+        );
+
+        if response.clicked() && tile.enabled {
+            if let Kind::Command(command) = &tile.kind {
+                *chosen = Some(command.clone());
+            }
+        }
+    }
+    row
 }
 
 /// How big a level will be, before anything is drawn.
@@ -663,6 +996,29 @@ fn measure(ctx: &egui::Context, t: &Theme, entries: &[Entry], screen: Rect) -> V
         let mut widest: f32 = 0.0;
         for entry in entries {
             if matches!(entry.kind, Kind::Separator) {
+                continue;
+            }
+            // The tile row is five captions side by side rather than one label, so it wants the sum
+            // and not the widest. Asked for here rather than left to the row to discover, for the
+            // reason the whole of this function exists: the menu is placed from this number before
+            // anything is drawn, and a row that turned out wider than the menu would be clipped
+            // rather than fitted.
+            if let Kind::Tiles(tiles) = &entry.kind {
+                let mut row = 0.0;
+                for tile in tiles {
+                    let caption = fonts
+                        .layout_no_wrap(tile.label.clone(), t.fonts.caption.clone(), Color32::WHITE)
+                        .size()
+                        .x;
+                    // `space-3` either side, not `space-2`. The captions are centred in cells of
+                    // equal width, so the gap between two of them is whatever is left over after the
+                    // longer one — and on a French Windows the row is `Couper Copier Renommer
+                    // Partager Supprimer`, where `Renommer` and `Partager` are within a few points
+                    // of the cell and ended up almost touching. This is the one number that buys
+                    // them air, because the row's share of the menu's width is decided here.
+                    row += caption + space::S3 * 2.0;
+                }
+                widest = widest.max(row);
                 continue;
             }
             let label = fonts
@@ -733,7 +1089,7 @@ fn place(anchor: Rect, size: Vec2, screen: Rect, root: bool) -> Pos2 {
 fn upload_icons(ctx: &egui::Context, menu: &mut Open, path: &mut Vec<usize>) {
     // Walked by index rather than by reference so the tree can be read while the texture
     // map is written.
-    let count = menu.level(path).map(Vec::len).unwrap_or(0);
+    let count = menu.children(path).map(Vec::len).unwrap_or(0);
     for index in 0..count {
         path.push(index);
         let image = menu
@@ -748,7 +1104,12 @@ fn upload_icons(ctx: &egui::Context, menu: &mut Open, path: &mut Vec<usize>) {
             );
             menu.textures.insert(path.clone(), handle);
         }
-        if matches!(menu.entry(path).map(|e| &e.kind), Some(Kind::Submenu { .. })) {
+        // Into a tile row as well as into a submenu: a tile is drawn from the shell's own bitmap
+        // and there is nothing else to draw it with.
+        if matches!(
+            menu.entry(path).map(|e| &e.kind),
+            Some(Kind::Submenu { .. } | Kind::Tiles(_))
+        ) {
             upload_icons(ctx, menu, path);
         }
         path.pop();
@@ -830,16 +1191,48 @@ fn keyboard(ctx: &egui::Context, menu: &mut Open) -> Keys {
             let wrapped = next.rem_euclid(count as isize) as usize;
             let mut candidate = level_path.clone();
             candidate.push(wrapped);
-            let usable = menu
-                .entry(&candidate)
-                .is_some_and(|e| e.enabled && !matches!(e.kind, Kind::Separator));
+            let usable = menu.entry(&candidate).is_some_and(|e| match &e.kind {
+                Kind::Separator => false,
+                // A row of five whose every tile is greyed — a selection nothing can be done to —
+                // is a row there is no point stopping on.
+                Kind::Tiles(tiles) => tiles.iter().any(|tile| tile.enabled),
+                _ => e.enabled,
+            });
             if usable {
+                // Landing on the tile row starts at its first usable tile rather than at whatever
+                // tile was last under the cursor, which may since have been greyed.
+                if let Some(Kind::Tiles(tiles)) = menu.entry(&candidate).map(|e| &e.kind) {
+                    menu.tile = tiles.iter().position(|tile| tile.enabled).unwrap_or(0);
+                }
                 menu.cursor = Some(candidate);
                 return Keys::Moved;
             }
             next += step;
         }
         return Keys::Moved;
+    }
+
+    // Left and Right walk the tile row before they mean anything about submenus — the row is one
+    // cursor stop and moving along it is what those keys are for while it is the stop. Wrapping
+    // rather than clamping, because a row of five is a ring and Left from the first tile plainly
+    // means the last.
+    if left || right {
+        if let Some(cursor) = menu.cursor.clone() {
+            if let Some(Kind::Tiles(tiles)) = menu.entry(&cursor).map(|e| &e.kind) {
+                let count = tiles.len();
+                let step: isize = if right { 1 } else { -1 };
+                let mut next = menu.tile as isize + step;
+                for _ in 0..count {
+                    let wrapped = next.rem_euclid(count as isize) as usize;
+                    if tiles[wrapped].enabled {
+                        menu.tile = wrapped;
+                        break;
+                    }
+                    next += step;
+                }
+                return Keys::Moved;
+            }
+        }
     }
 
     if right {
@@ -864,6 +1257,14 @@ fn keyboard(ctx: &egui::Context, menu: &mut Open) -> Keys {
                     menu.open = cursor;
                     menu.cursor = None;
                     return Keys::Moved;
+                }
+                // Whichever tile the row is on.
+                Some(Kind::Tiles(tiles)) => {
+                    if let Some(Kind::Command(command)) =
+                        tiles.get(menu.tile).map(|tile| &tile.kind)
+                    {
+                        return Keys::Done(Outcome::Chose(command.clone()));
+                    }
                 }
                 _ => {}
             }

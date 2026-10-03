@@ -165,6 +165,22 @@ pub struct Config {
     /// [`Self::regroup`]. So `auto_tiles=` is read as "anything but `0`", which is what makes a
     /// settings file from before it existed come back with the rule on rather than off.
     pub auto_tiles: crate::pane::AutoTiles,
+    /// The context-menu entries the user has moved between a collapsed group and the main menu.
+    ///
+    /// Windows' menu is banded and its long runs are collapsed into submenus — see
+    /// [`crate::shell::menu::regroup`] — and where that guesses wrong, a right click on the entry
+    /// moves it. This is where those decisions live, because the alternative is making them again
+    /// every session.
+    ///
+    /// Keyed by canonical verb where the entry has one and by label otherwise, which is why it is a
+    /// pair of string sets rather than anything richer: it has to survive the shell renumbering its
+    /// own ids between one menu and the next, which
+    /// [`crate::shell::menu::Command::Shell::id`]'s note describes it doing routinely.
+    ///
+    /// **Never pruned.** A key for an extension that has since been uninstalled matches nothing and
+    /// costs a line in the file; going looking for the ones that no longer resolve would mean asking
+    /// the registry about every one of them at startup, to tidy something nobody sees.
+    pub menu_moves: crate::shell::menu::Moves,
     pub sections: Sections,
     /// Window size in points, as last seen.
     pub window: Option<[f32; 2]>,
@@ -225,6 +241,7 @@ impl Default for Config {
             show_hidden: false,
             forward_slashes: false,
             auto_tiles: crate::pane::AutoTiles::default(),
+            menu_moves: crate::shell::menu::Moves::default(),
             sections: Sections::default(),
             window: None,
             position: None,
@@ -362,6 +379,20 @@ impl Config {
                     if let Ok(threshold) = value.parse::<f32>() {
                         config.auto_tiles.threshold = crate::pane::AutoTiles::clamped(threshold);
                     }
+                }
+                // A context-menu entry the user has moved out of its collapsed group, or into one.
+                // Repeated, one per entry, like `bookmark` above — the natural shape for a set in a
+                // file people edit by hand, and it means an entry nobody has touched costs no line.
+                //
+                // The value is a canonical verb (`{9F156763-…}`, `sendto`) or, for the third of a
+                // shell menu that has none, a label. Not validated: a key that matches nothing is a
+                // key for an extension that is not installed *today*, and dropping it on load would
+                // quietly forget a preference every time something was uninstalled and reinstalled.
+                "menu_promote" if !value.is_empty() => {
+                    config.menu_moves.promoted.insert(value.to_owned());
+                }
+                "menu_demote" if !value.is_empty() => {
+                    config.menu_moves.demoted.insert(value.to_owned());
                 }
                 // One of the two preview flags whose default is *on*, so it is read as "anything but
                 // 0": a settings file written before there was a gutter has no line for it, and the
@@ -528,6 +559,19 @@ impl Config {
             "tiles_threshold={:.0}\n",
             self.auto_tiles.threshold
         ));
+        // Sorted, because a `HashSet` is not: written in iteration order these lines would shuffle
+        // themselves on every save, and a settings file that changes when nothing changed is one
+        // nobody can diff. See [`Config::menu_moves`].
+        for (key, moves) in [
+            ("menu_promote", &self.menu_moves.promoted),
+            ("menu_demote", &self.menu_moves.demoted),
+        ] {
+            let mut names: Vec<&String> = moves.iter().collect();
+            names.sort();
+            for name in names {
+                text.push_str(&format!("{key}={name}\n"));
+            }
+        }
         text.push_str(&format!("line_numbers={}\n", flag(self.preview.numbers)));
         text.push_str(&format!("markdown_source={}\n", flag(self.preview.markup)));
         text.push_str(&format!("diff={}\n", flag(self.preview.diff)));

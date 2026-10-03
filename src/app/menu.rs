@@ -184,35 +184,33 @@ impl App {
                     token,
                     entries,
                     depth,
+                    handlers,
                 } => {
                     let Some(asking) = self.asking.take_if(|a| a.token == token) else {
                         continue;
                     };
-                    // An empty selection is the folder's *background* menu, and that is the one
-                    // menu the shell hands over with a gap in it: it carries no Paste, and
-                    // Explorer's own is synthesised by its view rather than read out of the
-                    // shell. So this program's goes in. See `crate::shell::menu::Own::Paste`.
-                    let entries = if asking.items.is_empty() {
-                        crate::shell::menu::with_our_paste(
+                    // The shell's entries go in raw. Banding them into groups, and putting this
+                    // program's own Paste and `Copy path(s)` in, is `Open::arrange`'s job — because
+                    // it has to happen again, unchanged, every time a right click moves an entry.
+                    //
+                    // The clipboard is read here and not there: it is the desktop's one clipboard
+                    // and `has_files` takes it, which is once per menu and not once per
+                    // rearrangement. Only for a background menu, which is the only one that gets a
+                    // Paste of ours.
+                    let can_paste =
+                        asking.items.is_empty() && crate::shell::clipboard::has_files();
+                    self.menu = Some(
+                        crate::ui::menu::Open::new(
+                            asking.pane,
+                            asking.at,
+                            asking.items,
+                            asking.folder,
                             entries,
-                            crate::shell::clipboard::has_files(),
+                            depth,
+                            token,
                         )
-                    } else {
-                        entries
-                    };
-                    // And `Copy path(s)`, on both menus, just above Properties — not a gap in the
-                    // shell's menu like the Paste above it, but the one command whose answer depends
-                    // on a setting of this program's. See `crate::shell::menu::Own::CopyPaths`.
-                    let entries = crate::shell::menu::with_our_copy_paths(entries);
-                    self.menu = Some(crate::ui::menu::Open::new(
-                        asking.pane,
-                        asking.at,
-                        asking.items,
-                        asking.folder,
-                        entries,
-                        depth,
-                        token,
-                    ));
+                        .banded(handlers, can_paste, &self.menu_moves),
+                    );
                 }
                 Said::Filled { token, id, children } => {
                     if let Some(menu) = self.menu.as_mut().filter(|m| m.token == token) {
@@ -279,12 +277,21 @@ impl App {
         }
     }
 
-    /// Raise the focused pane's folder menu, over its listing.
+    /// Raise the focused pane's menu, over its listing.
     ///
     /// For `--menu`, which is how a capture run gets a menu on screen: it has no pointer
     /// to right-click with, and the menu is the one part of the window a screenshot cannot
     /// otherwise reach. Goes through the same action as a real right click, so what it
     /// captures is the real menu and not a mock-up of one.
+    ///
+    /// **The selection's menu if there is a selection**, and the folder's background menu otherwise.
+    /// Which is what a right click does, and it is the difference between the two that makes the flag
+    /// worth having: a folder has *two* menus from two different shell objects — see
+    /// `win::context_of` — and only the selection's has shell32's Cut/Copy/Rename/Share/Delete block
+    /// in it, which is the row `crate::shell::menu::regroup` turns into tiles. So
+    /// `--reveal=<name> --menu` photographs the banded menu with its tile row, and `--menu` alone
+    /// photographs the background one. Before this it was always the second, and the tile row could
+    /// not be captured at all.
     pub fn open_folder_menu(&mut self, ctx: &egui::Context) {
         let Some(pane) = self.panes.iter().find(|p| p.id == self.focused) else {
             return;
@@ -292,9 +299,10 @@ impl App {
         let rect = pane.rect;
         let scale = ctx.pixels_per_point();
         let at = rect.min + egui::vec2(rect.width() * 0.22, rect.height() * 0.30);
+        let items = pane.tab().selection_paths();
         self.actions.push(Action::ShellMenu {
             pane: pane.id,
-            items: Vec::new(),
+            items,
             at: ((at.x * scale) as i32, (at.y * scale) as i32),
         });
     }
@@ -321,6 +329,27 @@ impl App {
         match outcome {
             Outcome::Open => {}
             Outcome::Closed => self.close_menu(),
+            // A right click moved an entry between a collapsed group and the main menu. The menu
+            // stays open and is rearranged under the pointer, which is the whole point — the
+            // alternative is a menu that closes so you can reopen it to see what you did.
+            //
+            // Nothing is asked of the shell: `Open::arrange` re-runs `regroup` over the entries the
+            // menu already holds. See `crate::ui::menu::Open::raw`.
+            Outcome::Move { keys, into_group } => {
+                for key in keys {
+                    self.menu_moves.record(key, into_group);
+                }
+                // Cloned because `arrange` borrows the menu mutably and the moves are a field
+                // beside it. A `Moves` is two sets of short strings and this happens on a click.
+                let moves = self.menu_moves.clone();
+                if let Some(menu) = self.menu.as_mut() {
+                    menu.arrange(&moves);
+                }
+                // Marked rather than written. `App::apply` is the one choke point that rate-limits
+                // settings writes, and the note there is explicit about why a call site must not
+                // save for itself — see `crate::app::perform`.
+                self.config_dirty = true;
+            }
             Outcome::Chose(command) => {
                 let Some(menu) = self.menu.take() else { return };
                 self.menu_builder.close(menu.token);
@@ -371,6 +400,7 @@ impl App {
     /// | --- | --- | --- |
     /// | `open` on a folder | opens it in a new **Explorer window** | navigates this pane |
     /// | `cut`, `copy` | fills the clipboard, and nothing here knows | [`App::put_these_on_clipboard`] |
+    /// | `rename` | **nothing at all** — it needs a view to put a caret in, and there is none | this program's rename field, `F2`'s |
     /// | `paste` on a folder | the shell's own copy, with no notice and no undo of ours | [`App::paste_into_folder`] |
     /// | `pintohome` | Explorer's Quick access | this program's bookmarks — see [`App::pin_is_a_bookmark`] |
     ///
@@ -413,6 +443,18 @@ impl App {
             // it rather than quietly clearing the clipboard.
             "cut" if !menu.items.is_empty() => vec![Action::CutItems(menu.items.clone())],
             "copy" if !menu.items.is_empty() => vec![Action::CopyItems(menu.items.clone())],
+            // The one verb here that the shell would not merely do *differently* — it would do
+            // nothing. `rename` opens an inline editor in the view hosting the menu, and a menu built
+            // from a bare shell folder has no view, so `InvokeCommand` returns and no caret appears
+            // anywhere. See `win::flags`, which is also what asks the shell for the entry at all.
+            //
+            // `BeginRename` renames the row under the pane's cursor, and the cursor is on the row
+            // this menu was raised over: a right click selects the row before the menu is asked for
+            // — see `crate::ui::filelist`, where the selection is settled first. One item only,
+            // because a rename field is one name: the shell offers the entry on a multiple selection
+            // and Explorer answers it by renaming them all in sequence, which is a different feature
+            // and not one to imply by accident.
+            "rename" if menu.items.len() == 1 => vec![Action::BeginRename(menu.pane)],
             // Into the selected folder. The shell offers this on any selection with a folder
             // somewhere in it, including several at once — where Explorer's own answer is not
             // something to reproduce by accident. The first folder is the one, and the rest of
