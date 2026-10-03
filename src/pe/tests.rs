@@ -362,3 +362,221 @@ fn reading_in_parallel_does_not_change_the_answer() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// The symbols
+// ---------------------------------------------------------------------------
+
+/// The one DLL that is on every Windows machine, exports thousands of symbols, and that this
+/// process itself imports from — which makes it the fixture for both halves of the question.
+fn kernel32() -> PathBuf {
+    let graph = walk(&me(), BUDGET, PATIENCE);
+    graph
+        .modules
+        .iter()
+        .find(|m| m.name.eq_ignore_ascii_case("kernel32.dll"))
+        .and_then(|m| m.path.clone())
+        .expect("every Windows binary reaches kernel32")
+}
+
+/// **A real export table, read whole.** The three shapes an export comes in are all in
+/// `kernel32.dll` and all asserted here, because each one is a way of getting it wrong:
+///
+/// - the ordinary named export with an address;
+/// - the **forwarder**, which is most of this DLL — `NTDLL.RtlAllocateHeap` and its like — and whose
+///   address field is a string rather than an entry point;
+/// - the **ordinal-only** export, which has no name at all and so cannot be found by one.
+#[test]
+fn a_real_export_table_is_read_whole() {
+    let dll = kernel32();
+    let exports = exports(&dll).expect("kernel32 is a PE file");
+    assert!(
+        exports.len() > 500,
+        "kernel32 exports {} symbols, which is not a real export table",
+        exports.len()
+    );
+
+    // Named, and something famous is among them.
+    let named: Vec<&str> = exports.iter().filter_map(|e| e.name.as_deref()).collect();
+    for known in ["CreateFileW", "GetProcAddress", "LoadLibraryW"] {
+        assert!(named.contains(&known), "kernel32 does not export {known}");
+    }
+    // The ordinals rise with the table, which is what says the address array was read by slot
+    // rather than by name-table position.
+    let ordinals: Vec<u16> = exports.iter().map(|e| e.ordinal).collect();
+    assert!(
+        ordinals.windows(2).all(|pair| pair[0] < pair[1]),
+        "the ordinals are not in order, so a slot was mispaired"
+    );
+    // An export is code or a redirection — which `Bound` makes structural, so what is left to check
+    // is that the redirections were read as strings and not as addresses.
+    let mut forwarders = 0;
+    for export in &exports {
+        if let Bound::Forward(to) = &export.bound {
+            forwarders += 1;
+            assert!(
+                to.contains('.') && !to.contains(' '),
+                "{to:?} does not look like a forwarder target"
+            );
+        }
+    }
+    assert!(
+        forwarders > 0,
+        "no forwarder was found, and most of kernel32's surface is forwarders"
+    );
+    // **Every name is claimed once**, which is the check that the two parallel arrays were read
+    // against each other rather than by position: the name table is sorted and the ordinal table is
+    // what maps it back onto a function, so a mispairing shows up as one name on two slots.
+    let mut named: Vec<&str> = exports.iter().filter_map(|e| e.name.as_deref()).collect();
+    let before = named.len();
+    named.sort_unstable();
+    named.dedup();
+    assert_eq!(before, named.len(), "one name is attached to two exports");
+}
+
+/// **What one binary uses out of another**, which is the other half of the question and a much
+/// shorter list than the export table it is drawn from.
+///
+/// Asserted against the export table rather than against a list of names: every symbol this
+/// process imports from `kernel32.dll` has to *be* one of the things `kernel32.dll` exports, and
+/// that is a property no change to this crate can invalidate.
+#[test]
+fn what_a_binary_uses_out_of_one_dll_is_a_subset_of_what_that_dll_exports() {
+    let dll = kernel32();
+    let used = imported_from(&me(), "kernel32.dll").expect("the test binary is a PE file");
+    if used.is_empty() {
+        // A Rust binary can reach kernel32 entirely through the API sets, in which case there is
+        // nothing to check and saying so is better than a green test that asserted nothing.
+        println!("this binary imports nothing from kernel32 by name");
+        return;
+    }
+    let offered: HashSet<String> = exports(&dll)
+        .expect("kernel32 is a PE file")
+        .into_iter()
+        .filter_map(|e| e.name)
+        .collect();
+    for symbol in &used {
+        // By name or by ordinal, and exactly one of the two — that is what the top bit of a
+        // thunk means.
+        assert_ne!(
+            symbol.name.is_some(),
+            symbol.ordinal.is_some(),
+            "a symbol imported both ways, or neither"
+        );
+        if let Some(name) = &symbol.name {
+            assert!(
+                offered.contains(name),
+                "{name} is imported from kernel32, which does not export it"
+            );
+        }
+    }
+    // The case matters: this is looked up by the name off the graph's edge, which is however the
+    // import table happened to spell it.
+    assert_eq!(
+        imported_from(&me(), "KERNEL32.DLL").unwrap().len(),
+        used.len(),
+        "the DLL name is being matched case-sensitively"
+    );
+    // And a DLL this binary does not import from is an empty list rather than a wrong one.
+    assert!(imported_from(&me(), "no-such-module.dll")
+        .unwrap()
+        .is_empty());
+}
+
+/// Neither table is asked of something that is not a binary, and neither invents an answer for a
+/// binary that has nothing to say — an `.exe` normally exports nothing at all.
+#[test]
+fn a_binary_with_nothing_to_say_says_nothing() {
+    let text = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
+    assert_eq!(exports(&text).err(), Some("not a binary"));
+    assert_eq!(imported_from(&text, "kernel32.dll").err(), Some("not a binary"));
+
+    // The test binary is a real image, and a Rust test harness exports nothing.
+    let mine = exports(&me()).expect("the test binary is a PE file");
+    assert!(
+        mine.len() < 8,
+        "the test executable exports {} symbols, which is unexpected enough to look at",
+        mine.len()
+    );
+}
+
+/// **A decorated C++ name comes back readable**, and a name that is not one comes back `None`
+/// rather than mangled further.
+///
+/// The fixtures are `RshApp3D.dll`'s, out of the panel this was written against — a real MSVC
+/// C++ DLL's export table, which is the case the whole thing exists for. Not read off that file:
+/// it is on one machine and these are the strings, which is what the demangler is being asked
+/// about.
+#[test]
+#[cfg(windows)]
+fn a_decorated_name_comes_back_readable() {
+    // A member function with a namespace, a class and parameters.
+    let got = demangle("?Exec@App3D@rsh@@SAHAEAVIDocument@2@@Z").expect("a decorated name");
+    assert!(
+        got.starts_with("rsh::App3D::Exec("),
+        "the qualified name is not what it leads with: {got}"
+    );
+    // **None of the decoration around it**, which is what the flags are chosen for: a row 300 points
+    // wide cannot spend nineteen characters on `public: int __cdecl`, and a name that begins with its
+    // access specifier sorts every `public:` in the DLL together.
+    for noise in ["public:", "static", "__cdecl", "__ptr64", "int "] {
+        assert!(
+            !got.contains(noise),
+            "{noise:?} survived the flags: {got}"
+        );
+    }
+
+    // A plain C export is already what it is called, and is refused before a syscall is spent.
+    assert_eq!(demangle("CreateFileW"), None);
+    assert_eq!(demangle(""), None);
+    // Itanium mangling is another scheme and this one does not claim to read it.
+    assert_eq!(demangle("_ZN4core3fmt5write17h0123456789abcdefE"), None);
+    // And something that starts like a decorated name but is not one is refused rather than
+    // handed back as itself — `dbghelp` returns the input unchanged, which would read as a
+    // successful demangling of nonsense.
+    assert_eq!(demangle("?"), None);
+    assert_eq!(demangle("?not a symbol at all"), None);
+}
+
+/// The two together: over a **real** export table, every name either demangles or is left alone,
+/// and nothing comes back with its decoration still on it.
+///
+/// The DLL is looked for rather than named: which module on a given machine exports C++ is not
+/// something a test can assume, so this walks its own graph and takes the first export table with
+/// decorated names in it. Saying which one it found — and saying so when there was none — is the
+/// difference between a test that checked something and one that passed.
+#[test]
+#[cfg(windows)]
+fn a_real_export_table_demangles_or_is_left_alone() {
+    let graph = walk(&me(), BUDGET, PATIENCE);
+    let mut checked = None;
+    for module in graph.modules.iter() {
+        let Some(path) = &module.path else { continue };
+        let Ok(exports) = exports(path) else { continue };
+        let mut decorated = 0;
+        for name in exports.iter().filter_map(|e| e.name.as_deref()) {
+            match demangle(name) {
+                Some(readable) => {
+                    decorated += 1;
+                    assert!(
+                        !readable.starts_with('?'),
+                        "{}: {name} demangled to something still decorated: {readable}",
+                        module.name
+                    );
+                    assert!(!readable.is_empty());
+                }
+                // Left alone, which is the right answer for a C export and the only answer for a
+                // scheme this does not read.
+                None => assert!(!name.is_empty()),
+            }
+        }
+        if decorated > 0 {
+            checked = Some((module.name.clone(), decorated, exports.len()));
+            break;
+        }
+    }
+    match checked {
+        Some((name, decorated, all)) => println!("{name}: {decorated} of {all} are decorated"),
+        None => println!("nothing in this graph exports a decorated name; only the C path was run"),
+    }
+}

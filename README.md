@@ -2266,13 +2266,17 @@ needs in order to load, and where each one came from** — the Dependency Walker
 without leaving the folder.
 
 ```
-🖵 azur-file-explorer.exe                                    ⊗ 5 missing  ✕
+🖵 azur-file-explorer.exe                              ⊗ 5 missing  ☰  ✕
   ⌄ azur-file-explorer.exe        D:\Sources\MyTools\…\target\debug      x64
+      api-ms-win-core-synch-l1-2-0.dll   resolved by the API set schema
     › ole32.dll                   C:\windows\system32                    x64
     › shell32.dll                 C:\windows\system32                    x64
-      api-ms-win-core-synch-l1-2-0.dll   resolved by the API set schema
     › VCRUNTIME140.dll            C:\Program Files\AdoptOpenJDK\…\bin    x64
 ```
+
+The rows are in [folder-then-name order](#same-folder-first-then-alphabetical), which for this binary
+is plain alphabetical — nothing it imports lives in the folder it is in — and `☰` is the
+[list-or-tree](#the-tree-or-one-flat-list) button.
 
 That last row is the whole point of the thing. Nothing about this program has anything to do with a
 JDK; a `VCRUNTIME140.dll` from one is simply what is furthest forward in this machine's `PATH`, and
@@ -2298,14 +2302,170 @@ has — and counted separately: **246 files, 689 API sets** is the honest shape 
 Walking this program's own binary finds five DLLs that are not on this machine —
 `HvsiFileTrust`, `AzureAttestManager` and three more — every one of them **delay-loaded** from
 somewhere deep inside `shell32`, and every one harmless: Windows ships the stubs for features that
-are not installed, and a delay-loaded import is not opened until something calls into it.
+are not installed, and a delay-loaded import is not opened until something calls into it. A
+delay-loaded reference is dimmed and says so in its Location column, which is the difference between
+"this will not run" and "one feature will not work, later, somewhere else".
 
-So the tree opens with the root expanded and then **exactly the branches that lead to something
-which would stop the program from starting** — a missing module reachable by imports that are all
-loaded up front. Everything else stays folded. For this binary that is nothing, and the initial
-view is nineteen rows rather than the several hundred that expanding a path through `shell32` would
-have produced. A delay-loaded reference is dimmed and says so in its Location column, which is the
-difference between "this will not run" and "one feature will not work, later, somewhere else".
+The bar says **`5 missing`**, and for a while that was all it said. The tree opened the root and then
+exactly the branches leading to a module that would stop the program from *starting* — which for this
+binary is none of them, since all five are delay-loaded — so the count named a set the display would
+not show you, at any amount of scrolling. That is the one thing a dependency list must not do; it is
+what people learned to stop believing the original tool about.
+
+Two things fix it, and neither is "expand everything".
+
+**The title names them.** Hovering the panel's title has always given the whole answer; the missing
+modules are part of it now, each with the module that wants it and whether anything wants it up front:
+
+```
+244 files, 688 API sets, 5 missing — 43 ms
+
+Not found:
+    HvsiFileTrust.dll — wanted by shell32.dll, delay-loaded
+    wpaxholder.dll — wanted by urlmon.dll, delay-loaded
+    PdmUtilities.dll — wanted by Print.PrintSupport.Source.dll, delay-loaded
+    AzureAttestManager.dll — wanted by DMCmnUtils.dll, delay-loaded
+    AzureAttestNormal.dll — wanted by DMCmnUtils.dll, delay-loaded
+```
+
+**And the tree opens the way down to every one of them**, delay-loaded or not — the count and the
+opened branches are now the same set, and what tells the two kinds apart is how a row is drawn rather
+than whether it can be found at all.
+
+What that costs is worth stating, because it is the same wall this panel is otherwise careful about:
+opening the way to a module under `shell32` opens `shell32`, and `shell32` has 217 imports of its own.
+The initial view is about 770 rows rather than 30. Two things make that the right trade anyway — the
+rows at the *top* are unchanged, so what the panel shows when it opens is still the root's own imports
+in order, and the alternative was five modules unreachable by any gesture. The title says which five
+to scroll for, and the 20,000-row cap is what keeps the pathological case bounded.
+
+### Same folder first, then alphabetical
+
+The rows of a level are ordered by **the folder the module was found in, and then by name** — the ones
+that live next to the module importing them first, everything else after, each group in the listing's
+own [natural order](#sorting) so `vcruntime140_1` follows `vcruntime140`.
+
+Import-table order was what this showed before, which is the linker's order: for a program that ships
+DLLs beside itself, its own are scattered through fifty system modules in a sequence nobody can predict
+or scan. The folder compared against is the **importing** module's rather than the root's, so the rule
+reads the same at every level: the ones that live next to it come first. Anything that is not a file at
+all — an API set, a module that is missing — is in no folder, so it never joins the first group and
+sorts alphabetically among the rest, which is where a name being looked up expects to be found.
+
+### The tree, or one flat list
+
+One button on the panel's bar, and it is [the listing's own flatten button](#flattening-a-folder) —
+the same glyph, because it is the same question asked of a different tree: *show me every one of
+these, in one list, instead of the shape that says how each was reached.*
+
+The two views answer different questions and both are worth having. The tree says **what pulled this
+in**, which is the whole reason to walk a graph rather than read a list. The flat list is the one that
+can be read to the bottom: every module once, in the same folder-then-name order, which is also the
+quickest way to see that five of them are not there. A module appears once in it rather than once per
+importer, so it has no one importer to be about — which is why the second symbol panel below is a
+tree-only thing.
+
+### What a module offers, and what its importer takes
+
+Clicking a row **picks** it, and the panel divides: the tree keeps the larger part, and beside or
+below it go two lists about the picked module.
+
+```
+                              746 modules  [Search    ]│Used by shell32.dll — 3 [Search  ]
+⌄ shell32.dll         C:\windows\System32   x64        │IsWDAGEnabledForEdge     @4  delayed
+  › CFGMGR32.dll      C:\windows\System32   x64        │IsFileTrustedEx          @2  delayed
+  ⊗ HvsiFileTrust.dll not found — delay-loaded          │IsFileSupportedByWDAG    @0  delayed
+  › combase.dll       C:\windows\System32   x64        ├─────────────────────────────────
+                                                        │Exports                 [Search  ]
+                                                        │Not found, so there is no
+                                                        │export table to read.
+```
+
+Two lists and not one, because they are two questions. **Exports** is what the module offers —
+`kernel32.dll` has about seventeen hundred, sorted by name here rather than by ordinal, since a list
+that long is searched for a name and ordinal order makes that a scan of the whole panel. Each row
+carries its **ordinal** and its **entry point** — or `→ NTDLL.RtlAllocateHeap`, for the forwarders that
+are most of what `kernel32` appears to export at all. There was a third number, the *hint*, and it came
+out: three numbers beside a name is a table of numbers with a name in it, and of the three the hint is
+the one that answers a question nobody asks of this panel. It is the *importer's* record of where a name
+sat, so it earns a column in the list of what an importer uses and not in the list of what a module
+offers.
+
+**Used by** is the other half, and the more interesting one: what the module *above* it in the tree
+actually calls out of it. `shell32.dll` imports seventeen hundred symbols' worth of `kernel32.dll` and
+uses forty. It is why the pick is a *pair* — a module and its importer — so the same DLL picked under
+two different importers is two different answers, and it is tree-only, the flat list having no importer
+to be about. The example above is the useful case in miniature: three functions, all delay-loaded, all
+from a DLL that is not on this machine, which is the entire reason nothing is on fire.
+
+Both lists are read **when the row is picked and not during the walk**. A graph of two hundred modules
+is a couple of million symbols; the question is only ever asked about one module at a time. The read is
+a handful of syscalls, because a table of names is pulled in 16 KB at a time rather than one name per
+read — which was measured at 40 ms on a big DLL's export table, a dropped frame on the click that asked
+for it.
+
+**Folding moved to the expander and the double click**, which is the platform's own tree vocabulary and
+had to happen the moment a click on the body of a row meant something else. A second click on the
+picked row puts it away, which is the way back to a tree with the whole canvas.
+
+### The names are demangled
+
+`?Exec@App3D@rsh@@SAHAEAVIDocument@2@@Z` is what the file says and `rsh::App3D::Exec(...)` is what the
+panel shows, through `dbghelp`'s `UnDecorateSymbolName` — the linker's own demangler, which is the right
+one to ask about a Windows DLL and knows nothing about the Itanium scheme a MinGW or Rust module uses.
+Those come back unchanged rather than mangled further, and so does every plain C export: `CreateFileW`
+is already what it is called, and the test for that is done before a syscall is spent on it.
+
+**Without the decoration around the name**, which is a deliberate trim rather than all `dbghelp` can
+give: no calling convention, no return type, no `public:`, no `__ptr64`. Two reasons, and the second is
+the one that decided it. A panel 300 points wide holds about forty characters, and `public: int __cdecl`
+is nineteen of them spent before the name starts, on every row. And it is what makes the list
+*sortable*: the rows are ordered by what they say, so a name that began with its access specifier would
+sort every `public:` in the DLL together and leave the class names — the thing the eye is going down the
+column for — in no order at all.
+
+### Resizable, and a column down the right
+
+The panels are a **column on the right-hand side** whenever the canvas is at least **800 points** wide,
+and a band along the bottom when it is not. That is a width alone and not a shape: a canvas wider than
+it is tall can still be a 500-point side dock, where the 300 points a column would leave the tree
+cannot hold the Location column that is the reason to look at it. Under both floors — 280 points of
+tree, 190 of panel — they are not drawn at all, the tree being what this panel is for.
+
+Both boundaries are **grips**: drag to size, double click to put it back, the gesture the sidebar's
+splitter and the panel's own edge already use. What they move is a *share* rather than a number of
+points, so the panels keep their proportions when the pane is resized, and each is clamped so that
+neither side of a seam can be dragged under its floor. Both are remembered — one `dependency=` line in the
+settings, beside the list-or-tree flag, since three values written and read by hand were two values
+written and never read — because a panel that had to be re-dragged every time it opened is a panel nobody drags.
+
+### And a search box on each of the three
+
+One in the tree's strip, one in each panel's, and all three understand what [the filter box on the path
+bar](#the-path-bar) does — every word must match, `!` excludes, `^` and `$` hold an end — because a
+search box in this window should mean one thing wherever it is. The two symbol boxes ask it of what the
+row *shows*, which is the demangled name, so what you can read is what you can search; the caption
+counts what survived: `Exports — 130 of 854`.
+
+The tree's box is not a filter over the rows, and that is the whole of that decision. Filtering what is
+unfolded would search the thirty rows that happen to be open out of a thousand, and the answer is nearly
+always inside a branch that is shut — the one place a filter cannot look. So a query asks the **graph**,
+and what comes back is the chain from the root down to every module whose name matches:
+
+```
+20 of 934 modules                     [crypt      ✕]
+⌄ shell32.dll             C:\windows\System32     x64
+  ⌄ ADVAPI32.dll          C:\windows\System32     x64
+      bcrypt.dll          C:\windows\System32     x64
+      CRYPT32.dll         C:\windows\System32     x64
+    ⌄ RPCRT4.dll          C:\windows\System32     x64     ← faint: the route, not the answer
+        bcryptPrimitives.dll  C:\windows\System32 x64
+```
+
+Not "which of these rows match" but "where does this come in, and through what" — which is the question
+a tree can answer and a list cannot. The modules that are only on the way are drawn in the quiet ink,
+because the route is not the answer. It is the same breadth-first walk that opens the way down to the
+missing modules, asked a different question.
 
 The other thing worth knowing at a glance is on the right-hand end of every row: the processor it
 was built for, in the danger colour when it is not the root's. Windows will not load a mismatch,
@@ -2340,6 +2500,24 @@ mark carries the colour, where 3.01 is the number that applies, and the count st
 taken out really do fail somewhere — across both themes, since `status-warning` is fine on the dark
 side and a rule derived from the dark theme alone is how the two light-theme defects this project
 has already fixed got in.
+
+And then picking a row added a fourth surface — the accent, the same fill a selected row in the
+listing wears — on which two of the three surviving inks stop being ink:
+
+| ink | on a picked row | picked and hovered |
+| --- | --- | --- |
+| `text-primary` | 8.0 / 14.3 | 6.1 / 11.0 |
+| ~~`text-secondary`~~ | **3.3** / 5.8 | 2.5 / 4.5 |
+| ~~`status-danger`~~ | **2.3** / 3.4 | **1.8** / 2.7 |
+
+So a picked row goes to `text-primary` throughout — name, location and processor tag, and the error
+mark with them, `status-danger` being 2.33:1 there in the dark theme and under the floor a *shape*
+gets, let alone ink. Nothing is lost by it: the error mark is still the error mark, the location column
+still reads `not found`, and the picked row is the one row whose state you have just read. It is the
+two hundred rows you have *not* picked that need the colour. The flattening is one function, and the
+test asserts the rule in both directions — that `text-primary` clears the floor on all four surfaces,
+and that the other two really do fail on this one, so the rule cannot quietly become unnecessary
+without something saying so.
 
 ### Where it looked
 
@@ -5089,6 +5267,7 @@ Deliberately:
 | `--menu` | raise the folder's context menu, so `--shot` can capture one |
 | `--rename` | open the selected name for editing, for the same reason |
 | `--preview` | open the preview panel on the selected file — or the first previewable one — for the same reason |
+| `--deps=<module>` | and then pick that row of [the dependency tree](#what-a-binary-needs), so a capture shows the two symbol panels. They are behind a click on a row, and it waits for the walk rather than a frame count, because how long a walk takes is the machine's business. The searching and the resizing cannot be photographed at all and are driven with `SendInput` against the real build instead |
 | `--compare` | select the first two pictures and open the panel on them, so a capture can show the comparison |
 | `--console[=<a;b;c>]` | open the console panel, and run these commands in it |
 | `--flat`, `--flat=list\|tree` | open every pane flattened, for looking at that view without pressing the button — and in a stated mode, so photographing the other one does not mean editing the settings and remembering to put them back |

@@ -153,10 +153,11 @@ fn the_preview_panel_takes_room_from_the_listing_and_its_close_button_gives_it_b
             "{at:?}: the panel is still reading"
         );
 
-        // **A row folds when it is clicked.** Worth driving for real rather than through the
-        // view's own method, because the rows live inside a `ScrollArea` inside a panel inside
-        // a pane — and a click landing on any of those instead of on the row is precisely the
-        // kind of thing that looks correct in the source and does nothing at all.
+        // **A row picks when it is clicked and folds when it is double-clicked.** Worth driving for
+        // real rather than through the view's own methods, because the rows live inside a
+        // `ScrollArea` inside a panel inside a pane — and a click landing on any of those instead of
+        // on the row is precisely the kind of thing that looks correct in the source and does
+        // nothing at all.
         let before = shown_deps(&h);
         assert!(before > 2, "{at:?}: the root's imports are not on show");
         // **The row is asked for rather than assumed.** This used to click the row under the
@@ -169,36 +170,42 @@ fn the_preview_panel_takes_room_from_the_listing_and_its_close_button_gives_it_b
         // And it has to be a row this panel can *show*, not merely one the tree holds: a click below
         // the last visible row lands on empty canvas, and the panel along the bottom of a pane holds
         // about nine rows where the one down the side holds twenty-five. See
-        // `crate::ui::deps::View::first_foldable`, where both halves of that are written down.
-        let fits = ((panel.height() - crate::ui::preview::HEADER) / crate::ui::deps::ROW) as usize;
-        let (row, name) = h.app.panes[0]
-            .tab()
-            .preview
-            .dependency_first_foldable(fits)
-            .unwrap_or_else(|| {
-                panic!("{at:?}: none of the {fits} rows on show can be unfolded at all")
-            });
+        // `crate::ui::deps::View::foldable`, where all of that is written down.
+        //
         // **Clicked where the row was drawn, and not where the constants say it should have been.**
-        // Which is the third time this test has been caught by the same thing, and the first time it
-        // stops being able to happen: the position used to be `panel.top() + HEADER + ROW * row`, and
-        // the panel's rows do not start at `HEADER` — there is a seam above the header, so every click
+        // Which is the third time this test was caught by the same thing, and the first time it stops
+        // being able to happen: the position used to be `panel.top() + HEADER + ROW * row`, and the
+        // panel's rows do not start at `HEADER` — there is a seam above the header, so every click
         // landed one row low. It passed anyway for as long as the row below the intended one also
         // happened to be foldable, and stopped the day this crate gained an import that put an api
-        // set there. See `crate::ui::deps::View::first_foldable`, which hands back the name for this.
-        let drawn: Vec<egui::Pos2> = h
-            .texts()
-            .into_iter()
-            .filter(|(pos, text)| *text == name && panel.contains(*pos))
-            .map(|(pos, _)| pos)
-            .collect();
-        assert_eq!(
-            drawn.len(),
-            1,
-            "{at:?}: row {row} is `{name}`, and the panel draws that name {} times — the click below              would be a guess between them",
-            drawn.len()
-        );
-        // A few points into the row, the text being drawn just inside its top edge.
-        let first_import = pos2(panel.left() + 80.0, drawn[0].y + crate::ui::deps::ROW / 4.0);
+        // set there.
+        //
+        // So the drawn text is the authority on both halves: the candidate is the first foldable row
+        // whose name is on the panel exactly once, and where it is on the panel is where the click
+        // goes. A name drawn twice — a module imported by two things that are both on screen, which
+        // the auto-expand made ordinary — would be a guess between two rows, and one drawn not at all
+        // is a row this docking cannot show.
+        let texts = h.texts();
+        let candidates = h.app.panes[0].tab().preview.dependency_foldable(60);
+        let (name, drawn) = candidates
+            .iter()
+            .find_map(|(_, name)| {
+                let mut here = texts
+                    .iter()
+                    .filter(|(pos, text)| text == name && panel.contains(*pos));
+                let first = here.next()?.0;
+                here.next().is_none().then_some((name, first))
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "{at:?}: none of the {} foldable rows is drawn exactly once on the panel",
+                    candidates.len()
+                )
+            });
+        // A few points into the row, the text being drawn just inside its top edge — and clear of
+        // the expander at the left-hand end, which is the one part of a row that folds on a single
+        // click.
+        let first_import = pos2(panel.left() + 80.0, drawn.y + crate::ui::deps::ROW / 4.0);
         // **Settled first.** The panel has just been filled by a worker thread, and a click on a
         // row of it in the same breath is a click on a view that is still arriving: co-executing
         // with the other two tests in this group, this went from unfolding the row to doing
@@ -206,14 +213,47 @@ fn the_preview_panel_takes_room_from_the_listing_and_its_close_button_gives_it_b
         // unrelated `println!`. One quiet frame is what a person's hand gives it for free.
         h.wait();
         h.click_at(first_import);
+        assert_eq!(
+            shown_deps(&h),
+            before,
+            "{at:?}: a single click on the body of a row folded it"
+        );
+        let picked = h.app.panes[0]
+            .tab()
+            .preview
+            .dependency_picked()
+            .unwrap_or_else(|| panic!("{at:?}: clicking `{name}` picked nothing"));
+        assert_eq!(picked.from, Some(0), "the row clicked was one of the root's");
+        // And the panels about it are on screen — in whichever of the two arrangements this docking
+        // has room for, which is the point of asking the panel rather than computing a rect here.
+        h.wait();
+        assert!(
+            h.texts()
+                .into_iter()
+                .any(|(pos, text)| panel.contains(pos) && text.starts_with("Exports")),
+            "{at:?}: a row is picked and its symbols are nowhere on the panel"
+        );
+
+        // The double click folds, and folding does not disturb the pick.
+        h.wait();
+        h.double_click_at(first_import);
         let opened = shown_deps(&h);
         assert!(
             opened > before,
-            "{at:?}: clicking a row did not unfold it: {before} rows, then {opened}"
+            "{at:?}: double-clicking a row did not unfold it: {before} rows, then {opened}"
         );
         h.wait();
-        h.click_at(first_import);
+        h.double_click_at(first_import);
         assert_eq!(shown_deps(&h), before, "{at:?}: it did not fold up again");
+        // Clicking the picked row again puts it away, which is the only way back to a tree with the
+        // whole canvas to itself.
+        h.wait();
+        h.click_at(first_import);
+        assert_eq!(
+            h.app.panes[0].tab().preview.dependency_picked(),
+            None,
+            "{at:?}: the pick could not be put away"
+        );
 
         // The close button, found by hovering rather than by arithmetic.
         let close = egui::Id::new(("preview-close", h.app.panes[0].id));

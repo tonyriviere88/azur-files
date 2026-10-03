@@ -39,6 +39,14 @@ fn the_window_comes_back_the_way_it_was_left() {
             diff: false,
             collapse: true,
             muted: true,
+            // All three away from their defaults, for the reason the flags above are: a value that
+            // happened to match its default would round-trip whether it was ever written or not.
+            // This is the one that caught the shares being written and never read back.
+            deps: crate::ui::deps::Sizes {
+                list: true,
+                share: 0.325,
+                split: 0.675,
+            },
         },
         console_share: 0.28,
         console_shell: crate::console::Kind::PowerShell,
@@ -82,6 +90,12 @@ fn the_window_comes_back_the_way_it_was_left() {
     assert!(back.preview.collapse);
     // Whether video plays with its sound, which is a habit in exactly the way the four above are.
     assert!(back.preview.muted);
+    // And how the dependency view is set up. **All three**, because they were the failure this
+    // round trip exists to catch: the two shares were written on every save and had no reader
+    // at all, so a dragged panel came back the size it started. One key and one codec now,
+    // which is what makes that not expressible.
+    assert_eq!(back.preview.deps, saved.preview.deps);
+    assert!(saved.to_text().contains("dependency=1,0.325,0.675"));
     // A settings file from the build before these features has no line for any of them, and the two
     // whose default is *on* — the gutter and the diff — have to come back on rather than off because
     // the key was missing.

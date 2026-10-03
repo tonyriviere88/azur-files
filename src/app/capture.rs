@@ -539,6 +539,19 @@ impl App {
         }
     }
 
+    /// `--deps=<module>`: pick that row of the dependency tree, so a capture shows the two symbol
+    /// panels beside it.
+    ///
+    /// They are behind a click on a row and a capture run has no mouse, which is the same argument
+    /// [`App::begin_rename_here`] and [`App::open_preview_here`] make. Whether the row was there,
+    /// because the caller is a command line and a name that matched nothing is worth saying rather
+    /// than a screenshot that quietly shows the tree on its own.
+    pub fn pick_dependency(&mut self, name: &str) -> bool {
+        let pane = self.focused;
+        self.pane_mut(pane)
+            .is_some_and(|p| p.tab_mut().preview.pick_dependency(name))
+    }
+
     /// Select the *second* previewable file as well, so `--shot --preview --compare` photographs a
     /// comparison rather than one picture.
     ///

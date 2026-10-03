@@ -280,6 +280,11 @@ pub struct Layout {
     /// and it is a convention about *pages that start playing at you*; this one plays because the
     /// keyboard was moved onto it and held still.
     pub muted: bool,
+    /// How the dependency view is set up: list or tree, and how much room its symbol panels have.
+    ///
+    /// One type rather than three fields, because they are one settings line and one codec — see
+    /// [`crate::ui::deps::Sizes`], where the reason that matters is written down.
+    pub deps: deps::Sizes,
 }
 
 impl Default for Layout {
@@ -292,6 +297,7 @@ impl Default for Layout {
             diff: true,
             collapse: false,
             muted: false,
+            deps: deps::Sizes::default(),
         }
     }
 }
@@ -308,7 +314,10 @@ enum Content {
     Reading,
     Picture(Box<Picture>),
     Text(Text),
-    Binary(deps::View),
+    /// Boxed, like the picture beside it: a walked graph's view carries its title text, its rows and
+    /// three queries, which is twice what the next largest variant holds — and every `Content` in the
+    /// panel would be that size.
+    Binary(Box<deps::View>),
     /// A video, playing.
     ///
     /// **The only variant that is a live thing rather than an answer**, and the only one whose drop
@@ -476,16 +485,27 @@ impl Slot {
         }
     }
 
-    /// Which row of the dependency tree a click could unfold. See
-    /// [`crate::ui::deps::View::first_foldable`], which is where the reason this is needed is
-    /// written down.
+    /// Which row of the dependency tree is picked, if this is that view and one is. For the tests.
     #[cfg(test)]
-    pub fn dependency_first_foldable(&self, rows: usize) -> Option<(usize, String)> {
+    pub fn dependency_picked(&self) -> Option<deps::Pick> {
+        match &self.content {
+            Content::Binary(view) => view.picked(),
+            _ => None,
+        }
+    }
+
+    /// Which rows of the dependency tree a click could unfold. See
+    /// [`crate::ui::deps::View::foldable`], which is where the reason this is needed — and the reason
+    /// it is all of them rather than one — is written down.
+    #[cfg(test)]
+    pub fn dependency_foldable(&self, rows: usize) -> Vec<(usize, String)> {
         match &self.content {
             Content::Binary(view) => view
-                .first_foldable(rows)
-                .map(|(at, name)| (at, name.to_owned())),
-            _ => None,
+                .foldable(rows)
+                .into_iter()
+                .map(|(at, name)| (at, name.to_owned()))
+                .collect(),
+            _ => Vec::new(),
         }
     }
 
@@ -807,7 +827,7 @@ impl Slot {
                 view: None,
                 view_for: None,
             }),
-            Payload::Binary(graph) => Content::Binary(deps::View::new(graph)),
+            Payload::Binary(graph) => Content::Binary(Box::new(deps::View::new(graph))),
             Payload::Failed(why) => Content::Failed(why),
             // The shell had no visualizer for it either, so the panel says what it has always said
             // about a file with no preview. The extension comes from the file this panel is holding
@@ -1071,14 +1091,31 @@ impl Preview {
         self.focus = at.min(self.slots.len() - 1);
     }
 
+    /// Pick a dependency row by module name, as a click on it does. Whether there was one.
+    ///
+    /// For `--deps=<module>` — see [`crate::ui::deps::View::pick_named`], which says why a flag has
+    /// to exist for this at all.
+    pub fn pick_dependency(&mut self, name: &str) -> bool {
+        let at = self.focused_at();
+        match &mut self.slots[at].content {
+            Content::Binary(view) => view.pick_named(name),
+            _ => false,
+        }
+    }
+
     #[cfg(test)]
     pub fn dependency_rows(&self) -> Option<usize> {
         self.focused().dependency_rows()
     }
 
     #[cfg(test)]
-    pub fn dependency_first_foldable(&self, rows: usize) -> Option<(usize, String)> {
-        self.focused().dependency_first_foldable(rows)
+    pub fn dependency_foldable(&self, rows: usize) -> Vec<(usize, String)> {
+        self.focused().dependency_foldable(rows)
+    }
+
+    #[cfg(test)]
+    pub fn dependency_picked(&self) -> Option<deps::Pick> {
+        self.focused().dependency_picked()
     }
 
     #[cfg(test)]
@@ -1495,7 +1532,18 @@ fn tile_content(
             Some(doc) if !layout.markup => document::draw(ui, t, canvas, spot, doc, find),
             _ => text_canvas(ui, t, canvas, spot, text, layout.numbers, find),
         },
-        Content::Binary(view) => deps::show(ui, t, canvas, view),
+        // The tile's id and not the canvas rect: the three search boxes and the two grips are named
+        // after it, and a widget whose id moves loses the keyboard mid-word — which a rect does on
+        // every frame of the drag that is resizing it.
+        Content::Binary(view) => deps::show(
+            ui,
+            t,
+            canvas,
+            Id::new(("deps", spot)),
+            view,
+            &mut layout.deps,
+            out,
+        ),
     }
 
     // And the find bar over the top of it, last, because it floats.

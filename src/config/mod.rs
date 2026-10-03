@@ -408,6 +408,10 @@ impl Config {
                 "diff" => config.preview.diff = value != "0",
                 "diff_collapse" => config.preview.collapse = value == "1",
                 "video_muted" => config.preview.muted = value == "1",
+                // Three values on one line, because none of them means much without the others —
+                // the same argument `preview=` makes about a position and a share. The codec is
+                // `deps::Sizes`', so what is read here cannot drift from what is written.
+                "dependency" => config.preview.deps = crate::ui::deps::Sizes::parse(value),
                 "sidebar_width" => {
                     // `is_finite` first — see `preview` above. This is the one of the three where a
                     // NaN could not be recovered from inside the program: the sidebar rect would be
@@ -577,6 +581,7 @@ impl Config {
         text.push_str(&format!("diff={}\n", flag(self.preview.diff)));
         text.push_str(&format!("diff_collapse={}\n", flag(self.preview.collapse)));
         text.push_str(&format!("video_muted={}\n", flag(self.preview.muted)));
+        text.push_str(&format!("dependency={}\n", self.preview.deps.as_str()));
         // **Network last, out of panel order**, and deliberately: the first three positions are
         // what every settings file already written means by this line, and moving one of them
         // would silently reinterpret those files. A new group goes on the end.

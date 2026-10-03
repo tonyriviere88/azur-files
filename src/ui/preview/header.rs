@@ -252,6 +252,30 @@ pub(super) fn header(
                 right = at.left() - PAD;
             }
         }
+        // A binary gets one control, and it is the same question the listing's own flatten button
+        // asks — hence the same glyph: *show me every one of these, in one list, instead of the tree
+        // that says how each was reached*. A dependency graph and a folder tree are the same shape
+        // and the same two ways of reading it.
+        Content::Binary(_) => {
+            let at = button(right);
+            if tool_button(
+                ui,
+                t,
+                at,
+                Id::new(("preview-deps-list", pane)),
+                &crate::icons::flatten,
+                "List every module instead of the tree",
+                true,
+                layout.deps.list,
+                surface,
+            )
+            .clicked()
+            {
+                layout.deps.list = !layout.deps.list;
+                out.push(Action::RememberLayout);
+            }
+            right = at.left() - PAD;
+        }
         _ => {}
     }
 
@@ -529,7 +553,7 @@ pub(super) fn header(
             Sense::hover(),
         );
         if response.hovered() {
-            azur_egui_theme::components::tooltip(response, &deps::about(view.graph()));
+            azur_egui_theme::components::tooltip(response, view.about());
         }
     }
 }

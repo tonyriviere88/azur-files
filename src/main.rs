@@ -184,6 +184,7 @@ fn main() -> eframe::Result {
     let mut tiles = false;
     let mut preview = false;
     let mut find: Option<String> = None;
+    let mut deps: Option<String> = None;
     let mut compare = false;
     let mut previews = 0usize;
     let mut trace = false;
@@ -245,6 +246,12 @@ fn main() -> eframe::Result {
             // gesture, and the two are different pictures of the same panel.
             preview = true;
             previews = text.parse().unwrap_or(0);
+        } else if let Some(name) = arg.strip_prefix("--deps=") {
+            // `--deps=shell32.dll`: open the panel on a binary and pick that row of its dependency
+            // tree, so a capture shows the two symbol panels rather than the tree on its own. The
+            // panel itself comes with it, the same way `--find=` brings it.
+            preview = true;
+            deps = Some(name.to_owned());
         } else if let Some(text) = arg.strip_prefix("--find=") {
             preview = true;
             find = Some(text.to_owned());
@@ -398,6 +405,7 @@ fn main() -> eframe::Result {
                 preview,
                 console,
                 find,
+                deps,
                 compare,
                 previews,
                 waited: 0,
@@ -561,6 +569,12 @@ struct Window {
     /// `--find=<text>`: and then open the find bar on that text, for a capture of the text viewer
     /// with something found in it.
     find: Option<String>,
+    /// `--deps=<module>`: and then pick that row of a binary's dependency tree, for a capture of the
+    /// two symbol panels — which are behind a click on a row.
+    ///
+    /// Applied later than the rest and not at a frame number: the walk arrives on a worker thread, so
+    /// a pick made before the graph is here has no row to land on. See where it is driven.
+    deps: Option<String>,
     /// `--compare`: select the first *two* pictures instead, so a capture can show the comparison.
     compare: bool,
     /// `--previews=<n>`: select that many previewable files, so a capture can show the panel tiled.
@@ -672,6 +686,25 @@ impl eframe::App for Window {
             let commands = self.console.take().unwrap_or_default();
             self.app.open_console_here(&commands);
         }
+        // **Once the walk has landed**, which is not a frame number: the graph is read on a worker
+        // thread, so a pick made before it is here finds no row. Tried every frame until it takes, and
+        // *not* consumed on the first attempt — opening the panel does not itself start the read, so at
+        // the frame the panel opens there is no content and nothing pending either, and a flag consumed
+        // there photographed the tree on its own.
+        //
+        // Off `self.frames` and `preview_pending`, like `--console` and `--path` above and for the
+        // reason the paragraph over them gives: it read `!self.preview` — another flag's
+        // *consumed*-ness — which is only cleared under `Shot::frame`, so it was the kind of flag that
+        // silently does nothing without `--shot`. The wait below is what gives it its frames.
+        if self.frames >= 8
+            && !self.app.preview_pending()
+            && self
+                .deps
+                .as_deref()
+                .is_some_and(|name| self.app.pick_dependency(name))
+        {
+            self.deps = None;
+        }
         self.app.frame(ui);
         // A menu waiting on the shell is a menu with `Loading...` in it, and the four frames
         // before `SETTLE` are nowhere near long enough for `QueryContextMenu` — so the
@@ -684,12 +717,29 @@ impl eframe::App for Window {
             || self.app.console_busy()
             || self.app.git_pending()
             || self.app.sizes_pending()
-            || self.app.thumbs_pending())
+            || self.app.thumbs_pending()
+            // The pick above, once it has had the frames to be attempted in. Waiting on it any earlier
+            // would be waiting on the capture counter that opens the panel, and that counter only
+            // advances when a capture is attempted — a deadlock that complained below about a name
+            // which was there all along.
+            || (self.frames >= 8 && self.deps.is_some()))
             && self.waited < PATIENCE
         {
             self.waited += 1;
             ui.ctx().request_repaint();
         } else {
+            // Still set once everything has settled: nothing on show is called that. Which is worth
+            // saying rather than handing back a screenshot that quietly shows the tree on its own —
+            // and the likelier of the two reasons is the second half of it, since the panel only
+            // opens for a capture run at all.
+            if self.frames >= 8 {
+                if let Some(name) = self.deps.take() {
+                    eprintln!(
+                        "--deps: nothing called `{name}` is on show in the dependency tree \
+                         (is the preview open on a binary?)"
+                    );
+                }
+            }
             self.capture(&ui.ctx().clone());
         }
     }
