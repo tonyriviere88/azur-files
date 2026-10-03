@@ -196,6 +196,10 @@ impl App {
                     } else {
                         entries
                     };
+                    // And `Copy path(s)`, on both menus, just above Properties — not a gap in the
+                    // shell's menu like the Paste above it, but the one command whose answer depends
+                    // on a setting of this program's. See `crate::shell::menu::Own::CopyPaths`.
+                    let entries = crate::shell::menu::with_our_copy_paths(entries);
                     self.menu = Some(crate::ui::menu::Open::new(
                         asking.pane,
                         asking.at,
@@ -560,9 +564,9 @@ impl App {
 
     /// What one of this program's own menu entries means.
     ///
-    /// Two things ask anything of their own now: a right-button drop, and Paste on empty space.
-    /// Everything else that used to be here -- Open, Open in new tab, Open in a pane to the right
-    /// or below, Add to bookmarks, Copy path, Refresh, Select all, Show hidden files, New folder,
+    /// Three things ask anything of their own now: a right-button drop, Paste on empty space, and
+    /// `Copy path(s)`. Everything else that used to be here -- Open, Open in new tab, Open in a pane
+    /// to the right or below, Add to bookmarks, Refresh, Select all, Show hidden files, New folder,
     /// Open terminal here -- has been taken out of the context menu, which otherwise shows Windows'
     /// menu and nothing else.
     pub(super) fn own_menu_action(
@@ -590,6 +594,16 @@ impl App {
             // being shown. Named outright rather than as [`Action::Paste`], which would read the
             // pane again: the same reasoning as the redirected `paste` verb, and the same action.
             Own::Paste => Action::PasteIntoFolder(menu.folder.clone()),
+            // The selection the menu was raised over, and an empty one is the folder being shown —
+            // [`App::pin_is_a_bookmark`]'s answer to the same question, and `Ctrl+Shift+C`'s: a
+            // background menu asking "the path of what?" is asking about the folder you are in.
+            // Which slash they are written with is [`Action::CopyPaths`]', so the entry and the
+            // shortcut cannot disagree about it.
+            Own::CopyPaths => Action::CopyPaths(if menu.items.is_empty() {
+                vec![menu.folder.clone()]
+            } else {
+                menu.items.clone()
+            }),
         })
     }
 }

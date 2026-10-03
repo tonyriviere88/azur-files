@@ -117,6 +117,19 @@ pub struct Config {
     /// never had anything to say, and somebody who wants the strict hierarchy is somebody who will go
     /// and ask for it. It is in the flatten button's own menu beside the two modes.
     pub regroup: bool,
+    /// Whether the listings show the files Windows marks hidden. `Ctrl+H`.
+    ///
+    /// The same kind of preference as the three above, and remembered for the same reason: whether
+    /// you work with `.git`, `AppData` and `desktop.ini` in front of you is a habit, and a program
+    /// that put them back out of sight every launch is a `Ctrl+H` somebody has to remember to press.
+    /// One answer for the whole window rather than one per pane, which is what makes it a thing this
+    /// file can hold at all — see [`crate::app::App::show_hidden`].
+    ///
+    /// **Off**, like [`Self::forward_slashes`] and for a similar reason: hidden is what the file
+    /// system asked for, and a first run that overruled it would be this program being clever. So
+    /// `show_hidden=` is read as "only `1`", and a settings file written before it existed comes
+    /// back with those rows out of the way.
+    pub show_hidden: bool,
     /// Whether the path field writes `/` between the parts of a path instead of `\`.
     ///
     /// **Off**, because `\` is what Windows shows everywhere else and a path bar that disagreed
@@ -124,9 +137,14 @@ pub struct Config {
     /// the paths that are on their way somewhere else — a shell, a URL, a source file — where the
     /// conversion is otherwise done by hand every time.
     ///
-    /// It changes what the field *shows* and nothing else: the field has always taken either
-    /// slash, and [`crate::fs::normalize`] is what sees to that at the door. Ticked in the
-    /// field's own context menu, which is the one control the setting is about.
+    /// It changes nothing about what is *read*: the field has always taken either slash, and
+    /// [`crate::fs::normalize`] is what sees to that at the door. Ticked in the field's own context
+    /// menu, which is the one control the setting is about.
+    ///
+    /// **Not only the field.** `Ctrl+Shift+C` and the context menu's `Copy path(s)` write the paths
+    /// with the same slash — see [`crate::app::Action::CopyPaths`] — because a path leaving this
+    /// program for somewhere else is the case the setting was added for, and a copied path is that
+    /// case more literally than the field is.
     pub forward_slashes: bool,
     /// When a folder opens as tiles rather than as rows without the switch being pressed.
     ///
@@ -196,6 +214,7 @@ impl Default for Config {
             console_shell: crate::console::Kind::default(),
             flat_mode: crate::pane::FlatMode::default(),
             regroup: true,
+            show_hidden: false,
             forward_slashes: false,
             auto_tiles: crate::pane::AutoTiles::default(),
             sections: Sections::default(),
@@ -311,8 +330,9 @@ impl Config {
                 // *on*, so a settings file written by an older build has no line for it and the
                 // default has to stand.
                 "regroup" => config.regroup = value != "0",
-                // Read as "only 1", like the preview's two below: its default is *off*, so a
-                // missing line and a `0` mean the same thing and both have to leave it alone.
+                // Both read as "only 1", like the preview's two below: their default is *off*, so a
+                // missing line and a `0` mean the same thing and both have to leave them alone.
+                "show_hidden" => config.show_hidden = value == "1",
                 "forward_slashes" => config.forward_slashes = value == "1",
                 // The same again: opening a folder as tiles on its own is off until somebody asks
                 // for it. See [`crate::pane::AutoTiles`].
@@ -438,6 +458,7 @@ impl Config {
         text.push_str(&format!("console_shell={}\n", self.console_shell.label()));
         text.push_str(&format!("flatten={}\n", self.flat_mode.as_str()));
         text.push_str(&format!("regroup={}\n", flag(self.regroup)));
+        text.push_str(&format!("show_hidden={}\n", flag(self.show_hidden)));
         text.push_str(&format!(
             "forward_slashes={}\n",
             flag(self.forward_slashes)

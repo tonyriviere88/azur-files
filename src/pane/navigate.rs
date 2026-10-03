@@ -257,6 +257,25 @@ impl Tab {
         true
     }
 
+    /// Show the files Windows marks hidden, or stop. Answers whether it did anything.
+    ///
+    /// [`Tab::set_regroup`]'s twin for the third of the window's listing preferences, with one
+    /// difference: this decides which entries are rows at all rather than how they are arranged, so
+    /// the columns are measured again — the widest name in a folder is often a hidden one, and a
+    /// `.git` under a column fitted without it is a truncated row.
+    ///
+    /// Still never a re-read: the walk always reports hidden entries and it is the display that
+    /// leaves them out. See [`crate::fs::sort::build_order`].
+    pub fn set_show_hidden(&mut self, on: bool) -> bool {
+        if self.show_hidden == on {
+            return false;
+        }
+        self.show_hidden = on;
+        self.rebuild_order();
+        self.widths_measured = false;
+        true
+    }
+
     pub fn set_flat_mode(&mut self, mode: FlatMode) -> bool {
         if !self.flat || self.flat_mode == mode {
             self.flat_mode = mode;

@@ -40,6 +40,7 @@ fn the_window_comes_back_the_way_it_was_left() {
         // Away from their defaults for the same reason the two above are.
         flat_mode: crate::pane::FlatMode::Tree,
         regroup: false,
+        show_hidden: true,
         forward_slashes: true,
         // Both away from their defaults again: the rule is *on* by default and the threshold is
         // `TILES_THRESHOLD`, so a round trip that used either would prove nothing. There is no third
@@ -118,7 +119,13 @@ fn the_window_comes_back_the_way_it_was_left() {
     // And a hand-edited nonsense value cannot make the rule mean something it has no name for.
     let edited = Config::parse("auto_tiles=1\ntiles_threshold=900\n");
     assert_eq!(edited.auto_tiles.threshold, 100.0);
-    // Which slash the path field writes. The other way round from the two above — its default is
+    // Whether hidden files are rows. The other way round from the three above — its default is
+    // *off*, so it is the `1` that has to survive and the missing line that has to come back false.
+    // The whole point of it being here is that `Ctrl+H` is not a keystroke you press again every
+    // launch, so a value that is written and not read would be the feature quietly absent.
+    assert!(back.show_hidden);
+    assert!(!older.show_hidden, "off by default");
+    // Which slash the path field writes. The same way round as the one above — its default is
     // *off*, so it is the missing line that has to come back false and the `1` that has to
     // survive. A preference nobody can keep is worse than no preference: the whole point of it is
     // that the field opens the same way every time.

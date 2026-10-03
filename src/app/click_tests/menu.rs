@@ -55,13 +55,14 @@ fn a_right_click_opens_a_menu_now_and_fills_it_from_the_shell() {
         );
     }
     let menu = h.app.menu.as_ref().expect("open by now");
-    // Windows' menu, with exactly one entry of ours in front of it. This program used to put
-    // half a dozen above the shell's — those are gone. What is left here is Paste, and this is
-    // the *background* menu ([`App::open_folder_menu`] raises that one), which is the single
-    // menu the shell hands over with a gap in it: see `crate::shell::menu::Own::Paste`. On a
-    // file's or a folder's own menu there is still nothing of ours, which
-    // `the_drag_answers_and_paste_are_the_only_entries_of_our_own` and
-    // `the_background_menu_gets_this_program_s_paste` hold between them.
+    // Windows' menu, with exactly two entries of ours in it. This program used to put half a dozen
+    // above the shell's — those are gone. Paste is here because this is the *background* menu
+    // ([`App::open_folder_menu`] raises that one), the single menu the shell hands over with a gap in
+    // it; `Copy path(s)` is on every menu. See `crate::shell::menu::Own::Paste` and `Own::CopyPaths`,
+    // and `the_drag_answers_paste_and_copy_paths_are_the_only_entries_of_our_own` for the fence
+    // around that list.
+    //
+    // In that order, which is where each goes: Paste at the top and `Copy path(s)` beside Properties.
     assert!(
         menu.entries.len() > 3,
         "the shell should have filled the menu: {:?}",
@@ -80,9 +81,22 @@ fn a_right_click_opens_a_menu_now_and_fills_it_from_the_shell() {
         .collect();
     assert_eq!(
         ours,
-        ["Paste"],
-        "the background menu should be Windows' own with this program's Paste above it, and \
-         nothing else of ours"
+        ["Paste", "Copy path(s)"],
+        "the background menu should be Windows' own with this program's Paste above it and \
+         Copy path(s) beside Properties, and nothing else of ours"
+    );
+    // And that one really is beside Properties rather than merely somewhere below Paste, because
+    // that position is what keeps it out of the scrolling part — see `ui::menu::pinned_from`.
+    let at = menu
+        .entries
+        .iter()
+        .position(|e| e.label == "Copy path(s)")
+        .expect("just found above");
+    assert_eq!(
+        crate::shell::menu::properties_at(&menu.entries),
+        Some(at + 1),
+        "Copy path(s) is not directly above the shell's Properties: {:?}",
+        menu.entries.iter().map(|e| &e.label).collect::<Vec<_>>()
     );
 
     // Every shell submenu is there and empty, which is the point of the lazy fill.

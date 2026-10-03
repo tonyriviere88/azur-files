@@ -768,6 +768,127 @@ fn our_paste_on_empty_space_pastes_into_the_folder_being_shown() {
     );
 }
 
+/// `Copy path(s)` copies what the menu was raised over, one path per line, with the slash the path
+/// field is set to write.
+///
+/// Three claims. The *selection the menu was raised over* rather than the pane's, because a right
+/// click can be about a row the keyboard is not on. The folder being shown when nothing is selected,
+/// which is `Ctrl+Shift+C`'s answer and [`App::pin_is_a_bookmark`]'s. And the slash, which is the
+/// reason the entry is this program's at all — see [`crate::shell::menu::Own::CopyPaths`].
+///
+/// Driven through [`Action::CopyPaths`] — the action `Ctrl+Shift+C` pushes — so what this holds down
+/// is held down for both of them at once.
+#[test]
+fn copy_paths_writes_the_paths_with_the_slash_the_path_field_is_set_to() {
+    use crate::shell::menu::Own;
+
+    let (mut app, ctx) = app(&["/a"]);
+    let folder = PathBuf::from(r"C:\src\ui");
+    let menu = |items: Vec<PathBuf>| {
+        crate::ui::menu::Open::new(
+            1,
+            pos2(0.0, 0.0),
+            items,
+            folder.clone(),
+            Vec::new(),
+            crate::shell::menu::Depth::Full,
+            0,
+        )
+    };
+    // What the last action put on the clipboard, and drained so the next assertion cannot pass on
+    // the answer to the previous one. `copy_text` is an output command rather than a syscall, so
+    // nothing here goes near the desktop's own clipboard.
+    let copied = |ctx: &egui::Context| -> Option<String> {
+        ctx.output_mut(|o| {
+            let text = o.commands.iter().rev().find_map(|command| match command {
+                egui::OutputCommand::CopyText(text) => Some(text.clone()),
+                _ => None,
+            });
+            o.commands.clear();
+            text
+        })
+    };
+    let copy = |app: &mut App, items: Vec<PathBuf>| -> Option<String> {
+        let action = app
+            .own_menu_action(&menu(items), Own::CopyPaths)
+            .expect("the entry has to mean something");
+        assert_eq!(action.name(), "CopyPaths");
+        app.perform(&ctx, action);
+        copied(&ctx)
+    };
+
+    let two = vec![folder.join("menu.rs"), folder.join("mod.rs")];
+    assert_eq!(
+        copy(&mut app, two.clone()).as_deref(),
+        Some("C:\\src\\ui\\menu.rs\r\nC:\\src\\ui\\mod.rs"),
+        "two paths, one per line, with the separator a fresh profile writes"
+    );
+
+    // Nothing selected is the folder the menu was raised in.
+    assert_eq!(copy(&mut app, Vec::new()).as_deref(), Some(r"C:\src\ui"));
+
+    // And with the path field set to `/`, which is what that setting is for. The line break between
+    // the paths is not a separator and is left alone.
+    app.forward_slashes = true;
+    assert_eq!(
+        copy(&mut app, two).as_deref(),
+        Some("C:/src/ui/menu.rs\r\nC:/src/ui/mod.rs")
+    );
+    assert_eq!(copy(&mut app, Vec::new()).as_deref(), Some("C:/src/ui"));
+}
+
+/// Showing hidden files is one answer for the window, and it is written down.
+///
+/// It was one answer per *tab* and remembered nowhere, which made `Ctrl+H` a keystroke you pressed
+/// again every launch. Both halves of the fix are here, and the first is what makes the second
+/// possible: two panes free to disagree have no single state for a settings file to hold.
+///
+/// The new-tab case is [`crate::pane::Tab::showing`]'s reason for existing — the note there is why a
+/// tab cannot be handed this one a frame late the way it can `flat_mode`.
+#[test]
+fn showing_hidden_files_is_the_window_s_preference_and_survives_a_relaunch() {
+    let (mut app, ctx) = app(&["/a", "/b"]);
+    assert!(!app.show_hidden, "a fresh profile leaves them out of the way");
+    assert!(app.panes.iter().flat_map(|p| &p.tabs).all(|t| !t.show_hidden));
+
+    app.perform(&ctx, Action::ToggleHidden);
+    assert!(app.show_hidden);
+    assert!(
+        app.panes.iter().flat_map(|p| &p.tabs).all(|t| t.show_hidden),
+        "a pane was left disagreeing with the preference that is about to be written"
+    );
+    assert!(app.config_dirty, "the toggle was never going to reach the file");
+    assert!(app.settings().show_hidden);
+
+    // A tab opened afterwards agrees with it, rather than being the one listing in the window with
+    // half its rows missing.
+    app.perform(
+        &ctx,
+        Action::NavigateNewTab {
+            pane: 1,
+            path: PathBuf::from("/c"),
+        },
+    );
+    assert!(
+        app.panes[0].tabs.last().expect("the new tab").show_hidden,
+        "a tab made after the toggle came up hiding them"
+    );
+
+    // And the window those settings describe comes back showing them — every tab of it, since that
+    // is what the one line in the file means.
+    let back = App::opening(&ctx, app.settings(), Vec::new(), Side::Right);
+    assert!(back.show_hidden);
+    assert!(
+        back.panes.iter().flat_map(|p| &p.tabs).all(|t| t.show_hidden),
+        "the restored tabs are ordered without the setting the window was launched with"
+    );
+
+    app.perform(&ctx, Action::ToggleHidden);
+    assert!(!app.show_hidden);
+    assert!(!app.settings().show_hidden);
+    assert!(app.panes.iter().flat_map(|p| &p.tabs).all(|t| !t.show_hidden));
+}
+
 /// The join: the entry the shell really puts in the menu, through the real dispatch.
 ///
 /// Everything either side of this is covered on its own —

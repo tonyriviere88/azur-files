@@ -193,11 +193,22 @@ pub struct App {
     /// The window's preference beside [`App::flat_mode`], kept the same way and for the same reason.
     /// See [`crate::fs::sort::build_tree_order`], which is what it does.
     regroup: bool,
+    /// Whether every listing shows the files Windows marks hidden. `Ctrl+H`.
+    ///
+    /// The window's preference beside [`App::regroup`], kept the same way — and **one answer for the
+    /// window rather than one per pane**, which is the change that let it into the settings file at
+    /// all: two panes free to disagree have no single state for one line to remember, and Explorer's
+    /// own Hidden items box is one box for every window it opens. The tabs each keep the copy their
+    /// order is built from; see [`crate::pane::Tab::show_hidden`].
+    show_hidden: bool,
     /// Whether the path field writes `/` between the parts of a path rather than `\`.
     ///
     /// The window's preference again — which slash you want is a habit, and it is about where the
     /// path is going after it leaves here rather than about the folder in front of you. Ticked in
     /// the field's own context menu. See [`crate::config::Config::forward_slashes`].
+    ///
+    /// Read by [`Action::CopyPaths`] as well as by the field, since a path being copied out is that
+    /// "somewhere else" more literally than the bar is.
     forward_slashes: bool,
     /// Whether a folder that is opened becomes tiles on its own, and at what share of pictures.
     ///
@@ -372,6 +383,10 @@ impl App {
         let mut layout = dock::Node::Leaf(first);
         let mut next_pane = 2;
         let mut focused = first;
+        // Every tab below is made showing what the settings file says the window shows, because the
+        // first listing to land is ordered with it and there is no frame in which to correct it. See
+        // [`Tab::showing`], which is why this is the one preference threaded through here.
+        let hidden = config.show_hidden;
 
         if open.is_empty() {
             // The panes that were open last time, and the tree that arranged them. Both, or
@@ -397,7 +412,11 @@ impl App {
             match tree {
                 Some(tree) => {
                     for (group, &id) in groups.iter().zip(&ids) {
-                        let mut tabs = group.paths.iter().cloned().map(Tab::new);
+                        let mut tabs = group
+                            .paths
+                            .iter()
+                            .cloned()
+                            .map(|path| Tab::showing(path, hidden));
                         let mut pane =
                             Pane::new(id, tabs.next().expect("a group with no tabs was filtered"));
                         pane.tabs.extend(tabs);
@@ -413,10 +432,10 @@ impl App {
                         .iter()
                         .flat_map(|group| group.paths.iter())
                         .cloned()
-                        .map(Tab::new)
+                        .map(|path| Tab::showing(path, hidden))
                         .collect();
                     if tabs.is_empty() {
-                        tabs.push(Tab::new(fs::places::default_start()));
+                        tabs.push(Tab::showing(fs::places::default_start(), hidden));
                     }
                     let mut pane = Pane::new(first, tabs.remove(0));
                     pane.tabs.extend(tabs);
@@ -425,11 +444,14 @@ impl App {
             }
         } else {
             let mut paths = open.into_iter();
-            panes.push(Pane::new(first, Tab::new(paths.next().unwrap_or_default())));
+            panes.push(Pane::new(
+                first,
+                Tab::showing(paths.next().unwrap_or_default(), hidden),
+            ));
             for path in paths {
                 let id = next_pane;
                 next_pane += 1;
-                panes.push(Pane::new(id, Tab::new(path)));
+                panes.push(Pane::new(id, Tab::showing(path, hidden)));
                 layout.split(id - 1, side, id);
             }
         }
@@ -486,6 +508,7 @@ impl App {
             console_shell: config.console_shell,
             flat_mode: config.flat_mode,
             regroup: config.regroup,
+            show_hidden: config.show_hidden,
             forward_slashes: config.forward_slashes,
             auto_tiles: config.auto_tiles,
             providers: crate::shell::providers::Providers::new(),
@@ -536,6 +559,7 @@ impl App {
             console_shell: self.console_shell,
             flat_mode: self.flat_mode,
             regroup: self.regroup,
+            show_hidden: self.show_hidden,
             forward_slashes: self.forward_slashes,
             auto_tiles: self.auto_tiles,
             sections: self.sections,

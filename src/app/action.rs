@@ -53,7 +53,11 @@ pub enum Action {
     // The view
     Sort { pane: PaneId, column: Column },
     SelectAll(PaneId),
-    ToggleHidden(PaneId),
+    /// Show the files Windows marks hidden, or stop — the window's preference, so every pane
+    /// follows, like [`Self::SetRegroup`] below. `Ctrl+H`, and written to the settings file.
+    ///
+    /// No pane, unlike the toggles either side of it. See [`crate::app::App::show_hidden`].
+    ToggleHidden,
     /// Show this folder's whole tree instead of its own children, or stop.
     ToggleFlat(PaneId),
     /// Count what is inside every folder on show, and draw each row's share of the total — or stop.
@@ -241,7 +245,7 @@ impl Action {
             Self::EditPath(_) => "EditPath",
             Self::Sort { .. } => "Sort",
             Self::SelectAll(_) => "SelectAll",
-            Self::ToggleHidden(_) => "ToggleHidden",
+            Self::ToggleHidden => "ToggleHidden",
             Self::ToggleFlat(_) => "ToggleFlat",
             Self::ToggleSizes(_) => "ToggleSizes",
             Self::SetFlatMode(_) => "SetFlatMode",

@@ -125,8 +125,9 @@ impl App {
             if m.command && i.key_pressed(K::A) {
                 push(Action::SelectAll(pane));
             }
+            // No pane, unlike its neighbours: the window's preference, and every pane follows.
             if m.command && i.key_pressed(K::H) {
-                push(Action::ToggleHidden(pane));
+                push(Action::ToggleHidden);
             }
             if m.command && i.key_pressed(K::E) {
                 push(Action::ToggleFlat(pane));

@@ -29,10 +29,10 @@
 //! A machine with a dozen shell extensions installed has a menu taller than the window, so
 //! each level's rows go in a scroll area — without which the entries past the edge would
 //! simply be unreachable. Two things follow from that, and both are decided here rather than
-//! left to `egui`: `Properties` is drawn *below* the scrolling part so it is always the last
-//! thing on the menu (see [`pinned_from`]), and a level goes back to the top on the frame it
-//! appears rather than inheriting whatever the last menu was left scrolled to (see
-//! [`Open::shown`]).
+//! left to `egui`: `Properties` and this program's `Copy path(s)` beside it are drawn *below* the
+//! scrolling part so they are always the last thing on the menu (see [`pinned_from`]), and a level
+//! goes back to the top on the frame it appears rather than inheriting whatever the last menu was
+//! left scrolled to (see [`Open::shown`]).
 //!
 //! # Nothing here reflows
 //!
@@ -49,7 +49,7 @@ use azur_egui_theme::components::{menu_divider, popover_frame, MenuItem};
 use azur_egui_theme::tokens::{radius, space};
 use egui::{pos2, vec2, Color32, Id, Order, Pos2, Rect, TextureHandle, Ui, Vec2};
 
-use crate::shell::menu::{Command, Entry, Kind};
+use crate::shell::menu::{Command, Entry, Kind, Own};
 use crate::theme::Theme;
 
 /// A menu on screen.
@@ -253,39 +253,61 @@ fn stack_height(entries: &[Entry]) -> f32 {
 /// than inside it. `entries.len()` when there is nothing to pin, which is every submenu and
 /// every menu of this program's own entries.
 ///
-/// **Properties is the one entry that has to be reachable without scrolling.** It is where a
+/// **Properties is the entry that has to be reachable without scrolling.** It is where a
 /// shell menu ends, it is what people go to the bottom of one *for*, and on a machine with a
 /// dozen extensions installed the bottom of the menu is past the edge of the window — so the
 /// entry with the furthest to scroll to is the one most often wanted. Pinned, it is always the
 /// last thing on the menu whatever the scroll is doing above it.
 ///
-/// **Recognised by verb, not by label.** `properties` is the shell's own name for the command
-/// and is the same on every Windows; `Propriétés` is one localisation out of many, and a menu
-/// that only pinned it in English would be a menu that behaved differently per machine.
+/// **Which row Properties is** is not decided here. [`crate::shell::menu::properties_at`] says, by
+/// verb and never by label, and the code that puts an entry beside it asks the same function — so the
+/// two cannot come to different answers.
 ///
 /// **Nothing is moved.** The tail is a suffix of the entries in the order the shell gave them,
 /// so if an extension has put something below Properties it is pinned too. Lifting Properties
 /// out of the middle and re-hanging it at the bottom would show the menu in an order Explorer
 /// does not, which is worse than a menu that scrolls.
 ///
-/// The divider above it comes with it. It belongs to Properties rather than to whatever is
+/// **This program's own `Copy path(s)` comes with it**, because that is where it was put — between
+/// Properties and the divider above them both, see [`crate::shell::menu::with_our_copy_paths`]. A
+/// tail that began at Properties would leave the one entry in the menu that is *this program's*
+/// scrolling away above a pinned row, which is the opposite of what pinning is for.
+///
+/// The divider above them comes too. It belongs to what is below rather than to whatever is
 /// above — left in the scrolling part it would slide away and leave a pinned row sitting under
 /// the last of the entries with no rule between them.
 fn pinned_from(entries: &[Entry]) -> usize {
-    let properties = entries.iter().rposition(|entry| match &entry.kind {
-        Kind::Command(Command::Shell { verb: Some(verb), .. }) => {
-            verb.eq_ignore_ascii_case("properties")
-        }
-        _ => false,
+    // Properties, or — on a menu the shell gave none for — the last row, when that is the entry
+    // `with_our_copy_paths` put there instead. `Copy path(s)` being reachable without scrolling
+    // should not rest on the shell having offered a Properties to hang it off.
+    let anchor = crate::shell::menu::properties_at(entries).or_else(|| {
+        entries
+            .len()
+            .checked_sub(1)
+            .filter(|&at| ours_beside_properties(&entries[at]))
     });
-    let Some(index) = properties else {
+    let Some(index) = anchor else {
         return entries.len();
     };
-    if index > 0 && matches!(entries[index - 1].kind, Kind::Separator) {
-        index - 1
-    } else {
-        index
+    // Ours first, then the divider above the lot.
+    let mut from = index;
+    while from > 0 && ours_beside_properties(&entries[from - 1]) {
+        from -= 1;
     }
+    if from > 0 && matches!(entries[from - 1].kind, Kind::Separator) {
+        from - 1
+    } else {
+        from
+    }
+}
+
+/// Whether this is one of this program's own entries that belongs to the pinned tail.
+///
+/// Named rather than "any [`Command::Own`]", because most of them are not: `Copy here`, `Move here`
+/// and `Cancel` are the whole of a right-button drop's menu, which has no Properties and nothing to
+/// pin, and [`Own::Paste`] goes at the *top* of a background menu.
+fn ours_beside_properties(entry: &Entry) -> bool {
+    matches!(entry.kind, Kind::Command(Command::Own(Own::CopyPaths)))
 }
 
 /// Draw the menu and every open submenu.

@@ -219,6 +219,11 @@ fn a_menu_longer_than_the_screen_is_capped_and_drawn_the_size_it_measured() {
 }
 
 /// What comes out of the scroll area and what stays under it.
+///
+/// The `Copy path(s)` cases are the reason this is more than a two-line function: the entry goes
+/// between Properties and the divider above it, so a tail that started *at* Properties — which is
+/// what this did before the entry existed — would leave it above the fold on exactly the machines
+/// the pinning is for.
 #[test]
 fn properties_and_the_divider_above_it_are_pinned_out_of_the_scrolling_part() {
     // A menu of this program's own entries has no Properties in it and nothing to pin,
@@ -256,6 +261,42 @@ fn properties_and_the_divider_above_it_are_pinned_out_of_the_scrolling_part() {
         entry("Scan with something"),
     ];
     assert_eq!(pinned_from(&after), 1);
+
+    // ---- And this program's own `Copy path(s)`, which sits between the two ----
+    let ours = vec![
+        entry("Ouvrir"),
+        entry("Renommer"),
+        divider(),
+        Entry::own(Own::CopyPaths),
+        verb("Propriétés", "properties"),
+    ];
+    assert_eq!(
+        pinned_from(&ours),
+        2,
+        "the tail has to start at the divider, so neither our entry nor Properties can scroll away"
+    );
+
+    // Without the divider, both rows still come out — the walk back is over our entries first and
+    // the rule above them second, not the other way round.
+    let bare = vec![entry("Ouvrir"), Entry::own(Own::CopyPaths), verb("Propriétés", "properties")];
+    assert_eq!(pinned_from(&bare), 1);
+
+    // A menu the shell gave no Properties for at all: no Windows has handed one over, but the entry
+    // still went in — at the end — and the promise that it is reachable without scrolling does not
+    // depend on the shell having offered something to hang it off.
+    let orphan = vec![entry("Ouvrir"), divider(), Entry::own(Own::CopyPaths)];
+    assert_eq!(pinned_from(&orphan), 1);
+
+    // And **only** that entry of ours. A right-button drop's menu is nothing but this program's own
+    // entries, has no Properties in it and nothing to pin — the first case above — so the rule has
+    // to be about `Copy path(s)` and not about `Command::Own`.
+    let dropped = vec![
+        entry("Copy here"),
+        entry("Move here"),
+        divider(),
+        Entry::own(Own::Cancel),
+    ];
+    assert_eq!(pinned_from(&dropped), 4, "a drop menu pinned rows it has no reason to");
 }
 
 #[test]

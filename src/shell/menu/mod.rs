@@ -121,8 +121,9 @@ use std::path::{Path, PathBuf};
 /// is still on its keyboard shortcut, and most of them are in the shell's menu anyway under the
 /// name Explorer gives it.
 ///
-/// What is left is the two things the shell has no answer for, because neither is the shell's
-/// question: where a right-button drag has just landed, and Paste on empty space.
+/// What is left is the things the shell has no answer for, because none of them is the shell's
+/// question: where a right-button drag has just landed, Paste on empty space, and the paths of
+/// what is selected written the way *this* program writes a path.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Own {
     /// The four a right-button drag offers when it lands, which is how Windows has asked
@@ -147,6 +148,23 @@ pub enum Own {
     /// It goes through the same [`crate::shell::ops`] engine as Ctrl+V, so it is the same paste
     /// with the same progress, conflicts and undo — the shortcut and the entry cannot drift.
     Paste,
+    /// The selection's absolute paths, as text, one per line — `Ctrl+Shift+C` as a menu entry.
+    ///
+    /// **The one entry here that the shell has something like and still has to be ours**, which is
+    /// worth being clear about. Windows 11 offers `Copy as path` (`copyaspath`) on every menu and
+    /// Windows 10 only behind a held Shift, and neither of them knows about the one thing this entry
+    /// is asked to respect: [`crate::config::Config::forward_slashes`]. A path on its way to a shell,
+    /// a URL or a source file is the whole reason that setting exists, and it is the same gesture —
+    /// so an entry that handed the job to the shell would write `\` at somebody who had asked the
+    /// program for `/`, from a menu, on the same window where the path bar had just agreed to it.
+    ///
+    /// It goes through [`crate::app::Action::CopyPaths`], which is what `Ctrl+Shift+C` pushes, so the
+    /// entry and the shortcut cannot drift — the same rule [`Own::Paste`] follows.
+    ///
+    /// Placed **between Properties and the divider above it**, and pinned out of the scrolling part
+    /// with it, because an entry you have to scroll to find is one nobody finds. See
+    /// [`with_our_copy_paths`] and `crate::ui::menu::pinned_from`.
+    CopyPaths,
 }
 
 impl Own {
@@ -161,6 +179,10 @@ impl Own {
             // interface is in English throughout — the sidebar says Drives and Bookmarks. What
             // is in French is what Windows wrote, which is everything else in this menu.
             Self::Paste => "Paste",
+            // `(s)` rather than a count, and rather than one label for a file and another for a
+            // selection: a menu entry is the name of a command and not a sentence about what is
+            // selected, which is the same choice `Create shortcuts here` above makes.
+            Self::CopyPaths => "Copy path(s)",
         }
     }
 }
@@ -351,6 +373,48 @@ pub fn with_our_paste(entries: Vec<Entry>, can_paste: bool) -> Vec<Entry> {
     }
     ours.extend(entries);
     ours
+}
+
+/// Where the shell's Properties entry is in a level, if it has one.
+///
+/// **Recognised by verb, not by label.** `properties` is the shell's own name for the command and is
+/// the same on every Windows; `Propriétés` is one localisation out of many, and a rule keyed on the
+/// English one would behave differently per machine.
+///
+/// The last one, in the unlikely event of two: an extension is free to add its own, and the shell's
+/// is the one at the bottom.
+///
+/// Two callers, which is why it is here rather than in either of them: [`with_our_copy_paths`] puts
+/// an entry directly above it, and `crate::ui::menu::pinned_from` keeps everything from there down
+/// out of the scrolling part. Those two have to agree about which row Properties is, or the entry
+/// that was inserted beside it scrolls away from it.
+pub fn properties_at(entries: &[Entry]) -> Option<usize> {
+    entries.iter().rposition(|entry| match &entry.kind {
+        Kind::Command(Command::Shell { verb: Some(verb), .. }) => {
+            verb.eq_ignore_ascii_case("properties")
+        }
+        _ => false,
+    })
+}
+
+/// Put this program's `Copy path(s)` into a shell menu, just above Properties. See
+/// [`Own::CopyPaths`] for why the entry is ours at all.
+///
+/// Both menus get it — a selection's and a folder's background — because both are a question about
+/// something with a path, and with nothing selected the answer is the folder being shown, which is
+/// what `Ctrl+Shift+C` already answers with.
+///
+/// **A position and not an arrangement**: the entries stay in the order the shell gave them and one
+/// row goes in. At the end of the level on a menu with no Properties at all — which no Windows has
+/// yet handed over, `CMF_DEFAULTONLY` and `CMF_NOVERBS` included, but a menu is somebody else's list
+/// and the entry has to go *somewhere*.
+///
+/// Inserting into the middle is as safe as [`with_our_paste`]'s prepending, for the reason set out
+/// there: nothing in an entry is a position in this list.
+pub fn with_our_copy_paths(mut entries: Vec<Entry>) -> Vec<Entry> {
+    let at = properties_at(&entries).unwrap_or(entries.len());
+    entries.insert(at, Entry::own(Own::CopyPaths));
+    entries
 }
 
 #[cfg(test)]

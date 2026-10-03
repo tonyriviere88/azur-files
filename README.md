@@ -2744,14 +2744,26 @@ a menu on screen:
 ### Only Windows' entries
 
 There used to be half a dozen of this program's own above the shell's — open in a new tab,
-open in a pane to the right or below, bookmark, copy path, new folder, show hidden files. They
+open in a pane to the right or below, bookmark, new folder, show hidden files. They
 are gone. A right click gives Windows' menu and nothing else, which is what "the content is
 Explorer's" ought to mean; every command they carried is still on its keyboard shortcut, and
 most of them are in the shell's own menu anyway under the name Explorer gives it.
 
-The only entries this program still owns anywhere are the three a **right-button drop** asks
-— `Copy here`, `Move here`, `Cancel` — because that is not a question the shell has a menu
-for.
+What this program still owns is short, and each of them is there because of the question rather
+than because it was handy:
+
+- The four a **right-button drop** asks — `Copy here`, `Move here`, `Create shortcuts here`,
+  `Cancel` — because that is not a question the shell has a menu for.
+- **`Paste` on empty space**, the one gap the shell leaves: a folder's background menu carries no
+  `paste` verb, and Explorer synthesises its own around the shell's menu rather than out of it.
+- **`Copy path(s)`**, between `Propriétés` and the divider above it, and pinned out of the
+  scrolling part with it. The absolute path of everything selected, one per line — the folder being
+  shown when nothing is — which is `Ctrl+Shift+C` as a menu entry and the same action, so the two
+  cannot drift. This is the one that overlaps something Windows has: Windows 11 offers `Copy as
+  path` on every menu and Windows 10 behind a held Shift. Neither of them knows about
+  [`forward_slashes`](#settings), and a path on its way to a shell, a URL or a source file is the
+  whole reason that setting exists — so handing this one to the shell would write `\` at somebody
+  who had just told the path bar `/`.
 
 One thing to know about the trade: right-clicking the empty space below the files gives the
 folder's own shell menu, and `New`, `Refresh` and `Paste` are **not** in it. Those come from
@@ -2848,10 +2860,11 @@ have got for free:
   menu that learned its height a frame late would appear in the wrong place and then jump.
   A level taller than the window is capped and scrolls, so the last entry of a machine
   with a dozen shell extensions installed is still reachable.
-- **Properties is pinned below the scroll**, with the divider above it, so it is the last
-  thing on the menu whatever the scroll is doing. It is where a shell menu ends and it is
-  what people go to the bottom of one *for* — which on a machine with a dozen extensions
-  installed is the entry with the furthest to scroll to. Recognised by its `properties`
+- **Properties is pinned below the scroll**, with the divider above it and `Copy path(s)`
+  between the two, so they are the last thing on the menu whatever the scroll is doing.
+  Properties is where a shell menu ends and it is what people go to the bottom of one *for*
+  — which on a machine with a dozen extensions installed is the entry with the furthest to
+  scroll to. Recognised by its `properties`
   verb rather than its label, since `Propriétés` is one localisation out of many. Nothing
   is *moved*: the pinned part is a suffix of the entries in the order the shell gave them,
   so anything an extension put below Properties is pinned with it. Showing the menu in an
@@ -3679,14 +3692,14 @@ A pipe is not a terminal and every program can tell:
 | `→`, `←` | in a flattened **tree**: open the folder under the cursor, or shut it — and `←` on anything else steps out to the folder it is in |
 | `F5`, `Ctrl+R` | refresh |
 | `Ctrl+A` | select all |
-| `Ctrl+H` | show hidden files |
+| `Ctrl+H` | show hidden files — every pane, and remembered between sessions |
 | `Ctrl+D` | bookmark this folder |
 | `Ctrl+P` | preview the selection — works from inside the filter box, like `Ctrl+E` |
 | `Ctrl+X` / `Ctrl+C` / `Ctrl+V` | cut / copy / paste |
 | `Delete` / `Shift+Delete` | recycle / delete permanently |
 | `F2` | rename |
 | `Ctrl+Shift+N` | new folder |
-| `Ctrl+Shift+C` | copy the selected paths as text |
+| `Ctrl+Shift+C` | copy the selected paths as text, one per line — with whichever slash the path field writes, and also in the context menu as `Copy path(s)` |
 | `Ctrl+²` | show or hide this pane's console — also the switch at the left of [the status line](#the-status-line) |
 | `↑` `↓` `PgUp` `PgDn` `Home` `End` | move the cursor (`Shift` extends) |
 | `Enter` | open |
@@ -4726,11 +4739,22 @@ as `diff` for the same reason: a settings file from before it existed has no lin
 turns on is the absence of rows that never had anything to say. See
 [A chain of folders is one row](#a-chain-of-folders-is-one-row).
 
+`show_hidden=1` is whether the listings show the files Windows marks hidden — `Ctrl+H`. Off by
+default, so a missing line and a `0` mean the same thing: hidden is what the file system asked for,
+and a first run that overruled it would be this program being clever. Whether you work with `.git`,
+`AppData` and `desktop.ini` in front of you is a habit, though, and one this file had no line for —
+which made `Ctrl+H` a keystroke you pressed again every launch. **One answer for the window rather
+than one per pane**, which is the change that let it come here at all: two panes free to disagree
+have no single state for one line to hold, and Explorer's own Hidden items box is one box for every
+window it opens.
+
 `forward_slashes=1` is whether the path field writes `/` between the parts of a path instead of `\`.
 Off by default, so a missing line and a `0` mean the same thing — `\` is what Windows shows
 everywhere else, and a path bar that disagreed with the rest of the desktop out of the box would be
 this program being clever. Ticked in the field's own context menu, which is the one control it is
-about; see [The path bar](#the-path-bar).
+about; see [The path bar](#the-path-bar). It is not only the field: `Ctrl+Shift+C` and the context
+menu's `Copy path(s)` write the paths with the same slash, which is where a path is usually going
+when the setting is on at all.
 
 `auto_tiles=1` and `tiles_threshold=60` are the only lines here about rows or tiles, and they are a
 *rule* rather than a remembered mode: a folder whose rows are that much pictures opens as tiles. The

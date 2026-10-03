@@ -931,20 +931,24 @@ fn probe_invokable() {
     crate::sandbox::remove(&dir);
 }
 
-/// The right-drag answers and Paste are the only entries of our own.
+/// The right-drag answers, Paste and `Copy path(s)` are the only entries of our own.
 ///
 /// This test is the fence around that, and the list is short on purpose: everything else this
 /// program used to put above the shell's menu is gone, and a context menu that starts
-/// collecting entries of its own again stops being the menu it claims to be. Each of these
-/// four is here because Windows has no answer for the question — "a right-button drag just
-/// landed", and Paste on empty space, which the shell's background menu does not carry. See
-/// [`Own::Paste`].
+/// collecting entries of its own again stops being the menu it claims to be. Each one is here
+/// because of the question rather than because it was handy — "a right-button drag just landed",
+/// Paste on empty space, which the shell's background menu does not carry, and the paths of the
+/// selection written with the slash *this program* was told to write. See [`Own::Paste`] and
+/// [`Own::CopyPaths`], where the case for each is made; `Copy path(s)` is the one that overlaps
+/// something Windows offers, and the note there is why the overlap is not the whole story.
 #[test]
-fn the_drag_answers_and_paste_are_the_only_entries_of_our_own() {
+fn the_drag_answers_paste_and_copy_paths_are_the_only_entries_of_our_own() {
     assert_eq!(Own::CopyHere.label(), "Copy here");
     assert_eq!(Own::MoveHere.label(), "Move here");
+    assert_eq!(Own::LinkHere.label(), "Create shortcuts here");
     assert_eq!(Own::Cancel.label(), "Cancel");
     assert_eq!(Own::Paste.label(), "Paste");
+    assert_eq!(Own::CopyPaths.label(), "Copy path(s)");
     let entry = Entry::own(Own::CopyHere);
     assert!(entry.enabled);
     assert!(!entry.checked);
@@ -1017,6 +1021,94 @@ fn the_background_menu_gets_this_program_s_paste() {
     // And no separator dangling off a menu the shell gave nothing for.
     let alone = with_our_paste(Vec::new(), true);
     assert_eq!(alone.len(), 1, "a separator with nothing under it");
+}
+
+/// `Copy path(s)` goes in directly above Properties, and nothing else moves.
+///
+/// Directly above, because that is what the drawing code pins with it: `ui::menu::pinned_from`
+/// starts the unscrollable tail at the divider above them both, and a row anywhere else in the level
+/// would be inside the part that scrolls. The two agree about which row Properties is by asking
+/// [`properties_at`] rather than each testing the verb for itself.
+///
+/// The rest of it is [`with_our_paste`]'s claim again, and it has to be made again because it is
+/// about a *different* operation: inserting into the middle of the level cannot disturb the shell's
+/// entries, because nothing in one is a position in this list — an id and a submenu path are
+/// positions in the shell's own `HMENU`, and a submenu's `source` is an opaque number.
+#[test]
+fn our_copy_paths_goes_in_directly_above_properties() {
+    let shell = |label: &str, verb: &str| Entry {
+        label: label.to_owned(),
+        shortcut: String::new(),
+        kind: Kind::Command(Command::Shell {
+            verb: Some(verb.to_owned()),
+            id: 42,
+            path: vec![3],
+            label: label.to_owned(),
+        }),
+        enabled: true,
+        checked: false,
+        icon: None,
+    };
+    let submenu = |label: &str, source: u32| Entry {
+        label: label.to_owned(),
+        shortcut: String::new(),
+        kind: Kind::unfilled(source),
+        enabled: true,
+        checked: false,
+        icon: None,
+    };
+    // A menu shaped like the real thing: entries, a submenu, the divider, Properties.
+    let menu = || {
+        vec![
+            shell("Ouvrir", "open"),
+            submenu("Envoyer vers", 7),
+            Entry::separator(),
+            shell("Propriétés", "properties"),
+        ]
+    };
+
+    let with = with_our_copy_paths(menu());
+    assert_eq!(
+        with.iter().map(|e| e.label.as_str()).collect::<Vec<_>>(),
+        ["Ouvrir", "Envoyer vers", "", "Copy path(s)", "Propriétés"],
+        "the entry is not between Properties and the divider above it"
+    );
+    assert!(matches!(
+        with[3].kind,
+        Kind::Command(Command::Own(Own::CopyPaths))
+    ));
+    assert!(with[3].enabled);
+    // The shell's entries came through untouched — the id and the submenu path a command is
+    // invoked by are positions in the shell's `HMENU` and not in this list, and the submenu is
+    // still asked for by its opaque id.
+    assert_eq!(with[1].kind.unasked(), Some(7));
+    match &with[0].kind {
+        Kind::Command(Command::Shell { id, path, verb, .. }) => {
+            assert_eq!((*id, path.as_slice(), verb.as_deref()), (42, [3].as_slice(), Some("open")));
+        }
+        other => panic!("the shell's Open came out as {other:?}"),
+    }
+
+    // Recognised by **verb**, so an extension whose label happens to read Properties does not
+    // become the anchor: this one goes above the shell's, at the bottom.
+    let mut impostor = menu();
+    impostor.insert(1, shell("Properties", "com.example.props"));
+    let with = with_our_copy_paths(impostor);
+    assert_eq!(
+        with.iter().map(|e| e.label.as_str()).collect::<Vec<_>>(),
+        ["Ouvrir", "Properties", "Envoyer vers", "", "Copy path(s)", "Propriétés"]
+    );
+
+    // And a menu with no Properties at all takes it on the end rather than losing it. No Windows
+    // has handed one of those over — `CMF_DEFAULTONLY` and `CMF_NOVERBS` both keep Properties — but
+    // a menu is somebody else's list and the entry has to go somewhere.
+    let none = with_our_copy_paths(vec![shell("Ouvrir", "open")]);
+    assert_eq!(
+        none.iter().map(|e| e.label.as_str()).collect::<Vec<_>>(),
+        ["Ouvrir", "Copy path(s)"]
+    );
+    let nothing = with_our_copy_paths(Vec::new());
+    assert_eq!(nothing.len(), 1, "the entry went missing with nothing to put it beside");
 }
 
 #[test]

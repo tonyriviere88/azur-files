@@ -130,7 +130,7 @@ impl App {
             }
 
             Action::OpenInSplit { pane, path, side } => {
-                let id = self.spawn_pane(Tab::new(path));
+                let id = self.spawn_pane(Tab::showing(path, self.show_hidden));
                 if !self.layout.split(pane, side, id) {
                     self.panes.retain(|p| p.id != id);
                     return;
@@ -147,8 +147,9 @@ impl App {
                 self.config_dirty = true;
             }
             Action::NavigateNewTab { pane, path } => {
+                let hidden = self.show_hidden;
                 if let Some(p) = self.pane_mut(pane) {
-                    p.tabs.push(Tab::new(path));
+                    p.tabs.push(Tab::showing(path, hidden));
                     p.show_tab(p.tabs.len() - 1);
                 }
                 self.focused = pane;
@@ -212,13 +213,22 @@ impl App {
                     p.tab_mut().select_all();
                 }
             }
-            Action::ToggleHidden(pane) => {
-                if let Some(p) = self.pane_mut(pane) {
-                    let tab = p.tab_mut();
-                    tab.show_hidden = !tab.show_hidden;
-                    tab.rebuild_order();
-                    tab.widths_measured = false;
+            // Whether hidden files are rows, for every tab of every pane at once — the window's
+            // preference like `SetFlatMode` and `SetRegroup` below, and written down like them.
+            //
+            // Nothing is re-read, for the reason those two are not: the walk always reports hidden
+            // entries and it is the display that leaves them out. What is different is that this
+            // changes which rows *exist* rather than how they are arranged, so the columns are
+            // measured again — see [`crate::pane::Tab::set_show_hidden`].
+            Action::ToggleHidden => {
+                let on = !self.show_hidden;
+                self.show_hidden = on;
+                for p in &mut self.panes {
+                    for tab in p.tabs.iter_mut() {
+                        tab.set_show_hidden(on);
+                    }
                 }
+                self.config_dirty = true;
             }
             // Unlike the other view toggles, this one changes what was *read* rather than
             // what is shown of it, so the listing goes and `start_scans` asks again.
@@ -629,10 +639,22 @@ impl App {
             }
             Action::Reveal(path) => fs::shell::reveal(&path),
             Action::OpenTerminal(path) => fs::shell::open_terminal(&path),
+            // The paths as text, one per line — `Ctrl+Shift+C`, and the context menu's
+            // `Copy path(s)`, which is this same action so that the two cannot drift.
+            //
+            // **With whichever slash the path field is set to write**, because a path being copied
+            // out is what that setting is for — see [`crate::config::Config::forward_slashes`]. One
+            // `replace` over the whole line is exact either way: neither slash can appear in a
+            // Windows file name, so every one of them is a separator. See
+            // [`crate::ui::breadcrumb::with_separator`].
+            //
+            // `\r\n` between them, which is what the clipboard means by a line on this platform: a
+            // list pasted into Notepad, `cmd` or an editor comes out as lines rather than as one.
             Action::CopyPaths(paths) => {
+                let slashes = self.forward_slashes;
                 let text = paths
                     .iter()
-                    .map(|p| p.to_string_lossy().into_owned())
+                    .map(|p| breadcrumb::with_separator(&p.to_string_lossy(), slashes))
                     .collect::<Vec<_>>()
                     .join("\r\n");
                 ctx.copy_text(text);

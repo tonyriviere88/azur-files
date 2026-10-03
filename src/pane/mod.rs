@@ -484,6 +484,15 @@ pub struct Tab {
     /// has to pass both — see [`Lens`]. No settling delay, unlike the text: it arrives whole, from a
     /// menu, so there are no keystrokes to wait for.
     pub lens: Option<Lens>,
+    /// Whether the files Windows marks hidden are rows here.
+    ///
+    /// **The window's preference**, copied in when the tab is made and again whenever `Ctrl+H`
+    /// changes it — the arrangement [`Tab::flat_mode`] and [`Tab::regroup`] below have, and here for
+    /// the same reason: it is what [`Tab::rebuild_order`] reads, and that is called from a dozen
+    /// places with no business knowing about `App`. See [`crate::config::Config::show_hidden`].
+    ///
+    /// Unlike those two it has to be right from the moment a tab exists, which is what
+    /// [`Tab::showing`] is for.
     pub show_hidden: bool,
     /// Show everything under this folder rather than its own children. See
     /// [`Tab::toggle_flat`] and [`crate::fs::scan::scan_deep`].
@@ -752,6 +761,8 @@ impl Tab {
             filter: String::new(),
             filter_at: None,
             lens: None,
+            // The window's preference, and its default is off — see `Config::show_hidden`. Every tab
+            // in the program is made by `Tab::showing`, which brings the real one.
             show_hidden: false,
             flat: false,
             flat_mode: FlatMode::default(),
@@ -791,6 +802,23 @@ impl Tab {
             rename_fresh: false,
             preview: crate::ui::preview::Preview::default(),
         }
+    }
+
+    /// A new tab already showing what the rest of the window is showing.
+    ///
+    /// [`Tab::new`] and the one window preference a tab cannot be handed late: `show_hidden` is read
+    /// by every [`Tab::rebuild_order`], the first listing's included, so a tab that took the default
+    /// and was put right a frame later would draw one frame of a folder short of half its rows.
+    /// `flat_mode` and `regroup` are not in that position — neither is read until a tab is flattened,
+    /// and [`Tab::toggle_flat`] is handed the window's values then — which is why they are not
+    /// arguments here.
+    ///
+    /// Every tab `App` makes comes through this or [`Tab::duplicate`], which carries the field
+    /// across; plain [`Tab::new`] is for the tests, which mean the default.
+    pub fn showing(path: impl Into<PathBuf>, show_hidden: bool) -> Self {
+        let mut tab = Self::new(path);
+        tab.show_hidden = show_hidden;
+        tab
     }
 
     /// A copy of this tab pointing at the same place — what the `+` button and a
