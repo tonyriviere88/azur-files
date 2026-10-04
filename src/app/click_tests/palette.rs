@@ -100,7 +100,13 @@ fn every_colour_on_screen_belongs_to_the_palette_it_is_set_to() {
         h.settle();
         assert_eq!(h.app.theme.palette, palette, "the window did not change palette");
 
-        let mine = neutrals(&h.app.theme);
+        // This palette's ink counts as its own as well. It is never foreign (a palette's ink is
+        // not a surface), but it can be the same value as another palette's surface: Onyx keeps
+        // Azur's `text-disabled`, `GRAY_8`, which is the dark palette's hover, so a greyed-out
+        // Back arrow in Onyx would read as the dark hover drawn by mistake.
+        let mut mine = neutrals(&h.app.theme);
+        let ink = &h.app.theme.text;
+        mine.extend([ink.primary, ink.secondary, ink.tertiary, ink.disabled]);
         // Every neutral of every *other* palette, less anything this one paints too. The
         // subtraction is what keeps the test about provenance rather than about coincidence:
         // `stroke-subtle` and the seam are one value in the dark palette, and its `control-active`

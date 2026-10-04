@@ -575,7 +575,7 @@ fn a_shortcut_row_says_where_it_points_and_what_it_runs() {
     crate::sandbox::remove(&root);
 }
 
-/// The listing keeps three rows of nothing under it, in a folder of any size.
+/// The listing keeps [`filelist::TAIL`] of nothing under it, in a folder of any size.
 ///
 /// The folder's own menu — the one with `New` on it — is what you get by right-clicking a
 /// part of the listing that is not a file. In a folder taller than the pane
@@ -623,9 +623,10 @@ fn the_listing_keeps_room_under_it_for_the_folder() {
         .map(|r| r.rect)
         .expect("nothing is listening below the last row");
     assert!(
-        (tail.height() - 3.0 * crate::pane::ROW_HEIGHT).abs() < 1.0,
-        "the space under the last file is {:.0} points, not three rows",
-        tail.height()
+        (tail.height() - filelist::TAIL).abs() < 1.0,
+        "the space under the last file is {:.0} points, not {:.0}",
+        tail.height(),
+        filelist::TAIL
     );
 
     let raised = h.click_with(tail.center(), PointerButton::Secondary, Modifiers::NONE);

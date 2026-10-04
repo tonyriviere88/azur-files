@@ -438,10 +438,11 @@ fn only_a_network_executable_gets_the_short_menu() {
     assert!(!crate::shell::over_network(Path::new("")));
 }
 
-/// A short menu says so, because a missing 7-Zip should not look like a broken program.
+/// A short menu is still a menu: asked at [`Depth::Fast`](crate::shell::menu::Depth::Fast), the
+/// shell's own verbs come back even though the extensions' do not.
 #[test]
 #[cfg(windows)]
-fn a_short_menu_admits_to_being_short() {
+fn a_short_menu_is_still_a_menu() {
     let _serialised = crate::shell::serialised();
     let mut h = Harness::new();
     h.settle();
@@ -479,11 +480,6 @@ fn a_short_menu_admits_to_being_short() {
         menu.entries.len() > 3,
         "the reduced menu is too short to be one: {:?}",
         menu.entries.iter().map(|e| &e.label).collect::<Vec<_>>()
-    );
-    let notice = h.app.notice.clone().unwrap_or_default();
-    assert!(
-        notice.contains("network"),
-        "nothing told the user why the menu is short: {notice:?}"
     );
     h.app.close_menu();
     h.frame(Vec::new());

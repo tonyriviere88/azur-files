@@ -510,6 +510,12 @@ pub(crate) fn edit_field(
         ui.input(|i| i.pointer.interact_pos())
             .is_some_and(|at| rect.contains(at))
     });
+    // And back on the same frame, not the next one. The field gives the keyboard up while the
+    // press in the menu is being handled, and the check above only notices on the frame after —
+    // a frame in which a key typed straight after the tick has nowhere to go.
+    if in_menu && !ui.ctx().memory(|m| m.has_focus(response.id)) {
+        response.request_focus();
+    }
 
     // ---- The offers ------------------------------------------------------
     //
