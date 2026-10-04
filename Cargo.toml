@@ -11,7 +11,7 @@ publish = false
 # Must resolve to the same egui the theme tracks: two egui versions in one graph
 # are two different `Context` types, and the theme would style neither.
 egui = { version = "0.35", default-features = false }
-azur-egui-theme = { path = "../azur-egui-theme" }
+azur-egui-theme = { git = "https://github.com/tonyriviere88/azur-egui-theme.git" }
 
 # To ask eframe for the window's `HWND`, which the shell needs so its progress and
 # conflict dialogs are owned by this window instead of appearing behind it. Pinned to

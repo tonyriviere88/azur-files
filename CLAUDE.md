@@ -6,7 +6,9 @@ complete. Read the header of a module before changing it.
 
 `azur-files` ("Azur Files") — a Windows file manager in Rust on egui 0.35, ~109k lines across
 ~170 files in `src/`. Windows-only (`src/windows/` is the platform half of almost every
-module). Sibling path dependency: `../azur-egui-theme`, the shared Azur design system.
+module). Git dependency: `azur-egui-theme`
+(https://github.com/tonyriviere88/azur-egui-theme.git), the shared Azur design system,
+pinned by `Cargo.lock`; `cargo update -p azur-egui-theme` moves it to the latest commit.
 
 ---
 
@@ -84,8 +86,7 @@ cargo claude-test <filter> -- --ignored --nocapture --test-threads=1
 - **Run only the tests the change touched.** The suite drives the real clipboard and real
   file operations, so unrelated tests are not a free check.
 - **A failure may already be there.** Check it against `HEAD` before assuming you caused
-  it. A git worktree needs `../azur-egui-theme` junctioned in as a sibling, and removing
-  that junction needs a `\\?\` path.
+  it. A git worktree builds as it is; the theme comes from git, not from a sibling folder.
 - `cargo claude-test` stalls when a test fails and a backgrounded run looks hung while it
   waits on the cargo lock. Build with `--no-run` and run the test exe directly, output to
   a file.
