@@ -581,6 +581,7 @@ mod link_tests {
     /// — `one.txt` has an extension to put the `.lnk` after, and `a folder` does not — and twice
     /// each, because the second time is what shows the collision rule.
     #[test]
+    #[ignore = "fails on the GitHub Actions runner, passes on a desktop: compares against a link drop made by the real shell"]
     fn the_names_match_the_shell_s_own_link_drop() {
         let _serialised = crate::shell::serialised();
         crate::shell::init();
