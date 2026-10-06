@@ -25,6 +25,75 @@ pub(crate) fn ticked<'a>(item: MenuItem<'a>, on: bool) -> MenuItem<'a> {
     }
 }
 
+/// How many places the history menu lists on each side of where you are. The history holds up to
+/// 256; a menu that long runs off the screen, and the places worth jumping to are the near ones.
+pub(crate) const HISTORY_LIMIT: usize = 10;
+
+/// The menu both Back and Forward open on a right click: the tab's history around where you are,
+/// each place by its folder name alone.
+///
+/// One list in the order it was walked, the way Explorer's recent-locations dropdown has it — the
+/// places ahead at the top, furthest first, then where you are, ticked, then the places behind. A
+/// left arrow marks a place Back reaches and a right arrow one Forward does, so the side of the tick
+/// an entry is on does not have to be worked out. The arrows are `text-secondary` like every menu
+/// glyph and turn `accent.mark` under the pointer, on the entry you are about to go to.
+///
+/// The name alone because the button is already the context — they are places you have just been,
+/// and a list of full paths sharing a long common prefix reads as a column of the same text.
+/// Not sticky: each entry is a command, and the listing it opens is what the reader wants to see.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn history_menu(
+    ui: &Ui,
+    t: &Theme,
+    trigger: &egui::Response,
+    pane: PaneId,
+    history: &[PathBuf],
+    at: usize,
+    out: &mut Vec<Action>,
+) {
+    use azur_egui_theme::components::{menu_item_metrics, ContextMenu};
+
+    // The slot is reserved by an icon that paints nothing, and the arrow is painted over it once
+    // the entry has answered whether it is hovered — `MenuItem` draws its icon in one fixed colour.
+    let blank = |_: &egui::Painter, _: Rect, _: egui::Color32| {};
+    let ahead = (at + 1..history.len()).take(HISTORY_LIMIT).rev();
+    let behind = (0..at).rev().take(HISTORY_LIMIT);
+
+    ContextMenu::new(trigger).show(ui.ctx(), |ui| {
+        let mut entry = |ui: &mut Ui, index: usize, arrow: Option<azur_icons::Icon<'_>>| {
+            let name = fs::display_name(&history[index]);
+            let item = match arrow {
+                Some(_) => MenuItem::new(name).icon(&blank),
+                None => MenuItem::new(name).selected(true),
+            };
+            let response = ui.add(item);
+            if let Some(arrow) = arrow {
+                let color = if response.hovered() {
+                    t.accent.mark
+                } else {
+                    t.text.secondary
+                };
+                let x = response.rect.left() + menu_item_metrics().padding;
+                arrow(
+                    ui.painter(),
+                    crate::ui::icon_rect(response.rect, x, 16.0),
+                    color,
+                );
+            }
+            if response.clicked() && index != at {
+                out.push(Action::GoToHistory { pane, at: index });
+            }
+        };
+        for index in ahead {
+            entry(ui, index, Some(&icons::arrow_right));
+        }
+        entry(ui, at, None);
+        for index in behind {
+            entry(ui, index, Some(&icons::arrow_left));
+        }
+    });
+}
+
 /// A folder diff's show button's own menu: the three states by name, the one on show ticked.
 pub(crate) fn diff_show_menu(
     ui: &Ui,

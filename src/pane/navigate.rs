@@ -51,6 +51,17 @@ impl Tab {
         }
     }
 
+    /// Jump straight to a place in the history — Back or Forward several steps at once, which is
+    /// what the two buttons' menus offer. The trail is kept either side, exactly as stepping there
+    /// one at a time would keep it.
+    pub fn go_to_history(&mut self, at: usize) {
+        if at < self.history.len() && at != self.at {
+            self.at = at;
+            let path = self.history[at].clone();
+            self.go_to(path);
+        }
+    }
+
     /// Up one level. The folder just left is highlighted by [`Tab::go_to`], off the trail.
     pub fn go_up(&mut self) {
         if let Some(parent) = crate::fs::parent_of(&self.path) {

@@ -211,6 +211,11 @@ impl App {
                     p.tab_mut().go_forward();
                 }
             }
+            Action::GoToHistory { pane, at } => {
+                if let Some(p) = self.pane_mut(pane) {
+                    p.tab_mut().go_to_history(at);
+                }
+            }
             Action::Up(pane) => {
                 if let Some(p) = self.pane_mut(pane) {
                     p.tab_mut().go_up();

@@ -69,6 +69,8 @@ pub enum Action {
     NavigateNewTab { pane: PaneId, path: PathBuf },
     Back(PaneId),
     Forward(PaneId),
+    /// Go to `at` in the tab's history, from the Back or Forward button's menu.
+    GoToHistory { pane: PaneId, at: usize },
     Up(PaneId),
     Refresh(PaneId),
     EditPath(PaneId),
@@ -305,6 +307,7 @@ impl Action {
             Self::NavigateNewTab { .. } => "NavigateNewTab",
             Self::Back(_) => "Back",
             Self::Forward(_) => "Forward",
+            Self::GoToHistory { .. } => "GoToHistory",
             Self::Up(_) => "Up",
             Self::Refresh(_) => "Refresh",
             Self::EditPath(_) => "EditPath",

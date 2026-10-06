@@ -546,6 +546,27 @@ fn navigating_after_back_drops_the_future() {
 }
 
 #[test]
+fn jumping_through_the_history_keeps_both_trails() {
+    let mut tab = Tab::new("/a");
+    tab.navigate("/a/b");
+    tab.navigate("/a/b/c");
+
+    // Two steps back at once, as the Back button's menu does it.
+    tab.go_to_history(0);
+    assert_eq!(tab.path, PathBuf::from("/a"));
+    assert_eq!(tab.at, 0);
+    assert_eq!(tab.history.len(), 3, "a jump must not truncate the future");
+
+    tab.go_to_history(2);
+    assert_eq!(tab.path, PathBuf::from("/a/b/c"));
+    assert!(!tab.can_go_forward());
+
+    // Off the end is refused rather than a panic.
+    tab.go_to_history(9);
+    assert_eq!(tab.path, PathBuf::from("/a/b/c"));
+}
+
+#[test]
 fn walking_up_keeps_the_trail_on_the_breadcrumb() {
     let mut tab = Tab::new("/a/b/c");
     assert_eq!(tab.trail, PathBuf::from("/a/b/c"));

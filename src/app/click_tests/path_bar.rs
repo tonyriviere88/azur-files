@@ -18,6 +18,78 @@ fn the_history_buttons_respond() {
     assert!(done.contains(&"Up"), "Up did not respond, got {done:?}");
 }
 
+/// **A right click on Back opens the whole history, and an entry in it takes you there.**
+///
+/// One menu for both directions: the place ahead above, where you are ticked in the middle, the
+/// place behind below, each by its folder name alone. The arrows are `text-secondary` at rest and
+/// `accent.mark` on the entry under the pointer — asserted on the painted ink, because the colour
+/// is chosen after `MenuItem` has drawn and nothing else would see it go wrong.
+#[test]
+fn the_back_buttons_menu_lists_the_history_both_ways() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let mut h = Harness::new();
+    let pane = h.app.panes[0].id;
+    h.app.panes[0].tab_mut().navigate(root.join("src"));
+    h.app.panes[0].tab_mut().navigate(root.join("src").join("ui"));
+    h.app.panes[0].tab_mut().go_back();
+    h.settle();
+
+    let button = h
+        .ctx
+        .read_response(Id::new(("nav", pane, "Back (Alt+Left)")))
+        .map(|r| r.rect)
+        .expect("the Back button was not laid out");
+    h.click_with(button.center(), PointerButton::Secondary, Modifiers::NONE);
+    // Past the menu's fade-in, or every ink below is read part way to its colour.
+    h.wait();
+
+    // The *last* of each name painted, because the menu is the top layer and the breadcrumb and
+    // the listing behind it spell the same names.
+    let entry = |h: &Harness, label: &str| {
+        h.texts()
+            .into_iter()
+            .rev()
+            .find(|(_, text)| text == label)
+            .map(|(at, _)| at)
+            .unwrap_or_else(|| {
+                panic!(
+                    "the menu has no `{label}` in it: {:?}",
+                    h.texts().into_iter().map(|(_, t)| t).collect::<Vec<_>>()
+                )
+            })
+    };
+    let ahead = entry(&h, "ui");
+    let here = entry(&h, "src");
+    let behind = entry(&h, "azur-files");
+    assert!(
+        ahead.y < here.y && here.y < behind.y,
+        "the history is not in the order it was walked: {ahead:?} {here:?} {behind:?}"
+    );
+
+    // The arrow sits in the slot left of the label, on the label's line. It is stroked rather
+    // than filled, so its colour is read off the shaft — the one straight segment it draws.
+    let ink = |h: &Harness, at: Pos2| {
+        let slot = Rect::from_min_max(pos2(at.x - 30.0, at.y - 4.0), pos2(at.x, at.y + 20.0));
+        h.segments()
+            .into_iter()
+            .filter(|(points, _)| points.iter().all(|p| slot.contains(*p)))
+            .map(|(_, color)| color)
+            .collect::<Vec<_>>()
+    };
+    let (rest, hover) = (h.app.theme.text.secondary, h.app.theme.accent.mark);
+    assert_eq!(ink(&h, behind), [rest], "the arrow at rest is not text-secondary");
+    assert!(ink(&h, here).is_empty(), "where you are has an arrow as well as its tick");
+    h.frame(vec![Event::PointerMoved(pos2(behind.x + 2.0, behind.y + 6.0))]);
+    h.wait();
+    assert_eq!(ink(&h, behind), [hover], "the hovered entry's arrow is not accent.mark");
+    assert_eq!(ink(&h, ahead), [rest], "an entry the pointer is not on went blue");
+
+    let done = h.click_at(pos2(behind.x + 2.0, behind.y + 6.0));
+    assert!(done.contains(&"GoToHistory"), "the entry did nothing, got {done:?}");
+    assert_eq!(h.tab(0).path, root);
+    assert_eq!(h.tab(0).history.len(), 3, "a jump back dropped the places ahead");
+}
+
 /// Refresh is in the group at the left, and the star that was beside the filter is gone.
 ///
 /// Both halves matter. Refresh moved *into* the never-dropped group, so it is found by

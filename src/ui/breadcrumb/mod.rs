@@ -298,6 +298,8 @@ pub fn show(
     // the filter because it is the same kind of thing as the other three — it acts on the folder
     // you are looking at — and because that end is the end that gets given up on a narrow pane.
     // It is part of the group that is never dropped now, which is the point of moving it.
+    //
+    // A right click on Back or Forward lists the history either side — see [`history_menu`].
     let mut x = rect.left() + space::S2;
     for (glyph, tip, enabled, action) in [
         (
@@ -325,7 +327,8 @@ pub fn show(
             Action::Refresh(pane),
         ),
     ] {
-        if tool_button(
+        let history = matches!(action, Action::Back(_) | Action::Forward(_));
+        let response = tool_button(
             ui,
             t,
             button(x),
@@ -335,10 +338,13 @@ pub fn show(
             enabled,
             false,
             surface,
-        )
-        .clicked()
-        {
+        );
+        if response.clicked() {
             out.push(action);
+        }
+        // Only an enabled button senses a click at all, so a menu never opens empty.
+        if history {
+            history_menu(ui, t, &response, pane, &tab.history, tab.at, out);
         }
         x += TOOL_SIZE;
     }
