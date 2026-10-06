@@ -515,10 +515,13 @@ fn question(ui: &mut egui::Ui, t: &Theme, id: u64, clash: &Clash, out: &mut Vec<
     });
 }
 
-/// `Copying 1,204 files to Photos`, and the past tense once it has stopped.
+/// `Copying 812 items to Photos`, and the past tense once it has stopped.
+///
+/// **The count is what is left to do, not what was asked for**: it goes down as the job goes on, so
+/// the headline says how far there is still to go rather than repeating the size of the request.
 fn headline(s: &Snapshot) -> String {
     let into = crate::fs::display_name(&s.into);
-    let files = match s.files_found {
+    let files = match s.files_found.saturating_sub(s.files_done) {
         1 => "1 item".to_owned(),
         n => format!("{n} items"),
     };
