@@ -265,6 +265,15 @@ impl App {
         // counting this frame, and a folder counted this frame is one whose bars are right on the
         // frame it appears in rather than one behind. See [`crate::sizes`].
         self.collect_sizes(&ctx, now);
+        // The answer to *Check now*, and an install that has finished: the new build is in place of
+        // this one, so start it and go.
+        let drained = self.updater.drain();
+        if let Some(told) = drained.told {
+            self.report(told);
+        }
+        if let Some(exe) = drained.installed {
+            self.restart_into(&ctx, &exe);
+        }
 
         // Swapped out rather than borrowed, because the drawing code needs `&Theme`
         // and `&mut self` at the same time. The placeholder is the *same* palette, so
@@ -300,7 +309,14 @@ impl App {
 
         let bar = chrome::bar_rect(screen);
         let body = Rect::from_min_max(pos2(screen.left(), bar.bottom()), screen.max);
-        let plan = self.plan_layout(body, bar);
+        // The update badge sits beside the mark, so the tabs start after it — decided here, before
+        // the strips are planned, from the same measurement the bar draws it with.
+        let badge = self.updater.badge(&self.update_skip);
+        let bar_left = chrome::content_left(bar)
+            + badge
+                .as_ref()
+                .map_or(0.0, |badge| chrome::badge_room(ui.painter(), &theme, badge));
+        let plan = self.plan_layout(body, bar, bar_left);
 
         self.tab_slots.clear();
         // And where the strips themselves went, which `body` fills in for the bands as it draws
@@ -319,6 +335,11 @@ impl App {
             self.sidebar_shown,
             self.win_key.ours(),
             self.ops.fast(),
+            chrome::Update {
+                every: self.update_every,
+                badge: badge.as_ref(),
+                current: self.updater.current(),
+            },
             &self.drag,
             &mut self.icons,
             &mut self.actions,
@@ -428,12 +449,27 @@ impl App {
     /// place its tab strips, and because it is arithmetic worth being able to check on its
     /// own. Returns where every pane's tabs go, with the panes already reduced by the room
     /// their strip bands take.
-    pub(super) fn plan_layout(&mut self, body: Rect, bar: Rect) -> chrome::StripPlan {
+    ///
+    /// `bar_left` is where the title bar's tabs may begin: [`chrome::content_left`], or further
+    /// right while the update badge is showing.
+    pub(super) fn plan_layout(&mut self, body: Rect, bar: Rect, bar_left: f32) -> chrome::StripPlan {
         let (_, panes_area) = Self::split_body(body, self.sidebar_width, self.sidebar_shown);
         self.layout
             .layout(panes_area, &mut self.pane_rects, &mut self.splitters);
         self.pane_order = self.pane_rects.iter().map(|(id, _)| *id).collect();
-        chrome::plan_strips(&mut self.pane_rects, bar)
+        chrome::plan_strips(&mut self.pane_rects, bar, bar_left)
+    }
+
+    /// Start the build an update has just installed, and close this window.
+    ///
+    /// The settings are written *first*, so the new process reads this window's tabs rather than
+    /// the ones it was opened with; the exit save that follows then has nothing left to write.
+    fn restart_into(&mut self, ctx: &egui::Context, exe: &std::path::Path) {
+        self.save_settings();
+        match crate::update::relaunch(exe) {
+            Ok(()) => ctx.send_viewport_cmd(egui::ViewportCommand::Close),
+            Err(why) => self.report(why),
+        }
     }
 
     /// The sidebar and the area the panes divide between them.

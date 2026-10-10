@@ -175,6 +175,16 @@ pub struct Config {
     /// program being clever with somebody's files. Ticked in the application menu. See
     /// [`crate::shell::ops::fast`] for what it does and what it hands back to the shell.
     pub fast_copy: bool,
+    /// How often the window asks GitHub whether a newer release has been published: never, every
+    /// day or every week. `update=day`.
+    ///
+    /// **Every day** by default, so a settings file from before the key exists keeps asking. It only
+    /// ever raises a badge — installing is always a click. Chosen in the application menu's *Auto
+    /// update* submenu. See [`crate::update`].
+    pub update_every: crate::update::Every,
+    /// The release the user said to skip, from the badge's menu: an offer of exactly this version
+    /// stays hidden, and the next one shows. Empty for none.
+    pub update_skip: String,
     /// When a folder opens as tiles rather than as rows without the switch being pressed.
     ///
     /// The one setting here that touches [`crate::pane::ViewMode`], and it is a *rule* rather than a
@@ -266,6 +276,8 @@ impl Default for Config {
             sort: crate::fs::Sort::default(),
             forward_slashes: false,
             fast_copy: false,
+            update_every: crate::update::Every::default(),
+            update_skip: String::new(),
             auto_tiles: crate::pane::AutoTiles::default(),
             menu_moves: crate::shell::menu::Moves::default(),
             sections: Sections::default(),
@@ -406,6 +418,13 @@ impl Config {
                 }
                 "forward_slashes" => config.forward_slashes = value == "1",
                 "fast_copy" => config.fast_copy = value == "1",
+                // A word this build does not know leaves the default, like `sort` above.
+                "update" => {
+                    if let Some(every) = crate::update::Every::parse(value) {
+                        config.update_every = every;
+                    }
+                }
+                "update_skip" => config.update_skip = value.to_owned(),
                 // The same again: opening a folder as tiles on its own is off until somebody asks
                 // for it. See [`crate::pane::AutoTiles`].
                 // Read as "anything but 0", like `regroup` above and `diff` below: its default is
@@ -605,6 +624,10 @@ impl Config {
             flag(self.forward_slashes)
         ));
         text.push_str(&format!("fast_copy={}\n", flag(self.fast_copy)));
+        text.push_str(&format!("update={}\n", self.update_every.as_str()));
+        if !self.update_skip.is_empty() {
+            text.push_str(&format!("update_skip={}\n", self.update_skip));
+        }
         text.push_str(&format!("auto_tiles={}\n", flag(self.auto_tiles.on)));
         // Whole percent: it is what the slider produces — see `ui::filelist::tiles_menu`, whose step
         // is 5 — and a `59.9999` in a file people are meant to be able to edit would be this program

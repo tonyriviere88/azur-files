@@ -164,6 +164,7 @@ dependencies = [
  "resvg",
  "ruzstd",
  "sevenz-rust2",
+ "sha2",
  "tar",
  "windows",
  "windows-core",

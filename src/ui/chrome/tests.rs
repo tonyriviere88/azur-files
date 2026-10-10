@@ -30,7 +30,7 @@ fn two_rows_a_strip_apart_do_not_give_one_pane_two_strips() {
             Rect::from_min_max(pos2(500.0, top + STRIP_ROW), pos2(1000.0, 400.0)),
         ),
     ];
-    let plan = plan_strips(&mut panes, bar);
+    let plan = plan_strips(&mut panes, bar, content_left(bar));
     assert!(
         plan.in_bar.is_empty(),
         "this bar is too narrow to hold a strip, so nothing should be in it"
@@ -63,7 +63,7 @@ fn one_pane_puts_its_tabs_in_the_title_bar_above_itself() {
     let mut panes = vec![(1u32, Rect::from_min_max(pos2(left, 40.0), pos2(right, 690.0)))];
     let before = panes[0].1;
 
-    let plan = plan_strips(&mut panes, bar);
+    let plan = plan_strips(&mut panes, bar, content_left(bar));
     assert!(plan.rows.is_empty(), "one row needs no band");
     assert_eq!(plan.in_bar.len(), 1);
     let (id, strip) = plan.in_bar[0];
@@ -82,7 +82,7 @@ fn panes_side_by_side_each_get_a_strip_over_themselves() {
         (2u32, Rect::from_min_max(pos2(middle + 4.0, 40.0), pos2(right, 690.0))),
     ];
 
-    let plan = plan_strips(&mut panes, bar);
+    let plan = plan_strips(&mut panes, bar, content_left(bar));
     assert!(plan.rows.is_empty());
     assert_eq!(plan.in_bar.len(), 2);
     assert_eq!(plan.in_bar[0].1.left(), left);
@@ -102,7 +102,7 @@ fn a_pane_in_a_row_below_gets_a_band_of_its_own() {
         (2u32, Rect::from_min_max(pos2(left, split + 4.0), pos2(right, 690.0))),
     ];
 
-    let plan = plan_strips(&mut panes, bar);
+    let plan = plan_strips(&mut panes, bar, content_left(bar));
     assert_eq!(plan.in_bar.len(), 1, "the top row still uses the title bar");
     assert_eq!(plan.in_bar[0].0, 1);
     assert_eq!(plan.rows.len(), 1, "the row below gets a band");
@@ -136,7 +136,7 @@ fn a_band_covers_only_the_panes_in_its_own_row() {
         ),
     ];
 
-    let plan = plan_strips(&mut panes, bar);
+    let plan = plan_strips(&mut panes, bar, content_left(bar));
     assert_eq!(plan.in_bar.len(), 2, "both top-row panes are in the bar");
     assert_eq!(plan.rows.len(), 1);
     let row = &plan.rows[0];
@@ -161,7 +161,7 @@ fn a_row_the_caption_buttons_would_squeeze_moves_to_a_band() {
         })
         .collect();
 
-    let plan = plan_strips(&mut panes, bar);
+    let plan = plan_strips(&mut panes, bar, content_left(bar));
     assert!(
         plan.in_bar.is_empty(),
         "no strip goes in the bar when one of them would not fit"
@@ -171,4 +171,22 @@ fn a_row_the_caption_buttons_would_squeeze_moves_to_a_band() {
     for (_, rect) in &panes {
         assert_eq!(rect.top(), 40.0 + STRIP_ROW);
     }
+}
+
+/// **The update badge pushes the tabs along, and only when it is in their way.** With the panel
+/// down the left hidden, the first pane starts just past the mark, so its strip has to start past
+/// the badge too; with the panel showing, the pane starts further right than the badge reaches and
+/// nothing moves. See `badge_room`.
+#[test]
+fn the_tabs_start_past_the_update_badge() {
+    let (bar, left, right) = window();
+    let badge = content_left(bar) + 70.0;
+
+    let mut hidden = vec![(1u32, Rect::from_min_max(pos2(bar.left(), 40.0), pos2(right, 690.0)))];
+    let plan = plan_strips(&mut hidden, bar, badge);
+    assert_eq!(plan.in_bar[0].1.left(), badge, "the strip starts after the badge");
+
+    let mut shown = vec![(1u32, Rect::from_min_max(pos2(left, 40.0), pos2(right, 690.0)))];
+    let plan = plan_strips(&mut shown, bar, badge);
+    assert_eq!(plan.in_bar[0].1.left(), left, "over the panel, the badge is in nobody's way");
 }

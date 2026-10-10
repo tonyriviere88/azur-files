@@ -239,6 +239,10 @@ eframe = { version = "0.35", default-features = false, features = [
     "wayland",
 ] }
 
+# The update download is checked against the SHA-256 published beside it; see `update`. Already in
+# the graph through `lzma-rust2`, at the same version and features, so this line costs nothing.
+sha2 = "0.11"
+
 [target.'cfg(windows)'.dependencies]
 # COM, for the parts of this program that are the shell rather than merely near it:
 # the system image list behind Explorer's file icons, `IFileOperation` behind its
@@ -338,6 +342,7 @@ windows-sys = { version = "0.61", features = [
     # `fs::drives::list_shares` — three functions out of `mpr.dll`, no COM, and it reads the
     # redirector's own connection table rather than going to the network.
     "Win32_NetworkManagement_WNet",
+    "Win32_Networking_WinHttp",
     # `SECURITY_ATTRIBUTES`, which is a parameter of `RegCreateKeyExW` — so without this feature
     # that one function is `configured out` and `windows/winkey.rs` does not compile. The same
     # accident the `windows` crate's own `Win32_Security` note above describes, met a second time on

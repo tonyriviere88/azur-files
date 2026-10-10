@@ -192,7 +192,10 @@ pub struct StripPlan {
 /// The first row falls back to a band too when the caption buttons would leave one of its
 /// strips under [`MIN_STRIP`] — all of it or none of it, because a window with one pane's
 /// tabs in the bar and another's in a band below reads as a bug rather than as a rule.
-pub fn plan_strips(panes: &mut [(PaneId, Rect)], bar: Rect) -> StripPlan {
+///
+/// `left` is where the title bar's tabs may begin: [`content_left`], or further right while the
+/// update badge is beside the mark — see [`badge_room`].
+pub fn plan_strips(panes: &mut [(PaneId, Rect)], bar: Rect, left: f32) -> StripPlan {
     let mut plan = StripPlan {
         in_bar: Vec::new(),
         rows: Vec::new(),
@@ -218,7 +221,7 @@ pub fn plan_strips(panes: &mut [(PaneId, Rect)], bar: Rect) -> StripPlan {
     };
 
     // ---- The top row, if the title bar can hold it ----------------------
-    let (left, right) = (content_left(bar), controls_left(bar) - space::S3);
+    let right = controls_left(bar) - space::S3;
     let first = row_of(tops[0], panes);
     let candidates: Vec<(PaneId, Rect)> = first
         .iter()
@@ -306,6 +309,8 @@ pub fn title_bar(
     win_key: bool,
     // Whether copies and moves go through this program's own engine, for the tick beside it.
     fast_copy: bool,
+    // The update setting's tick, and the badge beside the mark when there is one to show.
+    update: Update<'_>,
     drag: &Option<TabDrag>,
     icons_cache: &mut crate::shell::icons::Icons,
     out: &mut Vec<Action>,
@@ -357,8 +362,22 @@ pub fn title_bar(
         ui.painter(),
         Rect::from_center_size(mark.center(), vec2(16.0, 16.0)),
     );
-    app_menu(ui, &mark_response, t.palette, sidebar, win_key, fast_copy, out);
+    let switches = Switches {
+        sidebar,
+        win_key,
+        fast_copy,
+        update_every: update.every,
+    };
+    app_menu(ui, &mark_response, t.palette, switches, out);
     x = mark.right() + space::S2;
+
+    // ---- The update badge, beside the mark, when there is one -----------
+    //
+    // [`plan_strips`] was given the same width, through [`badge_room`], so the tabs already
+    // start after it.
+    if let Some(badge) = update.badge {
+        x = update_badge(ui, t, bar, x, badge, update.current, out) + space::S2;
+    }
 
     // ---- Window buttons, from the right ---------------------------------
     let controls_left = window_buttons(ui, t, bar, maximized, out);
@@ -806,20 +825,52 @@ fn paint_tab(
     filled
 }
 
+/// What the title bar knows about updates. See [`crate::update`].
+#[derive(Clone, Copy)]
+pub struct Update<'a> {
+    /// How often the window asks, for the tick in the application menu's *Auto update*.
+    pub every: crate::update::Every,
+    /// What to show beside the mark. `None` is nothing, which is every window that is up to date.
+    pub badge: Option<&'a crate::update::Badge>,
+    /// This build's version, for the badge's menu.
+    pub current: &'a str,
+}
+
+/// The ticks in the application menu, as they stand.
+#[derive(Clone, Copy)]
+struct Switches {
+    sidebar: bool,
+    win_key: bool,
+    fast_copy: bool,
+    update_every: crate::update::Every,
+}
+
 /// The application menu: the handful of settings that belong to the window rather
 /// than to a pane.
 fn app_menu(
     ui: &mut Ui,
     trigger: &egui::Response,
     palette: crate::theme::Palette,
-    sidebar: bool,
-    win_key: bool,
-    fast_copy: bool,
+    switches: Switches,
     out: &mut Vec<Action>,
 ) {
     use azur_egui_theme::components::{Menu, MenuItem};
 
-    Menu::new(trigger).min_width(220.0).show(ui.ctx(), |ui| {
+    let Switches {
+        sidebar,
+        win_key,
+        fast_copy,
+        update_every,
+    } = switches;
+    // **As tall as the window has room for, and no taller a ceiling than that.** `Menu` scrolls past
+    // 320 points unless told otherwise — the design system's `.list { max-height }` — and this menu
+    // passed that some entries ago, so its last one was sitting under a scroll. `max_height` is a
+    // ceiling and not a size (see `Menu::show`), so the popup is still exactly as tall as what is in
+    // it; what changes is that only a window too short to hold the whole menu makes it scroll.
+    // Counting the entries instead would be one more number to keep in step with this function.
+    let room = ui.ctx().content_rect().height() - HEIGHT - space::S1 * 2.0 - space::S2 * 2.0;
+    let menu = Menu::new(trigger).min_width(220.0).max_height(room.max(120.0));
+    menu.show(ui.ctx(), |ui| {
         if ui
             .add(MenuItem::new("New tab").shortcut("Ctrl+T").icon(&azur_icons::plus))
             .clicked()
@@ -922,6 +973,25 @@ fn app_menu(
         {
             out.push(Action::SetFastCopy(!fast_copy));
         }
+        // Updates, behind one entry like the themes: *Check now*, and then how often the window asks
+        // by itself — one choice of three, ticked. A submenu rather than four rows here, which keeps
+        // this menu its length. Above the default-explorer entry, which keeps its place last for the
+        // reason it gives. See [`crate::update`].
+        let entry = MenuItem::new("Auto update").icon(&icons::downloads);
+        azur_egui_theme::components::submenu(ui, entry, |ui| {
+            if ui.add(MenuItem::new("Check now")).clicked() {
+                out.push(Action::CheckForUpdate);
+            }
+            azur_egui_theme::components::menu_divider(ui);
+            for every in crate::update::Every::ALL {
+                if ui
+                    .add(MenuItem::new(every.label()).selected(update_every == every))
+                    .clicked()
+                {
+                    out.push(Action::SetUpdateEvery(every));
+                }
+            }
+        });
         // Windows' own folder key, and **the one entry in this window that changes something outside
         // it**. It is last but for `Close window`, and that is the reasoning: everything above acts
         // on this window and stops existing when the window closes, and this one outlives the
@@ -956,6 +1026,138 @@ fn app_menu(
             out.push(Action::Window(WindowAction::Close));
         }
     });
+}
+
+// ---------------------------------------------------------------------------
+// The update badge
+// ---------------------------------------------------------------------------
+
+/// Inside the badge: the room either side, and between its glyph and its text.
+const BADGE_PAD: f32 = space::S2;
+const BADGE_GAP: f32 = space::S1;
+
+fn badge_text(badge: &crate::update::Badge) -> String {
+    use crate::update::Badge;
+    match badge {
+        Badge::Available { version } => version.clone(),
+        Badge::Downloading { version, percent } => format!("{version} · {percent}%"),
+        Badge::Failed { .. } => "Update failed".into(),
+    }
+}
+
+/// The badge's width. A download is measured at 100%, so the tabs beside it do not shuffle along
+/// as the number grows.
+fn badge_width(painter: &egui::Painter, t: &Theme, badge: &crate::update::Badge) -> f32 {
+    use crate::update::Badge;
+    let widest = match badge {
+        Badge::Downloading { version, .. } => badge_text(&Badge::Downloading {
+            version: version.clone(),
+            percent: 100,
+        }),
+        _ => badge_text(badge),
+    };
+    let text = painter
+        .layout_no_wrap(widest, t.fonts.body.clone(), t.text.secondary)
+        .size()
+        .x;
+    (BADGE_PAD + TOOL_ICON + BADGE_GAP + text + BADGE_PAD).ceil()
+}
+
+/// How much of the title bar the badge takes, the gap after it included — what
+/// [`plan_strips`] has to start the tabs past.
+pub fn badge_room(painter: &egui::Painter, t: &Theme, badge: &crate::update::Badge) -> f32 {
+    badge_width(painter, t, badge) + space::S2
+}
+
+/// The update badge, at `x` beside the mark, and the menu it opens. Returns its right edge.
+///
+/// Quiet on purpose: `text-secondary` and no fill until it is hovered, like the caption buttons,
+/// because an update is news and not an alarm. A download in progress is not clickable — there is
+/// nothing to choose until it has finished or failed.
+fn update_badge(
+    ui: &mut Ui,
+    t: &Theme,
+    bar: Rect,
+    x: f32,
+    badge: &crate::update::Badge,
+    current: &str,
+    out: &mut Vec<Action>,
+) -> f32 {
+    use azur_egui_theme::components::{
+        galley_on_baseline, ink_baseline, menu_header, tooltip, Menu, MenuItem,
+    };
+    use crate::update::Badge;
+
+    let rect = Rect::from_min_size(
+        pos2(x, (bar.center().y - TOOL_SIZE * 0.5).round()),
+        vec2(badge_width(ui.painter(), t, badge), TOOL_SIZE),
+    );
+    let busy = matches!(badge, Badge::Downloading { .. });
+    let sense = if busy { Sense::hover() } else { Sense::click() };
+    let response = ui.interact(rect, Id::new("update-badge"), sense);
+    let open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&response));
+    let lit = open || (response.hovered() && !busy);
+    if lit {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::same(radius::SMALL), t.bg.control_hover);
+    }
+    let ink = if lit { t.text.primary } else { t.text.secondary };
+    let glyph = icon_rect(rect, rect.left() + BADGE_PAD, TOOL_ICON);
+    match badge {
+        Badge::Failed { .. } => azur_icons::warning(ui.painter(), glyph, ink),
+        _ => icons::downloads(ui.painter(), glyph, ink),
+    }
+    let galley = ui
+        .painter()
+        .layout_no_wrap(badge_text(badge), t.fonts.body.clone(), ink);
+    let baseline = ink_baseline(ui.painter(), &t.fonts.body, rect.top(), rect.height());
+    galley_on_baseline(ui.painter(), glyph.right() + BADGE_GAP, baseline, galley);
+
+    let (version, tip) = match badge {
+        Badge::Available { version } => (
+            version,
+            format!("{} {version} is available — click to update", crate::brand::NAME),
+        ),
+        Badge::Downloading { version, .. } => {
+            (version, format!("Downloading {} {version}", crate::brand::NAME))
+        }
+        Badge::Failed { version, why } => (version, why.clone()),
+    };
+    if !busy {
+        Menu::new(&response).min_width(200.0).show(ui.ctx(), |ui| {
+            menu_header(
+                ui,
+                &format!("{} {version} · you have {current}", crate::brand::NAME),
+            );
+            let install = match badge {
+                Badge::Failed { .. } => "Try again",
+                _ => "Update and restart",
+            };
+            if ui
+                .add(MenuItem::new(install).icon(&icons::downloads))
+                .clicked()
+            {
+                out.push(Action::InstallUpdate);
+            }
+            if ui
+                .add(MenuItem::new("What's new").icon(&icons::link))
+                .clicked()
+            {
+                out.push(Action::OpenReleasePage);
+            }
+            // Not offered once an install has been tried: a failure is something to retry or read
+            // about, and hiding it would only hide the reason.
+            if matches!(badge, Badge::Available { .. })
+                && ui.add(MenuItem::new("Skip this version")).clicked()
+            {
+                out.push(Action::SkipUpdate);
+            }
+        });
+    }
+    if !open {
+        tooltip(response, &tip);
+    }
+    rect.right()
 }
 
 /// The minimise / maximise / close buttons. Returns their left edge, which is

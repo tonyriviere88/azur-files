@@ -1001,6 +1001,39 @@ impl App {
                 self.ops.set_fast(on);
                 self.config_dirty = true;
             }
+            Action::SetUpdateEvery(every) => {
+                self.update_every = every;
+                self.config_dirty = true;
+            }
+            // Asked for by name, so a version skipped earlier is offered again if it is still the
+            // newest: somebody checking by hand wants to hear about it.
+            Action::CheckForUpdate => {
+                if !self.update_skip.is_empty() {
+                    self.update_skip.clear();
+                    self.config_dirty = true;
+                }
+                self.updater.check_now();
+            }
+            // Refused rather than queued while a copy is running: the install ends in a restart, and
+            // a restart loses the copy. See `crate::update`.
+            Action::InstallUpdate => {
+                if self.ops.copying() {
+                    self.report("Finish or stop the copy first — updating restarts the window".into());
+                } else {
+                    self.updater.install();
+                }
+            }
+            Action::OpenReleasePage => {
+                if let Some(release) = self.updater.release() {
+                    crate::fs::shell::open(std::path::Path::new(&release.page));
+                }
+            }
+            Action::SkipUpdate => {
+                if let Some(release) = self.updater.release() {
+                    self.update_skip = release.version.clone();
+                    self.config_dirty = true;
+                }
+            }
             Action::Steer { transfer, steer } => self.ops.steer(transfer, steer),
             Action::Leave(leave) => {
                 use crate::ui::transfers::Leave;

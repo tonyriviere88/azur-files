@@ -62,6 +62,8 @@ fn the_window_comes_back_the_way_it_was_left() {
         },
         forward_slashes: true,
         fast_copy: true,
+        update_every: crate::update::Every::Week,
+        update_skip: "1.2.0".into(),
         // Both away from their defaults again: the rule is *on* by default and the threshold is
         // `TILES_THRESHOLD`, so a round trip that used either would prove nothing. There is no third
         // key — whether the count asks this machine about `.pdf` and `.3dr` is not a setting, it is
@@ -200,6 +202,18 @@ fn the_window_comes_back_the_way_it_was_left() {
     // one every other program on the machine makes. See `crate::shell::ops::fast`.
     assert!(back.fast_copy);
     assert!(!older.fast_copy, "off by default");
+    // How often GitHub is asked for a newer release: every day by default, so a file from before the
+    // key keeps asking, and written as a word. The skipped version is kept as written.
+    assert_eq!(back.update_every, crate::update::Every::Week);
+    assert!(saved.to_text().contains("update=week"));
+    assert_eq!(older.update_every, crate::update::Every::Day, "every day by default");
+    assert_eq!(
+        Config::parse("update=hourly\n").update_every,
+        crate::update::Every::Day,
+        "a word this build does not know leaves the default"
+    );
+    assert_eq!(back.update_skip, "1.2.0");
+    assert!(older.update_skip.is_empty());
     // And the console's two, which are the same kind of thing again. The shell is written as the
     // word the dropdown shows, so a settings file stays something you can read and edit.
     assert!((back.console_share - 0.28).abs() < 1e-3);

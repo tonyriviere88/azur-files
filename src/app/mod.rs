@@ -393,6 +393,11 @@ pub struct App {
     /// [`crate::shell::winkey::set`], and [`crate::shell::winkey`] on why there is no copy of this
     /// in the settings file.
     win_key: crate::shell::winkey::State,
+    /// Whether a newer release is out, and the install of one. See [`crate::update`].
+    updater: crate::update::Updater,
+    /// [`crate::config::Config::update_every`] and [`crate::config::Config::update_skip`].
+    update_every: crate::update::Every,
+    update_skip: String,
     /// Whose video is filling the screen, if one is.
     ///
     /// **The one state in this program that suppresses the rest of the window.** While it is set the
@@ -700,6 +705,15 @@ impl App {
             // that went missing. Startup is the one moment a running copy can put that right. See
             // `crate::shell::winkey`, which is emphatic about how narrow the repair is.
             win_key: crate::shell::winkey::heal(),
+            // At most as often as the setting says, and from the last answer when another window
+            // already asked — see `crate::update`. Never from a test.
+            updater: {
+                let mut updater = crate::update::Updater::new(ctx);
+                updater.check(config.update_every);
+                updater
+            },
+            update_every: config.update_every,
+            update_skip: config.update_skip.clone(),
             fullscreen_video: None,
             window_size: config.window,
             window_position: config.position,
@@ -782,6 +796,8 @@ impl App {
             sort: self.sort,
             forward_slashes: self.forward_slashes,
             fast_copy: self.ops.fast(),
+            update_every: self.update_every,
+            update_skip: self.update_skip.clone(),
             auto_tiles: self.auto_tiles,
             menu_moves: self.menu_moves.clone(),
             sections: self.sections,

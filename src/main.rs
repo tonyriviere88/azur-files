@@ -103,6 +103,7 @@ mod sizes;
 mod syntax;
 mod theme;
 mod ui;
+mod update;
 mod watch;
 
 use app::App;

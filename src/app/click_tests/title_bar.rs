@@ -808,3 +808,69 @@ fn the_application_menu_turns_fast_copy_on_and_off() {
         assert_eq!(h.app.settings().fast_copy, want, "the settings would not say so");
     }
 }
+
+/// **Auto update** is a submenu of the application menu: *Check now*, and a choice of how often,
+/// ticked on every day by default. A click on a choice is what the settings then say — which is where
+/// the next launch reads it from. *Check now* is not clicked: it asks GitHub, which a test never
+/// does (see `crate::update`), and the action reaching the journal is all there is to see.
+#[test]
+fn the_application_menu_chooses_how_often_to_check_for_updates() {
+    use crate::update::Every;
+
+    let mut h = Harness::new();
+    assert_eq!(h.app.settings().update_every, Every::Day, "every day by default");
+    let mark = (0..64)
+        .step_by(2)
+        .map(|x| pos2(x as f32, crate::ui::chrome::HEIGHT * 0.5))
+        .find(|at| h.hovers(Id::new("app-menu"), *at))
+        .expect("the application mark is not reachable");
+    let find = |h: &Harness, label: &str| {
+        h.texts()
+            .into_iter()
+            .find(|(_, t)| t == label)
+            .map(|(pos, _)| pos + vec2(8.0, 6.0))
+    };
+    for want in [Every::Week, Every::Never, Every::Day] {
+        h.click_at(mark);
+        h.frame(Vec::new());
+        let entry = find(&h, "Auto update").expect("the application menu has no Auto update entry");
+        // A submenu opens on hover, and takes a frame or two to be laid out beside its parent.
+        h.frame(vec![Event::PointerMoved(entry)]);
+        for _ in 0..4 {
+            h.frame(Vec::new());
+        }
+        let choice = find(&h, want.label())
+            .unwrap_or_else(|| panic!("the Auto update submenu has no {} entry", want.label()));
+        assert!(find(&h, "Check now").is_some(), "the submenu has no Check now");
+        h.click_at(choice);
+        h.settle();
+        assert_eq!(h.app.settings().update_every, want, "the click did not choose {want:?}");
+    }
+}
+
+/// **The whole application menu is on screen, with nothing under a scroll.** The design system caps
+/// a menu at 320 points unless told otherwise, and this one outgrew that: its last entry, `Close
+/// window`, sat below the fold, drawn but clipped, so a click where it appeared to be reached
+/// nothing. Clicking it is the test, because a clipped entry still turns up among the texts.
+#[test]
+fn the_application_menu_needs_no_scrolling() {
+    let mut h = Harness::new();
+    let mark = (0..64)
+        .step_by(2)
+        .map(|x| pos2(x as f32, crate::ui::chrome::HEIGHT * 0.5))
+        .find(|at| h.hovers(Id::new("app-menu"), *at))
+        .expect("the application mark is not reachable");
+    h.click_at(mark);
+    h.frame(Vec::new());
+    let close = h
+        .texts()
+        .into_iter()
+        .find(|(_, t)| t == "Close window")
+        .map(|(pos, _)| pos)
+        .expect("the application menu has no Close window entry");
+    let done = h.click_at(close + vec2(8.0, 6.0));
+    assert!(
+        done.contains(&"Window"),
+        "Close window did not take the click, so it is under a scroll: {done:?}"
+    );
+}

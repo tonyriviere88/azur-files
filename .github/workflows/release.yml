@@ -34,10 +34,13 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
         TAG: ${{ inputs.tag || github.ref_name }}
+      # The checksum beside the executable is what the in-app updater checks a download against,
+      # and it refuses a release without one — see `src/update/mod.rs`. Both names are its contract.
       run: |
-        exe=target/release/azur-files.exe
+        cd target/release
+        sha256sum azur-files.exe > azur-files.exe.sha256
         if gh release view "$TAG" > /dev/null 2>&1; then
-          gh release upload "$TAG" "$exe" --clobber
+          gh release upload "$TAG" azur-files.exe azur-files.exe.sha256 --clobber
         else
-          gh release create "$TAG" "$exe" --title "Azur Files ${TAG#v}" --generate-notes
+          gh release create "$TAG" azur-files.exe azur-files.exe.sha256 --title "Azur Files ${TAG#v}" --generate-notes
         fi
