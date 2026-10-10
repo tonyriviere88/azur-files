@@ -943,6 +943,9 @@ fn a_complaint_is_cut_to_something_that_fits_in_a_panel() {
     assert_eq!(short("bad magic"), "Bad magic");
     assert_eq!(short(""), "Cannot be read");
     assert!(short(&"very long complaint ".repeat(20)).len() <= 80);
+    // Byte 80 is inside the twenty-seventh `▽`; cutting there panicked.
+    assert_eq!(short(&"▽".repeat(30)).chars().count(), 30);
+    assert_eq!(short(&"é".repeat(100)).chars().count(), 80);
 }
 
 

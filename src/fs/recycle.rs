@@ -145,7 +145,8 @@ pub fn is_held(path: &Path) -> bool {
     let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
         return false;
     };
-    if !(name.len() > 2 && name[..2].eq_ignore_ascii_case("$R")) {
+    // Compared as bytes: `name[..2]` panics when byte 2 falls inside a character, as in `▽x`.
+    if !(name.len() > 2 && name.as_bytes()[..2].eq_ignore_ascii_case(b"$R")) {
         return false;
     }
     let Some(user) = path.parent() else { return false };
@@ -248,10 +249,12 @@ pub fn listing(started: Instant) -> Dir {
         let mut indexes: Vec<(String, usize)> = Vec::new();
         for i in 0..dir.len() {
             let name = dir.name(i);
-            if name.len() <= 2 {
+            // Checked: anything can be put in the bin's folder, and a name that starts with a
+            // character wider than two bytes has no cut at byte 2.
+            let Some((tag, key)) = name.split_at_checked(2).filter(|(_, key)| !key.is_empty())
+            else {
                 continue;
-            }
-            let (tag, key) = name.split_at(2);
+            };
             let key = key.to_ascii_lowercase();
             if tag.eq_ignore_ascii_case("$R") {
                 held.insert(key, i);
@@ -464,5 +467,14 @@ mod tests {
         );
         assert!(!is_held(Path::new(r"D:\$Recycle.Bin\$RKOFDIE.txt")), "not in a user's folder");
         assert!(!is_held(Path::new(r"D:\work\$Report.txt")));
+    }
+
+    /// A name whose first character is three bytes long. Slicing it at byte 2 panicked, and every
+    /// Delete and Ctrl+C asks this first, so selecting the file and pressing either took the
+    /// window down.
+    #[test]
+    fn a_name_starting_with_a_wide_character_is_not_held() {
+        assert!(!is_held(Path::new(r"D:\work\▽┊Button up Shirt.pmp")));
+        assert!(!is_held(Path::new(r"D:\work\📁x")));
     }
 }

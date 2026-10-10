@@ -567,7 +567,11 @@ fn capitalise(text: &str) -> String {
 fn short(why: &str) -> String {
     let first = why.split(['\n', ':']).next().unwrap_or(why).trim();
     let mut out = if first.is_empty() { why } else { first }.to_owned();
-    out.truncate(80);
+    // Cut at a character, not at byte 80: `truncate` panics inside one, and a decoder's complaint
+    // can be the system's own message, which on a French Windows is full of accents.
+    if let Some((at, _)) = out.char_indices().nth(80) {
+        out.truncate(at);
+    }
     // Capitalised, because it goes in the middle of a panel as a sentence rather than into a log.
     capitalise(&out)
 }
