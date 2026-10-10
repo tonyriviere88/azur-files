@@ -1,23 +1,36 @@
-# Introduction
+# Azur Files
 
 Azur Files is an alternative to Windows explorer.
 
-It is a split-pane file manager for Windows that scrolls a folder of a hundred thousand
-files at the refresh rate, and — the part Explorer has never done — shows you what is
-*inside* a file without leaving the window: source, Markdown, images, video, and a
-binary's dependency tree.
+It's a fast file explorer with tabs support, multiple preview panes (text, image, video, binary dependencies), diff viewer for texts and images, folder diff, git and console.
 
 ![The window: two panes, tabs, bookmarks and thumbnails](docs/overview.png)
+
+<br>
+<p align="center">
+  <a href="https://github.com/tonyriviere88/azur-files/releases/latest">
+    <img alt="Download for Windows" src="https://img.shields.io/badge/Download-for%20Windows-0078D4?style=for-the-badge&logo=windows&logoColor=white">
+  </a>
+  <a href="https://github.com/tonyriviere88/azur-files/releases">
+    <img alt="Latest release" src="https://img.shields.io/github/v/release/tonyriviere88/azur-files?style=for-the-badge&label=latest&color=1f2937">
+  </a>
+</p>
+<br>
 
 # Features
 
 - **fast** — a folder is read once and never asked about again, so a frame costs what the
   *window* is worth rather than what the folder is. The status line shows the real numbers.
-- **flatten folder** — everything under here, as one list or as a tree
-- **folder size** — measure the folder you are looking at, with a bar per row
-- **filter search** — type, and the listing narrows as you type
+- **[flatten folder](#flatten-a-folder)** — show all folders and files, as one list or as a tree
+- **[folder size](#folder-sizes)** — measure the folder you are looking at, with a bar per row
+- **[filter search](#filter-as-you-type)** — type, and the listing narrows as you type
 - **bookmarks** — the folders you actually use, arrangeable into groups
 - **tabs / panels** — tabs per pane, and panes split by dragging a tab to an edge
+- **[preview](#preview)** — [text](#text), [pictures](#picture), [video](#video) and a
+  [binary's dependencies](#binary), inside the pane
+- **[folder diff](#folder-diff)** — two folder trees side by side, only the differences in colour
+- **[console](#console)** — a shell in the folder on show, with its output in blocks
+- **[git](#git)** — status on every row, a lens for what changed, and a diff in the preview
 
 ## Flatten a folder
 
@@ -179,3 +192,25 @@ back on a red one, numbered as `HEAD` had them, with long runs of unchanged line
 and the file's syntax colouring intact.
 
 ![A file against HEAD, in the preview panel](docs/git-diff.png)
+
+# Building
+
+You need Windows, a Rust toolchain of 1.85 or later (from [rustup](https://rustup.rs)) with the
+MSVC target, and the Visual Studio C++ build tools that come with it. The window renders through
+Vulkan only, so the machine that runs it needs a working Vulkan driver.
+
+```sh
+git clone https://github.com/tonyriviere88/azur-files.git
+cd azur-files
+cargo build --release
+```
+
+The executable is `target/release/azur-files.exe`. It is self-contained, so you can copy it
+anywhere and run it from there.
+
+`cargo deploy` does both steps in one go: it builds the release binary and copies it to
+`D:\Programs`, or to `$AZUR_DEPLOY_DIR` if that is set, or to a folder given on the command line
+(`cargo deploy E:\Tools`). It can replace a copy that is running.
+
+The first build compiles every dependency from nothing, so expect a few minutes and a few GB
+in `target/`. Rebuilds after that are incremental.
