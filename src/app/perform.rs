@@ -176,7 +176,7 @@ impl App {
             }
 
             Action::OpenInSplit { pane, path, side } => {
-                let id = self.spawn_pane(Tab::showing(path, self.show_hidden));
+                let id = self.spawn_pane(Tab::showing(path, self.show_hidden, self.sort));
                 if !self.layout.split(pane, side, id) {
                     self.panes.retain(|p| p.id != id);
                     return;
@@ -193,9 +193,9 @@ impl App {
                 self.config_dirty = true;
             }
             Action::NavigateNewTab { pane, path } => {
-                let hidden = self.show_hidden;
+                let (hidden, sort) = (self.show_hidden, self.sort);
                 if let Some(p) = self.pane_mut(pane) {
-                    p.tabs.push(Tab::showing(path, hidden));
+                    p.tabs.push(Tab::showing(path, hidden, sort));
                     p.show_tab(p.tabs.len() - 1);
                 }
                 self.focused = pane;
@@ -260,10 +260,18 @@ impl App {
                 }
             }
 
+            // And the result becomes the window's preference, so the next tab — and the next launch
+            // — opens sorted the same way. See [`App::sort`].
             Action::Sort { pane, column } => {
-                if let Some(p) = self.pane_mut(pane) {
-                    p.tab_mut().sort_by_column(column);
-                }
+                let Some(p) = self.pane_mut(pane) else { return };
+                let tab = p.tab_mut();
+                tab.sort_by_column(column);
+                let sort = crate::fs::Sort {
+                    by: tab.sort_by,
+                    ascending: tab.ascending,
+                };
+                self.sort = sort;
+                self.config_dirty = true;
             }
             Action::SelectAll(pane) => {
                 if let Some(p) = self.pane_mut(pane) {

@@ -55,6 +55,11 @@ fn the_window_comes_back_the_way_it_was_left() {
         diff_show: crate::diff::Show::Names,
         regroup: false,
         show_hidden: true,
+        // Both halves away from the default, which is Type ascending.
+        sort: crate::fs::Sort {
+            by: crate::fs::Column::Modified,
+            ascending: false,
+        },
         forward_slashes: true,
         fast_copy: true,
         // Both away from their defaults again: the rule is *on* by default and the threshold is
@@ -172,6 +177,18 @@ fn the_window_comes_back_the_way_it_was_left() {
     // launch, so a value that is written and not read would be the feature quietly absent.
     assert!(back.show_hidden);
     assert!(!older.show_hidden, "off by default");
+    // Which column the listings are sorted by, and which way — written as words, so the file stays
+    // one somebody can edit. A file from before the key opens on the old default, Type ascending; a
+    // column with no direction takes the one its header's first click would; and a column this build
+    // has never heard of changes nothing.
+    assert_eq!(back.sort, saved.sort);
+    assert!(saved.to_text().contains("sort=modified,desc"));
+    assert_eq!(older.sort, crate::fs::Sort::default());
+    assert_eq!(
+        Config::parse("sort=size\n").sort,
+        crate::fs::Sort { by: crate::fs::Column::Size, ascending: false }
+    );
+    assert_eq!(Config::parse("sort=colour,asc\n").sort, crate::fs::Sort::default());
     // Which slash the path field writes. The same way round as the one above — its default is
     // *off*, so it is the missing line that has to come back false and the `1` that has to
     // survive. A preference nobody can keep is worse than no preference: the whole point of it is

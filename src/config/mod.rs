@@ -144,6 +144,13 @@ pub struct Config {
     /// `show_hidden=` is read as "only `1`", and a settings file written before it existed comes
     /// back with those rows out of the way.
     pub show_hidden: bool,
+    /// Which column the listings are sorted by, and which way: the last header clicked, in any pane.
+    ///
+    /// A habit in the same sense as the ones above — somebody who reads every folder newest first
+    /// wants that next launch too — and one answer for the window, like [`Self::show_hidden`], which
+    /// is what lets one line hold it: it is what every tab is opened with, the restored ones included.
+    /// `sort=modified,desc`. See [`crate::fs::Sort`].
+    pub sort: crate::fs::Sort,
     /// Whether the path field writes `/` between the parts of a path instead of `\`.
     ///
     /// **Off**, because `\` is what Windows shows everywhere else and a path bar that disagreed
@@ -256,6 +263,7 @@ impl Default for Config {
             diff_show: crate::diff::Show::default(),
             regroup: true,
             show_hidden: false,
+            sort: crate::fs::Sort::default(),
             forward_slashes: false,
             fast_copy: false,
             auto_tiles: crate::pane::AutoTiles::default(),
@@ -389,6 +397,13 @@ impl Config {
                 // Both read as "only 1", like the preview's two below: their default is *off*, so a
                 // missing line and a `0` mean the same thing and both have to leave them alone.
                 "show_hidden" => config.show_hidden = value == "1",
+                // A column and a direction. A column this build does not know leaves the default,
+                // like `theme` below: a file from a newer build is how that happens.
+                "sort" => {
+                    if let Some(sort) = crate::fs::Sort::parse(value) {
+                        config.sort = sort;
+                    }
+                }
                 "forward_slashes" => config.forward_slashes = value == "1",
                 "fast_copy" => config.fast_copy = value == "1",
                 // The same again: opening a folder as tiles on its own is off until somebody asks
@@ -584,6 +599,7 @@ impl Config {
         text.push_str(&format!("diff_show={}\n", self.diff_show.as_str()));
         text.push_str(&format!("regroup={}\n", flag(self.regroup)));
         text.push_str(&format!("show_hidden={}\n", flag(self.show_hidden)));
+        text.push_str(&format!("sort={}\n", self.sort.as_text()));
         text.push_str(&format!(
             "forward_slashes={}\n",
             flag(self.forward_slashes)

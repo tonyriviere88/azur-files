@@ -829,11 +829,10 @@ impl Tab {
             order: Vec::new(),
             order_gen: next_order_gen(),
             tree: Vec::new(),
-            // Type, not Name: a folder read by type comes up grouped — every source
-            // file together, every image together — and within a group it is still in
-            // name order, so nothing is harder to find than it would have been.
-            sort_by: Column::Type,
-            ascending: true,
+            // The default's reasoning is on `Sort::default`. Every tab in the program is made by
+            // `Tab::showing`, which brings the window's own.
+            sort_by: crate::fs::Sort::default().by,
+            ascending: crate::fs::Sort::default().ascending,
             filter: String::new(),
             filter_at: None,
             lens: None,
@@ -897,7 +896,7 @@ impl Tab {
         show: crate::diff::Show,
         twin: Option<PaneId>,
     ) -> Self {
-        let mut tab = Self::showing(path, show_hidden);
+        let mut tab = Self::showing(path, show_hidden, crate::fs::Sort::default());
         tab.flat = true;
         tab.flat_mode = FlatMode::Tree;
         tab.regroup = false;
@@ -915,18 +914,20 @@ impl Tab {
 
     /// A new tab already showing what the rest of the window is showing.
     ///
-    /// [`Tab::new`] and the one window preference a tab cannot be handed late: `show_hidden` is read
-    /// by every [`Tab::rebuild_order`], the first listing's included, so a tab that took the default
-    /// and was put right a frame later would draw one frame of a folder short of half its rows.
-    /// `flat_mode` and `regroup` are not in that position — neither is read until a tab is flattened,
-    /// and [`Tab::toggle_flat`] is handed the window's values then — which is why they are not
-    /// arguments here.
+    /// [`Tab::new`] and the two window preferences a tab cannot be handed late: `show_hidden` and
+    /// `sort` are both read by every [`Tab::rebuild_order`], the first listing's included, so a tab
+    /// that took the defaults and was put right a frame later would draw one frame of a folder short
+    /// of half its rows, or in an order it then jumps out of. `flat_mode` and `regroup` are not in
+    /// that position — neither is read until a tab is flattened, and [`Tab::toggle_flat`] is handed
+    /// the window's values then — which is why they are not arguments here.
     ///
-    /// Every tab `App` makes comes through this or [`Tab::duplicate`], which carries the field
+    /// Every tab `App` makes comes through this or [`Tab::duplicate`], which carries the fields
     /// across; plain [`Tab::new`] is for the tests, which mean the default.
-    pub fn showing(path: impl Into<PathBuf>, show_hidden: bool) -> Self {
+    pub fn showing(path: impl Into<PathBuf>, show_hidden: bool, sort: crate::fs::Sort) -> Self {
         let mut tab = Self::new(path);
         tab.show_hidden = show_hidden;
+        tab.sort_by = sort.by;
+        tab.ascending = sort.ascending;
         tab
     }
 

@@ -89,6 +89,66 @@ impl Column {
     pub fn starts_ascending(self) -> bool {
         matches!(self, Self::Name | Self::Keywords | Self::Type | Self::Status)
     }
+
+    /// The word the settings file spells this column with. Not [`Self::header`], which is screen
+    /// text and free to change; this is a format, and a file written today has to read back.
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Name => "name",
+            Self::Keywords => "keywords",
+            Self::Status => "status",
+            Self::Size => "size",
+            Self::Type => "type",
+            Self::Modified => "modified",
+        }
+    }
+
+    pub fn parse(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|column| column.key() == key)
+    }
+}
+
+/// Which column a listing is ordered by, and which way: the last header clicked, in any pane.
+///
+/// The window's preference rather than a fact about a folder — how you like to read a listing is a
+/// habit — so it is what every tab the window opens starts with, and what the settings file keeps as
+/// `sort=`. A tab still keeps its own copy once it is open, and a click on one pane's header leaves
+/// the others as they are. See [`crate::config::Config::sort`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Sort {
+    pub by: Column,
+    pub ascending: bool,
+}
+
+impl Default for Sort {
+    /// Type, not Name: a folder read by type comes up grouped — every source file together, every
+    /// image together — and within a group it is still in name order, so nothing is harder to find
+    /// than it would have been.
+    fn default() -> Self {
+        Self {
+            by: Column::Type,
+            ascending: true,
+        }
+    }
+}
+
+impl Sort {
+    /// `modified,desc`. A column with no direction after it takes the one a fresh click on its header
+    /// would, which is the likelier thing somebody editing the file by hand meant.
+    pub fn parse(value: &str) -> Option<Self> {
+        let (by, way) = value.split_once(',').unwrap_or((value, ""));
+        let by = Column::parse(by.trim())?;
+        let ascending = match way.trim() {
+            "asc" => true,
+            "desc" => false,
+            _ => by.starts_ascending(),
+        };
+        Some(Self { by, ascending })
+    }
+
+    pub fn as_text(self) -> String {
+        format!("{},{}", self.by.key(), if self.ascending { "asc" } else { "desc" })
+    }
 }
 
 /// Which rows [`crate::pane::Lens::Images`] keeps: every picture, and the folders that lead to one.

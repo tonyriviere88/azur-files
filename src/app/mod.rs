@@ -263,6 +263,13 @@ pub struct App {
     /// own Hidden items box is one box for every window it opens. The tabs each keep the copy their
     /// order is built from; see [`crate::pane::Tab::show_hidden`].
     show_hidden: bool,
+    /// Which column a tab opens sorted by, and which way: the last header clicked, in any pane.
+    ///
+    /// Beside [`App::show_hidden`] and handed to [`Tab::showing`] with it, since the first order a
+    /// tab builds is built with it. Unlike that one, a change is *not* pushed into the tabs already
+    /// open: sorting one pane by size is not a request to re-sort the other. See
+    /// [`crate::fs::Sort`].
+    sort: crate::fs::Sort,
     /// Whether the path field writes `/` between the parts of a path rather than `\`.
     ///
     /// The window's preference again — which slash you want is a habit, and it is about where the
@@ -536,8 +543,8 @@ impl App {
         let mut focused = first;
         // Every tab below is made showing what the settings file says the window shows, because the
         // first listing to land is ordered with it and there is no frame in which to correct it. See
-        // [`Tab::showing`], which is why this is the one preference threaded through here.
-        let hidden = config.show_hidden;
+        // [`Tab::showing`], which is why these are the two preferences threaded through here.
+        let (hidden, sort) = (config.show_hidden, config.sort);
 
         if open.is_empty() {
             // The panes that were open last time, and the tree that arranged them. Both, or
@@ -567,7 +574,7 @@ impl App {
                             .paths
                             .iter()
                             .cloned()
-                            .map(|path| Tab::showing(path, hidden));
+                            .map(|path| Tab::showing(path, hidden, sort));
                         let mut pane =
                             Pane::new(id, tabs.next().expect("a group with no tabs was filtered"));
                         pane.tabs.extend(tabs);
@@ -583,10 +590,10 @@ impl App {
                         .iter()
                         .flat_map(|group| group.paths.iter())
                         .cloned()
-                        .map(|path| Tab::showing(path, hidden))
+                        .map(|path| Tab::showing(path, hidden, sort))
                         .collect();
                     if tabs.is_empty() {
-                        tabs.push(Tab::showing(fs::places::default_start(), hidden));
+                        tabs.push(Tab::showing(fs::places::default_start(), hidden, sort));
                     }
                     let mut pane = Pane::new(first, tabs.remove(0));
                     pane.tabs.extend(tabs);
@@ -597,12 +604,12 @@ impl App {
             let mut paths = open.into_iter();
             panes.push(Pane::new(
                 first,
-                Tab::showing(paths.next().unwrap_or_default(), hidden),
+                Tab::showing(paths.next().unwrap_or_default(), hidden, sort),
             ));
             for path in paths {
                 let id = next_pane;
                 next_pane += 1;
-                panes.push(Pane::new(id, Tab::showing(path, hidden)));
+                panes.push(Pane::new(id, Tab::showing(path, hidden, sort)));
                 layout.split(id - 1, side, id);
             }
         }
@@ -675,6 +682,7 @@ impl App {
             diff_show: config.diff_show,
             regroup: config.regroup,
             show_hidden: config.show_hidden,
+            sort: config.sort,
             forward_slashes: config.forward_slashes,
             auto_tiles: config.auto_tiles,
             menu_moves: config.menu_moves.clone(),
@@ -771,6 +779,7 @@ impl App {
             diff_show: self.diff_show,
             regroup: self.regroup,
             show_hidden: self.show_hidden,
+            sort: self.sort,
             forward_slashes: self.forward_slashes,
             fast_copy: self.ops.fast(),
             auto_tiles: self.auto_tiles,

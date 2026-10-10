@@ -33,7 +33,7 @@ pub mod sort;
 pub mod time;
 
 pub use dir::{display_name, Dir};
-pub use sort::Column;
+pub use sort::{Column, Sort};
 
 use std::path::{Path, PathBuf};
 

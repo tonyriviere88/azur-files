@@ -910,6 +910,43 @@ fn showing_hidden_files_is_the_window_s_preference_and_survives_a_relaunch() {
     assert!(app.panes.iter().flat_map(|p| &p.tabs).all(|t| !t.show_hidden));
 }
 
+/// The sort a header click leaves becomes the window's, and is written down — but unlike hidden
+/// files it is not pushed into the panes already open: sorting one by size is not a request to
+/// re-sort the other. See [`crate::fs::Sort`].
+#[test]
+fn the_last_sort_chosen_is_what_tabs_open_with_and_survives_a_relaunch() {
+    use crate::fs::{Column, Sort};
+    let (mut app, ctx) = app(&["/a", "/b"]);
+    assert_eq!(app.sort, Sort::default());
+
+    // Modified starts descending, so one click is both halves away from the default.
+    app.perform(&ctx, Action::Sort { pane: 1, column: Column::Modified });
+    let newest = Sort { by: Column::Modified, ascending: false };
+    assert_eq!(app.sort, newest);
+    assert!(app.config_dirty, "the click was never going to reach the file");
+    assert_eq!(app.settings().sort, newest);
+    let other = app.panes[1].tab();
+    assert_eq!((other.sort_by, other.ascending), (Column::Type, true), "the other pane was re-sorted");
+
+    // A second click on the same header turns it round, and that is what is kept.
+    app.perform(&ctx, Action::Sort { pane: 1, column: Column::Modified });
+    let oldest = Sort { by: Column::Modified, ascending: true };
+    assert_eq!(app.settings().sort, oldest);
+
+    // A tab opened afterwards takes it.
+    app.perform(&ctx, Action::NavigateNewTab { pane: 1, path: PathBuf::from("/c") });
+    let new = app.panes[0].tabs.last().expect("the new tab");
+    assert_eq!((new.sort_by, new.ascending), (Column::Modified, true));
+
+    // And so does every tab of the window those settings describe.
+    let back = App::opening(&ctx, app.settings(), Vec::new(), Side::Right);
+    assert_eq!(back.sort, oldest);
+    assert!(
+        back.panes.iter().flat_map(|p| &p.tabs).all(|t| (t.sort_by, t.ascending) == (Column::Modified, true)),
+        "the restored tabs are ordered without the setting the window was launched with"
+    );
+}
+
 /// The join: the entry the shell really puts in the menu, through the real dispatch.
 ///
 /// Everything either side of this is covered on its own —
