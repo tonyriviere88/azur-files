@@ -839,13 +839,22 @@ fn drive_row(
     }
 
     navigate_on(&response, focused, &drive.path, out);
-    ContextMenu::new(&response).show(ui.ctx(), |ui| {
-        menu_targets(ui, focused, &drive.path, out);
-        azur_egui_theme::components::menu_divider(ui);
-        if ui.add(MenuItem::new("Open terminal here")).clicked() {
-            out.push(Action::OpenTerminal(drive.path.clone()));
-        }
-    });
+    // **Windows' own menu for the drive**, the one Explorer's navigation pane shows — Eject,
+    // Format, Disconnect, BitLocker, Properties and whatever is installed — rather than a short one
+    // of ours. Built off the UI thread like every shell menu, so a drive that is slow to answer
+    // costs a busy cursor and not a frozen window. See [`Action::DriveMenu`].
+    if response.secondary_clicked() {
+        // Physical pixels inside the window, as `filelist::context_menu` sends them.
+        let at = response
+            .interact_pointer_pos()
+            .unwrap_or(response.rect.center());
+        let scale = ui.ctx().pixels_per_point();
+        out.push(Action::DriveMenu {
+            pane: focused,
+            drive: drive.path.clone(),
+            at: ((at.x * scale) as i32, (at.y * scale) as i32),
+        });
+    }
 }
 
 /// Left click navigates, middle click opens a tab.

@@ -171,6 +171,23 @@ pub enum Own {
     /// **Only on a selection of exactly two folders**, and just after the shell's Open, which is the
     /// other thing a folder in this menu is for. See [`with_our_folder_diff`].
     FolderDiff,
+    /// The drive in a tab of its own, on a drive's menu only. This and the three after it are what
+    /// the sidebar's own drive menu offered before it became Windows' one — the shell has no idea
+    /// this window has tabs, panes or a terminal. After Open, like [`Own::FolderDiff`]. See
+    /// [`with_our_drive_entries`].
+    OpenNewTab,
+    /// The drive in a new pane to the right of the one the menu was raised for.
+    OpenRight,
+    /// The drive in a new pane below it.
+    OpenBelow,
+    /// A terminal opened at the drive.
+    OpenTerminal,
+    /// Close a network connection that has no drive letter — `\\fileserver\web`, opened by path.
+    ///
+    /// Windows' own menu offers *Disconnect* on a mapped letter and on nothing else, so a share
+    /// reached by path had no way out of the Network group short of `net use /delete`. On the menu
+    /// of a row in that group only. See [`with_our_disconnect`].
+    Disconnect,
 }
 
 impl Own {
@@ -190,6 +207,12 @@ impl Own {
             // selected, which is the same choice `Create shortcuts here` above makes.
             Self::CopyPaths => "Copy path(s)",
             Self::FolderDiff => "Folder diff",
+            // The sidebar's words for them, unchanged, so the entries read as they always did.
+            Self::OpenNewTab => "Open in new tab",
+            Self::OpenRight => "Open in a pane to the right",
+            Self::OpenBelow => "Open in a pane below",
+            Self::OpenTerminal => "Open terminal here",
+            Self::Disconnect => "Disconnect",
         }
     }
 }
@@ -559,12 +582,35 @@ pub fn with_our_copy_paths(mut entries: Vec<Entry>) -> Vec<Entry> {
 /// on this machine is `Ouvrir`. The first one at the top level, because that is the one a folder's
 /// menu leads with; at the head of the menu if an extension has taken Open away, which is where the
 /// entry would have been anyway.
-pub fn with_our_folder_diff(mut entries: Vec<Entry>) -> Vec<Entry> {
+pub fn with_our_folder_diff(entries: Vec<Entry>) -> Vec<Entry> {
+    after_open(entries, &[Own::FolderDiff])
+}
+
+/// Put this program's ways of opening a drive into its menu, just after its first `open`, in the
+/// order the sidebar's own menu had them — see [`Own::OpenNewTab`].
+pub fn with_our_drive_entries(entries: Vec<Entry>) -> Vec<Entry> {
+    after_open(
+        entries,
+        &[Own::OpenNewTab, Own::OpenRight, Own::OpenBelow, Own::OpenTerminal],
+    )
+}
+
+/// Put `Disconnect` into a letterless network location's menu, just above Properties, which is
+/// where Windows puts its own *Disconnect* on a mapped drive — see [`Own::Disconnect`].
+pub fn with_our_disconnect(mut entries: Vec<Entry>) -> Vec<Entry> {
+    let at = properties_at(&entries).unwrap_or(entries.len());
+    entries.insert(at, Entry::own(Own::Disconnect));
+    entries
+}
+
+/// Insert some of ours after the first top-level `open`, or at the head of the menu without one.
+fn after_open(mut entries: Vec<Entry>, own: &[Own]) -> Vec<Entry> {
     let open = entries.iter().position(|entry| match &entry.kind {
         Kind::Command(Command::Shell { verb: Some(verb), .. }) => verb.eq_ignore_ascii_case("open"),
         _ => false,
     });
-    entries.insert(open.map_or(0, |at| at + 1), Entry::own(Own::FolderDiff));
+    let at = open.map_or(0, |at| at + 1);
+    entries.splice(at..at, own.iter().map(|&which| Entry::own(which)));
     entries
 }
 

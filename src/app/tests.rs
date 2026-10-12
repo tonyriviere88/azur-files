@@ -858,6 +858,164 @@ fn copy_paths_writes_the_paths_with_the_slash_the_path_field_is_set_to() {
     assert_eq!(copy(&mut app, Vec::new()).as_deref(), Some("C:/src/ui"));
 }
 
+/// A drive's menu — the one whose folder is This PC — has `Open terminal here` and no rename of ours.
+///
+/// The terminal, because it is what the sidebar's drive menu offered before it became Windows' one.
+/// No rename, because `BeginRename` renames the row under the *pane's* cursor, and from the sidebar
+/// that is some other file. A folder's menu is the control: rename is ours there, and no terminal.
+#[test]
+fn a_drive_menu_opens_a_terminal_and_never_renames_the_pane_s_row() {
+    use crate::shell::menu::{Command, Handlers, Kind, Moves, Own};
+
+    let (app, _ctx) = app(&["/a"]);
+    let menu = |folder: &str, item: &str| {
+        crate::ui::menu::Open::new(
+            1,
+            pos2(0.0, 0.0),
+            vec![PathBuf::from(item)],
+            PathBuf::from(folder),
+            Vec::new(),
+            crate::shell::menu::Depth::Full,
+            0,
+        )
+        .banded(Handlers::new(), false, &Moves::default())
+    };
+    let has_terminal = |menu: &crate::ui::menu::Open| {
+        menu.entries
+            .iter()
+            .any(|e| matches!(e.kind, Kind::Command(Command::Own(Own::OpenTerminal))))
+    };
+    let rename = Command::verb_only("rename");
+
+    let drive = menu("", r"C:\");
+    assert!(has_terminal(&drive), "a drive's menu has to offer a terminal");
+    // The four of ours, in the sidebar's old order, and each one meaning what it says.
+    let ours: Vec<Own> = drive
+        .entries
+        .iter()
+        .filter_map(|e| match e.kind {
+            Kind::Command(Command::Own(which)) if which != Own::CopyPaths => Some(which),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        ours,
+        [Own::OpenNewTab, Own::OpenRight, Own::OpenBelow, Own::OpenTerminal]
+    );
+    for (which, name) in [
+        (Own::OpenNewTab, "NavigateNewTab"),
+        (Own::OpenRight, "OpenInSplit"),
+        (Own::OpenBelow, "OpenInSplit"),
+        (Own::OpenTerminal, "OpenTerminal"),
+    ] {
+        let action = app
+            .own_menu_action(&drive, which)
+            .expect("the entry has to mean something");
+        assert_eq!(action.name(), name, "{which:?}");
+    }
+    match app.own_menu_action(&drive, Own::OpenBelow) {
+        Some(Action::OpenInSplit { side, path, .. }) => {
+            assert_eq!(side, crate::pane::Side::Bottom);
+            assert_eq!(path, PathBuf::from(r"C:\"));
+        }
+        _ => unreachable!("checked just above"),
+    }
+    // `Disconnect` is the Network group's, and a plain drive's menu does not get it.
+    assert!(!drive
+        .entries
+        .iter()
+        .any(|e| matches!(e.kind, Kind::Command(Command::Own(Own::Disconnect)))));
+    assert!(
+        App::ours_rather_than_the_shell_s(&drive, &rename).is_empty(),
+        "a drive's rename must not become the pane's"
+    );
+
+    let folder = menu(r"C:\src", r"C:\src\ui");
+    assert!(!has_terminal(&folder), "the terminal is a drive's entry only");
+    assert!(
+        app.own_menu_action(&folder, Own::OpenNewTab).is_some(),
+        "the entry is harmless wherever it lands, but it only lands on a drive's menu"
+    );
+    let ours: Vec<&str> = App::ours_rather_than_the_shell_s(&folder, &rename)
+        .iter()
+        .map(Action::name)
+        .collect();
+    assert_eq!(ours, ["BeginRename"]);
+}
+
+/// A folder on a mapping Windows has not reconnected is recognised, brought back once, and a refusal
+/// says so; closing a letterless connection that Windows refuses says so too.
+///
+/// **Nothing here reaches the network.** Both calls stop at [`crate::shell::ops::FOR_REAL`] under
+/// `cfg(test)` and answer as a cancelled dialog would, which is exactly the failure path — and the
+/// mapping is a pretended one, on a letter this machine does not have.
+#[test]
+fn an_unmounted_drive_is_reconnected_once_and_a_refusal_is_reported() {
+    use crate::fs::drives::{Drive, DriveKind};
+
+    let (mut app, ctx) = app(&["/a"]);
+    let taken: Vec<String> = app.volumes.all().iter().map(|d| d.letter.clone()).collect();
+    let letter = ('Q'..='Z')
+        .map(|c| format!("{c}:"))
+        .find(|l| !taken.contains(l))
+        .expect("a free letter between Q and Z");
+    app.volumes.pretend_drive(Drive {
+        path: PathBuf::from(format!("{letter}\\")),
+        letter: letter.clone(),
+        label: "Common".to_owned(),
+        kind: DriveKind::Network,
+        total: 0,
+        free: 0,
+        described: false,
+        disconnected: true,
+    });
+
+    // Which paths are on it: any folder under the letter, either case, and nothing else.
+    let inside = PathBuf::from(format!("{letter}\\projects\\x"));
+    assert_eq!(app.volumes.unmounted(&inside), Some(letter.clone()));
+    assert_eq!(
+        app.volumes
+            .unmounted(&PathBuf::from(format!("{}\\", letter.to_lowercase()))),
+        Some(letter.clone())
+    );
+    assert_eq!(app.volumes.unmounted(&PathBuf::from(r"\\fileserver\web")), None);
+    if let Some(mounted) = taken.first() {
+        assert_eq!(
+            app.volumes.unmounted(&PathBuf::from(format!("{mounted}\\"))),
+            None,
+            "a mounted drive is not reconnected"
+        );
+    }
+
+    // What the user sees while it is tried, and after it is refused.
+    let pane = app.focused;
+    let settle = |app: &mut App, want: &str| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while app.notice.as_deref() != Some(want) && std::time::Instant::now() < deadline {
+            app.collect_connections(&ctx);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert_eq!(app.notice.as_deref(), Some(want));
+    };
+    app.ask_reconnect(pane, &inside, letter.clone(), &ctx);
+    assert_eq!(app.notice.as_deref(), Some(format!("Reconnecting {letter}…").as_str()));
+    settle(&mut app, "Could not reconnect the drive");
+    // Once per path: a refusal does not come straight back as a second attempt.
+    app.notice = None;
+    app.ask_reconnect(pane, &inside, letter.clone(), &ctx);
+    assert_eq!(app.notice, None, "the same path was asked about twice");
+
+    let share = PathBuf::from(r"\\yafe-no-such-machine.invalid\web");
+    app.perform(&ctx, Action::Disconnect(share.clone()));
+    settle(
+        &mut app,
+        &format!(
+            "Could not disconnect {} — is a file on it still open?",
+            share.display()
+        ),
+    );
+}
+
 /// Showing hidden files is one answer for the window, and it is written down.
 ///
 /// It was one answer per *tab* and remembered nowhere, which made `Ctrl+H` a keystroke you pressed

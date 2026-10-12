@@ -25,9 +25,10 @@ impl App {
             return;
         };
         let folder = p.tab().path.clone();
-        if folder.as_os_str().is_empty() {
-            // This PC is a list of volumes, not a directory; the shell has no menu for it
-            // that would mean anything here.
+        if folder.as_os_str().is_empty() && items.is_empty() {
+            // This PC's *background* is a list of volumes, not a directory; the shell has no menu
+            // for it that would mean anything here. Its rows do have one — a drive is an item of
+            // This PC, and `SHBindToParent` on `C:\` binds to exactly that — see `ask_menu`.
             return;
         }
         // **And no menu inside an archive**, for the same reason one level further on: the shell is
@@ -62,7 +63,24 @@ impl App {
                 folders.len() == 2 && items.iter().all(|item| folders.contains(item))
             })
         };
+        self.ask_menu(pane, folder, items, at, diffable, ctx);
+    }
 
+    /// Ask the shell for the menu of `items` in `folder`, and open it when it answers.
+    ///
+    /// `folder` empty is **This PC**, and the items are drives — from a This PC listing or from
+    /// the sidebar, which is why the folder is passed rather than read off the pane. The shell
+    /// does not need it for a selection (see `win::context_of`, which binds to each item's own
+    /// parent), and this program uses it only for what is on a background menu.
+    pub(super) fn ask_menu(
+        &mut self,
+        pane: PaneId,
+        folder: PathBuf,
+        items: Vec<PathBuf>,
+        at: (i32, i32),
+        diffable: bool,
+        ctx: &egui::Context,
+    ) {
         // Whatever was open, or on its way, is not what was asked for.
         self.close_menu();
         let scale = ctx.pixels_per_point();
@@ -222,6 +240,21 @@ impl App {
                     let can_paste = asking.items.is_empty()
                         && !fs::is_synthetic(&asking.folder)
                         && crate::shell::clipboard::has_files();
+                    // **No Rename on a drive.** The shell's renames the volume label from inside
+                    // a view this menu has none of, and ours — see `ours_rather_than_the_shell_s`
+                    // — renames the row under the pane's cursor, which from the sidebar is some
+                    // other file altogether. An entry that did nothing or the wrong thing is worse
+                    // than none.
+                    let mut entries = entries;
+                    if asking.folder.as_os_str().is_empty() {
+                        entries.retain(|entry| entry.verb.as_deref() != Some("rename"));
+                    }
+                    // `Disconnect` on a row of the Network group — a connection with no letter,
+                    // which Windows' own menu has no way to close. Asked of the list the panel is
+                    // showing, so the entry is offered on exactly the rows that are there.
+                    let disconnectable = asking.folder.as_os_str().is_empty()
+                        && matches!(&asking.items[..], [only]
+                            if self.volumes.shares().iter().any(|share| share.path == *only));
                     self.menu = Some(
                         crate::ui::menu::Open::new(
                             asking.pane,
@@ -233,6 +266,7 @@ impl App {
                             token,
                         )
                         .diffable(asking.diffable)
+                        .disconnectable(disconnectable)
                         .banded(handlers, can_paste, &self.menu_moves),
                     );
                 }
@@ -485,7 +519,10 @@ impl App {
             // because a rename field is one name: the shell offers the entry on a multiple selection
             // and Explorer answers it by renaming them all in sequence, which is a different feature
             // and not one to imply by accident.
-            "rename" if menu.items.len() == 1 => vec![Action::BeginRename(menu.pane)],
+            // Never for a drive, whose menu is This PC's — see `pump_menu`, which leaves the entry out.
+            "rename" if menu.items.len() == 1 && !menu.folder.as_os_str().is_empty() => {
+                vec![Action::BeginRename(menu.pane)]
+            }
             // Into the selected folder. The shell offers this on any selection with a folder
             // somewhere in it, including several at once — where Explorer's own answer is not
             // something to reproduce by accident. The first folder is the one, and the rest of
@@ -677,6 +714,23 @@ impl App {
                 },
                 _ => return None,
             },
+            // The drive the menu was raised over, which is the only menu these entries are on. The
+            // pane is the one the menu belongs to — from the sidebar, the focused one.
+            Own::OpenNewTab => Action::NavigateNewTab {
+                pane: menu.pane,
+                path: menu.items.first()?.clone(),
+            },
+            Own::OpenRight | Own::OpenBelow => Action::OpenInSplit {
+                pane: menu.pane,
+                path: menu.items.first()?.clone(),
+                side: if which == Own::OpenRight {
+                    crate::pane::Side::Right
+                } else {
+                    crate::pane::Side::Bottom
+                },
+            },
+            Own::OpenTerminal => Action::OpenTerminal(menu.items.first()?.clone()),
+            Own::Disconnect => Action::Disconnect(menu.items.first()?.clone()),
             // Into the folder the menu was raised in, which for a background menu is the folder
             // being shown. Named outright rather than as [`Action::Paste`], which would read the
             // pane again: the same reasoning as the redirected `paste` verb, and the same action.

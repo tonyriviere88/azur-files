@@ -556,6 +556,74 @@ pub fn connect(target: &Path, owner: crate::shell::Owner) -> Result<(), u32> {
     }
 }
 
+/// Bring back a mapped drive Windows has not reconnected — `H:` after a reboot — the way Explorer
+/// does when you open it.
+///
+/// `WNetRestoreSingleConnectionW` is the call Explorer makes: it reads the mapping out of the
+/// profile, and with `fUseUI` it raises the system credential dialog if the saved credentials do
+/// not do. Declared here because `windows-sys` does not carry it; it is documented in
+/// `winnetwk.h` and exported by `mpr.dll` — **but not by the SDK's `mpr.lib`**, measured against
+/// 10.0.28000, so an ordinary `#[link]` fails at link time with `LNK2019`. `raw-dylib` binds to the
+/// DLL's export directly, which is how `windows-sys` declares everything else here.
+///
+/// **Blocks for as long as SMB takes and the dialog is up.** Never on the UI thread. Under
+/// `cfg(test)` it answers to [`crate::shell::ops::FOR_REAL`], like [`connect`].
+#[cfg(windows)]
+pub fn reconnect(letter: &str, owner: crate::shell::Owner) -> Result<(), u32> {
+    // `mpr` and not `mpr.dll`: `raw-dylib` appends the extension itself, and the spelling with it
+    // imports from `mpr.dll.dll`, which no machine has — the process then fails to start at all.
+    #[link(name = "mpr", kind = "raw-dylib")]
+    extern "system" {
+        fn WNetRestoreSingleConnectionW(
+            parent: windows_sys::Win32::Foundation::HWND,
+            device: *const u16,
+            use_ui: i32,
+        ) -> u32;
+    }
+
+    #[cfg(test)]
+    if !crate::shell::ops::FOR_REAL.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(ERROR_CANCELLED);
+    }
+
+    // `H:`, without the backslash: a device name, which is what the profile is keyed on.
+    let device: Vec<u16> = letter
+        .trim_end_matches('\\')
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+    match unsafe { WNetRestoreSingleConnectionW(owner.raw(), device.as_ptr(), 1) } {
+        NO_ERROR => Ok(()),
+        code => Err(code),
+    }
+}
+
+/// Close a network connection that has no drive letter — `\\fileserver\web`, opened by path.
+///
+/// `dwFlags` of zero leaves the profile alone, which for a letterless connection has nothing in it
+/// anyway; and **not forced**, so a connection with files open on it is refused with
+/// `ERROR_OPEN_FILES` rather than pulled out from under whoever has them.
+///
+/// Local and quick — it drops the session, it does not wait on the server — but it is still run on
+/// a worker, because a redirector tearing down a session to a server that has gone away is exactly
+/// the kind of call this program does not make in a frame.
+#[cfg(windows)]
+pub fn disconnect(remote: &Path) -> Result<(), u32> {
+    use windows_sys::Win32::NetworkManagement::WNet::WNetCancelConnection2W;
+
+    #[cfg(test)]
+    if !crate::shell::ops::FOR_REAL.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err(ERROR_CANCELLED);
+    }
+
+    let mut name: Vec<u16> = remote.as_os_str().encode_wide().collect();
+    name.push(0);
+    match unsafe { WNetCancelConnection2W(name.as_ptr(), 0, 0) } {
+        NO_ERROR => Ok(()),
+        code => Err(code),
+    }
+}
+
 /// Every disk share a server offers, asked of the server itself.
 ///
 /// `NetShareEnum`, which is what `net view \\server` calls and the only way to enumerate a

@@ -82,6 +82,9 @@ pub struct Open {
     /// Whether the selection is exactly two folders, and so gets `Folder diff`. Decided by whoever
     /// raised the menu, from the listing — see [`Open::diffable`].
     diffable: bool,
+    /// Whether the menu gets `Disconnect`: it is about a network connection with no letter. Decided
+    /// by whoever raised the menu, from the Network group — see [`Open::disconnectable`].
+    disconnectable: bool,
     /// How much of a menu this is, carried through so that a command chosen here is resolved
     /// against a menu built the same way. See [`crate::shell::menu::invoke`].
     pub depth: crate::shell::menu::Depth,
@@ -159,6 +162,7 @@ impl Open {
             handlers: crate::shell::menu::Handlers::new(),
             can_paste: false,
             diffable: false,
+            disconnectable: false,
             depth,
             open: Vec::new(),
             cursor: None,
@@ -202,6 +206,13 @@ impl Open {
         self
     }
 
+    /// Offer `Disconnect` — the menu is about a letterless network connection. Before
+    /// [`Open::banded`], like [`Open::diffable`]. See [`crate::shell::menu::Own::Disconnect`].
+    pub fn disconnectable(mut self, on: bool) -> Self {
+        self.disconnectable = on;
+        self
+    }
+
     /// Band the shell's entries and put this program's own two in.
     ///
     /// **The one place a menu's contents are decided**, called by [`Open::new`] and again by every
@@ -230,6 +241,18 @@ impl Open {
         // `Folder diff`, after Open, when the selection is two folders.
         let entries = if self.diffable {
             crate::shell::menu::with_our_folder_diff(entries)
+        } else {
+            entries
+        };
+        // The tab, the two panes and the terminal, after Open, on a drive's menu — the one whose
+        // folder is This PC.
+        let entries = if self.folder.as_os_str().is_empty() && !self.items.is_empty() {
+            crate::shell::menu::with_our_drive_entries(entries)
+        } else {
+            entries
+        };
+        let entries = if self.disconnectable {
+            crate::shell::menu::with_our_disconnect(entries)
         } else {
             entries
         };

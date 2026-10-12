@@ -823,6 +823,10 @@ impl App {
                 items,
                 at,
             } => self.shell_menu(pane, items, at, ctx),
+            // This PC is the parent: a drive is an item there, whichever folder the pane is in.
+            Action::DriveMenu { pane, drive, at } => {
+                self.ask_menu(pane, PathBuf::new(), vec![drive], at, false, ctx)
+            }
             // **An archive opens here too, as a folder.** `pkg.zip` is a file to the operating
             // system and a place to this program: the same double click that steps into a directory
             // steps into one of these, which is what Explorer has always done for a `.zip` and what
@@ -892,6 +896,7 @@ impl App {
                 self.report(format!("{} is not a folder a terminal can start in", fs::display_name(&path)));
             }
             Action::OpenTerminal(path) => fs::shell::open_terminal(&nearest_real(&path)),
+            Action::Disconnect(remote) => self.disconnect(remote, ctx),
             // The paths as text, one per line — `Ctrl+Shift+C`, and the context menu's
             // `Copy path(s)`, which is this same action so that the two cannot drift.
             //

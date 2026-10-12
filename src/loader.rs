@@ -555,6 +555,28 @@ impl Volumes {
         &self.drives
     }
 
+    /// The letter `path` is on, when that letter is a mapping Windows has not reconnected — `H:`
+    /// for `H:\projects\x`, after a reboot. `None` for anything mounted, and for anything without
+    /// a letter.
+    ///
+    /// Read off the list the panel already holds rather than asked of the system again, so it costs
+    /// nothing and agrees with what the Drives group is showing.
+    pub fn unmounted(&self, path: &Path) -> Option<String> {
+        let text = path.to_string_lossy();
+        let letter = text.get(..2).filter(|head| head.ends_with(':'))?;
+        self.drives
+            .iter()
+            .find(|d| d.disconnected && d.letter.eq_ignore_ascii_case(letter))
+            .map(|d| d.letter.clone())
+    }
+
+    /// Put a drive in the list without asking the system, so a test can stand in for a mapping
+    /// this machine may not have — and cannot be put in that state without unmounting a real one.
+    #[cfg(test)]
+    pub(crate) fn pretend_drive(&mut self, drive: Drive) {
+        self.drives.push(drive);
+    }
+
     /// The network locations with no drive letter — what the Network group in the sidebar shows.
     ///
     /// Separate from [`Volumes::all`] rather than appended to it because they are a separate

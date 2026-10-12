@@ -20,7 +20,15 @@ impl App {
         // list holds is read off the connection table, so all this has to decide is whether to read
         // it again — once, after the loop, however many listings arrived in the same frame.
         let mut connected = false;
-        let Self { panes, providers, .. } = self;
+        // Folders on a mapped drive Windows has not reconnected, with the letter to bring back.
+        // Gathered here for the same reason as `refused`.
+        let mut unmounted: Vec<(crate::pane::PaneId, PathBuf, String)> = Vec::new();
+        let Self {
+            panes,
+            providers,
+            volumes,
+            ..
+        } = self;
         for loaded in arrived {
             for pane in panes.iter_mut() {
                 for tab in &mut pane.tabs {
@@ -32,6 +40,16 @@ impl App {
                         // See [`super::connect`].
                         if loaded.dir.credentials {
                             refused.push((pane.id, loaded.dir.path.clone()));
+                        }
+                        // **A mapping that is not mounted.** Opening `H:` after a reboot reads as
+                        // "path not found", because the letter does not exist until something
+                        // restores it — which is what Explorer does at this point, so this does
+                        // too. Navigated-to only, by the same `tab.awaiting` rule as above: the
+                        // restore can put a credential dialog up.
+                        if loaded.dir.error.is_some() {
+                            if let Some(letter) = volumes.unmounted(&loaded.dir.path) {
+                                unmounted.push((pane.id, loaded.dir.path.clone(), letter));
+                            }
                         }
                         // A machine that answered. Any listing on it counts, not just the machine's
                         // own share list: if `\\fileserver\web\owncloud` read, there is a connection
@@ -58,6 +76,9 @@ impl App {
         }
         for (pane, path) in refused {
             self.ask_credentials(pane, &path, ctx);
+        }
+        for (pane, path, letter) in unmounted {
+            self.ask_reconnect(pane, &path, letter, ctx);
         }
     }
 

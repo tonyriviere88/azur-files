@@ -75,7 +75,8 @@ use std::time::{Duration, Instant};
 mod win;
 #[cfg(windows)]
 pub use win::{
-    connect, describe, down_servers, list_letters, list_servers, list_shares, shares_on,
+    connect, describe, disconnect, down_servers, list_letters, list_servers, list_shares,
+    reconnect, shares_on,
 };
 
 /// Machines the network has announced, which is a different question from what is mounted — and
@@ -447,6 +448,17 @@ pub fn shares_on(_server: &str) -> Result<Vec<String>, u32> {
 /// ever sees it, so credentials were settled by whoever mounted it.
 #[cfg(not(windows))]
 pub fn connect(_target: &Path, _owner: crate::shell::Owner) -> Result<(), u32> {
+    Err(0)
+}
+
+/// No mapped drives and no connections, so nothing to bring back or to close.
+#[cfg(not(windows))]
+pub fn reconnect(_letter: &str, _owner: crate::shell::Owner) -> Result<(), u32> {
+    Err(0)
+}
+
+#[cfg(not(windows))]
+pub fn disconnect(_remote: &Path) -> Result<(), u32> {
     Err(0)
 }
 

@@ -221,6 +221,17 @@ pub enum Action {
         items: Vec<PathBuf>,
         at: (i32, i32),
     },
+    /// Show the shell context menu for a drive, as an item of This PC — Open, Eject, Format,
+    /// Disconnect, Properties and whatever is installed — wherever the drive was right-clicked.
+    ///
+    /// Not a [`Action::ShellMenu`], because that one takes its folder from the pane, and the
+    /// sidebar's drives are not in whatever folder the pane is showing. `pane` is only where Open
+    /// navigates.
+    DriveMenu {
+        pane: PaneId,
+        drive: PathBuf,
+        at: (i32, i32),
+    },
 
     // The outside world
     Open(PathBuf),
@@ -228,6 +239,9 @@ pub enum Action {
     OpenNewTab(PathBuf),
     Reveal(PathBuf),
     OpenTerminal(PathBuf),
+    /// Close a network connection that has no drive letter. See
+    /// [`crate::shell::menu::Own::Disconnect`].
+    Disconnect(PathBuf),
     CopyPaths(Vec<PathBuf>),
     AddBookmark(PathBuf),
     /// Pin a folder into a group, rather than at the end of the list.
@@ -358,12 +372,14 @@ impl Action {
             Self::CancelKeywords(_) => "CancelKeywords",
             Self::NewFolder(_) => "NewFolder",
             Self::ShellMenu { .. } => "ShellMenu",
+            Self::DriveMenu { .. } => "DriveMenu",
             Self::DragOut { .. } => "DragOut",
             Self::DropHere { .. } => "DropHere",
             Self::Open(_) => "Open",
             Self::OpenNewTab(_) => "OpenNewTab",
             Self::Reveal(_) => "Reveal",
             Self::OpenTerminal(_) => "OpenTerminal",
+            Self::Disconnect(_) => "Disconnect",
             Self::CopyPaths(_) => "CopyPaths",
             Self::AddBookmark(_) => "AddBookmark",
             Self::AddBookmarkIn { .. } => "AddBookmarkIn",

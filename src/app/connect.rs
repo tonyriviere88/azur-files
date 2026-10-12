@@ -34,6 +34,19 @@ pub struct Signed {
     pane: PaneId,
     path: PathBuf,
     worked: bool,
+    what: Asked,
+}
+
+/// Which of the three things that change the connection table this answer is about.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Asked {
+    /// A share or a machine signed in to — [`App::ask_credentials`].
+    SignIn,
+    /// A mapped drive brought back — [`App::ask_reconnect`]. The *letters* have changed, so the
+    /// Drives group is read again as well as the folder.
+    Reconnect,
+    /// A letterless connection closed — [`App::disconnect`]. Nothing to read again but the panel.
+    Disconnect,
 }
 
 /// The paths already asked about, and the channel the answers come back on.
@@ -101,7 +114,78 @@ impl App {
             .name("connect".to_owned())
             .spawn(move || {
                 let worked = crate::fs::drives::connect(&target, owner).is_ok();
-                if sender.send(Signed { pane, path, worked }).is_ok() {
+                let signed = Signed {
+                    pane,
+                    path,
+                    worked,
+                    what: Asked::SignIn,
+                };
+                if sender.send(signed).is_ok() {
+                    ctx.request_repaint();
+                }
+            });
+    }
+
+    /// Close a network connection that has no letter, from its row's menu.
+    ///
+    /// On a worker, like everything here that talks to the redirector, and answered on the same
+    /// channel so that the Network group is read again once the connection is really gone. Not
+    /// once-per-path: it is a command somebody chose, not something raised on their behalf.
+    pub(super) fn disconnect(&mut self, remote: PathBuf, ctx: &egui::Context) {
+        let sender = self.connecting.sender.clone();
+        let ctx = ctx.clone();
+        let pane = self.focused;
+        let _ = std::thread::Builder::new()
+            .name("disconnect".to_owned())
+            .spawn(move || {
+                let worked = crate::fs::drives::disconnect(&remote).is_ok();
+                let signed = Signed {
+                    pane,
+                    path: remote,
+                    worked,
+                    what: Asked::Disconnect,
+                };
+                if sender.send(signed).is_ok() {
+                    ctx.request_repaint();
+                }
+            });
+    }
+
+    /// Bring back the mapped drive `path` is on, when Windows has not reconnected it — `H:` after a
+    /// reboot — the way Explorer does when you open it.
+    ///
+    /// The same rules as [`App::ask_credentials`] and the same channel: raised by a navigation and
+    /// never by a prefetch, once per path until F5, and the folder read again when it worked.
+    /// `WNetRestoreSingleConnectionW` raises Windows' credential dialog itself if the saved
+    /// credentials do not do, so this needs nothing of its own for that.
+    pub(super) fn ask_reconnect(
+        &mut self,
+        pane: PaneId,
+        path: &Path,
+        letter: String,
+        ctx: &egui::Context,
+    ) {
+        if !self.connecting.asked.insert(path.to_path_buf()) {
+            return;
+        }
+        let sender = self.connecting.sender.clone();
+        let path = path.to_path_buf();
+        let owner = self.owner;
+        let ctx = ctx.clone();
+        // A sentence while SMB takes its time, which against a server that is not there is twenty
+        // seconds of a pane that otherwise says only "path not found".
+        self.notice = Some(format!("Reconnecting {letter}…"));
+        let _ = std::thread::Builder::new()
+            .name(format!("reconnect-{letter}"))
+            .spawn(move || {
+                let worked = crate::fs::drives::reconnect(&letter, owner).is_ok();
+                let signed = Signed {
+                    pane,
+                    path,
+                    worked,
+                    what: Asked::Reconnect,
+                };
+                if sender.send(signed).is_ok() {
                     ctx.request_repaint();
                 }
             });
@@ -116,8 +200,35 @@ impl App {
     pub(super) fn collect_connections(&mut self, ctx: &egui::Context) {
         let signed: Vec<Signed> = self.connecting.answers.try_iter().collect();
         for done in signed {
+            match done.what {
+                Asked::SignIn => {}
+                // The reconnecting notice is ours to take down, whichever way it went. A failure
+                // says so here, because the pane under it says only "path not found", which is
+                // true and is not why.
+                Asked::Reconnect => {
+                    self.notice =
+                        (!done.worked).then(|| "Could not reconnect the drive".to_owned());
+                }
+                // Gone from the table, so gone from the Network group — or, if Windows refused,
+                // said why: the commonest refusal is a file still open on the share.
+                Asked::Disconnect => {
+                    if done.worked {
+                        self.volumes.refresh(ctx);
+                    } else {
+                        self.notice = Some(format!(
+                            "Could not disconnect {} — is a file on it still open?",
+                            done.path.display()
+                        ));
+                    }
+                    continue;
+                }
+            }
             if !done.worked {
                 continue;
+            }
+            // A drive that is mounted now: its row stops being the dimmed, undescribed one.
+            if done.what == Asked::Reconnect {
+                self.volumes.refresh(ctx);
             }
             // The share is reachable now, so nothing cached about it is right — including the
             // machine's share list, which was refused a moment ago and will answer this time.

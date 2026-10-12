@@ -85,6 +85,43 @@ fn a_drive_row_navigates() {
     );
 }
 
+/// A right click on a drive asks the shell for that drive's menu, as an item of This PC — whichever
+/// folder the pane happens to be in.
+///
+/// Asserted on what is asked and nothing further: the menu is closed straight away, so nothing on
+/// it can be invoked. A local fixed disk, so the shell has no share to go looking for.
+#[test]
+fn a_right_click_on_a_drive_asks_for_its_shell_menu() {
+    let mut h = Harness::new();
+    let Some(path) = h
+        .app
+        .volumes
+        .all()
+        .iter()
+        .find(|d| d.kind == crate::fs::drives::DriveKind::Fixed)
+        .map(|d| d.path.clone())
+    else {
+        return;
+    };
+    let at = h
+        .find(
+            Id::new(("drive", path.as_path())),
+            crate::ui::GUTTER + 100.0,
+            40..300,
+        )
+        .expect("no drive row is reachable by the pointer");
+    let raised = h.click_with(at, PointerButton::Secondary, Modifiers::NONE);
+    assert!(raised.contains(&"DriveMenu"), "a right click on a drive gave {raised:?}");
+    let asking = h.app.asking.as_ref().expect("the menu is built off-thread");
+    assert_eq!(asking.items, [path], "the menu is about the drive");
+    assert!(
+        asking.folder.as_os_str().is_empty(),
+        "a drive is an item of This PC, not of {:?}",
+        asking.folder
+    );
+    h.app.close_menu();
+}
+
 /// A machine in the Network group is a row that opens it.
 ///
 /// The row almost every network folder is now reached through: `\\fileserver` offers fourteen

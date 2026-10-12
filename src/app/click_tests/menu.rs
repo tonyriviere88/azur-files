@@ -664,6 +664,53 @@ fn a_right_click_in_an_empty_folder_still_raises_a_menu() {
     crate::sandbox::remove(&root);
 }
 
+/// A right click on a drive in This PC asks for that drive's menu; one on This PC's empty space
+/// asks for nothing, because the shell has no background menu for a list of volumes.
+///
+/// The menu is closed as soon as it has been asked for, so nothing on it can be invoked.
+#[test]
+#[cfg(windows)]
+fn a_right_click_on_a_drive_in_this_pc_asks_for_its_menu() {
+    let mut h = Harness::new();
+    let pane = h.app.panes[0].id;
+    h.app.perform(
+        &h.ctx.clone(),
+        Action::Navigate {
+            pane,
+            path: PathBuf::new(),
+        },
+    );
+    h.settle();
+
+    let (name, target) = {
+        let tab = h.tab(0);
+        let dir = tab.dir.as_ref().expect("This PC is a listing");
+        let entry = tab.entry_at(0).expect("This PC lists at least one volume");
+        (dir.name(entry).to_owned(), tab.target_at(0).expect("a drive row leads somewhere"))
+    };
+    let y = h.row_center(0, 0).y;
+    // In the pane: the sidebar draws the same name for the same drive.
+    let listing = h.app.panes[0].rect;
+    let ink = h
+        .texts()
+        .into_iter()
+        .find(|(at, text)| *text == name && listing.x_range().contains(at.x))
+        .map(|(at, _)| at)
+        .unwrap_or_else(|| panic!("`{name}` is not drawn in This PC"));
+
+    let raised = h.click_with(pos2(ink.x + 2.0, y), PointerButton::Secondary, Modifiers::NONE);
+    assert!(raised.contains(&"ShellMenu"), "{raised:?}");
+    let asking = h.app.asking.as_ref().expect("This PC's rows have a menu now");
+    assert_eq!(asking.items, [target], "the menu is about the drive clicked");
+    h.app.close_menu();
+
+    // Below the last volume: nothing is asked, rather than a menu that means nothing.
+    h.wait();
+    let below = pos2(ink.x + 2.0, h.app.panes[0].rect.bottom() - 40.0);
+    h.click_with(below, PointerButton::Secondary, Modifiers::NONE);
+    assert!(h.app.asking.is_none(), "This PC's background asked the shell for a menu");
+}
+
 /// A right click in a row asks about the file if it lands on it, and about the folder if not.
 ///
 /// A row is mostly space, and the space around a name is the listing's background as much as
