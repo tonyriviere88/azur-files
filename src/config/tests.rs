@@ -61,7 +61,6 @@ fn the_window_comes_back_the_way_it_was_left() {
             ascending: false,
         },
         forward_slashes: true,
-        fast_copy: true,
         update_every: crate::update::Every::Week,
         update_skip: "1.2.0".into(),
         // Both away from their defaults again: the rule is *on* by default and the threshold is
@@ -197,11 +196,6 @@ fn the_window_comes_back_the_way_it_was_left() {
     // that the field opens the same way every time.
     assert!(back.forward_slashes);
     assert!(!older.forward_slashes, "off by default");
-    // Which engine copies and moves. Off by default too, and for a stronger reason than the two
-    // above: a settings file that predates the key must keep getting the shell's copy, which is the
-    // one every other program on the machine makes. See `crate::shell::ops::fast`.
-    assert!(back.fast_copy);
-    assert!(!older.fast_copy, "off by default");
     // How often GitHub is asked for a newer release: every day by default, so a file from before the
     // key keeps asking, and written as a word. The skipped version is kept as written.
     assert_eq!(back.update_every, crate::update::Every::Week);

@@ -1,6 +1,5 @@
-//! Copy, move and permanent delete by this program's own hand, for when **Fast copy** is ticked in
-//! the application menu. Off by default; [`super`] is what runs when it is off, and what this hands
-//! back to whenever a job is not one it can do as well as the shell.
+//! Copy, move and permanent delete by this program's own hand. [`super`] is what this hands back
+//! to whenever a job is not one it can do as well as the shell.
 //!
 //! # Where Explorer's time goes, and what is taken back
 //!
@@ -23,8 +22,8 @@
 //!
 //! # What still goes to the shell
 //!
-//! [`win::run`] answers `None` and the job goes to `IFileOperation` exactly as it would with the
-//! setting off, for anything whose correct handling is the shell's and not a path's:
+//! [`win::run`] answers `None` and the job goes to `IFileOperation` instead, for anything whose
+//! correct handling is the shell's and not a path's:
 //!
 //! - a copy or move into the folder an item is already in — the shell's `one - Copy.txt` is
 //!   localised, and nothing here can produce the same name;
@@ -43,7 +42,7 @@
 //!
 //! # Permanent delete
 //!
-//! Shift+Delete with the setting on comes here too — never Delete, which is the Recycle Bin's and
+//! Shift+Delete comes here too — never Delete, which is the Recycle Bin's and
 //! stays the shell's: putting something in the bin correctly is the shell's own `$I…`/`$R…`
 //! bookkeeping, and undo depends on the shell saying what each item became there. A permanent
 //! delete has neither. What it does have is the cost this engine exists for: a tree like

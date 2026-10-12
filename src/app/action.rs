@@ -270,9 +270,6 @@ pub enum Action {
     /// argues that at length, and which is also the only thing in this program that changes
     /// anything outside the window.
     SetWinKey(bool),
-    /// Copy and move with this program's own engine, or with the shell's. In the application menu,
-    /// and written to the settings file. See [`crate::shell::ops::fast`].
-    SetFastCopy(bool),
     /// How often to ask GitHub whether a newer release is out. In the application menu's *Auto
     /// update* submenu, and written to the settings file. See [`crate::update`].
     SetUpdateEvery(crate::update::Every),
@@ -383,7 +380,6 @@ impl Action {
             Self::RemoveBookmarkGroup(_) => "RemoveBookmarkGroup",
             Self::SetTheme { .. } => "SetTheme",
             Self::SetWinKey(_) => "SetWinKey",
-            Self::SetFastCopy(_) => "SetFastCopy",
             Self::SetUpdateEvery(_) => "SetUpdateEvery",
             Self::CheckForUpdate => "CheckForUpdate",
             Self::InstallUpdate => "InstallUpdate",

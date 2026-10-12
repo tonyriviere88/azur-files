@@ -1437,7 +1437,6 @@ fn a_fast_copy_asks_on_its_panel_and_takes_the_answer_clicked() {
 
     let _for_real = crate::shell::ops::for_real();
     let mut h = Harness::new();
-    h.app.ops.set_fast(true);
     let ctx = h.ctx.clone();
     h.app.ops.start(
         crate::shell::ops::Job::Copy {
@@ -1504,7 +1503,6 @@ fn closing_during_a_fast_copy_asks_and_closes_once_it_has_stopped() {
 
     let _for_real = crate::shell::ops::for_real();
     let mut h = Harness::new();
-    h.app.ops.set_fast(true);
     let ctx = h.ctx.clone();
     h.app.ops.start(
         crate::shell::ops::Job::Copy {

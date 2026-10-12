@@ -167,14 +167,6 @@ pub struct Config {
     /// program for somewhere else is the case the setting was added for, and a copied path is that
     /// case more literally than the field is.
     pub forward_slashes: bool,
-    /// Whether copies, moves and permanent deletes go through this program's own engine before the
-    /// shell's. A delete to the Recycle Bin never does.
-    ///
-    /// **Off**, and read as "only `1`": the shell's `IFileOperation` is the copy every other program
-    /// on the machine makes, and a first run that swapped it for one of this program's would be this
-    /// program being clever with somebody's files. Ticked in the application menu. See
-    /// [`crate::shell::ops::fast`] for what it does and what it hands back to the shell.
-    pub fast_copy: bool,
     /// How often the window asks GitHub whether a newer release has been published: never, every
     /// day or every week. `update=day`.
     ///
@@ -275,7 +267,6 @@ impl Default for Config {
             show_hidden: false,
             sort: crate::fs::Sort::default(),
             forward_slashes: false,
-            fast_copy: false,
             update_every: crate::update::Every::default(),
             update_skip: String::new(),
             auto_tiles: crate::pane::AutoTiles::default(),
@@ -417,7 +408,6 @@ impl Config {
                     }
                 }
                 "forward_slashes" => config.forward_slashes = value == "1",
-                "fast_copy" => config.fast_copy = value == "1",
                 // A word this build does not know leaves the default, like `sort` above.
                 "update" => {
                     if let Some(every) = crate::update::Every::parse(value) {
@@ -623,7 +613,6 @@ impl Config {
             "forward_slashes={}\n",
             flag(self.forward_slashes)
         ));
-        text.push_str(&format!("fast_copy={}\n", flag(self.fast_copy)));
         text.push_str(&format!("update={}\n", self.update_every.as_str()));
         if !self.update_skip.is_empty() {
             text.push_str(&format!("update_skip={}\n", self.update_skip));

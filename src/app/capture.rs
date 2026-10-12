@@ -366,19 +366,16 @@ impl App {
         }
     }
 
-    /// Copy `from` into the focused pane's folder with the fast engine, whatever the setting says.
+    /// Copy `from` into the focused pane's folder.
     ///
     /// For `--copy`, which is how a capture run gets the transfer panel on screen: it is only ever
-    /// up while a copy is, and a capture has no clipboard gesture to start one with. The setting is
-    /// put back straight after, so the run leaves the user's choice as it found it. Copy onto a name
+    /// up while a copy is, and a capture has no clipboard gesture to start one with. Copy onto a name
     /// that is already there, and the panel holds still on its question for as long as the capture
     /// needs it.
     pub fn copy_here(&mut self, from: PathBuf, ctx: &egui::Context) {
         let Some(into) = self.pane_mut(self.focused).map(|p| p.tab().path.clone()) else {
             return;
         };
-        let was = self.ops.fast();
-        self.ops.set_fast(true);
         let owner = self.owner;
         self.ops.start(
             crate::shell::ops::Job::Copy {
@@ -388,7 +385,6 @@ impl App {
             owner,
             ctx,
         );
-        self.ops.set_fast(was);
     }
 
     /// Whether a copy started by [`Self::copy_here`] has yet to put its panel on screen: still

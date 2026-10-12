@@ -334,7 +334,6 @@ impl App {
             self.maximized,
             self.sidebar_shown,
             self.win_key.ours(),
-            self.ops.fast(),
             chrome::Update {
                 every: self.update_every,
                 badge: badge.as_ref(),

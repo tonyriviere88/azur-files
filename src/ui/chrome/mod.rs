@@ -307,8 +307,6 @@ pub fn title_bar(
     // Whether `Win+E` opens this build, for the tick beside it in that same menu. A copy of what
     // the registry said — see `crate::shell::winkey`, which is where the answer lives.
     win_key: bool,
-    // Whether copies and moves go through this program's own engine, for the tick beside it.
-    fast_copy: bool,
     // The update setting's tick, and the badge beside the mark when there is one to show.
     update: Update<'_>,
     drag: &Option<TabDrag>,
@@ -365,7 +363,6 @@ pub fn title_bar(
     let switches = Switches {
         sidebar,
         win_key,
-        fast_copy,
         update_every: update.every,
     };
     app_menu(ui, &mark_response, t.palette, switches, out);
@@ -841,7 +838,6 @@ pub struct Update<'a> {
 struct Switches {
     sidebar: bool,
     win_key: bool,
-    fast_copy: bool,
     update_every: crate::update::Every,
 }
 
@@ -859,7 +855,6 @@ fn app_menu(
     let Switches {
         sidebar,
         win_key,
-        fast_copy,
         update_every,
     } = switches;
     // **As tall as the window has room for, and no taller a ceiling than that.** `Menu` scrolls past
@@ -958,20 +953,6 @@ fn app_menu(
         // for something set once.
         if let Some(wants) = azur_egui_theme::palettes::submenu(ui, palette) {
             out.push(Action::SetTheme(wants));
-        }
-        // This program's own engine instead of the shell's, for copies, moves and permanent
-        // deletes — never a delete to the Recycle Bin. Off until
-        // somebody ticks it — see [`crate::config::Config::fast_copy`] — and what it hands back to
-        // the shell even when on is in [`crate::shell::ops::fast`].
-        if ui
-            .add(
-                MenuItem::new("Fast copy")
-                    .selected(fast_copy)
-                    .icon(&icons::copy),
-            )
-            .clicked()
-        {
-            out.push(Action::SetFastCopy(!fast_copy));
         }
         // Updates, behind one entry like the themes: *Check now*, and then how often the window asks
         // by itself — one choice of three, ticked. A submenu rather than four rows here, which keeps

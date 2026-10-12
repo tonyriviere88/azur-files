@@ -996,11 +996,6 @@ impl App {
                     Err(why) => self.report(why),
                 }
             }
-            // From the next copy on: one already running stays with the engine it started on.
-            Action::SetFastCopy(on) => {
-                self.ops.set_fast(on);
-                self.config_dirty = true;
-            }
             Action::SetUpdateEvery(every) => {
                 self.update_every = every;
                 self.config_dirty = true;

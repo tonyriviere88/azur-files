@@ -45,8 +45,7 @@
 //!
 //! # Fast copy
 //!
-//! With **Fast copy** ticked in the application menu, a copy, a move or a permanent delete is offered
-//! to [`fast`] on that same thread first, and only comes here when [`fast`] declines it. Everything
+//! A copy, a move or a permanent delete is offered to [`fast`] on that same thread first, and only comes here when [`fast`] declines it. Everything
 //! else — a delete to the Recycle Bin, rename, new folder, and every undo — is the shell's either
 //! way. See [`fast`] for which jobs it takes, and what it has to do itself that the shell would have
 //! done.
@@ -560,9 +559,6 @@ pub struct Operations {
     rx: Receiver<Done>,
     /// What is running, oldest first, for the status line.
     running: Vec<String>,
-    /// Whether a copy or a move goes to [`fast`] before the shell. The setting, held here because
-    /// this is the one place that decides; see [`crate::config::Config::fast_copy`].
-    fast: bool,
     /// The copies and moves [`fast`] is doing, for the panel that shows them — and the ones that
     /// finished with something left undone, until that panel is closed.
     transfers: Vec<std::sync::Arc<fast::Transfer>>,
@@ -577,20 +573,9 @@ impl Operations {
             tx,
             rx,
             running: Vec::new(),
-            fast: false,
             transfers: Vec::new(),
             next_transfer: 0,
         }
-    }
-
-    /// Whether copies and moves go to [`fast`] first.
-    pub fn fast(&self) -> bool {
-        self.fast
-    }
-
-    /// From the next job on. One already running stays with the engine it started on.
-    pub fn set_fast(&mut self, on: bool) {
-        self.fast = on;
     }
 
     /// What every copy and move [`fast`] has is doing, for [`crate::ui::transfers`].
@@ -715,14 +700,14 @@ impl Operations {
         let scratch = claimed(&job).map(Scratch::at);
         // Kept back from the closure below, because the failure path needs it. See there.
         let unstarted = after.clone();
-        // Offered to [`fast`] first, when the setting is on and the job is one it might take. Made
-        // here rather than on the thread so the panel has it from this frame.
+        // Offered to [`fast`] first, when the job is one it might take. Made here rather than
+        // on the thread so the panel has it from this frame.
         // A permanent delete as well; a delete to the Recycle Bin never — see [`fast`] on why.
         let takes = matches!(
             job,
             Job::Copy { .. } | Job::Move { .. } | Job::Delete { to_bin: false, .. }
         );
-        let transfer = (self.fast && takes).then(|| {
+        let transfer = takes.then(|| {
             self.next_transfer += 1;
             let transfer = std::sync::Arc::new(fast::Transfer::new(
                 self.next_transfer,

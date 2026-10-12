@@ -1,8 +1,8 @@
 //! The panel a copy or move shows while [`crate::shell::ops::fast`] is doing it: how far it has got,
 //! pause and cancel, the question when a file is already there, and what failed.
 //!
-//! The shell's own copy draws a dialog of its own, and with **Fast copy** off this is never drawn.
-//! With it on, this is the dialog. It sits in the window's bottom-right corner rather than over the
+//! The shell's own copy draws a dialog of its own, and for a job [`crate::shell::ops::fast`] hands
+//! back to the shell this is never drawn. Otherwise, this is the dialog. It sits in the window's bottom-right corner rather than over the
 //! middle, and nothing behind it is blocked: a copy is something that happens while you work.
 //!
 //! **Nothing is changed from here.** Every button pushes an [`Action::Steer`] and the job hears

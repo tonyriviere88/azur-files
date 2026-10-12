@@ -649,11 +649,7 @@ impl App {
             previews: crate::preview::Previews::new(ctx),
             owner: crate::shell::Owner::default(),
             connecting: connect::Connecting::default(),
-            ops: {
-                let mut ops = crate::shell::ops::Operations::new();
-                ops.set_fast(config.fast_copy);
-                ops
-            },
+            ops: crate::shell::ops::Operations::new(),
             closing: Closing::No,
             history: crate::shell::ops::history::History::default(),
             cut: Vec::new(),
@@ -795,7 +791,6 @@ impl App {
             show_hidden: self.show_hidden,
             sort: self.sort,
             forward_slashes: self.forward_slashes,
-            fast_copy: self.ops.fast(),
             update_every: self.update_every,
             update_skip: self.update_skip.clone(),
             auto_tiles: self.auto_tiles,
