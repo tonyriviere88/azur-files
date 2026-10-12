@@ -61,9 +61,64 @@ pub fn list_letters() -> Vec<Drive> {
             total: 0,
             free: 0,
             described: false,
+            disconnected: false,
         });
     }
+
+    // **A mapped drive Windows has not reconnected yet.** After a reboot the persistent mappings
+    // are restored lazily — Explorer does it when the drive is first touched, and a logon that ran
+    // before the network was up does not do it at all — so `H:` is in the profile and not in the
+    // mask, and the panel lost it. Listed from the profile, which is a local read, and marked so
+    // that nothing asks it anything: [`describe`] against it is the 22-second trap.
+    for (letter, remote) in remembered() {
+        let Some(bit) = letter
+            .bytes()
+            .next()
+            .map(|b| b.to_ascii_uppercase())
+            .filter(u8::is_ascii_uppercase)
+            .map(|b| u32::from(b - b'A'))
+        else {
+            continue;
+        };
+        if mask & (1 << bit) != 0 {
+            continue;
+        }
+        let letter = (b'A' + bit as u8) as char;
+        drives.push(Drive {
+            path: PathBuf::from(format!("{letter}:\\")),
+            letter: format!("{letter}:"),
+            // The share, as Explorer names a mapping it cannot reach: there is no volume label to
+            // be had without asking the server for it.
+            label: split_unc(&remote)
+                .map(|(_, share)| share)
+                .unwrap_or_else(|| DriveKind::Network.default_label().to_owned()),
+            kind: DriveKind::Network,
+            total: 0,
+            free: 0,
+            described: false,
+            disconnected: true,
+        });
+    }
+    // In letter order, as Explorer lists them, rather than the unmounted ones trailing behind.
+    drives.sort_by(|a, b| a.letter.cmp(&b.letter));
     drives
+}
+
+/// The mapped drives saved in this user's profile, as `(local name, remote path)` — `("H:",
+/// "\\lgs-net.com\alyo\alyodata\Common")` — whether or not they are connected right now.
+///
+/// `RESOURCE_REMEMBERED` reads the profile (`HKCU\Network`) and **does not touch the network**:
+/// it is the list `net use` prints for a mapping it has not restored, and it answers the same with
+/// the server switched off. That is what lets [`list_letters`] ask it on the startup path.
+#[cfg(windows)]
+fn remembered() -> Vec<(String, PathBuf)> {
+    use windows_sys::Win32::NetworkManagement::WNet::{RESOURCETYPE_DISK, RESOURCE_REMEMBERED};
+
+    enumerate(RESOURCE_REMEMBERED, RESOURCETYPE_DISK)
+        .into_iter()
+        .filter(|(local, remote, _)| !local.is_empty() && remote.starts_with("\\\\"))
+        .map(|(local, remote, _)| (local, PathBuf::from(remote.trim_end_matches('\\'))))
+        .collect()
 }
 
 /// Every network connection this machine has *and can currently use*, as `(local name, remote path,
@@ -98,29 +153,60 @@ pub fn list_letters() -> Vec<Drive> {
 /// local. It is the same reason [`crate::shell::over_network`] can afford `GetDriveTypeW`. The
 /// 13 ms this costs the first time is `mpr.dll` being loaded, once per process.
 ///
-/// **`RESOURCE_REMEMBERED` is deliberately not asked for.** A *persistent* connection is by
-/// construction one with a letter — that is what is persisted — so the remembered scope returns
-/// nothing the Drives group is not already showing. Measured on the same machine: `H:` and nothing
-/// else. `RESOURCE_RECENT` is the same list again.
+/// **`RESOURCE_REMEMBERED` is not asked for here.** A *persistent* connection is by construction
+/// one with a letter — that is what is persisted — so it belongs to the Drives group and not to
+/// either list built from this one. It is not true that the letter always has it, though: after a
+/// reboot a mapping that has not been restored is in the profile and not in `GetLogicalDrives`,
+/// which is what [`remembered`] is for. `RESOURCE_RECENT` is the same list again.
 #[cfg(windows)]
 fn connections() -> Vec<(String, PathBuf, u32)> {
+    use windows_sys::Win32::NetworkManagement::WNet::{RESOURCETYPE_ANY, RESOURCE_CONNECTED};
+
+    let mut found: Vec<(String, PathBuf, u32)> = Vec::new();
+    // Asked once, before the walk, because it is a table rather than a question per row — and
+    // asked here rather than in the two callers so that neither can forget it. See [`unavailable`].
+    let down = unavailable();
+    for (local, remote, kind) in enumerate(RESOURCE_CONNECTED, RESOURCETYPE_ANY) {
+        // A provider that hands back something other than a UNC path — there is nothing
+        // useful a row could do with it, since navigating there is the row's only purpose.
+        if !remote.starts_with("\\\\") {
+            continue;
+        }
+        // One connection can be reported twice — the multiple-provider router and a
+        // redirector both answering for it — and the two need not be next to each other in
+        // the list, so this is checked against everything found rather than against the row
+        // before. Case-insensitively, because a UNC path is. Two identical rows in the panel
+        // would read as two places.
+        let path = PathBuf::from(remote.trim_end_matches('\\'));
+        // A connection Windows says is down is not a place to offer. Dropped here, at the one
+        // door both [`list_shares`] and [`list_servers`] come through, so that a share and the
+        // machine it is on cannot disagree about whether it is there.
+        if super::holds(&down, &path) {
+            continue;
+        }
+        if found
+            .iter()
+            .any(|(_, had, _)| had.as_os_str().eq_ignore_ascii_case(path.as_os_str()))
+        {
+            continue;
+        }
+        found.push((local, path, kind));
+    }
+    found
+}
+
+/// One `WNetOpenEnumW` scope, flat, as `(local name, remote name, resource type)` — unfiltered,
+/// because [`connections`] and [`remembered`] each want a different subset of it.
+#[cfg(windows)]
+fn enumerate(scope: u32, kind: u32) -> Vec<(String, String, u32)> {
     use windows_sys::Win32::NetworkManagement::WNet::{
-        WNetCloseEnum, WNetEnumResourceW, WNetOpenEnumW, NETRESOURCEW, RESOURCETYPE_ANY,
-        RESOURCE_CONNECTED,
+        WNetCloseEnum, WNetEnumResourceW, WNetOpenEnumW, NETRESOURCEW,
     };
 
     let mut handle = std::ptr::null_mut();
     // `dwUsage` of zero is "no filter", which is the only sensible thing to ask of a scope that
     // is a flat list of connections rather than a tree to be walked.
-    let opened = unsafe {
-        WNetOpenEnumW(
-            RESOURCE_CONNECTED,
-            RESOURCETYPE_ANY,
-            0,
-            std::ptr::null(),
-            &mut handle,
-        )
-    };
+    let opened = unsafe { WNetOpenEnumW(scope, kind, 0, std::ptr::null(), &mut handle) };
     if opened != NO_ERROR {
         // A machine with no network provider at all, which is a machine with no network
         // locations. An empty list is the honest answer and there is nothing to report.
@@ -135,10 +221,7 @@ fn connections() -> Vec<(String, PathBuf, u32)> {
     // 64 entries is far more connections than a machine has, and the loop below is what makes
     // that a starting size rather than a limit.
     let mut buffer = vec![NETRESOURCEW::default(); 64];
-    let mut found: Vec<(String, PathBuf, u32)> = Vec::new();
-    // Asked once, before the walk, because it is a table rather than a question per row — and
-    // asked here rather than in the two callers so that neither can forget it. See [`unavailable`].
-    let down = unavailable();
+    let mut found: Vec<(String, String, u32)> = Vec::new();
     loop {
         // `u32::MAX` is "as many as fit", and both counts are in/out — so both are set afresh
         // on every pass round the loop.
@@ -178,31 +261,11 @@ fn connections() -> Vec<(String, PathBuf, u32)> {
         // here this program did not choose.
         let written = (count as usize).min(buffer.len());
         for entry in &buffer[..written] {
-            let remote = from_wide_ptr(entry.lpRemoteName);
-            // A provider that hands back something other than a UNC path — there is nothing
-            // useful a row could do with it, since navigating there is the row's only purpose.
-            if !remote.starts_with("\\\\") {
-                continue;
-            }
-            // One connection can be reported twice — the multiple-provider router and a
-            // redirector both answering for it — and the two need not be next to each other in
-            // the list, so this is checked against everything found rather than against the row
-            // before. Case-insensitively, because a UNC path is. Two identical rows in the panel
-            // would read as two places.
-            let path = PathBuf::from(remote.trim_end_matches('\\'));
-            // A connection Windows says is down is not a place to offer. Dropped here, at the one
-            // door both [`list_shares`] and [`list_servers`] come through, so that a share and the
-            // machine it is on cannot disagree about whether it is there.
-            if super::holds(&down, &path) {
-                continue;
-            }
-            if found
-                .iter()
-                .any(|(_, had, _)| had.as_os_str().eq_ignore_ascii_case(path.as_os_str()))
-            {
-                continue;
-            }
-            found.push((from_wide_ptr(entry.lpLocalName), path, entry.dwType));
+            found.push((
+                from_wide_ptr(entry.lpLocalName),
+                from_wide_ptr(entry.lpRemoteName),
+                entry.dwType,
+            ));
         }
     }
     unsafe { WNetCloseEnum(handle) };
@@ -351,6 +414,7 @@ pub fn list_shares() -> Vec<Drive> {
             total: 0,
             free: 0,
             described: false,
+            disconnected: false,
         })
         .collect()
 }
@@ -591,6 +655,13 @@ pub fn shares_on(server: &str) -> Result<Vec<String>, u32> {
 #[cfg(windows)]
 pub fn describe(drive: &mut Drive) {
     use windows_sys::Win32::Storage::FileSystem::{GetDiskFreeSpaceExW, GetVolumeInformationW};
+
+    // A mapping that is not mounted has nothing to describe, and asking is what would mount it —
+    // over SMB, for as long as SMB takes. [`crate::loader::Volumes`] never sends one here; this is
+    // so that nothing else can either.
+    if drive.disconnected {
+        return;
+    }
 
     let root = wide_root(&drive.path);
 

@@ -131,6 +131,11 @@ pub struct Drive {
     pub free: u64,
     /// Whether [`describe`] has run against this volume yet.
     pub described: bool,
+    /// A mapped drive saved in the profile that Windows has not reconnected — the state every
+    /// mapping is in after a reboot until something touches it. Listed so the letter does not
+    /// vanish, and **never described**: asking it for a label is what would make Windows try to
+    /// reconnect it, which against a server that is not there is the 22-second trap.
+    pub disconnected: bool,
 }
 
 impl Drive {
@@ -408,6 +413,7 @@ pub fn list_letters() -> Vec<Drive> {
         total: 0,
         free: 0,
         described: false,
+        disconnected: false,
     }]
 }
 
@@ -596,7 +602,16 @@ mod tests {
         for drive in &drives {
             assert!(!drive.described);
             assert_eq!(drive.total, 0, "an undescribed volume has no measurement");
+            // Only a mapping can be listed without being mounted.
+            if drive.disconnected {
+                assert_eq!(drive.kind, DriveKind::Network, "{drive:?}");
+            }
         }
+        // One row per letter, mounted or not: a mapping that is both in the profile and mounted
+        // must not be listed twice.
+        let mut letters: Vec<&str> = drives.iter().map(|d| d.letter.as_str()).collect();
+        letters.dedup();
+        assert_eq!(letters.len(), drives.len(), "{drives:?}");
     }
 
     /// The other half of the same claim, and the reason [`list_shares`] is allowed next to
@@ -964,6 +979,7 @@ mod tests {
             total,
             free,
             described: true,
+            disconnected: false,
         };
         remember(sample("First", 100, 40));
         remember(sample("Second", 200, 50));
@@ -988,6 +1004,7 @@ mod tests {
             total,
             free: total / 4,
             described: true,
+            disconnected: false,
         };
         let (one, two) = ("\\\\nowhere-a\\one", "\\\\nowhere-b\\two");
         remember(sample(one, 100));
@@ -1017,6 +1034,7 @@ mod tests {
             total: 0,
             free: 0,
             described: false,
+            disconnected: false,
         };
         assert_eq!(drive.display_name(), "Windows (C:)");
 
@@ -1028,6 +1046,7 @@ mod tests {
             total: 0,
             free: 0,
             described: false,
+            disconnected: false,
         };
         assert_eq!(share.display_name(), "web on fileserver");
     }

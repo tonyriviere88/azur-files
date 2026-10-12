@@ -732,7 +732,9 @@ impl Volumes {
 
     fn probe(&self, ctx: &egui::Context) {
         for drive in self.drives.iter().chain(self.shares.iter()) {
-            if drive.described {
+            // A mapping Windows has not reconnected is listed and left alone: describing it is
+            // what would make Windows try, and that is the hang this split exists to avoid.
+            if drive.described || drive.disconnected {
                 continue;
             }
             let mut drive = drive.clone();

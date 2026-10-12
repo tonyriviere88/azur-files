@@ -180,7 +180,13 @@ pub fn show(
             // ---- Drives ---------------------------------------------------
             if group_header(ui, t, width, "Drives", &mut sections.drives, 0.0).1 {
                 for drive in drives {
-                    let shell = shell_icon(ui, icons_cache, &drive.path);
+                    // Not the shell's icon for a mapping that is not mounted: asking the shell
+                    // about `H:\` is a way of touching it, and the painted glyph says enough.
+                    let shell = if drive.disconnected {
+                        None
+                    } else {
+                        shell_icon(ui, icons_cache, &drive.path)
+                    };
                     drive_row(
                         ui, t, width, drive, shell, &mut queue, current, focused, scratch,
                         out,
@@ -719,6 +725,10 @@ fn drive_tooltip(drive: &Drive, out: &mut String) {
     out.clear();
     out.push_str(&drive.display_name());
     out.push_str(" — ");
+    if drive.disconnected {
+        out.push_str("disconnected");
+        return;
+    }
     match drive.used_fraction() {
         Some(_) => {
             fmt::size(drive.free, out);
@@ -793,6 +803,9 @@ fn drive_row(
         t.fonts.body.clone(),
         if here || response.hovered() {
             t.text.primary
+        } else if drive.disconnected {
+            // A step down, as a found machine is in `row`: there, but not connected.
+            t.text.tertiary
         } else {
             t.text.secondary
         },
@@ -921,6 +934,7 @@ mod tests {
             total,
             free,
             described: true,
+            disconnected: false,
         }
     }
 
@@ -966,9 +980,29 @@ mod tests {
             total: 0,
             free: 0,
             described: true,
+            disconnected: false,
         };
         let mut out = String::new();
         drive_tooltip(&share, &mut out);
         assert_eq!(out, "web on fileserver — not measured");
+    }
+
+    /// A mapping Windows has not reconnected says so, rather than "not measured" — which would
+    /// read as a measurement still on its way, and none ever is.
+    #[test]
+    fn a_disconnected_mapping_says_so() {
+        let mapped = Drive {
+            path: PathBuf::from("H:\\"),
+            letter: "H:".to_owned(),
+            label: "Common".to_owned(),
+            kind: DriveKind::Network,
+            total: 0,
+            free: 0,
+            described: false,
+            disconnected: true,
+        };
+        let mut out = String::new();
+        drive_tooltip(&mapped, &mut out);
+        assert_eq!(out, "Common (H:) — disconnected");
     }
 }
