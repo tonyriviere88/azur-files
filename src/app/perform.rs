@@ -764,8 +764,67 @@ impl App {
                     self.report(fs::recycle::RESTORE_FIRST.to_owned());
                     return;
                 }
+                // **Several selected is a batch rename**: the panel over the listing, rather than a
+                // field over one row that would quietly rename only the row under the cursor.
+                // In the mode last clicked, which is what the settings file remembers.
+                let mode = self.batch_mode;
                 if let Some(p) = self.pane_mut(pane) {
-                    p.tab_mut().begin_rename();
+                    let tab = p.tab_mut();
+                    if !tab.begin_batch(mode) {
+                        tab.begin_rename();
+                    }
+                }
+            }
+            // The panel's Rename: the plan against the listing as it is now — the preview's own copy
+            // only if that is still the listing it was made from — and nothing at all done unless
+            // every row is clear. One job, so one Ctrl+Z.
+            //
+            // **The renamed files are selected again** once the folder is re-read, under their new
+            // names: the batch is still the thing being looked at. See `Tab::refresh`, which keeps
+            // names put aside here rather than overwriting them with the old ones.
+            Action::BatchApply(pane) => {
+                let owner = self.owner;
+                let zone = self.zone.clone();
+                let Some(p) = self.pane_mut(pane) else { return };
+                let tab = p.tab_mut();
+                let Some(dir) = tab.dir.clone() else { return };
+                let Some(batch) = tab.batch.as_deref_mut() else { return };
+                let batch = batch.replan(&dir, &zone);
+                let plan = batch.preview();
+                if !plan.ready() {
+                    if let Some(why) = plan.refusal().map(str::to_owned) {
+                        self.report(why);
+                    }
+                    return;
+                }
+                let renames = batch.renames(plan);
+                tab.keep_selected = batch.names_after(plan);
+                tab.batch = None;
+                self.ops.start(
+                    crate::shell::ops::Job::RenameMany { items: renames },
+                    owner,
+                    ctx,
+                );
+            }
+            Action::BatchCancel(pane) => {
+                if let Some(p) = self.pane_mut(pane) {
+                    p.tab_mut().batch = None;
+                }
+            }
+            // The mode, on the panel that was clicked, and as the window's preference — marked for
+            // writing now. `App::apply` is the one place a save is rate-limited, so marking is all a
+            // call site does; see `crate::app::perform`'s note on `config_dirty`.
+            Action::SetBatchMode { pane, mode } => {
+                if let Some(batch) = self
+                    .pane_mut(pane)
+                    .and_then(|p| p.tab_mut().batch.as_deref_mut())
+                {
+                    batch.rule.mode = mode;
+                    batch.fresh = true;
+                }
+                if self.batch_mode != mode {
+                    self.batch_mode = mode;
+                    self.config_dirty = true;
                 }
             }
             Action::CommitRename { pane, name } => {

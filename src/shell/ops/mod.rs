@@ -231,6 +231,11 @@ pub enum Job {
     /// Shift+Delete.
     Delete { items: Vec<PathBuf>, to_bin: bool },
     Rename { item: PathBuf, name: String },
+    /// Many renames as **one** operation — the batch rename panel's. One `IFileOperation`, one
+    /// progress, and one entry on Ctrl+Z, which puts every name back. Each pair is an item and the
+    /// new name it gets in the folder it is already in; see [`crate::pane::batch`], which is where
+    /// the names are checked before any of this is asked for.
+    RenameMany { items: Vec<(PathBuf, String)> },
     NewFolder { parent: PathBuf, name: String },
     /// Make a shortcut in `into` for each item — the Alt-drag, and the right-drag menu's
     /// *Create shortcuts here*.
@@ -272,6 +277,7 @@ impl Job {
             } => format!("Recycling {}…", plural(items.len())),
             Self::Delete { items, .. } => format!("Deleting {}…", plural(items.len())),
             Self::Rename { .. } => "Renaming…".to_owned(),
+            Self::RenameMany { items } => format!("Renaming {}…", plural(items.len())),
             Self::NewFolder { .. } => "Creating a folder…".to_owned(),
             // Counted in shortcuts rather than in items, because that is what is being made and
             // "a shortcut for 1 item" says the number twice.
@@ -298,6 +304,10 @@ impl Job {
                 parents(items)
             }
             Self::Rename { item, .. } => item.parent().map(Path::to_path_buf).into_iter().collect(),
+            Self::RenameMany { items } => items
+                .iter()
+                .filter_map(|(item, _)| item.parent().map(Path::to_path_buf))
+                .collect(),
             // The destination and nothing else, and it is added below. What a shortcut points at is
             // not touched — that is the whole difference between this and a copy.
             Self::NewFolder { .. } | Self::Link { .. } => Vec::new(),
@@ -348,6 +358,7 @@ impl Job {
             | Self::Delete { items, .. }
             | Self::Link { items, .. } => items.iter().map(PathBuf::as_path).collect(),
             Self::Rename { item, .. } => vec![item.as_path()],
+            Self::RenameMany { items } => items.iter().map(|(item, _)| item.as_path()).collect(),
             // Nothing yet exists to act on; the name is not a path until the shell has made it.
             Self::NewFolder { .. } => Vec::new(),
             Self::PutBack { items } => items
@@ -373,6 +384,7 @@ impl Job {
             // nothing was ever moved *into* an archive for them to put back.
             Self::Delete { .. }
             | Self::Rename { .. }
+            | Self::RenameMany { .. }
             | Self::PutBack { .. }
             | Self::Restore { .. } => None,
         }
@@ -396,6 +408,7 @@ impl Job {
                 items.iter().map(PathBuf::as_path).collect()
             }
             Self::Rename { item, .. } => vec![item.as_path()],
+            Self::RenameMany { items } => items.iter().map(|(item, _)| item.as_path()).collect(),
             Self::PutBack { items } => items.iter().map(|(from, _)| from.as_path()).collect(),
             // A copy and a shortcut add something and take nothing, a new folder takes nothing, and
             // a restore's source is an item in the Recycle Bin, which is never an archive's index.

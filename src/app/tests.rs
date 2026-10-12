@@ -703,17 +703,17 @@ fn the_shell_s_open_cut_copy_and_paste_act_in_this_explorer() {
     // shell folder has no view. See `win::flags`, which is also what asks the shell for the entry —
     // without `CMF_CANRENAME` there is no `rename` verb in the menu to hook.
     //
-    // One item only. The shell offers the entry on a multiple selection and Explorer answers it by
-    // renaming them all in turn, which is a different feature; left to the shell it does nothing
-    // visible, which is the honest outcome for a gesture this program does not implement.
+    // On a multiple selection it is the same action, and `BeginRename` opens the batch rename panel
+    // over the selection — see `Tab::begin_batch` — rather than leaving it to a shell that would do
+    // nothing visible.
     match ours(vec![sub.clone()], "rename").as_slice() {
         [Action::BeginRename(_)] => {}
         got => panic!("Rename gave {:?}", names(got)),
     }
-    assert!(
-        ours(vec![file.clone(), sub.clone()], "rename").is_empty(),
-        "Rename was answered for a multiple selection, which this program has no field for"
-    );
+    match ours(vec![file.clone(), sub.clone()], "rename").as_slice() {
+        [Action::BeginRename(_)] => {}
+        got => panic!("Rename on a multiple selection gave {:?}", names(got)),
+    }
     assert!(
         ours(Vec::new(), "rename").is_empty(),
         "Rename was answered on a background menu, where there is no row to rename"

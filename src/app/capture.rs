@@ -339,6 +339,29 @@ impl App {
             .is_some_and(|p| !p.tab().order.is_empty())
     }
 
+    /// Select every file in the focused pane and open the batch rename panel over them.
+    ///
+    /// For `--batch`, which is how a capture run gets the panel on screen. Files only, so the shot
+    /// shows names with extensions for a rule to leave alone; in Pattern mode when a pattern is
+    /// given, so the shot can show the tokens filled in.
+    pub fn begin_batch_here(&mut self, pattern: Option<String>) {
+        let pane = self.focused;
+        let Some(p) = self.pane_mut(pane) else { return };
+        let tab = p.tab_mut();
+        tab.clear_selection();
+        let files: Vec<usize> = (0..tab.order.len()).filter(|&at| !tab.is_dir_at(at)).collect();
+        for at in files {
+            tab.toggle(at);
+        }
+        let mode = match pattern {
+            Some(_) => crate::pane::batch::Mode::Pattern,
+            None => crate::pane::batch::Mode::default(),
+        };
+        if let (true, Some(pattern), Some(batch)) = (tab.begin_batch(mode), pattern, tab.batch.as_mut()) {
+            batch.rule.pattern = pattern;
+        }
+    }
+
     /// Select the first file in the focused pane and open its name for editing.
     ///
     /// For `--rename`, which is how a capture run gets the rename field on screen: it has no

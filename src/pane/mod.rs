@@ -560,6 +560,9 @@ pub struct Tab {
     /// see [`Tab::match_count`]. A cell because the count is asked for while drawing, through a
     /// shared borrow, and it is a cache of the order rather than state anybody changes.
     pub matched: std::cell::Cell<Option<(u64, usize)>>,
+    /// The batch rename panel, while it is open over this listing: the rule being typed and the
+    /// items it applies to. See [`batch`] and [`Tab::begin_batch`].
+    pub batch: Option<Box<batch::BatchRename>>,
     /// And how: as one list, or as the tree it came from. Only read while `flat` is set.
     ///
     /// The window's preference, copied in when the flatten is turned on and when the preference
@@ -874,6 +877,7 @@ impl Tab {
             before_filter: None,
             walked: None,
             matched: std::cell::Cell::new(None),
+            batch: None,
             flat_mode: FlatMode::default(),
             // The window's preference, and its default is on — see `Config::regroup`. A tab that
             // has never been flattened takes the real one the moment it is.
@@ -1167,6 +1171,7 @@ mod tests;
 
 // One `impl Tab` per concern, along the banners this file used to carry. The types and the two
 // constructors stay here; what a tab *does* is next door.
+pub mod batch;
 mod listing;
 mod navigate;
 mod select;

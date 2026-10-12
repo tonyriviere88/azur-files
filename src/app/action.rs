@@ -99,6 +99,18 @@ pub enum Action {
     FilterDown(PaneId),
     /// `Enter` in the filter box: open the match under the cursor, or the first.
     FilterEnter(PaneId),
+    /// The batch rename panel's Rename: every name the rule makes, as one job. See
+    /// [`crate::pane::batch`].
+    BatchApply(PaneId),
+    /// Close the batch rename panel without renaming anything.
+    BatchCancel(PaneId),
+    /// A mode of the batch rename panel was clicked: switch to it, and remember it as the one the
+    /// panel opens in. Written down now, not on Rename. See
+    /// [`crate::config::Config::batch_mode`].
+    SetBatchMode {
+        pane: PaneId,
+        mode: crate::pane::batch::Mode,
+    },
     /// Count what is inside every folder on show, and draw each row's share of the total — or stop.
     ///
     /// Unlike [`Self::ToggleFlat`] beside it, nothing is re-read: the listing is the same listing and
@@ -357,6 +369,9 @@ impl Action {
             Self::SetSearchSubfolders(_) => "SetSearchSubfolders",
             Self::FilterDown(_) => "FilterDown",
             Self::FilterEnter(_) => "FilterEnter",
+            Self::BatchApply(_) => "BatchApply",
+            Self::BatchCancel(_) => "BatchCancel",
+            Self::SetBatchMode { .. } => "SetBatchMode",
             Self::ToggleSizes(_) => "ToggleSizes",
             Self::SetFlatMode(_) => "SetFlatMode",
             Self::SetView { .. } => "SetView",

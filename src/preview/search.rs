@@ -37,7 +37,7 @@ pub const HITS: usize = 4096;
 /// backtracking in it, which is why a pattern somebody is still typing can be run on the UI thread
 /// at all), but it can be made to allocate, and the answer to that is a ceiling rather than a
 /// timeout. A megabyte is far above any pattern typed into a find bar and far below trouble.
-const PATTERN_LIMIT: usize = 1 << 20;
+pub(crate) const PATTERN_LIMIT: usize = 1 << 20;
 
 /// How many character comparisons a literal search may spend before it stops looking.
 ///

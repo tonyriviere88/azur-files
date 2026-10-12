@@ -184,6 +184,7 @@ fn main() -> eframe::Result {
     let mut lens: Option<pane::Lens> = None;
     let mut menu = false;
     let mut rename = false;
+    let mut batch: Option<Option<String>> = None;
     let mut path: Option<String> = None;
     let mut stack = false;
     let mut tiles = false;
@@ -248,6 +249,10 @@ fn main() -> eframe::Result {
             menu = true;
         } else if arg == "--rename" {
             rename = true;
+        } else if arg == "--batch" {
+            batch = Some(None);
+        } else if let Some(pattern) = arg.strip_prefix("--batch=") {
+            batch = Some(Some(pattern.to_owned()));
         } else if let Some(text) = arg.strip_prefix("--path=") {
             path = Some(text.to_owned());
         } else if arg == "--tiles" {
@@ -433,6 +438,7 @@ fn main() -> eframe::Result {
                 shot,
                 menu,
                 rename,
+                batch,
                 path,
                 tiles,
                 diff,
@@ -582,6 +588,10 @@ struct Window {
     /// screenshot cannot otherwise reach, since it needs a keystroke on a focused row — and
     /// where the caret lands is the whole thing worth looking at.
     rename: bool,
+    /// `--batch[=pattern]`: select the first pane's files and open the batch rename panel over them,
+    /// in Pattern mode with that pattern when one is given. Behind a selection and F2, which a
+    /// capture run has no keyboard for — the same reason `--rename` exists.
+    batch: Option<Option<String>>,
     /// `--path=<text>`: open the path field with that text half-typed in it, so a capture can show
     /// the completion dropdown. Behind `Ctrl+L` and then a keystroke, which a capture run has no
     /// keyboard for — the same reason `--rename` exists.
@@ -690,6 +700,11 @@ impl eframe::App for Window {
         if self.rename && self.shot.as_ref().is_some_and(|s| s.frame >= 8) && self.app.has_rows() {
             self.rename = false;
             self.app.begin_rename_here();
+        }
+        // The same moment, for the same reason: a scan landing afterwards would take the selection.
+        if self.batch.is_some() && self.shot.as_ref().is_some_and(|s| s.frame >= 8) && self.app.has_rows() {
+            let pattern = self.batch.take().flatten();
+            self.app.begin_batch_here(pattern);
         }
         // The same window, for the same reason: the panel follows the keyboard, and a scan
         // landing afterwards would move the keyboard off the row that was chosen for it.

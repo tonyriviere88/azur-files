@@ -139,6 +139,10 @@ pub struct Config {
     /// written before it existed has no line for it, and the default has to stand. A name typed into
     /// a file manager is nearly always asking where something is, not whether it is right here.
     pub search_subfolders: bool,
+    /// Which mode the batch rename panel opens in — the last one clicked, written down when it is
+    /// clicked rather than when something is renamed, so a mode looked at and left is still the
+    /// one the panel comes back to. See [`crate::pane::batch::Mode`].
+    pub batch_mode: crate::pane::batch::Mode,
     /// Whether the listings show the files Windows marks hidden. `Ctrl+H`.
     ///
     /// The same kind of preference as the three above, and remembered for the same reason: whether
@@ -273,6 +277,7 @@ impl Default for Config {
             diff_show: crate::diff::Show::default(),
             regroup: true,
             search_subfolders: true,
+            batch_mode: crate::pane::batch::Mode::default(),
             show_hidden: false,
             sort: crate::fs::Sort::default(),
             forward_slashes: false,
@@ -407,6 +412,12 @@ impl Config {
                 // default has to stand.
                 "regroup" => config.regroup = value != "0",
                 "search_subfolders" => config.search_subfolders = value != "0",
+                // A word nobody wrote leaves the default, like every other line here.
+                "batch_mode" => {
+                    if let Some(mode) = crate::pane::batch::Mode::parse(value) {
+                        config.batch_mode = mode;
+                    }
+                }
                 // Both read as "only 1", like the preview's two below: their default is *off*, so a
                 // missing line and a `0` mean the same thing and both have to leave them alone.
                 "show_hidden" => config.show_hidden = value == "1",
@@ -621,6 +632,7 @@ impl Config {
             "search_subfolders={}\n",
             flag(self.search_subfolders)
         ));
+        text.push_str(&format!("batch_mode={}\n", self.batch_mode.as_str()));
         text.push_str(&format!("show_hidden={}\n", flag(self.show_hidden)));
         text.push_str(&format!("sort={}\n", self.sort.as_text()));
         text.push_str(&format!(

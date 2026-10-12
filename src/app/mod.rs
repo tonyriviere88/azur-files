@@ -258,6 +258,8 @@ pub struct App {
     /// Whether a filter searches subfolders too. The window's preference, kept like the two above.
     /// See [`crate::config::Config::search_subfolders`].
     pub(crate) search_subfolders: bool,
+    /// The mode the batch rename panel opens in. See [`crate::config::Config::batch_mode`].
+    batch_mode: crate::pane::batch::Mode,
     /// Whether every listing shows the files Windows marks hidden. `Ctrl+H`.
     ///
     /// The window's preference beside [`App::regroup`], kept the same way — and **one answer for the
@@ -690,6 +692,7 @@ impl App {
             diff_show: config.diff_show,
             regroup: config.regroup,
             search_subfolders: config.search_subfolders,
+            batch_mode: config.batch_mode,
             show_hidden: config.show_hidden,
             sort: config.sort,
             forward_slashes: config.forward_slashes,
@@ -797,6 +800,7 @@ impl App {
             diff_show: self.diff_show,
             regroup: self.regroup,
             search_subfolders: self.search_subfolders,
+            batch_mode: self.batch_mode,
             show_hidden: self.show_hidden,
             sort: self.sort,
             forward_slashes: self.forward_slashes,

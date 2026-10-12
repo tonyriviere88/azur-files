@@ -487,6 +487,19 @@ unsafe fn perform(
                 Err(e) => return friendly(&e),
             }
         }
+        // One `RenameItem` per pair, into one operation — so one progress, and the sink hears each as
+        // a `PostRenameItem`, which is what undo is built from. A pair whose item cannot be found is
+        // skipped rather than failing the batch, exactly as `PutBack` below does.
+        Job::RenameMany { items } => {
+            let mut queued = 0;
+            for (path, name) in items {
+                let Ok(src) = item(path) else { continue };
+                if op.RenameItem(&src, &HSTRING::from(name.as_str()), None).is_ok() {
+                    queued += 1;
+                }
+            }
+            queued
+        }
         Job::NewFolder { parent, name } => {
             let dest: IShellItem = match item(parent) {
                 Ok(dest) => dest,

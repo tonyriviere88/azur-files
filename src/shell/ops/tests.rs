@@ -694,6 +694,79 @@ fn a_move_can_be_undone_and_redone_through_the_history() {
     crate::sandbox::remove(&root);
 }
 
+/// **A batch rename is one operation, and one Ctrl+Z puts every name back** — on real files, through
+/// `Operations` like the move above, so the gate, the sandbox guard and the sink are all in the path.
+///
+/// One entry and not three is the claim: the history is built from what the sink heard, so a
+/// sink that missed a `PostRenameItem` would leave a name that Ctrl+Z does not reach.
+#[test]
+#[cfg(windows)]
+fn a_batch_rename_is_one_undo() {
+    use crate::shell::ops::history::History;
+
+    let _serialised = crate::shell::serialised();
+    crate::shell::init();
+    let _for_real = for_real();
+
+    let ctx = egui::Context::default();
+    let root = sandbox("batch-rename");
+    std::fs::create_dir_all(&root).expect("sandbox");
+    let names = ["a.txt", "b.txt", "c.txt"];
+    for name in names {
+        std::fs::write(root.join(name), name.as_bytes()).expect("write");
+    }
+
+    let mut ops = Operations::new();
+    let mut history = History::default();
+    let settle = |ops: &mut Operations, history: &mut History| -> Vec<Done> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut arrived = Vec::new();
+        while std::time::Instant::now() < deadline {
+            for done in ops.drain() {
+                history.record(done.clone());
+                arrived.push(done);
+            }
+            if ops.in_progress().is_none() {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        arrived
+    };
+
+    ops.start(
+        Job::RenameMany {
+            items: names
+                .iter()
+                .enumerate()
+                .map(|(i, name)| (root.join(name), format!("photo_{:03}.txt", i + 1)))
+                .collect(),
+        },
+        Owner::default(),
+        &ctx,
+    );
+    let arrived = settle(&mut ops, &mut history);
+    assert_eq!(arrived.len(), 1, "the batch never reported back");
+    assert_eq!(arrived[0].error, None);
+    for i in 1..=3 {
+        assert!(root.join(format!("photo_{i:03}.txt")).exists(), "photo_{i:03} is missing");
+    }
+    assert!(!root.join("a.txt").exists());
+    assert_eq!(arrived[0].outcome.moved.len(), 3, "the sink missed a rename");
+
+    // ---- One Ctrl+Z ----
+    let back = history.undo().expect("an undo job");
+    ops.start_then(back, After::Settle, Owner::default(), &ctx);
+    let arrived = settle(&mut ops, &mut history);
+    assert_eq!(arrived[0].error, None, "the undo was refused");
+    for name in names {
+        assert!(root.join(name).exists(), "Ctrl+Z did not bring back {name}");
+    }
+    assert!(!history.can_undo(), "the batch was more than one entry");
+
+    crate::sandbox::remove(&root);
+}
+
 /// **An Alt-drag, and Ctrl+Z after it.**
 ///
 /// [`Job::Link`] is the one job that goes through neither `IFileOperation` nor the Recycle Bin, so

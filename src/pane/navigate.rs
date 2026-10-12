@@ -177,6 +177,8 @@ impl Tab {
         self.search_here = false;
         // A place in a folder that has just been left is not a place to come back to.
         self.before_filter = None;
+        // Nor is a batch rename of what was selected there.
+        self.batch = None;
         // And with it what was shut in the tree, which named folders under the folder being
         // left. `Tab::refresh` keeps these too: the same tree, read again, is the same tree.
         self.collapsed.clear();
@@ -475,18 +477,23 @@ impl Tab {
     /// This is a *refresh*, not a navigation: the same folder, read afresh because something
     /// changed it. Every file operation ends here, so losing the selection here means copying a
     /// file and then having nothing selected to copy again.
+    ///
+    /// **Names already put aside win.** A batch rename sets them to the names the files are about to
+    /// have, before the job that renames them ends in this refresh; the selection on show still
+    /// holds the old names, which will not be there to find.
     pub fn refresh(&mut self) {
-        self.keep_selected = match &self.dir {
-            Some(dir) => self
-                .selected
-                .iter()
-                .enumerate()
-                .filter(|(_, &on)| on)
-                .filter(|&(entry, _)| entry < dir.len())
-                .map(|(entry, _)| dir.name(entry).to_owned())
-                .collect(),
-            None => std::mem::take(&mut self.keep_selected),
-        };
+        if self.keep_selected.is_empty() {
+            if let Some(dir) = &self.dir {
+                self.keep_selected = self
+                    .selected
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, &on)| on)
+                    .filter(|&(entry, _)| entry < dir.len())
+                    .map(|(entry, _)| dir.name(entry).to_owned())
+                    .collect();
+            }
+        }
         self.dir = None;
         self.awaiting = None;
         self.asked_at = None;

@@ -323,6 +323,54 @@ impl Tab {
         None
     }
 
+    /// Open the batch rename panel over what is selected, in the order it is on screen — which is
+    /// the order `{n}` counts in, so what the preview numbers first is the row you see first.
+    ///
+    /// `false`, and nothing opened, for fewer than two items — one is F2's inline field — and
+    /// wherever a rename is not this listing's to make: This PC, the Recycle Bin, and the inside
+    /// of an archive.
+    pub fn begin_batch(&mut self, mode: batch::Mode) -> bool {
+        if self.selected_count < 2
+            || crate::fs::is_synthetic(&self.path)
+            || crate::archive::is_virtual_location(&self.path)
+        {
+            return false;
+        }
+        let Some(dir) = self.dir.clone() else { return false };
+        let items: Vec<batch::Item> = self
+            .order
+            .iter()
+            .map(|&entry| entry as usize)
+            .filter(|&entry| self.selected.get(entry).copied().unwrap_or(false))
+            .map(|entry| {
+                let folder = dir.within(entry);
+                let folder_path = if folder.is_empty() {
+                    dir.path.clone()
+                } else {
+                    dir.path.join(folder)
+                };
+                batch::Item {
+                    name: dir.name(entry).to_owned(),
+                    leaf: dir.leaf(entry).to_owned(),
+                    folder_name: crate::fs::display_name(&folder_path),
+                    folder: folder.to_owned(),
+                    is_dir: dir.entries[entry].is_dir(),
+                    modified: dir.entries[entry].modified,
+                    guid: crate::shell::new_guid().unwrap_or_default(),
+                    target: dir.target(entry),
+                }
+            })
+            .collect();
+        if items.len() < 2 {
+            return false;
+        }
+        let mut panel = batch::BatchRename::new(items);
+        panel.rule.mode = mode;
+        self.renaming = None;
+        self.batch = Some(Box::new(panel));
+        true
+    }
+
     /// Remember where the folder is, the first time a filter is typed into it.
     ///
     /// Called once a frame, and does something only on the first frame the filter is not empty —

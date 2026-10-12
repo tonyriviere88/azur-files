@@ -32,6 +32,7 @@ use egui::{pos2, vec2, Event, Id, Modifiers, PointerButton, Pos2, RawInput, Rect
 // | [`rescan`] | a folder changing underneath the listing |
 // | [`memory`] | does browsing let go of what it read? |
 mod band;
+mod batch;
 mod breadcrumb;
 mod details;
 mod filter;

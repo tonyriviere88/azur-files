@@ -515,12 +515,11 @@ impl App {
             //
             // `BeginRename` renames the row under the pane's cursor, and the cursor is on the row
             // this menu was raised over: a right click selects the row before the menu is asked for
-            // — see `crate::ui::filelist`, where the selection is settled first. One item only,
-            // because a rename field is one name: the shell offers the entry on a multiple selection
-            // and Explorer answers it by renaming them all in sequence, which is a different feature
-            // and not one to imply by accident.
+            // — see `crate::ui::filelist`, where the selection is settled first. On a multiple
+            // selection it is the same action, and `BeginRename` opens the batch rename panel over
+            // what is selected rather than a field over one of them — see `Tab::begin_batch`.
             // Never for a drive, whose menu is This PC's — see `pump_menu`, which leaves the entry out.
-            "rename" if menu.items.len() == 1 && !menu.folder.as_os_str().is_empty() => {
+            "rename" if !menu.items.is_empty() && !menu.folder.as_os_str().is_empty() => {
                 vec![Action::BeginRename(menu.pane)]
             }
             // Into the selected folder. The shell offers this on any selection with a folder

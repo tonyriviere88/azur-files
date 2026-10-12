@@ -54,6 +54,9 @@ fn the_window_comes_back_the_way_it_was_left() {
         flat_mode: crate::pane::FlatMode::Tree,
         diff_show: crate::diff::Show::Names,
         regroup: false,
+        // Both away from their defaults — on, and Replace — for the reason the flags above are.
+        search_subfolders: false,
+        batch_mode: crate::pane::batch::Mode::Case,
         show_hidden: true,
         // Both halves away from the default, which is Type ascending.
         sort: crate::fs::Sort {
@@ -135,6 +138,18 @@ fn the_window_comes_back_the_way_it_was_left() {
     // turned it off, has to come back off.
     assert!(!back.regroup);
     assert!(older.regroup, "on by default");
+    // Whether a filter searches subfolders, on by default like the flag above; and which mode the
+    // batch rename panel opens in, as a word, with Replace for a file that predates it.
+    assert!(!back.search_subfolders, "the `0` did not survive");
+    assert!(older.search_subfolders, "on by default");
+    assert_eq!(back.batch_mode, crate::pane::batch::Mode::Case);
+    assert!(saved.to_text().contains("batch_mode=case"));
+    assert_eq!(older.batch_mode, crate::pane::batch::Mode::Replace);
+    assert_eq!(
+        Config::parse("batch_mode=nonsense\n").batch_mode,
+        crate::pane::batch::Mode::Replace,
+        "an unknown word leaves the default"
+    );
     // The panel down the left is a third of those, and it is the one where getting the default wrong
     // would be worst: a file written by a build that predates the key has no line for it, and a
     // window that opened with no way to reach a drive or a bookmark would read as broken.

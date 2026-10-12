@@ -155,10 +155,13 @@ impl App {
         // question first.
         // Keywords count: they are a field over a row exactly as a rename is, and re-reading the folder
         // under one is the same edit thrown away.
+        // And the batch rename panel, which holds the keyboard the same way and for a sharper
+        // reason: the listing under it is not on screen, and `Delete` or an arrow acting on a
+        // selection nobody can see is the one thing it must not do.
         let renaming = self.panes.iter().any(|p| {
             p.tabs
                 .iter()
-                .any(|t| t.renaming.is_some() || t.keywords.is_some())
+                .any(|t| t.renaming.is_some() || t.keywords.is_some() || t.batch.is_some())
         });
         // A menu on screen owns the keyboard: its own arrows and Enter are handled where
         // it is drawn, and the listing must not move underneath it at the same time.

@@ -43,6 +43,7 @@ use crate::ui::{
 };
 
 mod band;
+mod batch;
 mod chain;
 mod columns;
 mod highlight;
@@ -156,6 +157,18 @@ pub fn show(
         rect.min,
         vec2(rect.width(), if tiles { 0.0 } else { HEADER_HEIGHT }),
     );
+    // **The batch rename panel takes the listing's place** while it is open: the items being
+    // renamed and what they will become, and nothing else. See [`batch`].
+    if tab.batch.is_some() {
+        let region = Rect::from_min_max(rect.min, pos2(rect.right(), rect.bottom() - reserved));
+        batch::show(ui, t, zone, region, pane, tab, out);
+        status_line(
+            ui, t, floor, pane, tab, console_open, auto_tiles, providers, status, now, subfolders,
+            scratch, out,
+        );
+        return outcome;
+    }
+
     // A pane squeezed shorter than its own furniture would give an inverted body
     // rect, which turns into an empty visible range and an underflow downstream. The
     // header and the status line are worth more than a row nobody could read.
