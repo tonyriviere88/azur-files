@@ -311,9 +311,219 @@ impl Tab {
         // one rebuilds from the filter as it stands, and a column click or an `F5` has not changed
         // what the filter says. Losing your place in a listing you are still reading is what those
         // two must not do.
+        //
+        // **Except a filter cleared back to nothing, with a place to go back to** — see
+        // [`Tab::before_filter`]. That is not a new question but the old folder again, and the frame
+        // spent at the top before the place is restored would be a jump nobody asked for.
+        if self.filter.is_empty() && self.before_filter.is_some() {
+            return None;
+        }
         self.scroll_y = 0.0;
         self.scroll_to = Some(0.0);
         None
+    }
+
+    /// Remember where the folder is, the first time a filter is typed into it.
+    ///
+    /// Called once a frame, and does something only on the first frame the filter is not empty —
+    /// which is the frame after the first keystroke, before the wait is up and before anything has
+    /// been filtered, flattened or scrolled. See [`Tab::before_filter`].
+    pub fn note_before_filter(&mut self) {
+        if self.filter.is_empty() || self.before_filter.is_some() {
+            return;
+        }
+        let selected = match &self.dir {
+            Some(dir) => self
+                .selected
+                .iter()
+                .enumerate()
+                .filter(|&(entry, &on)| on && entry < dir.len())
+                .map(|(entry, _)| dir.name(entry).to_owned())
+                .collect(),
+            None => Vec::new(),
+        };
+        self.before_filter = Some(BeforeFilter {
+            selected,
+            scroll_y: self.scroll_y,
+        });
+    }
+
+    /// The place to go back to, once the filter has been cleared and the clear has settled.
+    ///
+    /// Taken rather than read, so it is given back once. `None` while a filter is up, while the
+    /// clear is still waiting out [`FILTER_DELAY`], and when nothing was noted.
+    pub fn take_before_filter(&mut self) -> Option<BeforeFilter> {
+        if !self.filter.is_empty() || self.filter_at.is_some() {
+            return None;
+        }
+        self.before_filter.take()
+    }
+
+    /// Put the folder back where [`Tab::note_before_filter`] found it.
+    ///
+    /// The selection by name, because the listing it was taken from may not be the one on show —
+    /// coming out of a flatten, the folder's own children arrive a moment later, out of the cache —
+    /// so when there is no listing yet the names go to [`Tab::keep_selected`], which is what
+    /// [`Tab::apply`] reselects from. The scroll as an offset to go to, which waits for the listing
+    /// either way.
+    pub fn restore_before_filter(&mut self, before: BeforeFilter) {
+        match self.dir.clone().filter(|_| self.awaiting.is_none()) {
+            Some(dir) => {
+                self.clear_selection();
+                for (position, &entry) in self.order.iter().enumerate() {
+                    if before.selected.iter().any(|name| name == dir.name(entry as usize)) {
+                        self.selected[entry as usize] = true;
+                        self.selected_count += 1;
+                        self.selected_size += Self::size_at(Some(&dir), entry as usize);
+                        self.cursor.get_or_insert(position);
+                        self.anchor.get_or_insert(position);
+                    }
+                }
+            }
+            None => self.keep_selected = before.selected,
+        }
+        self.scroll_y = before.scroll_y;
+        self.scroll_to = Some(before.scroll_y);
+    }
+
+    /// What a filter that has just been applied does to the flattened view: `Some(true)` to turn it
+    /// on, `Some(false)` to turn it back off, `None` to leave it.
+    ///
+    /// **Typing a filter searches the whole tree, not just the folder's own children** — which is
+    /// what a name typed into a file manager is nearly always asking. The flattened view already
+    /// is that search: [`crate::fs::scan::scan_deep`] walks the tree and the filter narrows it, so
+    /// this only presses the button on the user's behalf.
+    ///
+    /// **And clearing the filter puts it back.** Only a flatten the filter itself turned on — see
+    /// [`Tab::flat_by_filter`] — so a folder that was flat before the typing started stays flat,
+    /// and one somebody flattened by hand while filtering is theirs. Coming back out is the cache's
+    /// copy of the folder's own children, not a second walk; see [`Tab::toggle_flat`].
+    ///
+    /// Refused wherever the button is: in a folder diff, which is always a tree, and on This PC and
+    /// the Recycle Bin, which have none. Refused too when `subfolders` — the window's
+    /// [`crate::config::Config::search_subfolders`] — is off, and then a flatten the filter made
+    /// is undone, so unticking the setting takes effect on the filter that is up.
+    ///
+    /// **And not on a network drive, unless asked** — `network` answers that, and is only asked when
+    /// everything else says yes. Walking a share is seconds to minutes on a pause between keystrokes,
+    /// so there the filter narrows the folder's own children and the status line offers the walk as
+    /// one click, which sets [`Tab::search_here`] for as long as the filter is up.
+    ///
+    /// **Once per settled filter**, which is why this takes `&mut self`: it notes the text it
+    /// answered for in [`Tab::flat_asked`] and has nothing to say until the text changes. Asked of
+    /// the *settled* text — never while the typing is still going — and however it came to be
+    /// settled: [`Tab::settle_filter`] at the end of the wait, or any [`Tab::rebuild_order`] that
+    /// paid the wait off early, such as a walk landing while the box was being cleared.
+    pub fn filter_flat(
+        &mut self,
+        subfolders: bool,
+        network: impl FnOnce(&std::path::Path) -> bool,
+    ) -> Option<bool> {
+        if self.filter_at.is_some() || self.filter == self.flat_asked {
+            return None;
+        }
+        self.flat_asked = self.filter.clone();
+        let filtering = !self.filter.trim().is_empty();
+        if !filtering {
+            // Asked for this filter, and the filter has gone.
+            self.search_here = false;
+        }
+        let want = filtering
+            && subfolders
+            && self.diff.is_none()
+            && !crate::fs::is_synthetic(&self.path)
+            && (self.search_here || !network(&self.path));
+        if want && !self.flat {
+            return Some(true);
+        }
+        if !want && self.flat && self.flat_by_filter {
+            return Some(false);
+        }
+        None
+    }
+
+    /// Whether this tab is a filter searching the tree — flattened, with words in the box. What the
+    /// status line and the empty listing word their answers about.
+    pub fn searching_tree(&self) -> bool {
+        self.flat && !self.filter.trim().is_empty()
+    }
+
+    /// How many rows on show the filter matched — **not** how many rows are on show.
+    ///
+    /// The two differ in a tree, which keeps every folder on the way to a match so that the match
+    /// can be opened, and those folders are not matches. So the filter's own question is asked
+    /// again of each row, exactly as [`crate::fs::sort::build_order`] asks it — of the row's whole
+    /// path — and the answer is kept for as long as the order it was counted over: once per
+    /// rebuild, never once per frame, because over two hundred thousand rows it is a real pass.
+    pub fn match_count(&self) -> usize {
+        if let Some((gen, count)) = self.matched.get() {
+            if gen == self.order_gen {
+                return count;
+            }
+        }
+        let count = match &self.dir {
+            Some(dir) => {
+                let query = azur_egui_theme::filter::Query::parse(&self.filter);
+                let mut path = dir.path.to_string_lossy().into_owned();
+                if !path.is_empty() && !path.ends_with(['\\', '/']) {
+                    path.push('\\');
+                }
+                let base = path.len();
+                self.order
+                    .iter()
+                    .filter(|&&entry| {
+                        path.truncate(base);
+                        path.push_str(dir.name(entry as usize));
+                        query.matches(&path)
+                    })
+                    .count()
+            }
+            None => 0,
+        };
+        self.matched.set(Some((self.order_gen, count)));
+        count
+    }
+
+    /// Whether the window held back from searching subfolders here because the folder is on a
+    /// network drive — so the status line has a *Search subfolders* to offer. See
+    /// [`Tab::filter_flat`].
+    pub fn tree_search_held_back(&self, subfolders: bool) -> bool {
+        subfolders
+            && !self.flat
+            && !self.search_here
+            && !self.filter.trim().is_empty()
+            && self.filter_at.is_none()
+            && self.diff.is_none()
+            && !crate::fs::is_synthetic(&self.path)
+            && crate::shell::over_network(&self.path)
+    }
+
+    /// Turn the flattened view on for a filter **without dropping the listing on show**.
+    ///
+    /// [`Tab::toggle_flat`] drops it, because pressed by hand the flatten is a different view of the
+    /// folder and a moment of nothing is honest. For a filter it is not: the folder's own matches are
+    /// right there, and blanking them for the second the walk takes reads as "nothing matched". So
+    /// the shallow listing stays, re-sorted under the tree's rules, until the walk lands and
+    /// [`Tab::apply`] replaces it — carrying the selection across by name, which the two listings
+    /// share for the folder's own children. The walk itself is the caller's to ask for, because this
+    /// has no loader; see `App::filter_flat`.
+    pub fn flatten_keeping_listing(&mut self, mode: FlatMode, regroup: bool) {
+        if self.flat || self.diff.is_some() || crate::fs::is_synthetic(&self.path) {
+            return;
+        }
+        self.flat = true;
+        self.flat_mode = mode;
+        self.regroup = regroup;
+        self.collapsed.clear();
+        self.renaming = None;
+        self.keywords = None;
+        self.keywords_hover = None;
+        self.name_the_new = None;
+        self.sizes.forget();
+        self.widths_measured = false;
+        self.awaiting = None;
+        self.asked_at = None;
+        self.rebuild_order();
     }
 
     /// What the Status column says about one entry: the provider's answer where it has given one,

@@ -274,7 +274,14 @@ impl Loader {
     /// - *Detached*, like [`Volumes::probe`]: there is nothing useful to do with a walk
     ///   that is still going when the window closes, and joining it would hold the
     ///   process open for as long as the walk had left to run.
-    pub fn request_deep(&mut self, path: &Path) -> u64 {
+    ///
+    /// `counted` is the walk's running total, for whoever is waiting to say how far it has got —
+    /// see [`scan::scan_deep_counting`].
+    pub fn request_deep(
+        &mut self,
+        path: &Path,
+        counted: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> u64 {
         let token = self.next_token;
         self.next_token += 1;
         let path = path.to_path_buf();
@@ -284,10 +291,11 @@ impl Loader {
             .name("flatten".to_owned())
             .spawn(move || {
                 scan::silence_device_dialogs();
-                let dir = Arc::new(scan::scan_deep(
+                let dir = Arc::new(scan::scan_deep_counting(
                     &path,
                     scan::FLATTEN_BUDGET,
                     scan::FLATTEN_PATIENCE,
+                    &counted,
                 ));
                 if answers.send(Loaded { token, dir }).is_ok() {
                     ctx.request_repaint();

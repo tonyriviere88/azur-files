@@ -45,6 +45,7 @@ use crate::ui::{
 mod band;
 mod chain;
 mod columns;
+mod highlight;
 mod keywords;
 mod rename;
 mod rows;
@@ -131,6 +132,9 @@ pub fn show(
     // and hit-tests as one too.
     reserved: f32,
     scratch: &mut String,
+    // Whether a filter searches subfolders, so an empty result and the status line can say what
+    // was and was not searched. See [`crate::config::Config::search_subfolders`].
+    subfolders: bool,
     out: &mut Vec<Action>,
 ) -> Outcome {
     // The frame's clock, for the one thing here that depends on how long something has taken:
@@ -160,7 +164,8 @@ pub fn show(
             header_strip(ui, t, header, pane, tab, &resolved_widths(tab, rect.width()), out);
         }
         status_line(
-            ui, t, floor, pane, tab, console_open, auto_tiles, providers, status, now, scratch, out,
+            ui, t, floor, pane, tab, console_open, auto_tiles, providers, status, now, subfolders,
+            scratch, out,
         );
         return outcome;
     }
@@ -225,10 +230,17 @@ pub fn show(
         // with plenty in it. The text comes first because it is the thing most recently typed and the
         // first thing anybody would clear — and each lens words its own answer, which is
         // [`crate::pane::Lens::nothing_found`].
-        let message = if tab.dir.as_ref().is_some_and(|d| d.is_empty()) {
+        //
+        // **A filter says what it searched.** "Nothing matches" over an empty pane does not say
+        // whether the tree was looked through, how much of it, or whether it is still being looked
+        // through — and those are exactly the three things that decide what to do next. See
+        // [`status::nothing_matches`].
+        let searched;
+        let message = if tab.dir.as_ref().is_some_and(|d| d.is_empty()) && !tab.searching_tree() {
             "This folder is empty"
         } else if !tab.filter.is_empty() {
-            "Nothing matches the filter"
+            searched = status::nothing_matches(tab, subfolders);
+            searched.as_str()
         } else if let Some(lens) = tab.lens {
             lens.nothing_found()
         } else if let Some(show) = tab
@@ -278,7 +290,8 @@ pub fn show(
     }
 
     status_line(
-        ui, t, floor, pane, tab, console_open, auto_tiles, providers, status, now, scratch, out,
+        ui, t, floor, pane, tab, console_open, auto_tiles, providers, status, now, subfolders,
+        scratch, out,
     );
     outcome
 }

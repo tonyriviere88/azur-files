@@ -77,6 +77,9 @@ fn the_filter_waits_for_the_typing_to_stop() {
     h.time += step;
     h.frame(Vec::new());
     assert!(h.tab(0).filter_at.is_none(), "the deadline is still standing");
+    // And searches the tree: the filter that applied is what flattens the folder, once.
+    h.settle();
+    assert!(h.tab(0).flat, "a filter that applied did not flatten the folder");
     let dir = h.tab(0).dir.clone().expect("the listing");
 
     // Everything above is about the clock and holds wherever this repository lives. What is
@@ -91,18 +94,420 @@ fn the_filter_waits_for_the_typing_to_stop() {
         return;
     }
 
+    // Against the tree it walked, not the folder's own children it started from.
     let rows = h.tab(0).order.len();
+    let all = dir.len();
     assert!(
         rows < all,
         "the filter never applied at all: still {rows} of {all} rows"
     );
-    for &i in &h.tab(0).order {
+    // Files only: a flattened tree keeps the folders that lead to a match, so that the match can be
+    // reached, and `app` is kept for `app\click_tests\…co…` without matching itself.
+    for &i in h.tab(0).order.iter().filter(|&&i| !dir.entries[i as usize].is_dir()) {
         let path = dir.target(i as usize).to_string_lossy().to_lowercase();
         assert!(
             path.contains("co"),
             "`{path}` does not match the filter that was typed"
         );
     }
+}
+
+/// **A filter searches the whole tree**: once the typing stops, the folder is flattened — one walk
+/// for the word, not one per letter — and the filter narrows what the walk found.
+///
+/// And it is the filter's own question only where the button would be: on This PC there is no tree
+/// to walk, and typing there flattens nothing.
+#[test]
+fn typing_a_filter_flattens_the_folder_once_the_typing_stops() {
+    let mut h = Harness::new();
+    let pane = h.app.panes[0].id;
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    h.app.perform(
+        &h.ctx.clone(),
+        Action::Navigate {
+            pane,
+            path: src.clone(),
+        },
+    );
+    h.settle();
+    assert!(!h.tab(0).flat, "the folder opened flattened, so this proves nothing");
+
+    let held = Modifiers::COMMAND;
+    h.modifiers = held;
+    h.frame(vec![Event::Key {
+        key: egui::Key::F,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: held,
+    }]);
+    h.modifiers = Modifiers::NONE;
+
+    // Typed but not settled: nothing walked yet.
+    h.frame(vec![Event::Text("tests".to_owned())]);
+    assert!(!h.tab(0).flat, "flattened on the keystroke rather than when the typing stopped");
+
+    h.take_journal();
+    h.time += crate::pane::FILTER_DELAY * 1.5;
+    // The frame that settles the filter, and the one after, which is where the app acts on it —
+    // never during drawing. See `App::follow_filters`.
+    h.frame(Vec::new());
+    h.frame(Vec::new());
+    let done = h.take_journal();
+    assert_eq!(
+        done.iter().filter(|name| **name == "FilterFlat").count(),
+        1,
+        "the settled filter should flatten exactly once, got {done:?}"
+    );
+    assert!(h.tab(0).flat);
+    h.settle();
+
+    // Files from below the folder, which only the tree has — `tests.rs` lives in subfolders of `src`.
+    let tab = h.tab(0);
+    let dir = tab.dir.as_ref().expect("the walk landed");
+    assert!(
+        tab.order
+            .iter()
+            .any(|&i| dir.name(i as usize).contains(std::path::MAIN_SEPARATOR)),
+        "nothing from a subfolder survived the filter, so the tree was not searched"
+    );
+    // Still flat after another frame: one walk, not a toggle back and forth.
+    h.frame(Vec::new());
+    assert!(h.tab(0).flat);
+
+    // ---- Cleared, through the real field: the folder as it was -----------
+    let erase: Vec<Event> = (0.."tests".len())
+        .map(|_| Event::Key {
+            key: egui::Key::Backspace,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Modifiers::NONE,
+        })
+        .collect();
+    h.frame(erase);
+    assert_eq!(h.tab(0).filter, "", "the field was not emptied");
+    h.take_journal();
+    h.time += crate::pane::FILTER_DELAY * 1.5;
+    h.frame(Vec::new());
+    h.frame(Vec::new());
+    let done = h.take_journal();
+    assert_eq!(
+        done.iter().filter(|name| **name == "FilterFlat").count(),
+        1,
+        "clearing the filter should unflatten exactly once, got {done:?}"
+    );
+    assert!(!h.tab(0).flat, "the folder is still flattened after its filter was cleared");
+    h.settle();
+    let tab = h.tab(0);
+    let dir = tab.dir.as_ref().expect("the folder's own listing");
+    assert!(
+        (0..dir.len()).all(|i| !dir.name(i).contains(std::path::MAIN_SEPARATOR)),
+        "the listing is still the tree, not the folder's own children"
+    );
+
+    // ---- This PC: no tree, so nothing to flatten -------------------------
+    h.app.perform(
+        &h.ctx.clone(),
+        Action::Navigate {
+            pane,
+            path: PathBuf::new(),
+        },
+    );
+    h.settle();
+    h.app.panes[0].tab_mut().filter = "c".to_owned();
+    h.app.panes[0].tab_mut().filter_changed(h.time);
+    h.take_journal();
+    h.time += crate::pane::FILTER_DELAY * 1.5;
+    h.frame(Vec::new());
+    h.frame(Vec::new());
+    let done = h.take_journal();
+    assert!(!done.contains(&"FilterFlat"), "This PC was flattened: {done:?}");
+    assert!(!h.tab(0).flat);
+}
+
+/// **`Escape` in the filter box empties it and keeps the caret there**, ready for the next query; a
+/// second `Escape`, on the empty box, leaves it as it always did — so the key is never a trap.
+#[test]
+fn escape_clears_the_filter_and_keeps_the_caret() {
+    let mut h = Harness::new();
+    let pane = h.app.panes[0].id;
+    h.app.perform(
+        &h.ctx.clone(),
+        Action::Navigate {
+            pane,
+            path: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src"),
+        },
+    );
+    h.settle();
+
+    let held = Modifiers::COMMAND;
+    h.modifiers = held;
+    h.frame(vec![Event::Key {
+        key: egui::Key::F,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: held,
+    }]);
+    h.modifiers = Modifiers::NONE;
+    h.frame(Vec::new());
+    let field = h.ctx.memory(|m| m.focused());
+    assert!(field.is_some(), "Ctrl+F did not put the caret in the filter box");
+    h.frame(vec![Event::Text("abc".to_owned())]);
+    assert_eq!(h.tab(0).filter, "abc");
+
+    let escape = || Event::Key {
+        key: egui::Key::Escape,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: Modifiers::NONE,
+    };
+    h.frame(vec![escape()]);
+    h.frame(Vec::new());
+    assert_eq!(h.tab(0).filter, "", "Escape did not empty the box");
+    assert_eq!(
+        h.ctx.memory(|m| m.focused()),
+        field,
+        "Escape took the caret out of the box along with the text"
+    );
+    // The clear is a real one: once the wait is up the listing is the whole folder again.
+    h.time += crate::pane::FILTER_DELAY * 1.5;
+    h.frame(Vec::new());
+    assert!(h.tab(0).filter_at.is_none(), "the cleared filter was never applied");
+
+    // And on an empty box `Escape` is the way out, as before.
+    h.frame(vec![escape()]);
+    h.frame(Vec::new());
+    assert_eq!(
+        h.ctx.memory(|m| m.focused()),
+        None,
+        "Escape on an empty box kept the keyboard in it"
+    );
+}
+
+/// The filter box with the caret in it, over this crate's own `src` — the fixture every test below
+/// shares. Returns the pane.
+fn filter_in_src(h: &mut Harness) -> crate::pane::PaneId {
+    let pane = h.app.panes[0].id;
+    h.app.perform(
+        &h.ctx.clone(),
+        Action::Navigate {
+            pane,
+            path: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src"),
+        },
+    );
+    h.settle();
+    let held = Modifiers::COMMAND;
+    h.modifiers = held;
+    h.frame(vec![Event::Key {
+        key: egui::Key::F,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: held,
+    }]);
+    h.modifiers = Modifiers::NONE;
+    h.frame(Vec::new());
+    assert!(
+        h.ctx.memory(|m| m.focused()).is_some(),
+        "Ctrl+F did not put the caret in the filter box"
+    );
+    pane
+}
+
+/// A key pressed with nothing held.
+fn key(key: egui::Key) -> Event {
+    Event::Key {
+        key,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: Modifiers::NONE,
+    }
+}
+
+/// Past the typing's wait, and the frame after it, which is where the app acts on a settled filter.
+fn past_the_wait(h: &mut Harness) {
+    h.time += crate::pane::FILTER_DELAY * 1.5;
+    h.frame(Vec::new());
+    h.frame(Vec::new());
+}
+
+/// **While the tree is walked, the folder's own matches stay on screen** — blanking them for the
+/// second the walk takes reads as "nothing matched".
+#[test]
+fn the_folder_stays_on_screen_while_the_tree_is_walked() {
+    let mut h = Harness::new();
+    filter_in_src(&mut h);
+    h.frame(vec![Event::Text("mod".to_owned())]);
+    past_the_wait(&mut h);
+
+    // The frame the walk was asked for in: flattened, waiting, and a listing on show regardless.
+    let tab = h.tab(0);
+    assert!(tab.flat, "the filter did not flatten the folder");
+    if tab.awaiting.is_some() {
+        assert!(
+            tab.dir.is_some(),
+            "the listing was dropped while the walk was out, so the pane went blank"
+        );
+    }
+    h.settle();
+    let tab = h.tab(0);
+    assert!(tab.awaiting.is_none(), "the walk never landed");
+    let dir = tab.dir.as_ref().expect("the tree");
+    assert!(
+        (0..dir.len()).any(|i| dir.name(i).contains('\\')),
+        "what landed is not the tree"
+    );
+}
+
+/// **Clearing the filter puts the folder back where it was**: the same row selected as before the
+/// typing started, in the folder's own listing.
+#[test]
+fn clearing_the_filter_puts_the_selection_back() {
+    let mut h = Harness::new();
+    let pane = h.app.panes[0].id;
+    h.app.perform(
+        &h.ctx.clone(),
+        Action::Navigate {
+            pane,
+            path: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src"),
+        },
+    );
+    h.settle();
+    let chosen = {
+        let tab = h.app.panes[0].tab_mut();
+        tab.select_only(3);
+        let entry = tab.order[3] as usize;
+        tab.dir.as_ref().expect("the listing").name(entry).to_owned()
+    };
+
+    filter_in_src(&mut h);
+    // `filter_in_src` navigated again, which is the same folder and keeps nothing; select again.
+    {
+        let tab = h.app.panes[0].tab_mut();
+        let at = tab
+            .order
+            .iter()
+            .position(|&i| tab.dir.as_ref().unwrap().name(i as usize) == chosen)
+            .expect("the row is still there");
+        tab.select_only(at);
+    }
+    h.frame(vec![Event::Text("mod".to_owned())]);
+    past_the_wait(&mut h);
+    h.settle();
+    assert!(h.tab(0).flat);
+
+    h.frame(vec![key(egui::Key::Escape)]);
+    past_the_wait(&mut h);
+    h.settle();
+    let tab = h.tab(0);
+    assert!(!tab.flat, "clearing the filter left the folder flattened");
+    let dir = tab.dir.as_ref().expect("the folder's own listing");
+    let selected: Vec<&str> = (0..dir.len())
+        .filter(|&i| tab.selected[i])
+        .map(|i| dir.name(i))
+        .collect();
+    assert_eq!(selected, [chosen.as_str()], "the selection did not come back");
+    assert!(tab.cursor.is_some(), "and the cursor with it");
+}
+
+/// **`↓` goes from the box to the results, and `Enter` opens one.**
+///
+/// `Enter` is only pressed over a folder: a file would be handed to the shell and opened for real.
+#[test]
+fn down_and_enter_take_the_filter_to_its_results() {
+    let mut h = Harness::new();
+    let pane = filter_in_src(&mut h);
+    // `ui$`: the `ui` folder itself, which is a folder — whatever else ends in `ui`.
+    h.frame(vec![Event::Text("ui$".to_owned())]);
+    past_the_wait(&mut h);
+    h.settle();
+
+    h.take_journal();
+    h.frame(vec![key(egui::Key::ArrowDown)]);
+    h.frame(Vec::new());
+    assert!(h.take_journal().contains(&"FilterDown"));
+    assert_eq!(
+        h.ctx.memory(|m| m.focused()),
+        None,
+        "↓ left the keyboard in the box"
+    );
+    assert_eq!(h.tab(0).cursor, Some(0), "↓ did not put the cursor on the first match");
+
+    // Back into the box, and Enter.
+    filter_in_src_again(&mut h);
+    if !h.tab(0).is_dir_at(0) {
+        println!("the first match is a file; not pressing Enter on it");
+        return;
+    }
+    let want = h.tab(0).target_at(0).expect("a target");
+    h.take_journal();
+    h.frame(vec![key(egui::Key::Enter)]);
+    h.frame(Vec::new());
+    let done = h.take_journal();
+    assert!(done.contains(&"FilterEnter"), "{done:?}");
+    assert!(done.contains(&"Navigate"), "Enter did not open the match: {done:?}");
+    h.settle();
+    assert_eq!(h.app.pane_mut(pane).unwrap().tab().path, want);
+}
+
+/// Ctrl+F again, without navigating — for a test that has already filtered.
+fn filter_in_src_again(h: &mut Harness) {
+    let held = Modifiers::COMMAND;
+    h.modifiers = held;
+    h.frame(vec![Event::Key {
+        key: egui::Key::F,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: held,
+    }]);
+    h.modifiers = Modifiers::NONE;
+    h.frame(Vec::new());
+}
+
+/// **With *Search subfolders too* unticked, a filter narrows this folder and walks nothing** — and
+/// the box says which it will do before anything is typed.
+#[test]
+fn with_subfolders_off_a_filter_stays_in_the_folder() {
+    let mut h = Harness::new();
+    let pane = h.app.panes[0].id;
+    h.app.perform(
+        &h.ctx.clone(),
+        Action::Navigate {
+            pane,
+            path: PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src"),
+        },
+    );
+    h.settle();
+    // The placeholder, read before the caret goes in: a focused empty box draws none.
+    let says = |h: &Harness, words: &str| h.texts().iter().any(|(_, text)| text == words);
+    assert!(
+        says(&h, "Search"),
+        "the box does not say it searches subfolders"
+    );
+    h.app.perform(&h.ctx.clone(), Action::SetSearchSubfolders(false));
+    h.frame(Vec::new());
+    assert!(
+        says(&h, "Filter this folder"),
+        "the box still promises a search of the subfolders"
+    );
+
+    filter_in_src_again(&mut h);
+    h.frame(vec![Event::Text("mod".to_owned())]);
+    past_the_wait(&mut h);
+    h.settle();
+    assert!(!h.tab(0).flat, "a filter walked the tree with the setting off");
+    // Ticked again, under the filter that is up: the walk starts without a keystroke.
+    h.take_journal();
+    h.app.perform(&h.ctx.clone(), Action::SetSearchSubfolders(true));
+    h.frame(Vec::new());
+    h.frame(Vec::new());
+    assert!(h.take_journal().contains(&"FilterFlat"));
+    assert!(h.app.pane_mut(pane).unwrap().tab().flat);
 }
 
 /// **Two words typed in the box narrow by both.**
@@ -148,22 +553,35 @@ fn two_words_in_the_filter_box_narrow_by_both() {
     h.time += crate::pane::FILTER_DELAY * 1.5;
     h.frame(Vec::new());
     assert!(h.tab(0).filter_at.is_none(), "the filter never applied");
+    // The filter flattens the folder, so what it narrows is the tree once the walk has landed.
+    h.settle();
 
     let dir = h.tab(0).dir.clone().expect("the listing");
     let order = &h.tab(0).order;
-    let kept: Vec<&str> = order.iter().map(|&i| dir.name(i as usize)).collect();
+    // Files, as a set. The flattened tree a filter opens also keeps the folders on the way to each
+    // match — so they can be opened — and lists rows in tree order; neither is this test's subject.
+    let file = |i: usize| !dir.entries[i].is_dir();
+    let mut kept: Vec<&str> = order
+        .iter()
+        .map(|&i| i as usize)
+        .filter(|&i| file(i))
+        .map(|i| dir.name(i))
+        .collect();
+    kept.sort_unstable();
 
     // What "both words, in any order, over the whole path" comes to, worked out here rather
     // than written down as a list of names: whether this repository happens to live somewhere
     // with a `pre` in it then changes both sides together instead of only one, and the test
     // still says what it means to say.
-    let want: Vec<&str> = (0..dir.len())
+    let mut want: Vec<&str> = (0..dir.len())
+        .filter(|&i| file(i))
         .filter(|&i| {
             let path = dir.target(i).to_string_lossy().to_lowercase();
             path.contains("view") && path.contains("pre")
         })
         .map(|i| dir.name(i))
         .collect();
+    want.sort_unstable();
     // That the two words *narrow* — which is what makes the comparison below worth making.
     // Not a named file: the fixture is this crate's own `src`, and naming one in it makes the
     // test a hostage of the source layout.
@@ -398,10 +816,13 @@ fn ctrl_e_reaches_through_the_filter_box() {
         "Ctrl+F did not put the caret in the filter box, so this test proves nothing"
     );
 
-    // A filter typed in, so the other half of the claim can be checked: it survives.
+    // A filter typed in, so the other half of the claim can be checked: it survives. Which flattens
+    // the folder on its own — a filter searches the tree — so Ctrl+E below is the way back *out*.
     h.app.panes[0].tab_mut().filter = "sort".to_owned();
     h.app.panes[0].tab_mut().rebuild_order();
     h.frame(Vec::new());
+    h.settle();
+    assert!(h.app.panes[0].tab().flat, "the filter did not flatten the folder");
     h.take_journal();
 
     h.modifiers = held;
@@ -420,16 +841,19 @@ fn ctrl_e_reaches_through_the_filter_box() {
     );
     h.settle();
 
+    // Off by hand, and it stays off: the filter that is still up does not press the button back.
     let tab = h.app.panes[0].tab();
-    assert!(tab.flat);
+    assert!(!tab.flat, "the filter flattened the folder again over Ctrl+E");
     assert_eq!(tab.filter, "sort", "the filter went with the toggle");
+    // Possibly nothing at all: `sort` lives below `src`, not in it, and an empty listing is the
+    // right answer for the folder's own children. That the filter survived is the assertion above.
     let names = shown_names(&h, 0);
     assert!(
-        !names.is_empty() && names.iter().all(|name| name.contains("sort")),
-        "the filter is not being applied to the flattened listing: {names:?}"
+        names.iter().all(|name| name.contains("sort")),
+        "the filter is not being applied to the folder's own listing: {names:?}"
     );
     assert!(
-        names.iter().any(|name| name.contains('\\')),
-        "nothing from a subfolder came up, so the tree was not walked: {names:?}"
+        names.iter().all(|name| !name.contains('\\')),
+        "a subfolder's file is still showing, so the folder is still the tree: {names:?}"
     );
 }

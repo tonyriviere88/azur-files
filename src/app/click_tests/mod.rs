@@ -136,11 +136,14 @@ impl Harness {
     fn settle(&mut self) {
         for attempt in 0..200 {
             self.frame(Vec::new());
+            // A listing on show **and nothing still coming**: a filter that has started a tree walk
+            // keeps the folder's own listing up until the walk lands, so a listing alone is not an
+            // answer any more. See `Tab::flatten_keeping_listing`.
             let arrived = self
                 .app
                 .panes
                 .iter()
-                .all(|pane| pane.tab().dir.is_some());
+                .all(|pane| pane.tab().dir.is_some() && pane.tab().awaiting.is_none());
             if arrived && attempt >= 4 {
                 break;
             }

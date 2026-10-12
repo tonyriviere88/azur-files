@@ -255,6 +255,7 @@ pub(crate) fn funnel_menu(
     trigger: &egui::Response,
     pane: PaneId,
     lens: Option<Lens>,
+    subfolders: bool,
     out: &mut Vec<Action>,
 ) {
     azur_egui_theme::components::Menu::new(trigger).show(ui.ctx(), |ui| {
@@ -266,6 +267,17 @@ pub(crate) fn funnel_menu(
                     lens: (!on).then_some(which),
                 });
             }
+        }
+        // **Where the words look**, behind a rule because it is not a listing like the two above
+        // but a setting about the box beside it: whether a name typed there searches the whole tree
+        // or only this folder. The window's, and written down. See
+        // [`crate::config::Config::search_subfolders`].
+        azur_egui_theme::components::menu_divider(ui);
+        if ui
+            .add(ticked(MenuItem::new("Search subfolders too"), subfolders))
+            .clicked()
+        {
+            out.push(Action::SetSearchSubfolders(!subfolders));
         }
     });
 }

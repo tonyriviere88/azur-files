@@ -255,6 +255,9 @@ pub struct App {
     /// The window's preference beside [`App::flat_mode`], kept the same way and for the same reason.
     /// See [`crate::fs::sort::build_tree_order`], which is what it does.
     regroup: bool,
+    /// Whether a filter searches subfolders too. The window's preference, kept like the two above.
+    /// See [`crate::config::Config::search_subfolders`].
+    pub(crate) search_subfolders: bool,
     /// Whether every listing shows the files Windows marks hidden. `Ctrl+H`.
     ///
     /// The window's preference beside [`App::regroup`], kept the same way — and **one answer for the
@@ -487,10 +490,14 @@ pub struct App {
 /// only the root folder's own files could do it. `F5` had been fixed for this once already
 /// (`Tab::refresh` drops the listing and lets [`App::start_scans`] re-ask, which does branch); the
 /// watcher's path was the one that had not.
-fn ask_for(tab: &Tab, loader: &mut Loader) -> u64 {
+fn ask_for(tab: &mut Tab, loader: &mut Loader) -> u64 {
     if tab.flat {
-        loader.request_deep(&tab.path)
+        // A fresh count per walk, so a second walk does not start at the first one's total.
+        let counted = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        tab.walked = Some(counted.clone());
+        loader.request_deep(&tab.path, counted)
     } else {
+        tab.walked = None;
         loader.request(&tab.path)
     }
 }
@@ -682,6 +689,7 @@ impl App {
             flat_mode: config.flat_mode,
             diff_show: config.diff_show,
             regroup: config.regroup,
+            search_subfolders: config.search_subfolders,
             show_hidden: config.show_hidden,
             sort: config.sort,
             forward_slashes: config.forward_slashes,
@@ -788,6 +796,7 @@ impl App {
             flat_mode: self.flat_mode,
             diff_show: self.diff_show,
             regroup: self.regroup,
+            search_subfolders: self.search_subfolders,
             show_hidden: self.show_hidden,
             sort: self.sort,
             forward_slashes: self.forward_slashes,

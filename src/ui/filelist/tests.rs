@@ -94,8 +94,45 @@ fn a_row_says_where_it_is_after_its_name_and_gives_that_up_first() {
                 ink,
                 dim,
                 width,
+                &[],
+                egui::Color32::TRANSPARENT,
             )
         };
+
+        // A filter's hits: the name in runs, the marked one on the fill, the text unchanged.
+        let fill = egui::Color32::from_rgb(1, 2, 3);
+        let marked = name_galley(
+            painter,
+            "translations_fr.json",
+            None,
+            font.clone(),
+            ink,
+            dim,
+            400.0,
+            &[0..5, 13..15],
+            fill,
+        );
+        assert_eq!(marked.text(), "translations_fr.json");
+        let runs: Vec<(&str, bool)> = marked
+            .job
+            .sections
+            .iter()
+            .map(|s| {
+                (
+                    &marked.job.text[s.byte_range.start.0..s.byte_range.end.0],
+                    s.format.background == fill,
+                )
+            })
+            .collect();
+        assert_eq!(
+            runs,
+            [
+                ("trans", true),
+                ("lations_", false),
+                ("fr", true),
+                (".json", false)
+            ]
+        );
 
         // No context — a file in the folder you are looking at, which is not a shortcut.
         // One section, in body ink, and nothing else drawn.
@@ -334,4 +371,80 @@ fn a_jump_leaves_room_around_the_row_it_lands_on() {
     let short = 2.0 * row;
     let offset = nudge(0.0, short, 30.0 * row, row, true);
     assert!(offset <= 30.0 * row && offset + short >= 31.0 * row, "the row is on show: {offset}");
+}
+
+/// What a filter says about itself, on the status line and over an empty listing: matches and not
+/// rows, the walk's running count, and a partial walk owned up to.
+#[test]
+fn a_filter_says_what_it_searched() {
+    use crate::fs::dir::{DirBuilder, FLAG_DIR};
+    use std::sync::atomic::AtomicUsize;
+
+    let tree = |truncated: bool| {
+        let mut b = DirBuilder::new(r"C:\x");
+        b.push("src", 0, 0, FLAG_DIR);
+        b.push(r"src\main.rs", 1, 0, 0);
+        b.push(r"src\lib.rs", 1, 0, 0);
+        b.push("readme.md", 1, 0, 0);
+        let mut dir = b.finish(0);
+        dir.truncated = truncated;
+        std::sync::Arc::new(dir)
+    };
+    let mut tab = Tab::new(r"C:\x");
+    tab.flat = true;
+    tab.flat_mode = crate::pane::FlatMode::Tree;
+    tab.filter = ".rs$".to_owned();
+    tab.apply(tree(false));
+    // The tree keeps `src` so the two files can be opened; it is not a match.
+    assert!(tab.order.len() >= 2);
+    assert_eq!(
+        status::search_summary(&tab, true),
+        Some(("2 matches in x and its subfolders".to_owned(), false))
+    );
+
+    // While the walk is out, the count it has reached.
+    tab.awaiting = Some(1);
+    tab.walked = Some(std::sync::Arc::new(AtomicUsize::new(12_480)));
+    assert_eq!(
+        status::search_summary(&tab, true).map(|(text, _)| text),
+        Some("Searching x… 12,480 items".to_owned())
+    );
+    assert_eq!(
+        status::nothing_matches(&tab, true),
+        "Searching x and its subfolders…"
+    );
+    tab.awaiting = None;
+
+    // A walk that stopped at its limit says so, and says how much it did read.
+    tab.apply(tree(true));
+    assert_eq!(
+        status::search_summary(&tab, true).map(|(text, _)| text),
+        Some("2 matches in x and its subfolders — partial, 4 items searched".to_owned())
+    );
+    tab.filter = "zzz".to_owned();
+    tab.rebuild_order();
+    assert_eq!(
+        status::nothing_matches(&tab, true),
+        "No matches in the first 4 items under x"
+    );
+    tab.apply(tree(false));
+    assert_eq!(
+        status::nothing_matches(&tab, true),
+        "No matches in x or its subfolders (4 items searched)"
+    );
+
+    // This folder only.
+    let mut b = DirBuilder::new(r"C:\x");
+    b.push("main.rs", 1, 0, 0);
+    b.push("readme.md", 1, 0, 0);
+    let mut here = Tab::new(r"C:\x");
+    here.filter = "main".to_owned();
+    here.apply(std::sync::Arc::new(b.finish(0)));
+    assert_eq!(
+        status::search_summary(&here, false),
+        Some(("1 match in x".to_owned(), false))
+    );
+    // Nothing while the words are still being typed: the count would be the last filter's.
+    here.filter_at = Some(0.0);
+    assert_eq!(status::search_summary(&here, false), None);
 }

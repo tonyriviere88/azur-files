@@ -82,6 +82,44 @@ impl App {
         }
     }
 
+    /// Flatten each pane's folder for the filter that has just settled in it, or put it back when
+    /// the filter has been cleared. See [`crate::pane::Tab::filter_flat`] for the rule.
+    ///
+    /// Here, once a frame, rather than where the filter box is drawn: nothing changes while drawing,
+    /// and a filter is settled in more places than that one — any re-sort pays off a pending filter
+    /// early, and a flatten undone only by the box would miss the clear that a landing walk settled.
+    /// The active tab of each pane, because that is where a filter is typed and the tab
+    /// [`Action::FilterFlat`] acts on.
+    ///
+    /// And the other half of the same round trip: where the folder was before the filter, noted the
+    /// moment typing starts and given back once the box is empty again — after any unflatten, so
+    /// the place is restored into the folder's own listing and not the tree. See
+    /// [`crate::pane::Tab::before_filter`].
+    pub(super) fn follow_filters(&mut self, ctx: &egui::Context) {
+        let subfolders = self.search_subfolders;
+        let mut wanted: Vec<(crate::pane::PaneId, bool)> = Vec::new();
+        let mut back: Vec<(crate::pane::PaneId, crate::pane::BeforeFilter)> = Vec::new();
+        for p in &mut self.panes {
+            let id = p.id;
+            let tab = p.tab_mut();
+            tab.note_before_filter();
+            if let Some(on) = tab.filter_flat(subfolders, crate::shell::over_network) {
+                wanted.push((id, on));
+            }
+            if let Some(before) = tab.take_before_filter() {
+                back.push((id, before));
+            }
+        }
+        for (pane, on) in wanted {
+            self.perform(ctx, Action::FilterFlat { pane, on });
+        }
+        for (pane, before) in back {
+            if let Some(p) = self.pane_mut(pane) {
+                p.tab_mut().restore_before_filter(before);
+            }
+        }
+    }
+
     /// Count what is inside the folders on show, take the totals, and keep the shares in step.
     ///
     /// Everything the measure button costs after the click is here, and it is three things in the

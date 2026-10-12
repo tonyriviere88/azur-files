@@ -85,6 +85,20 @@ pub enum Action {
     ToggleHidden,
     /// Show this folder's whole tree instead of its own children, or stop.
     ToggleFlat(PaneId),
+    /// Flatten for a filter that has just been typed, or stop when it has been cleared — the
+    /// filter pressing [`Action::ToggleFlat`] on the user's behalf, and remembering that it did so
+    /// it can undo it. See [`crate::pane::Tab::filter_flat`].
+    FilterFlat { pane: PaneId, on: bool },
+    /// Search subfolders for the filter that is up, where the window held back on its own — a
+    /// network drive. The status line's link. See [`crate::pane::Tab::search_here`].
+    SearchSubfoldersHere(PaneId),
+    /// Whether a filter searches subfolders at all — the funnel menu's tick, and written to the
+    /// settings file. See [`crate::config::Config::search_subfolders`].
+    SetSearchSubfolders(bool),
+    /// `↓` in the filter box: on to the results.
+    FilterDown(PaneId),
+    /// `Enter` in the filter box: open the match under the cursor, or the first.
+    FilterEnter(PaneId),
     /// Count what is inside every folder on show, and draw each row's share of the total — or stop.
     ///
     /// Unlike [`Self::ToggleFlat`] beside it, nothing is re-read: the listing is the same listing and
@@ -338,6 +352,11 @@ impl Action {
             Self::SelectAll(_) => "SelectAll",
             Self::ToggleHidden => "ToggleHidden",
             Self::ToggleFlat(_) => "ToggleFlat",
+            Self::FilterFlat { .. } => "FilterFlat",
+            Self::SearchSubfoldersHere(_) => "SearchSubfoldersHere",
+            Self::SetSearchSubfolders(_) => "SetSearchSubfolders",
+            Self::FilterDown(_) => "FilterDown",
+            Self::FilterEnter(_) => "FilterEnter",
             Self::ToggleSizes(_) => "ToggleSizes",
             Self::SetFlatMode(_) => "SetFlatMode",
             Self::SetView { .. } => "SetView",

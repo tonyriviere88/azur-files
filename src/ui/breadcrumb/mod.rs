@@ -258,6 +258,9 @@ pub fn show(
     flat_mode: crate::pane::FlatMode,
     regroup: bool,
     slashes: bool,
+    // Whether a filter searches subfolders — the funnel menu's tick, and what the box's placeholder
+    // says it will do. See [`crate::config::Config::search_subfolders`].
+    subfolders: bool,
     out: &mut Vec<Action>,
 ) {
     // **A folder diff's half has the path and the four buttons that get about, and nothing else** —
@@ -387,6 +390,50 @@ pub fn show(
             ),
             vec2(filter_width, TOOL_SIZE),
         );
+        // **`Escape` empties the box and leaves the caret in it**, so the next query can be typed
+        // straight away. Taken before the field is drawn, because the field would otherwise read the
+        // key first and give up the focus — which is egui's answer to `Escape`, and still this
+        // window's for an empty box: there is nothing to clear, so the key goes on to do what it
+        // always did and puts the keyboard back on the listing. See `App::keyboard`.
+        //
+        // The field's id is last frame's, the only one there is before it is drawn; it is the same
+        // widget in the same place every frame, so that is its id this frame too.
+        let field_key = Id::new(("filter-field", pane));
+        let last_id = ui.data(|d| d.get_temp::<Id>(field_key));
+        let focused_here = last_id.is_some() && ui.memory(|m| m.focused()) == last_id;
+        if focused_here
+            && !tab.filter.is_empty()
+            && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
+            tab.filter.clear();
+            // Through the same door a keystroke goes through, so a clear is the clear button's
+            // clear: the same wait, the same rebuild, and the flatten the filter brought undone.
+            tab.filter_changed(ui.input(|i| i.time));
+        }
+        // **`↓` goes on to the results and `Enter` opens one** — the two keys that make a filter a
+        // way of getting somewhere rather than a way of looking. Taken here for the reason `Escape`
+        // is: the field would otherwise have them first. Acted on after the frame, as actions.
+        if focused_here {
+            if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)) {
+                out.push(Action::FilterDown(pane));
+            }
+            if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
+                out.push(Action::FilterEnter(pane));
+            }
+        }
+        // What the box will do with a word: search the tree, or narrow this folder. The same rule
+        // `Tab::filter_flat` applies — a network drive narrows the folder unless asked — so the
+        // placeholder is a promise the box keeps. `GetDriveTypeW` is a mount-table lookup.
+        let placeholder = if subfolders
+            && tab.diff.is_none()
+            && !crate::fs::is_synthetic(&tab.path)
+            && !crate::shell::over_network(&tab.path)
+        {
+            "Search"
+        } else {
+            "Filter this folder"
+        };
+
         // Square, like the bar it sits in. See [`crate::ui::squared`].
         //
         // The mark is taken before the field paints anything, so [`crate::ui::nudge_caret`] has a
@@ -396,7 +443,7 @@ pub fn show(
             ui.put(
                 field,
                 azur_egui_theme::components::TextField::new(&mut tab.filter)
-                    .placeholder("Filter")
+                    .placeholder(placeholder)
                     // **The bar it sits in, not `background-control`.** A field two points in
                     // from each end of a bar, painted a different colour from it, reads as a hole
                     // in the bar rather than as a control on it — and in a palette where the bar
@@ -453,6 +500,31 @@ pub fn show(
             // Noted, not applied — see `Tab::settle_filter` at the top of this function, and
             // `pane::FILTER_DELAY` for the 240 ms one pass can cost.
             tab.filter_changed(ui.input(|i| i.time));
+        }
+        // For next frame's `Escape`, above.
+        ui.data_mut(|d| d.insert_temp(field_key, response.id));
+        // **And the key has to reach it.** egui's focus machinery drops the focused widget on
+        // `Escape` at the very start of the pass, before anything is drawn, unless that widget's lock
+        // filter claims the key — so without this the caret is gone before the block above could
+        // keep it. Claimed only while there is text to clear: on an empty box `Escape` is left to
+        // the machinery, which is how the keyboard gets back to the listing. Set after the field,
+        // because the field sets a filter of its own each frame and the last one set is the one
+        // the next pass reads.
+        if response.has_focus() {
+            let escape = !tab.filter.is_empty();
+            ui.memory_mut(|m| {
+                m.set_focus_lock_filter(
+                    response.id,
+                    egui::EventFilter {
+                        horizontal_arrows: true,
+                        // Ours, for `↓` — see above. Left to the machinery, egui would read it as
+                        // "move the focus down" and hand the keyboard to some other widget.
+                        vertical_arrows: true,
+                        escape,
+                        ..Default::default()
+                    },
+                );
+            });
         }
         // `Ctrl+F` puts the caret here without the user having to find it, and so does **`F3`** —
         // one key, no chord, and the key a great many Windows programs have meant "find" with
@@ -521,7 +593,7 @@ pub fn show(
             tab.lens.is_some(),
             surface,
         );
-        funnel_menu(ui, &response, pane, tab.lens, out);
+        funnel_menu(ui, &response, pane, tab.lens, subfolders, out);
         right = field.left() - space::S2;
     }
 

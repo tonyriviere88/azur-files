@@ -253,6 +253,9 @@ impl App {
         // Before the next round of asking, so a share that has just been signed in to is re-read on
         // this frame rather than the one after — this is what turns the dialog's OK into a listing.
         self.collect_connections(&ctx);
+        // Before the scans, so a filter that has just flattened its folder has the walk asked for on
+        // this frame. See [`App::follow_filters`].
+        self.follow_filters(&ctx);
         self.start_scans(&ctx, now);
         // After the scans, because a listing that landed this frame is a folder to ask about this
         // frame — the branch and the marks then arrive one answer later rather than one navigation
@@ -909,6 +912,7 @@ impl App {
             forward_slashes,
             auto_tiles,
             providers,
+            search_subfolders,
             ..
         } = self;
         let tab = panes[index].tab_mut();
@@ -923,11 +927,11 @@ impl App {
 
         breadcrumb::show(
             child, t, bar, id, tab, crumbs, complete, loader, icons, preview, *flat_mode, *regroup,
-            *forward_slashes, actions,
+            *forward_slashes, *search_subfolders, actions,
         );
         filelist::show(
             child, t, zone, list, floor, id, tab, focused, icons, links, thumbs, cut, status,
-            console_open, *auto_tiles, providers, reserved, scratch, actions,
+            console_open, *auto_tiles, providers, reserved, scratch, *search_subfolders, actions,
         )
     }
 

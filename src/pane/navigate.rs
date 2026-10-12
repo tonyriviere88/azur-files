@@ -171,6 +171,12 @@ impl Tab {
         // [`Tab::diff`]. Opening a folder there moves that side's root down to it, and the walk is
         // the point.
         self.flat = self.diff.is_some();
+        // The filter went with the folder, and so does the flatten it brought.
+        self.flat_by_filter = false;
+        self.flat_asked.clear();
+        self.search_here = false;
+        // A place in a folder that has just been left is not a place to come back to.
+        self.before_filter = None;
         // And with it what was shut in the tree, which named folders under the folder being
         // left. `Tab::refresh` keeps these too: the same tree, read again, is the same tree.
         self.collapsed.clear();

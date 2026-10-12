@@ -131,6 +131,14 @@ pub struct Config {
     /// never had anything to say, and somebody who wants the strict hierarchy is somebody who will go
     /// and ask for it. It is in the flatten button's own menu beside the two modes.
     pub regroup: bool,
+    /// Whether a filter searches the folder's subfolders too — flattening the tree for it — or only
+    /// the folder's own children. See [`crate::pane::Tab::filter_flat`], and the funnel's menu, which
+    /// is where it is ticked.
+    ///
+    /// **On**, and read as "anything but `0`" for the reason `regroup` above is: a settings file
+    /// written before it existed has no line for it, and the default has to stand. A name typed into
+    /// a file manager is nearly always asking where something is, not whether it is right here.
+    pub search_subfolders: bool,
     /// Whether the listings show the files Windows marks hidden. `Ctrl+H`.
     ///
     /// The same kind of preference as the three above, and remembered for the same reason: whether
@@ -264,6 +272,7 @@ impl Default for Config {
             flat_mode: crate::pane::FlatMode::default(),
             diff_show: crate::diff::Show::default(),
             regroup: true,
+            search_subfolders: true,
             show_hidden: false,
             sort: crate::fs::Sort::default(),
             forward_slashes: false,
@@ -397,6 +406,7 @@ impl Config {
                 // *on*, so a settings file written by an older build has no line for it and the
                 // default has to stand.
                 "regroup" => config.regroup = value != "0",
+                "search_subfolders" => config.search_subfolders = value != "0",
                 // Both read as "only 1", like the preview's two below: their default is *off*, so a
                 // missing line and a `0` mean the same thing and both have to leave them alone.
                 "show_hidden" => config.show_hidden = value == "1",
@@ -607,6 +617,10 @@ impl Config {
         text.push_str(&format!("flatten={}\n", self.flat_mode.as_str()));
         text.push_str(&format!("diff_show={}\n", self.diff_show.as_str()));
         text.push_str(&format!("regroup={}\n", flag(self.regroup)));
+        text.push_str(&format!(
+            "search_subfolders={}\n",
+            flag(self.search_subfolders)
+        ));
         text.push_str(&format!("show_hidden={}\n", flag(self.show_hidden)));
         text.push_str(&format!("sort={}\n", self.sort.as_text()));
         text.push_str(&format!(

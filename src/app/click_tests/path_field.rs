@@ -708,6 +708,10 @@ fn the_text_fields_are_square_and_wear_the_right_fill() {
         let tab = h.app.pane_mut(pane).expect("the pane").tab_mut();
         tab.select_only(0);
         tab.filter = "r".to_owned();
+        // A filter that settled before the rename began, as one typed into the box would have. Left
+        // unanswered, it would flatten the folder on the next frame — a filter searches the tree —
+        // and a flatten takes the rename with it. See `Tab::filter_flat`.
+        tab.flat_asked = tab.filter.clone();
         tab.editing_path = true;
     }
     h.app.perform(&ctx, Action::BeginRename(pane));

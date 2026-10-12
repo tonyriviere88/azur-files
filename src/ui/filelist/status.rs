@@ -30,6 +30,100 @@ pub(crate) fn plural(count: u32) -> &'static str {
     }
 }
 
+/// What a filter that is up says about itself on the status line, and whether to follow it with the
+/// *Search subfolders* link. `None` with no words in the box.
+///
+/// | state | says |
+/// | --- | --- |
+/// | walking the tree | `Searching src… 12,480 items` |
+/// | the walk has landed | `23 matches in src and its subfolders` |
+/// | the walk stopped at its limit | `… — partial, 200,000 items searched` |
+/// | this folder only | `4 matches in src` |
+/// | held back on a network drive | `4 matches in src`, and the link |
+///
+/// **Matches, not rows**: a tree keeps the folders that lead to each match, and those are not
+/// answers to anything. See [`crate::pane::Tab::match_count`].
+pub(crate) fn search_summary(tab: &Tab, subfolders: bool) -> Option<(String, bool)> {
+    // Nothing while the words are still being typed — the count on show would be the last filter's
+    // — and nothing over a listing that could not be read, which says so in its own words.
+    if tab.filter.trim().is_empty()
+        || tab.filter_at.is_some()
+        || tab.dir.as_ref().is_some_and(|dir| dir.error.is_some())
+    {
+        return None;
+    }
+    let folder = crate::fs::display_name(&tab.path);
+    if tab.searching_tree() {
+        if tab.awaiting.is_some() {
+            let found = tab
+                .walked
+                .as_ref()
+                .map_or(0, |n| n.load(std::sync::atomic::Ordering::Relaxed));
+            return Some((
+                if found == 0 {
+                    format!("Searching {folder}…")
+                } else {
+                    format!("Searching {folder}… {} items", super::rows::grouped(found as u64))
+                },
+                false,
+            ));
+        }
+        let dir = tab.dir.as_ref()?;
+        let found = tab.match_count();
+        let mut text = format!(
+            "{} match{} in {folder} and its subfolders",
+            super::rows::grouped(found as u64),
+            if found == 1 { "" } else { "es" }
+        );
+        if dir.truncated {
+            text.push_str(&format!(
+                " — partial, {} items searched",
+                super::rows::grouped(dir.len() as u64)
+            ));
+        }
+        return Some((text, false));
+    }
+    tab.dir.as_ref()?;
+    let found = tab.match_count();
+    Some((
+        format!(
+            "{} match{} in {folder}",
+            super::rows::grouped(found as u64),
+            if found == 1 { "" } else { "es" }
+        ),
+        tab.tree_search_held_back(subfolders),
+    ))
+}
+
+/// What an empty listing says when a filter has emptied it — what was searched, and how much of it.
+///
+/// "Nothing matches" alone does not say whether the subfolders were looked through, whether all of
+/// them were, or whether they are still being looked through; and those decide what to do next —
+/// wait, narrow the folder, or ask for the walk.
+pub(crate) fn nothing_matches(tab: &Tab, subfolders: bool) -> String {
+    let folder = crate::fs::display_name(&tab.path);
+    if tab.searching_tree() {
+        if tab.awaiting.is_some() {
+            return format!("Searching {folder} and its subfolders…");
+        }
+        let searched = tab.dir.as_ref().map_or(0, |dir| dir.len());
+        if tab.dir.as_ref().is_some_and(|dir| dir.truncated) {
+            return format!(
+                "No matches in the first {} items under {folder}",
+                super::rows::grouped(searched as u64)
+            );
+        }
+        return format!(
+            "No matches in {folder} or its subfolders ({} items searched)",
+            super::rows::grouped(searched as u64)
+        );
+    }
+    if tab.tree_search_held_back(subfolders) {
+        return format!("No matches in {folder} — its subfolders were not searched");
+    }
+    format!("No matches in {folder}")
+}
+
 /// How long something took, in the shortest form that keeps three figures.
 ///
 /// Two things on this line report a duration and they differ by four orders of magnitude: reading a
@@ -134,6 +228,9 @@ pub(crate) fn status_line(
     providers: &mut crate::shell::providers::Providers,
     override_text: Option<&str>,
     now: f64,
+    // Whether a filter searches subfolders — so a filter held back on a network drive can offer the
+    // walk as one click. See [`crate::pane::Tab::tree_search_held_back`].
+    subfolders: bool,
     scratch: &mut String,
     out: &mut Vec<Action>,
 ) {
@@ -317,8 +414,73 @@ pub(crate) fn status_line(
         Some(dir) if dir.error.is_some() => Some("Could not be read"),
         _ => None,
     };
-    match word {
-        Some(word) => {
+    // **A filter that is up says what it searched**, in the git summary's place: a search is the
+    // question being asked of this listing right now, and the answer to it — how far the walk has
+    // got, how much it found, whether it is all there — outranks what git thinks of the folder.
+    let search = if word.is_none() || tab.searching_tree() {
+        search_summary(tab, subfolders)
+    } else {
+        None
+    };
+    match (word, search) {
+        (_, Some((text, link))) => {
+            let galley = truncated(
+                &painter,
+                &text,
+                t.fonts.caption.clone(),
+                t.text.secondary,
+                (edge - left).max(0.0),
+            );
+            let width = galley.size().x;
+            galley_on_baseline(&painter, left, baseline, galley);
+            left += width;
+            // The walk the window held back from, as one click — a network drive, where a filter
+            // narrows the folder unless asked. See [`crate::pane::Tab::tree_search_held_back`].
+            if link {
+                let at = left + space::S3;
+                let label = painter.layout_no_wrap(
+                    "Search subfolders".to_owned(),
+                    t.fonts.caption.clone(),
+                    t.accent.default,
+                );
+                let size = label.size();
+                if at + size.x <= edge {
+                    let hit = Rect::from_min_max(
+                        pos2(at, line.top()),
+                        pos2(at + size.x, line.bottom()),
+                    );
+                    let response = ui
+                        .interact(hit, Id::new(("search-subfolders", pane)), Sense::click())
+                        .on_hover_cursor(egui::CursorIcon::PointingHand);
+                    azur_egui_theme::components::tooltip(
+                        response.clone(),
+                        "This folder is on a network drive, so only its own files were filtered. \
+                         Walking its subfolders can take a while.",
+                    );
+                    galley_on_baseline(&painter, at, baseline, label);
+                    if response.hovered() {
+                        painter.line_segment(
+                            [
+                                pos2(at, (baseline + 2.0).round()),
+                                pos2(at + size.x, (baseline + 2.0).round()),
+                            ],
+                            Stroke::new(1.0, t.accent.default),
+                        );
+                    }
+                    if response.clicked() {
+                        out.push(Action::SearchSubfoldersHere(pane));
+                    }
+                    left = at + size.x;
+                }
+            }
+            // A walk in flight has a count that moves, and nothing else would ask for the frame
+            // that shows it: the walk only wakes the window when it is done.
+            if tab.searching_tree() && tab.awaiting.is_some() {
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(100));
+            }
+        }
+        (Some(word), None) => {
             let galley = truncated(
                 &painter,
                 word,
@@ -328,7 +490,7 @@ pub(crate) fn status_line(
             );
             galley_on_baseline(&painter, left, baseline, galley);
         }
-        None => left = git_summary(ui, &painter, t, line, baseline, pane, tab, left, out),
+        (None, None) => left = git_summary(ui, &painter, t, line, baseline, pane, tab, left, out),
     }
 
     // ---- The right, from the edge inwards, in the order they give way ----

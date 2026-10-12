@@ -214,7 +214,26 @@ pub(crate) fn wants_credentials(code: u32, path: &Path) -> bool {
 /// folders where one is denied is not a failed read, and the denied folder simply
 /// contributes nothing. A root that cannot be read at all still comes back as
 /// [`Dir::failed`], which is what the caller shows.
+///
+/// Only the tests ask without a count: the program's one walk is a search somebody is waiting on,
+/// and goes through [`scan_deep_counting`].
+#[cfg(test)]
 pub fn scan_deep(root: &Path, budget: usize, patience: std::time::Duration) -> Dir {
+    scan_deep_counting(root, budget, patience, &std::sync::atomic::AtomicUsize::new(0))
+}
+
+/// [`scan_deep`], saying as it goes how many entries it has found.
+///
+/// `counted` is written once per directory read — not per entry, which over two hundred thousand of
+/// them would be a store in the hottest loop the walk has — and only ever by the walk; whoever
+/// shares it reads it to say *Searching… 12,480 files* while a search is still running. A count and
+/// not a fraction, because nothing knows the size of the tree until it has been walked.
+pub fn scan_deep_counting(
+    root: &Path,
+    budget: usize,
+    patience: std::time::Duration,
+    counted: &std::sync::atomic::AtomicUsize,
+) -> Dir {
     let started = Instant::now();
     // "This PC" is not a folder and has no tree: its rows are volumes, each of which is
     // a place to flatten of its own. Flattening it would mean walking every drive in the
@@ -242,7 +261,7 @@ pub fn scan_deep(root: &Path, budget: usize, patience: std::time::Duration) -> D
         return dir;
     }
 
-    walk(root, budget, patience, hands())
+    walk_counting(root, budget, patience, hands(), counted)
 }
 
 /// The walk, with the number of enumerating threads spelled out.
@@ -250,7 +269,19 @@ pub fn scan_deep(root: &Path, budget: usize, patience: std::time::Duration) -> D
 /// Split from [`scan_deep`] for [`tests::flatten_speed`], which is what the figures in this
 /// module's documentation come from: one worker is the old serial walk, and the comparison is
 /// the only honest way to keep the claim about the others.
+#[cfg(test)]
 fn walk(root: &Path, budget: usize, patience: std::time::Duration, hands: usize) -> Dir {
+    walk_counting(root, budget, patience, hands, &std::sync::atomic::AtomicUsize::new(0))
+}
+
+/// [`walk`], reporting its count as it goes. See [`scan_deep_counting`].
+fn walk_counting(
+    root: &Path,
+    budget: usize,
+    patience: std::time::Duration,
+    hands: usize,
+    counted: &std::sync::atomic::AtomicUsize,
+) -> Dir {
     let started = Instant::now();
     let mut builder = DirBuilder::new(root);
     // Directories still to open, each with its path relative to the root. Popped from the front
@@ -319,6 +350,9 @@ fn walk(root: &Path, budget: usize, patience: std::time::Duration, hands: usize)
                     pending.push_back((dir.target(i), relative.clone()));
                 }
             }
+            // Once a directory, which is often enough for a status line and rare enough to cost
+            // nothing. See [`scan_deep_counting`].
+            counted.store(builder.len(), std::sync::atomic::Ordering::Relaxed);
         }
     }
 

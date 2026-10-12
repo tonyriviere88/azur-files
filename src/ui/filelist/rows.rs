@@ -462,6 +462,11 @@ pub(crate) fn rows(
         };
         let name_font = t.fonts.body.clone();
         let meta_font = t.fonts.caption.clone();
+        // The filter's words, read once for every row on screen: what each kept row's name is marked
+        // with, so a row found by a search says why it is there. `accent.subtle` behind the row's
+        // own ink, the find bar's pair for a hit, whose contrast is measured in both themes by
+        // `every_ink_in_the_find_bar_can_be_read`. See [`super::highlight`].
+        let marks = super::highlight::Marks::parse(&tab.filter);
 
         // Every row's shell icon, drawn in one batch once the rows are done.
         //
@@ -896,14 +901,22 @@ pub(crate) fn rows(
                         &mut chain_text,
                     )
                 } else {
+                    let leaf = dir.leaf(entry_index);
+                    let hits = if marks.is_empty() {
+                        Vec::new()
+                    } else {
+                        marks.find(leaf)
+                    };
                     name_galley(
                         ui.painter(),
-                        dir.leaf(entry_index),
+                        leaf,
                         context.as_deref(),
                         name_font.clone(),
                         name_color,
                         meta_color,
                         name_right - name_left,
+                        &hits,
+                        t.accent.subtle,
                     )
                 };
                 if inked {
@@ -1383,6 +1396,11 @@ pub(crate) fn rows(
 /// At most one extra layout per level, only for the rows that do not fit, and only for the ~40
 /// on screen; egui caches finished galleys, so a row that has not changed costs a hash lookup
 /// on every frame after the first.
+///
+/// `hits` are the stretches of `name` the filter's words cover — see [`super::highlight`] — set on
+/// `hit_fill`, so a row found by a search says why it is there. Empty for the ordinary case, which
+/// is the one-section galley it always was.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn name_galley(
     painter: &egui::Painter,
     name: &str,
@@ -1391,14 +1409,44 @@ pub(crate) fn name_galley(
     color: egui::Color32,
     dim: egui::Color32,
     width: f32,
+    hits: &[std::ops::Range<usize>],
+    hit_fill: egui::Color32,
 ) -> std::sync::Arc<egui::Galley> {
-    let Some(context) = context.filter(|text| !text.is_empty()) else {
+    let context = context.filter(|text| !text.is_empty());
+    if context.is_none() && hits.is_empty() {
         return truncated(painter, name, font, color, width);
+    }
+
+    // The name, in runs: its own ink throughout, and the hits on the fill as well.
+    let name_into = |job: &mut egui::text::LayoutJob| {
+        let plain = egui::TextFormat::simple(font.clone(), color);
+        let marked = egui::TextFormat {
+            background: hit_fill,
+            ..plain.clone()
+        };
+        let mut at = 0;
+        for hit in hits {
+            if hit.start > at {
+                job.append(&name[at..hit.start], 0.0, plain.clone());
+            }
+            job.append(&name[hit.clone()], 0.0, marked.clone());
+            at = hit.end;
+        }
+        if at < name.len() {
+            job.append(&name[at..], 0.0, plain);
+        }
+    };
+
+    let Some(context) = context else {
+        let mut job = egui::text::LayoutJob::default();
+        name_into(&mut job);
+        job.wrap = egui::text::TextWrapping::truncate_at_width(width.max(0.0));
+        return painter.layout_job(job);
     };
 
     let lay = |context: &str| {
         let mut job = egui::text::LayoutJob::default();
-        job.append(name, 0.0, egui::TextFormat::simple(font.clone(), color));
+        name_into(&mut job);
         job.append(
             &format!("{CONTEXT}{context}"),
             0.0,

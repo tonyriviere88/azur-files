@@ -532,6 +532,34 @@ pub struct Tab {
     /// Show everything under this folder rather than its own children. See
     /// [`Tab::toggle_flat`] and [`crate::fs::scan::scan_deep`].
     pub flat: bool,
+    /// Whether `flat` is on **because a filter turned it on** — see [`Tab::filter_wants_flat`] — so
+    /// that clearing the filter puts the folder back the way it was before the typing started.
+    ///
+    /// Only the filter sets it, and anything else that decides about the flatten takes it back: the
+    /// button pressed by hand, or a lens, which wants the tree for a reason of its own. After either,
+    /// the flatten is somebody's choice and an empty filter is no reason to undo it.
+    pub flat_by_filter: bool,
+    /// The filter text [`Tab::filter_flat`] last answered for, so it answers once per filter and
+    /// not once per frame — which is what lets the flatten button be pressed by hand while a filter
+    /// is up without the filter pressing it straight back.
+    pub flat_asked: String,
+    /// The user has asked for this filter to search subfolders where the window would not have on
+    /// its own — on a network drive, from the status line's *Search subfolders*. Held until the
+    /// filter is cleared, so refining the words does not take the walk away again.
+    pub search_here: bool,
+    /// Where the folder was before a filter was typed into it — the selection by name, and the
+    /// scroll — so that clearing the filter puts it back there rather than at the top. Taken the
+    /// moment the filter stops being empty, before anything has moved; given back when it is
+    /// empty again and settled. See [`Tab::note_before_filter`].
+    pub before_filter: Option<BeforeFilter>,
+    /// How many entries the tree walk this tab is waiting for has found so far, for the status
+    /// line's *Searching…*. Shared with the walk's thread, which is the only writer. `None` when
+    /// the tab is not waiting on a walk.
+    pub walked: Option<Arc<std::sync::atomic::AtomicUsize>>,
+    /// How many rows on show the filter actually matched, for the order it was counted over —
+    /// see [`Tab::match_count`]. A cell because the count is asked for while drawing, through a
+    /// shared borrow, and it is a cache of the order rather than state anybody changes.
+    pub matched: std::cell::Cell<Option<(u64, usize)>>,
     /// And how: as one list, or as the tree it came from. Only read while `flat` is set.
     ///
     /// The window's preference, copied in when the flatten is turned on and when the preference
@@ -840,6 +868,12 @@ impl Tab {
             // in the program is made by `Tab::showing`, which brings the real one.
             show_hidden: false,
             flat: false,
+            flat_by_filter: false,
+            flat_asked: String::new(),
+            search_here: false,
+            before_filter: None,
+            walked: None,
+            matched: std::cell::Cell::new(None),
             flat_mode: FlatMode::default(),
             // The window's preference, and its default is on — see `Config::regroup`. A tab that
             // has never been flattened takes the real one the moment it is.
@@ -1095,6 +1129,16 @@ impl Pane {
         }
         true
     }
+}
+
+/// Where a folder was before a filter was typed into it. See [`Tab::before_filter`].
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BeforeFilter {
+    /// The selection, by name — the folder's own children, which is what is on show before a
+    /// filter flattens anything, and what comes back when it is cleared.
+    pub selected: Vec<String>,
+    /// How far down the listing was.
+    pub scroll_y: f32,
 }
 
 /// Which side of a pane something is being dropped on.

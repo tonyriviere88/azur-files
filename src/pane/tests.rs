@@ -1342,3 +1342,169 @@ fn shares(tab: &Tab) -> Option<f32> {
     }
     Some(((total * 1e5).round() / 1e5) as f32)
 }
+
+/// What a settled filter does to the flatten: on for a filter typed into a folder that is not flat,
+/// off again when it is cleared — but only a flatten the filter itself turned on, only where the
+/// flatten button would work, and only once per filter text.
+#[test]
+fn a_filter_flattens_and_clearing_it_restores_the_folder() {
+    // What the app does with an answer: press the button, and note who pressed it.
+    let follow = |tab: &mut Tab| -> Option<bool> {
+        let on = tab.filter_flat(true, |_| false)?;
+        if tab.flat != on {
+            tab.flat = on;
+            tab.flat_by_filter = on;
+        }
+        Some(on)
+    };
+
+    let mut tab = Tab::new(r"C:\repo");
+    assert_eq!(follow(&mut tab), None, "no filter, nothing to search");
+    tab.filter = "   ".to_owned();
+    assert_eq!(follow(&mut tab), None, "blanks are not a filter");
+
+    // Typed and still settling: nothing yet.
+    tab.filter = "main".to_owned();
+    tab.filter_at = Some(0.0);
+    assert_eq!(follow(&mut tab), None, "answered before the typing stopped");
+    tab.filter_at = None;
+    assert_eq!(follow(&mut tab), Some(true));
+    assert!(tab.flat && tab.flat_by_filter);
+    assert_eq!(follow(&mut tab), None, "once per filter, not once per frame");
+
+    // Cleared: back to the folder's own children.
+    tab.filter.clear();
+    assert_eq!(follow(&mut tab), Some(false));
+    assert!(!tab.flat && !tab.flat_by_filter);
+
+    // **A folder that was flat before the typing started stays flat** when it is cleared.
+    let mut flat = Tab::new(r"C:\repo");
+    flat.flat = true;
+    flat.filter = "main".to_owned();
+    assert_eq!(follow(&mut flat), None);
+    flat.filter.clear();
+    assert_eq!(follow(&mut flat), None, "a flatten the filter did not make was undone");
+    assert!(flat.flat);
+
+    // And one pressed by hand while filtering is the user's: clearing does not undo it.
+    let mut kept = Tab::new(r"C:\repo");
+    kept.filter = "main".to_owned();
+    assert_eq!(follow(&mut kept), Some(true));
+    kept.flat_by_filter = false; // what `Action::ToggleFlat` and a lens both do
+    kept.filter.clear();
+    assert_eq!(follow(&mut kept), None);
+    assert!(kept.flat);
+
+    // Turned off by hand while the filter is still up: not pressed straight back on.
+    let mut off = Tab::new(r"C:\repo");
+    off.filter = "main".to_owned();
+    assert_eq!(follow(&mut off), Some(true));
+    off.flat = false;
+    off.flat_by_filter = false;
+    assert_eq!(follow(&mut off), None, "the filter overruled the button");
+
+    // This PC and the Recycle Bin have no tree to walk.
+    let mut pc = Tab::new("");
+    pc.filter = "c".to_owned();
+    assert_eq!(follow(&mut pc), None);
+    let mut bin = Tab::new(crate::fs::recycle::location());
+    bin.filter = "c".to_owned();
+    assert_eq!(follow(&mut bin), None);
+}
+
+/// The scope and the network: subfolders searched only when the setting says so, not on a network
+/// drive unless asked — and asked once is asked for as long as the filter is up.
+#[test]
+fn a_filter_searches_subfolders_only_where_it_should() {
+    let follow = |tab: &mut Tab, subfolders: bool, network: bool| -> Option<bool> {
+        let on = tab.filter_flat(subfolders, |_| network)?;
+        if tab.flat != on {
+            tab.flat = on;
+            tab.flat_by_filter = on;
+        }
+        Some(on)
+    };
+
+    // The setting off: the folder's own children only.
+    let mut off = Tab::new(r"C:\repo");
+    off.filter = "main".to_owned();
+    assert_eq!(follow(&mut off, false, false), None);
+    assert!(!off.flat);
+    // And unticked under a filter that had flattened: the walk goes.
+    let mut was = Tab::new(r"C:\repo");
+    was.filter = "main".to_owned();
+    assert_eq!(follow(&mut was, true, false), Some(true));
+    was.flat_asked.clear(); // what `Action::SetSearchSubfolders` does
+    assert_eq!(follow(&mut was, false, false), Some(false));
+    assert!(!was.flat);
+
+    // A network drive: held back, until asked.
+    let mut share = Tab::new(r"H:\projects");
+    share.filter = "main".to_owned();
+    assert_eq!(follow(&mut share, true, true), None);
+    assert!(!share.flat);
+    share.search_here = true;
+    share.flat_asked.clear(); // what `Action::SearchSubfoldersHere` does
+    assert_eq!(follow(&mut share, true, true), Some(true));
+    // Refining the words keeps the walk: asked once is asked for this filter.
+    share.filter = "main.rs".to_owned();
+    assert_eq!(follow(&mut share, true, true), None);
+    assert!(share.flat);
+    // Cleared, and the question is forgotten with the filter.
+    share.filter.clear();
+    assert_eq!(follow(&mut share, true, true), Some(false));
+    assert!(!share.search_here);
+}
+
+/// Where the folder was before the filter is noted once, before anything moves, and given back once
+/// the box is empty and settled — into the listing if it is there, through `keep_selected` if not.
+#[test]
+fn clearing_a_filter_puts_the_folder_back_where_it_was() {
+    use crate::fs::dir::DirBuilder;
+
+    let mut builder = DirBuilder::new(r"C:\here");
+    builder.push("a.txt", 1, 0, 0);
+    builder.push("b.txt", 1, 0, 0);
+    builder.push("c.txt", 1, 0, 0);
+    let mut tab = Tab::new(r"C:\here");
+    tab.apply(Arc::new(builder.finish(0)));
+    tab.select_only(1);
+    tab.scroll_y = 120.0;
+
+    tab.note_before_filter();
+    assert_eq!(tab.before_filter, None, "nothing typed, nothing to note");
+    tab.filter = "a".to_owned();
+    tab.filter_at = Some(0.0);
+    tab.note_before_filter();
+    let noted = tab.before_filter.clone().expect("noted on the first keystroke");
+    assert_eq!(noted.selected, ["b.txt"]);
+    assert_eq!(noted.scroll_y, 120.0);
+    // Noted once: what the filter does next does not overwrite it.
+    tab.scroll_y = 0.0;
+    tab.note_before_filter();
+    assert_eq!(tab.before_filter.as_ref().map(|b| b.scroll_y), Some(120.0));
+
+    // Not given back while the filter is up, nor while the clear is still settling.
+    assert_eq!(tab.take_before_filter(), None);
+    tab.filter.clear();
+    assert_eq!(tab.take_before_filter(), None);
+    tab.filter_at = None;
+    tab.rebuild_order();
+    tab.select_only(0);
+    let back = tab.take_before_filter().expect("given back once the clear settles");
+    assert_eq!(tab.take_before_filter(), None, "given back once");
+
+    // Into the listing on show.
+    tab.restore_before_filter(back.clone());
+    let selected: Vec<&str> = (0..3)
+        .filter(|&i| tab.selected[i])
+        .map(|i| tab.dir.as_ref().unwrap().name(i))
+        .collect();
+    assert_eq!(selected, ["b.txt"]);
+    assert_eq!(tab.scroll_to, Some(120.0));
+
+    // And with no listing yet — coming out of a flatten — through `keep_selected`.
+    tab.dir = None;
+    tab.restore_before_filter(back);
+    assert_eq!(tab.keep_selected, ["b.txt"]);
+}

@@ -300,8 +300,103 @@ impl App {
             Action::ToggleFlat(pane) => {
                 let (mode, regroup) = (self.flat_mode, self.regroup);
                 if let Some(p) = self.pane_mut(pane) {
-                    p.tab_mut().toggle_flat(mode, regroup);
+                    let tab = p.tab_mut();
+                    tab.toggle_flat(mode, regroup);
+                    // Pressed by hand: whichever way it went, the flatten is the user's now, and
+                    // clearing the filter is no reason to undo it.
+                    tab.flat_by_filter = false;
                 }
+            }
+            // The filter pressing the same button, and remembering it did — which is all that lets
+            // clearing the filter put the folder back as it was. Checked against the tab again
+            // rather than toggled blind: the action was decided a moment ago, and a toggle that
+            // arrived after something else had already done it would undo that instead.
+            //
+            // **On, the listing stays on screen** until the walk lands — see
+            // [`crate::pane::Tab::flatten_keeping_listing`] — so the walk is asked for here rather than
+            // by `start_scans`, which only asks for a tab with nothing on show. Off is the button's own
+            // toggle: the folder's children come back out of the cache in the same frame.
+            Action::FilterFlat { pane, on } => {
+                let (mode, regroup) = (self.flat_mode, self.regroup);
+                let now = ctx.input(|i| i.time);
+                let Some(p) = self.panes.iter_mut().find(|p| p.id == pane) else {
+                    return;
+                };
+                let tab = p.tab_mut();
+                if tab.flat != on {
+                    if on {
+                        tab.flatten_keeping_listing(mode, regroup);
+                        if tab.flat {
+                            tab.awaiting = Some(super::ask_for(tab, &mut self.loader));
+                            tab.asked_at = Some(now);
+                        }
+                    } else {
+                        tab.toggle_flat(mode, regroup);
+                    }
+                    tab.flat_by_filter = on && tab.flat;
+                }
+            }
+            // The status line's *Search subfolders*, where the window held back — a network drive.
+            // Held for as long as this filter is up, and the rule asked again so it is acted on this
+            // frame rather than at the next keystroke. See [`crate::pane::Tab::search_here`].
+            Action::SearchSubfoldersHere(pane) => {
+                if let Some(p) = self.pane_mut(pane) {
+                    let tab = p.tab_mut();
+                    tab.search_here = true;
+                    tab.flat_asked.clear();
+                }
+            }
+            // The window's preference, and every filter that is up asked again under it — so unticking
+            // it takes a filter's walk away, and ticking it starts one, without a keystroke.
+            Action::SetSearchSubfolders(on) => {
+                self.search_subfolders = on;
+                for p in &mut self.panes {
+                    for tab in p.tabs.iter_mut() {
+                        tab.flat_asked.clear();
+                    }
+                }
+                self.config_dirty = true;
+            }
+            // **`↓` from the filter box goes to the results**: the keyboard to the listing, and the
+            // cursor on the first row if it was on none — where the eye already is.
+            Action::FilterDown(pane) => {
+                ctx.memory_mut(|m| m.stop_text_input());
+                if let Some(p) = self.pane_mut(pane) {
+                    let tab = p.tab_mut();
+                    // A word still in its wait is applied now: the key is the end of the typing, and
+                    // the first row has to be the first *match*, not the first file.
+                    if tab.filter_at.is_some() {
+                        tab.rebuild_order();
+                    }
+                    if tab.cursor.is_none() && !tab.order.is_empty() {
+                        tab.select_only(0);
+                    }
+                    tab.scroll_to_cursor = true;
+                }
+            }
+            // **`Enter` in the filter box opens a match**: the one under the cursor, or the first
+            // when there is no cursor — which is what typing a name and pressing Enter is asking.
+            // The same two answers the listing's own `Enter` gives, a folder navigated to and a
+            // file opened. The keyboard goes back to the listing either way.
+            Action::FilterEnter(pane) => {
+                ctx.memory_mut(|m| m.stop_text_input());
+                let Some(p) = self.pane_mut(pane) else { return };
+                let tab = p.tab_mut();
+                // As for `↓`: the word is applied before the first match is chosen.
+                if tab.filter_at.is_some() {
+                    tab.rebuild_order();
+                }
+                if tab.cursor.is_none() && !tab.order.is_empty() {
+                    tab.select_only(0);
+                }
+                let Some(at) = tab.cursor else { return };
+                let Some(path) = tab.target_at(at) else { return };
+                let action = if tab.is_dir_at(at) {
+                    Action::Navigate { pane, path }
+                } else {
+                    Action::Open(path)
+                };
+                self.perform(ctx, action);
             }
             // And this one changes neither what was read nor how it is ordered: the rows, the sort,
             // the selection and the scroll are all untouched, and what changes is that a folder's
@@ -444,6 +539,9 @@ impl App {
                     if !tab.flat {
                         tab.toggle_flat(mode, regroup);
                     }
+                    // The lens wants the tree for a reason of its own, so clearing the filter no
+                    // longer gets to take it away.
+                    tab.flat_by_filter = false;
                     if lens.wants_tiles() {
                         tab.view_mode = crate::pane::ViewMode::Icons;
                     }
