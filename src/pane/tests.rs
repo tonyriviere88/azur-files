@@ -1508,3 +1508,35 @@ fn clearing_a_filter_puts_the_folder_back_where_it_was() {
     tab.restore_before_filter(back);
     assert_eq!(tab.keep_selected, ["b.txt"]);
 }
+
+/// **Typing more of a name keeps the row the name has already found.** `r` lands on the first
+/// `readme`; the `e` that follows still matches it, so the cursor stays put rather than hopping to
+/// the second `readme`. Only a fresh word, after the gap, walks on to the next match.
+#[test]
+fn type_ahead_keeps_the_first_match_while_the_word_grows() {
+    use crate::fs::dir::DirBuilder;
+
+    let mut builder = DirBuilder::new(r"C:\here");
+    builder.push("readme.md", 1, 0, 0);
+    builder.push("readme.txt", 1, 0, 0);
+    builder.push("zebra.txt", 1, 0, 0);
+    let mut tab = Tab::new(r"C:\here");
+    tab.apply(Arc::new(builder.finish(0)));
+    let name = |tab: &Tab| {
+        let dir = tab.dir.as_ref().expect("a listing");
+        dir.name(tab.entry_at(tab.cursor.expect("a cursor")).expect("an entry")).to_owned()
+    };
+
+    tab.type_ahead('r', 10.0);
+    assert_eq!(name(&tab), "readme.md");
+    for (ch, at) in [('e', 10.1), ('a', 10.2), ('d', 10.3), ('m', 10.4), ('e', 10.5)] {
+        tab.type_ahead(ch, at);
+        assert_eq!(name(&tab), "readme.md", "the cursor hopped on `{ch}`");
+    }
+    tab.type_ahead('.', 10.6);
+    tab.type_ahead('t', 10.7);
+    assert_eq!(name(&tab), "readme.txt", "a longer word moves on when the row stops matching");
+
+    tab.type_ahead('r', 20.0);
+    assert_eq!(name(&tab), "readme.md", "a fresh word walks on to the next match, wrapping");
+}

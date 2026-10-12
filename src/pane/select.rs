@@ -482,7 +482,8 @@ impl Tab {
     /// which is what makes typing `re` find `readme` but typing `r` a minute later
     /// start again from `r`.
     pub fn type_ahead(&mut self, ch: char, now: f64) {
-        if now - self.typeahead_at > TYPEAHEAD_GAP {
+        let fresh = !self.typing_a_name(now);
+        if fresh {
             self.typeahead.clear();
         }
         self.typeahead_at = now;
@@ -490,9 +491,16 @@ impl Tab {
 
         let Some(dir) = self.dir.clone() else { return };
         let needle = self.typeahead.as_str();
-        // Start from the row after the cursor, so repeating a letter walks through
-        // the matches instead of sticking on the first.
-        let start = self.cursor.map(|c| c + 1).unwrap_or(0);
+        // A fresh word starts from the row after the cursor, so a letter typed again after
+        // the gap walks through the matches instead of sticking on the first. A letter that
+        // extends the word starts from the cursor itself: the row the word has already found
+        // is kept for as long as it still matches, rather than hopping to the next match at
+        // every keystroke.
+        let start = match self.cursor {
+            Some(c) if fresh => c + 1,
+            Some(c) => c,
+            None => 0,
+        };
         let found = (0..self.order.len())
             .map(|offset| (start + offset) % self.order.len())
             .find(|&at| {
