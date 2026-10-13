@@ -289,6 +289,20 @@ pub enum Action {
     DiscoverNetwork,
     /// A new group, at the end of the list, with its name open for typing.
     AddBookmarkGroup,
+    /// Move a group of the left panel beside another, because its heading was dragged there.
+    /// See [`crate::ui::sidebar::Sections::move_beside`].
+    MoveSection {
+        from: crate::ui::sidebar::Section,
+        to: crate::ui::sidebar::Section,
+        after: bool,
+    },
+    /// Put a group of the left panel on it or take it off, from the panel's right-click menu.
+    ShowSection {
+        section: crate::ui::sidebar::Section,
+        shown: bool,
+    },
+    /// Put the left panel's groups back in their first-run order.
+    ResetSectionOrder,
     /// Fold a group away, or open it again. `usize` is a position in the bookmark list.
     ToggleBookmarkGroup(usize),
     /// Put a group's name in a field. The three of these are the same trio a file rename uses,
@@ -422,6 +436,9 @@ impl Action {
             Self::ToggleBookmark(_) => "ToggleBookmark",
             Self::DiscoverNetwork => "DiscoverNetwork",
             Self::AddBookmarkGroup => "AddBookmarkGroup",
+            Self::MoveSection { .. } => "MoveSection",
+            Self::ShowSection { .. } => "ShowSection",
+            Self::ResetSectionOrder => "ResetSectionOrder",
             Self::ToggleBookmarkGroup(_) => "ToggleBookmarkGroup",
             Self::BeginRenameBookmarkGroup(_) => "BeginRenameBookmarkGroup",
             Self::CommitRenameBookmarkGroup { .. } => "CommitRenameBookmarkGroup",

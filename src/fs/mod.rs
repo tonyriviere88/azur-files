@@ -20,6 +20,7 @@
 //! | [`places`] | the shell's known folders |
 //! | [`recycle`] | the Recycle Bin, read as a listing |
 //! | [`shell`] | handing a path back to the operating system |
+//! | [`wsl`] | the Linux distributions WSL has installed, read from the registry |
 
 pub mod dir;
 pub mod drives;
@@ -31,6 +32,7 @@ pub mod scan;
 pub mod shell;
 pub mod sort;
 pub mod time;
+pub mod wsl;
 
 pub use dir::{display_name, Dir};
 pub use sort::{Column, Sort};

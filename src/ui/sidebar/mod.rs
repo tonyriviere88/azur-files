@@ -1,8 +1,15 @@
-//! The left panel: drives, bookmarks, places, network locations.
+//! The left panel: drives, bookmarks, places, WSL distributions, network locations.
 //!
-//! Four collapsible groups of rows, in the order they are worth scanning: the volumes on this
-//! machine, the folders you chose, the ones the shell provides, and — last, because it is the only
-//! group whose contents this machine may know nothing about — the volumes on other machines.
+//! Five collapsible groups of rows, by default in the order they are worth scanning: the volumes on
+//! this machine, the folders you chose, the ones the shell provides, the Linux distributions WSL has
+//! installed, and — last, because it is the only group whose contents this machine may know nothing
+//! about — the volumes on other machines.
+//!
+//! **That order is a default and not a rule.** A heading is a handle: dragging it moves the whole
+//! group, and a right click on a heading or on the panel's empty space lists the groups with a tick
+//! each, to take one off the panel or put it back. Both are in [`Sections`] and in the settings
+//! file, by name. WSL is drawn only where a distribution is installed — see [`crate::fs::wsl`] for
+//! how that is known without starting anything.
 //!
 //! Network is its own group rather than more Drives rows because nothing in it has a drive letter
 //! — see [`crate::fs::drives::Drive::display_name`] — and a row named `fileserver` sitting among
@@ -39,6 +46,7 @@ use crate::app::Action;
 use crate::fs::drives::Drive;
 use crate::fs::fmt;
 use crate::fs::places::Place;
+use crate::fs::wsl::Distro;
 use crate::icons;
 use crate::pane::{PaneId, Side};
 use crate::theme::Theme;
@@ -112,14 +120,71 @@ const TEXT_INSET: f32 = INDENT + 12.0 + space::S2 + GLYPH + space::S3;
 /// ever further in than this. See [`bookmarks`].
 const CHILD: f32 = 12.0;
 
-/// Which groups are open. Persisted, because collapsing one is a decision about
-/// how you work rather than about this session.
-#[derive(Clone, Copy, Debug)]
+/// One group of rows in the panel.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Section {
+    Drives,
+    Bookmarks,
+    Places,
+    Wsl,
+    Network,
+}
+
+impl Section {
+    /// Every group, in the order a first run shows them — see the module header for why that order.
+    /// WSL sits between Places and Network: it is on this machine, so it is more certain than
+    /// anything on the network, and less often wanted than the folders above it.
+    pub const ALL: [Section; 5] = [
+        Section::Drives,
+        Section::Bookmarks,
+        Section::Places,
+        Section::Wsl,
+        Section::Network,
+    ];
+
+    /// What the settings file calls it. A name rather than a position, so that a group added later
+    /// cannot reinterpret an order somebody already arranged — the trap `sections=` has to step
+    /// around by writing its flags out of panel order.
+    pub fn key(self) -> &'static str {
+        match self {
+            Section::Drives => "drives",
+            Section::Bookmarks => "bookmarks",
+            Section::Places => "places",
+            Section::Wsl => "wsl",
+            Section::Network => "network",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|section| section.key() == key)
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Section::Drives => "Drives",
+            Section::Bookmarks => "Bookmarks",
+            Section::Places => "Places",
+            Section::Wsl => "WSL",
+            Section::Network => "Network",
+        }
+    }
+}
+
+/// How the panel is arranged: which groups are open, which are shown at all, and in what order.
+/// Persisted, because each of the three is a decision about how you work rather than about this
+/// session.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Sections {
     pub drives: bool,
     pub network: bool,
     pub bookmarks: bool,
     pub places: bool,
+    pub wsl: bool,
+    /// Top to bottom. Always every [`Section`] exactly once — see [`Self::set_order`], which is
+    /// the only way anything outside this type writes it.
+    pub order: [Section; 5],
+    /// Taken off the panel from its right-click menu, indexed by `Section as usize`.
+    pub hidden: [bool; 5],
 }
 
 impl Default for Sections {
@@ -129,7 +194,83 @@ impl Default for Sections {
             network: true,
             bookmarks: true,
             places: true,
+            wsl: true,
+            order: Section::ALL,
+            hidden: [false; 5],
         }
+    }
+}
+
+impl Sections {
+    /// Whether a group's rows are drawn under its heading.
+    pub fn open_mut(&mut self, section: Section) -> &mut bool {
+        match section {
+            Section::Drives => &mut self.drives,
+            Section::Bookmarks => &mut self.bookmarks,
+            Section::Places => &mut self.places,
+            Section::Wsl => &mut self.wsl,
+            Section::Network => &mut self.network,
+        }
+    }
+
+    pub fn shown(&self, section: Section) -> bool {
+        !self.hidden[section as usize]
+    }
+
+    /// Put a group on the panel or take it off. Whether anything changed, which is whether the
+    /// settings need writing.
+    pub fn set_shown(&mut self, section: Section, shown: bool) -> bool {
+        let was = self.shown(section);
+        self.hidden[section as usize] = !shown;
+        was != shown
+    }
+
+    /// Arrange the groups in `order`, which may name any of them in any number.
+    ///
+    /// Duplicates and unknown names are already gone by the time it gets here; what it has to settle
+    /// is a group the order **does not mention** — a file written before that group existed, or one
+    /// edited by hand. Such a group goes back in beside the one it follows in [`Section::ALL`], so
+    /// an arrangement written before WSL existed gains WSL after Places, wherever Places was put.
+    pub fn set_order(&mut self, order: impl IntoIterator<Item = Section>) {
+        let mut list: Vec<Section> = Vec::with_capacity(Section::ALL.len());
+        for section in order {
+            if !list.contains(&section) {
+                list.push(section);
+            }
+        }
+        for (at, section) in Section::ALL.into_iter().enumerate() {
+            if list.contains(&section) {
+                continue;
+            }
+            let after = Section::ALL[..at]
+                .iter()
+                .rev()
+                .find_map(|before| list.iter().position(|had| had == before));
+            list.insert(after.map_or(0, |index| index + 1), section);
+        }
+        self.order.copy_from_slice(&list);
+    }
+
+    /// Take `from` out and put it on one side of `to`. Whether anything moved.
+    pub fn move_beside(&mut self, from: Section, to: Section, after: bool) -> bool {
+        if from == to {
+            return false;
+        }
+        let before = self.order;
+        let mut list: Vec<Section> = self.order.into_iter().filter(|s| *s != from).collect();
+        let Some(at) = list.iter().position(|s| *s == to) else {
+            return false;
+        };
+        list.insert(at + usize::from(after), from);
+        self.order.copy_from_slice(&list);
+        self.order != before
+    }
+
+    /// Put the groups back in the order a first run shows them. Whether anything moved.
+    pub fn reset_order(&mut self) -> bool {
+        let moved = self.order != Section::ALL;
+        self.order = Section::ALL;
+        moved
     }
 }
 
@@ -143,6 +284,11 @@ type IconQueue = Vec<(egui::TextureId, Rect, Rect)>;
 
 /// Draw the sidebar's contents into the current `Ui`, which the panel has already
 /// sized.
+///
+/// The groups are drawn in [`Sections::order`], skipping any taken off the panel and WSL when
+/// nothing is installed. A heading is also a handle: dragging one moves its group, and a right
+/// click on a heading or on the panel's empty space offers the list of groups to tick. Both are
+/// pushed as actions rather than done here — see [`crate::app::Action::MoveSection`].
 #[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut Ui,
@@ -156,6 +302,7 @@ pub fn show(
     finding: bool,
     marks: &mut Marks<'_>,
     places: &[Place],
+    distros: &[Distro],
     current: &Path,
     focused: PaneId,
     sections: &mut Sections,
@@ -165,6 +312,15 @@ pub fn show(
 ) -> Option<Rect> {
     let mut bookmarks_rect = None;
     let mut queue: IconQueue = Vec::new();
+
+    // **The panel's empty space, for the right click that picks which groups are shown.** Interacted
+    // before anything in the scroll area, which is what puts it underneath: egui hands a click to
+    // the last widget that claimed the pointer's position, so every row and heading drawn after
+    // this keeps its own menu, and only the space below the last group falls through to here.
+    let back = ui.interact(ui.max_rect(), Id::new("sidebar-back"), Sense::click());
+    let wsl = !distros.is_empty();
+    sections_menu(&back, sections, wsl, out);
+
     egui::ScrollArea::vertical()
         .id_salt("sidebar")
         .auto_shrink([false, false])
@@ -177,163 +333,230 @@ pub fn show(
             ui.spacing_mut().item_spacing.y = 0.0;
             ui.add_space(space::S1);
 
-            // ---- Drives ---------------------------------------------------
-            if group_header(ui, t, width, "Drives", &mut sections.drives, 0.0).1 {
-                for drive in drives {
-                    // Not the shell's icon for a mapping that is not mounted: asking the shell
-                    // about `H:\` is a way of touching it, and the painted glyph says enough.
-                    let shell = if drive.disconnected {
-                        None
-                    } else {
-                        shell_icon(ui, icons_cache, &drive.path)
-                    };
-                    drive_row(
-                        ui, t, width, drive, shell, &mut queue, current, focused, scratch,
-                        out,
-                    );
-                }
-            }
-
-            // ---- Bookmarks ------------------------------------------------
-            ui.add_space(space::S2);
-            let header = ui.cursor().min;
-            let (heading, open) =
-                group_header(ui, t, width, "Bookmarks", &mut sections.bookmarks, ADD);
+            // Refilled by the Bookmarks group when it is drawn, and empty when it is not: a group
+            // taken off the panel is not somewhere a drag from a listing can land.
             marks.rows.clear();
-            if open {
-                bookmarks::section(
-                    ui, t, width, marks, icons_cache, &mut queue, current, focused, out,
+            // Where each group was drawn, the gap above it included, for a heading being dragged.
+            let mut spans: Vec<(Section, Rect)> = Vec::with_capacity(Section::ALL.len());
+            // The heading under the pointer's drag, and whether this is the frame it was let go.
+            let mut held: Option<(Section, bool)> = None;
+
+            for section in sections.order {
+                if !sections.shown(section) || (section == Section::Wsl && !wsl) {
+                    continue;
+                }
+                let top = ui.cursor().min;
+                if !spans.is_empty() {
+                    ui.add_space(space::S2);
+                }
+                let reserve = match section {
+                    Section::Bookmarks | Section::Network => ADD,
+                    _ => 0.0,
+                };
+                let head = group_header(
+                    ui,
+                    t,
+                    width,
+                    section.label(),
+                    sections.open_mut(section),
+                    reserve,
                 );
-            }
-            // The section as a whole, which is both what a drag from a listing may be dropped on
-            // and the area the `+` answers to the pointer within. Known only now, after the rows
-            // — the alternative is last frame's rect, and a control that appears a frame late is
-            // a control that flickers as the pointer crosses into the section.
-            let area = Rect::from_min_max(
-                pos2(header.x, header.y),
-                pos2(header.x + width, ui.cursor().min.y),
-            );
-            if open {
-                bookmarks_rect = Some(area);
-            }
-            // The one control in this panel, and it is on the heading rather than in a menu
-            // because a group is the only thing here that has to be *made* before it can be
-            // used — every other row in the sidebar already exists. Drawn whether the section
-            // is folded or not: making a group is how somebody would open it again.
-            new_group_button(ui, t, heading, area, marks, out);
+                sections_menu(&head.response, sections, wsl, out);
+                if head.response.drag_stopped() {
+                    held = Some((section, true));
+                } else if head.response.dragged() {
+                    held = Some((section, false));
+                }
 
-            // ---- Places ---------------------------------------------------
-            ui.add_space(space::S2);
-            if group_header(ui, t, width, "Places", &mut sections.places, 0.0).1 {
-                for place in places {
-                    let glyph = icons::for_place(place.icon);
-                    let color = match crate::fs::places::kind_of(place.icon) {
-                        fmt::Kind::Folder => t.folder,
-                        _ => t.text.secondary,
-                    };
-                    let shell = shell_icon(ui, icons_cache, &place.path);
-                    let response = row(
-                        ui,
-                        t,
-                        width,
-                        0.0,
-                        ROW,
-                        glyph,
-                        color,
-                        shell,
-                        &mut queue,
-                        &place.label,
-                        place.path == current,
-                        Id::new(("place", &place.label)),
-                        Sense::click(),
-                        false,
-                        false,
-                    );
-                    // The Recycle Bin too, which used to be handed to Explorer — see
-                    // [`crate::fs::recycle`] for how it is listed here now.
-                    navigate_on(&response, focused, &place.path, out);
-                    ContextMenu::new(&response).show(ui.ctx(), |ui| {
-                        menu_targets(ui, focused, &place.path, out);
-                        azur_egui_theme::components::menu_divider(ui);
-                        if ui
-                            .add(MenuItem::new("Add to bookmarks").icon(&icons::star))
-                            .clicked()
-                        {
-                            out.push(Action::AddBookmark(place.path.clone()));
+                match section {
+                    // ---- Drives -----------------------------------------------
+                    Section::Drives if head.open => {
+                        for drive in drives {
+                            // Not the shell's icon for a mapping that is not mounted: asking the
+                            // shell about `H:\` is a way of touching it, and the painted glyph says
+                            // enough.
+                            let shell = if drive.disconnected {
+                                None
+                            } else {
+                                shell_icon(ui, icons_cache, &drive.path)
+                            };
+                            drive_row(
+                                ui, t, width, drive, shell, &mut queue, current, focused,
+                                scratch, out,
+                            );
                         }
-                    });
+                    }
+
+                    // ---- Bookmarks --------------------------------------------
+                    Section::Bookmarks => {
+                        if head.open {
+                            bookmarks::section(
+                                ui, t, width, marks, icons_cache, &mut queue, current, focused,
+                                out,
+                            );
+                        }
+                        // The section as a whole, which is both what a drag from a listing may be
+                        // dropped on and the area the `+` answers to the pointer within. Known only
+                        // now, after the rows — the alternative is last frame's rect, and a control
+                        // that appears a frame late is a control that flickers as the pointer
+                        // crosses into the section.
+                        let area = down_to_cursor(ui, head.rect.min, width);
+                        if head.open {
+                            bookmarks_rect = Some(area);
+                        }
+                        // The one control in this panel that makes something, and it is on the
+                        // heading rather than in a menu because a group is the only thing here that
+                        // has to be *made* before it can be used — every other row in the sidebar
+                        // already exists. Drawn whether the section is folded or not: making a group
+                        // is how somebody would open it again.
+                        new_group_button(ui, t, head.rect, area, marks, out);
+                    }
+
+                    // ---- Places -----------------------------------------------
+                    Section::Places if head.open => {
+                        for place in places {
+                            let glyph = icons::for_place(place.icon);
+                            let color = match crate::fs::places::kind_of(place.icon) {
+                                fmt::Kind::Folder => t.folder,
+                                _ => t.text.secondary,
+                            };
+                            let shell = shell_icon(ui, icons_cache, &place.path);
+                            let response = row(
+                                ui,
+                                t,
+                                width,
+                                0.0,
+                                ROW,
+                                glyph,
+                                color,
+                                shell,
+                                &mut queue,
+                                &place.label,
+                                place.path == current,
+                                Id::new(("place", &place.label)),
+                                Sense::click(),
+                                false,
+                                false,
+                            );
+                            // The Recycle Bin too, which used to be handed to Explorer — see
+                            // [`crate::fs::recycle`] for how it is listed here now.
+                            navigate_on(&response, focused, &place.path, out);
+                            place_menu(ui, &response, focused, &place.path, out);
+                        }
+                    }
+
+                    // ---- WSL --------------------------------------------------
+                    //
+                    // The distributions installed for this user, read from the registry and never
+                    // from WSL — see [`crate::fs::wsl`] for what asking WSL would cost, and why the
+                    // icon is a file beside the distribution's disk and not the shell's answer for
+                    // its share. Not drawn at all where nothing is installed.
+                    Section::Wsl if head.open => {
+                        for distro in distros {
+                            let shell = distro
+                                .icon
+                                .as_deref()
+                                .and_then(|icon| shell_icon(ui, icons_cache, icon));
+                            let response = row(
+                                ui,
+                                t,
+                                width,
+                                0.0,
+                                ROW,
+                                &icons::terminal,
+                                t.text.secondary,
+                                shell,
+                                &mut queue,
+                                &distro.name,
+                                distro.path == current,
+                                Id::new(("wsl", &distro.name)),
+                                Sense::click(),
+                                false,
+                                false,
+                            );
+                            navigate_on(&response, focused, &distro.path, out);
+                            place_menu(ui, &response, focused, &distro.path, out);
+                        }
+                    }
+
+                    // ---- Network ----------------------------------------------
+                    //
+                    // **Last** by default, after Places, because it is the only group whose
+                    // contents this machine may know nothing about: the ones above it are always
+                    // there and always right, and a panel is scanned from the top.
+                    //
+                    // Three kinds of row, in descending certainty:
+                    //
+                    // - **A machine this window is connected to** — `fileserver`. Opening it lists
+                    //   every share the server offers; see [`crate::fs::drives::server_dir`]. One
+                    //   line, no gauge, because a machine has no capacity.
+                    // - **A machine that is merely *there*** — drawn in `text-tertiary` to say so,
+                    //   because it has been seen and nothing more. Two things put one here and the
+                    //   row does not distinguish them, since clicking either resolves it the same
+                    //   way: the refresh button on the heading, which is an SSDP or WSD
+                    //   announcement; and a machine whose connection dropped but which still
+                    //   answers on the SMB port, probed at startup. See
+                    //   [`crate::loader::Volumes::found`]. Clicking one opens it, which is what
+                    //   asks for a connection: a machine that wants credentials refuses the share
+                    //   list, and refusing the share list is what raises Windows' credential
+                    //   prompt. See [`crate::app::connect`].
+                    // - **A network location that no machine here can reach** — a connection to a
+                    //   DFS path, whose first component is a domain rather than a server. Drawn by
+                    //   the same [`drive_row`] a disk gets, because it is a mount with the same
+                    //   capacity to show.
+                    //
+                    // The group is drawn even when all three are empty, because an absent group
+                    // answers "does this program see my share at all" with silence.
+                    Section::Network => {
+                        if head.open {
+                            if servers.is_empty() && shares.is_empty() && found.is_empty() {
+                                hint(ui, t, width, 0.0, "No network locations");
+                            }
+                            for server in servers {
+                                machine_row(
+                                    ui, t, width, server, false, icons_cache, &mut queue,
+                                    current, focused, out,
+                                );
+                            }
+                            // The found ones after the connected ones, and never a machine that is
+                            // already above: a row drawn twice, once certain and once dimmed, would
+                            // read as two places.
+                            for machine in found {
+                                if servers.iter().any(|had| {
+                                    had.as_os_str().eq_ignore_ascii_case(machine.as_os_str())
+                                }) {
+                                    continue;
+                                }
+                                machine_row(
+                                    ui, t, width, machine, true, icons_cache, &mut queue,
+                                    current, focused, out,
+                                );
+                            }
+                            for share in shares {
+                                let shell = shell_icon(ui, icons_cache, &share.path);
+                                drive_row(
+                                    ui, t, width, share, shell, &mut queue, current, focused,
+                                    scratch, out,
+                                );
+                            }
+                        }
+                        // The area the button answers to the pointer within, which is the heading
+                        // and the rows under it — the same span the `+` on Bookmarks uses, and for
+                        // the same reason.
+                        let area = down_to_cursor(ui, head.rect.min, width);
+                        discover_button(ui, t, head.rect, area, finding, out);
+                    }
+
+                    // A folded group: its heading is all there is.
+                    _ => {}
                 }
+
+                spans.push((section, down_to_cursor(ui, top, width)));
             }
 
-            // ---- Network --------------------------------------------------
-            //
-            // **Last**, after Places, because it is the only group whose contents this machine may
-            // know nothing about: the two above it are always there and always right, and a panel
-            // is scanned from the top.
-            //
-            // Three kinds of row, in descending certainty:
-            //
-            // - **A machine this window is connected to** — `fileserver`. Opening it lists every
-            //   share the server offers; see [`crate::fs::drives::server_dir`]. One line, no gauge,
-            //   because a machine has no capacity.
-            // - **A machine that is merely *there*** — drawn in `text-tertiary` to say so, because
-            //   it has been seen and nothing more. Two things put one here and the row does not
-            //   distinguish them, since clicking either resolves it the same way: the refresh button
-            //   on the heading, which is an SSDP or WSD announcement; and a machine whose connection
-            //   dropped but which still answers on the SMB port, probed at startup. See
-            //   [`crate::loader::Volumes::found`]. Clicking one opens it, which is what asks for a
-            //   connection: a machine that wants credentials refuses the share list, and refusing
-            //   the share list is what raises Windows' credential prompt. See
-            //   [`crate::app::connect`].
-            // - **A network location that no machine here can reach** — a connection to a DFS path,
-            //   whose first component is a domain rather than a server. Drawn by the same
-            //   [`drive_row`] a disk gets, because it is a mount with the same capacity to show.
-            //
-            // The group is drawn even when all three are empty, because an absent group answers
-            // "does this program see my share at all" with silence.
-            ui.add_space(space::S2);
-            let network_heading = ui.cursor().min;
-            let (network, network_open) =
-                group_header(ui, t, width, "Network", &mut sections.network, ADD);
-            if network_open {
-                if servers.is_empty() && shares.is_empty() && found.is_empty() {
-                    hint(ui, t, width, 0.0, "No network locations");
-                }
-                for server in servers {
-                    machine_row(
-                        ui, t, width, server, false, icons_cache, &mut queue, current, focused,
-                        out,
-                    );
-                }
-                // The found ones after the connected ones, and never a machine that is already
-                // above: a row drawn twice, once certain and once dimmed, would read as two places.
-                for machine in found {
-                    if servers
-                        .iter()
-                        .any(|had| had.as_os_str().eq_ignore_ascii_case(machine.as_os_str()))
-                    {
-                        continue;
-                    }
-                    machine_row(
-                        ui, t, width, machine, true, icons_cache, &mut queue, current, focused,
-                        out,
-                    );
-                }
-                for share in shares {
-                    let shell = shell_icon(ui, icons_cache, &share.path);
-                    drive_row(
-                        ui, t, width, share, shell, &mut queue, current, focused, scratch,
-                        out,
-                    );
-                }
+            if let Some((from, released)) = held {
+                moving_section(ui, t, &spans, from, released, out);
             }
-            // The area the button answers to the pointer within, which is the heading and the rows
-            // under it — the same span the `+` on Bookmarks uses, and for the same reason.
-            let network_area = Rect::from_min_max(
-                pos2(network_heading.x, network_heading.y),
-                pos2(network_heading.x + width, ui.cursor().min.y),
-            );
-            discover_button(ui, t, network, network_area, finding, out);
 
             ui.add_space(space::S3);
             // Every row's shell icon, in one run — see [`IconQueue`]. Inside the scroll area,
@@ -341,6 +564,116 @@ pub fn show(
             flush_icons(ui, &queue);
         });
     bookmarks_rect
+}
+
+/// From `top` down to where the next row would go, across the panel: a group, or its heading and
+/// rows.
+fn down_to_cursor(ui: &Ui, top: egui::Pos2, width: f32) -> Rect {
+    Rect::from_min_max(top, pos2(top.x + width, ui.cursor().min.y))
+}
+
+/// The menu a place or a distribution offers: the ways to open it, and pinning it.
+fn place_menu(
+    ui: &Ui,
+    response: &egui::Response,
+    focused: PaneId,
+    path: &Path,
+    out: &mut Vec<Action>,
+) {
+    ContextMenu::new(response).show(ui.ctx(), |ui| {
+        menu_targets(ui, focused, path, out);
+        azur_egui_theme::components::menu_divider(ui);
+        if ui
+            .add(MenuItem::new("Add to bookmarks").icon(&icons::star))
+            .clicked()
+        {
+            out.push(Action::AddBookmark(path.to_path_buf()));
+        }
+    });
+}
+
+/// Which groups the panel shows, as a list of ticks — on the empty space, and on every heading.
+///
+/// **Sticky**, because these are settings rather than commands: taking two groups off would
+/// otherwise mean opening the menu twice. WSL is listed only where something is installed; a
+/// ticked entry that puts nothing on the panel would read as a setting that does not work.
+fn sections_menu(target: &egui::Response, sections: &Sections, wsl: bool, out: &mut Vec<Action>) {
+    ContextMenu::new(target).sticky(true).show(&target.ctx, |ui| {
+        for section in sections.order {
+            if section == Section::Wsl && !wsl {
+                continue;
+            }
+            let shown = sections.shown(section);
+            if ui
+                .add(MenuItem::new(section.label()).selected(shown))
+                .clicked()
+            {
+                out.push(Action::ShowSection {
+                    section,
+                    shown: !shown,
+                });
+            }
+        }
+        // Only once there is an order to undo. Dragging is the one way to arrange the groups, and
+        // dragging five of them back by hand is the chore this saves.
+        if sections.order != Section::ALL {
+            azur_egui_theme::components::menu_divider(ui);
+            if ui.add(MenuItem::new("Reset order")).clicked() {
+                out.push(Action::ResetSectionOrder);
+                ui.close();
+            }
+        }
+    });
+}
+
+/// A heading being dragged: where it would go while it is held, and the move when it is let go.
+///
+/// The same accent caret a bookmark being dragged shows between rows, drawn on the edge of a
+/// whole group.
+fn moving_section(
+    ui: &Ui,
+    t: &Theme,
+    spans: &[(Section, Rect)],
+    from: Section,
+    released: bool,
+    out: &mut Vec<Action>,
+) {
+    let Some(pointer) = ui.ctx().pointer_interact_pos() else {
+        return;
+    };
+    let Some((to, span, after)) = section_landing(spans, pointer.y) else {
+        return;
+    };
+    if released {
+        if to != from {
+            out.push(Action::MoveSection { from, to, after });
+        }
+        return;
+    }
+    let y = if after { span.bottom() } else { span.top() };
+    ui.painter().rect_filled(
+        Rect::from_min_max(
+            pos2(span.left() + INDENT, y - 1.0),
+            pos2(span.right() - space::S3, y + 1.0),
+        ),
+        CornerRadius::same(radius::CIRCULAR),
+        t.accent.default,
+    );
+    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+}
+
+/// Which group a dragged heading is going beside, where that group was drawn, and whether it goes
+/// after it.
+///
+/// The groups tile the panel top to bottom with no gaps — each one's span takes in the air above
+/// it — so this is one comparison per group: the first one the pointer is above the bottom of, and
+/// which half of it. Below the last group is after the last group.
+fn section_landing(spans: &[(Section, Rect)], y: f32) -> Option<(Section, Rect, bool)> {
+    let &(last, span) = spans.last()?;
+    match spans.iter().find(|(_, span)| y < span.bottom()) {
+        Some(&(section, span)) => Some((section, span, y >= span.center().y)),
+        None => Some((last, span, true)),
+    }
 }
 
 /// A machine: a name and an icon, and nothing else because a machine has nothing else.
@@ -551,12 +884,24 @@ fn new_group_button(
     }
 }
 
-/// A group heading that folds its rows away.
+/// A group's heading, as it was drawn.
+struct Head {
+    rect: Rect,
+    /// Whether its rows should be drawn.
+    open: bool,
+    /// For the right-click menu and the drag that moves the group.
+    response: egui::Response,
+}
+
+/// A group heading that folds its rows away, and the handle that moves the group.
 ///
-/// Returns the row it took and whether its rows should be drawn. `reserve` is how much of the
-/// right edge belongs to something else — a control drawn on the heading afterwards, which is
-/// the `+` on Bookmarks and nothing anywhere else: the label stops short of it, and a click
-/// that lands in it does not fold the section.
+/// `reserve` is how much of the right edge belongs to something else — a control drawn on the
+/// heading afterwards, which is the `+` on Bookmarks and the refresh on Network: the label stops
+/// short of it, and a click that lands in it does not fold the section.
+///
+/// **A click folds and a drag moves**, which egui tells apart by distance: a press that travels
+/// less than a few points and comes back up is a click. The heading being dragged goes quiet the
+/// way a dragged bookmark does, and stays where it is until it is let go.
 fn group_header(
     ui: &mut Ui,
     t: &Theme,
@@ -564,9 +909,17 @@ fn group_header(
     label: &str,
     open: &mut bool,
     reserve: f32,
-) -> (Rect, bool) {
+) -> Head {
     let (rect, _) = ui.allocate_exact_size(vec2(width, HEADER), Sense::hover());
-    let response = ui.interact(rect, Id::new(("sidebar-group", label)), Sense::click());
+    let response = ui.interact(
+        rect,
+        Id::new(("sidebar-group", label)),
+        Sense::click_and_drag(),
+    );
+    if response.dragged() {
+        ui.painter()
+            .rect_filled(rect, CornerRadius::ZERO, t.bg.control_active);
+    }
     // Where the click landed, and not merely that one did: a control on the heading is on top
     // of it, so egui gives it the click — but this is the belt to that braces, because a
     // heading that folds itself away under a button is a fault nothing else would catch.
@@ -597,7 +950,11 @@ fn group_header(
         t,
         label,
     );
-    (rect, *open)
+    Head {
+        rect,
+        open: *open,
+        response,
+    }
 }
 
 /// One row. Returns its response so the caller can wire clicks and a menu.
@@ -994,6 +1351,39 @@ mod tests {
         let mut out = String::new();
         drive_tooltip(&share, &mut out);
         assert_eq!(out, "web on fileserver — not measured");
+    }
+
+    /// Dragging a heading moves its group to the side of the one it lands on, and only that.
+    #[test]
+    fn a_dragged_group_lands_beside_the_one_it_is_dropped_on() {
+        use Section::*;
+        let mut sections = Sections::default();
+        // Network to the top, before Drives.
+        assert!(sections.move_beside(Network, Drives, false));
+        assert_eq!(sections.order, [Network, Drives, Bookmarks, Places, Wsl]);
+        // Drives after Places.
+        assert!(sections.move_beside(Drives, Places, true));
+        assert_eq!(sections.order, [Network, Bookmarks, Places, Drives, Wsl]);
+        // Dropped where it already is, or on itself: nothing moved, so nothing to save.
+        assert!(!sections.move_beside(Drives, Places, true));
+        assert!(!sections.move_beside(Wsl, Wsl, false));
+        assert!(sections.reset_order());
+        assert_eq!(sections.order, Section::ALL);
+        assert!(!sections.reset_order());
+    }
+
+    /// Where a heading being dragged would land, read off the groups' spans.
+    #[test]
+    fn a_drag_lands_by_which_half_of_a_group_the_pointer_is_in() {
+        let span = |top: f32, bottom: f32| Rect::from_min_max(pos2(0.0, top), pos2(200.0, bottom));
+        let (drives, places) = (span(0.0, 100.0), span(100.0, 140.0));
+        let spans = [(Section::Drives, drives), (Section::Places, places)];
+        assert_eq!(section_landing(&spans, 10.0), Some((Section::Drives, drives, false)));
+        assert_eq!(section_landing(&spans, 60.0), Some((Section::Drives, drives, true)));
+        assert_eq!(section_landing(&spans, 110.0), Some((Section::Places, places, false)));
+        // Below the last group is after it.
+        assert_eq!(section_landing(&spans, 500.0), Some((Section::Places, places, true)));
+        assert_eq!(section_landing(&[], 10.0), None);
     }
 
     /// A mapping Windows has not reconnected says so, rather than "not measured" — which would

@@ -178,6 +178,11 @@ fn connections() -> Vec<(String, PathBuf, u32)> {
         // before. Case-insensitively, because a UNC path is. Two identical rows in the panel
         // would read as two places.
         let path = PathBuf::from(remote.trim_end_matches('\\'));
+        // A WSL distribution, which has a group of its own in the panel and is not a machine on
+        // the network. See [`crate::fs::wsl::is_wsl`].
+        if crate::fs::wsl::is_wsl(&path) {
+            continue;
+        }
         // A connection Windows says is down is not a place to offer. Dropped here, at the one
         // door both [`list_shares`] and [`list_servers`] come through, so that a share and the
         // machine it is on cannot disagree about whether it is there.

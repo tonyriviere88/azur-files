@@ -183,6 +183,7 @@ impl App {
                 .any(|e| matches!(e, egui::Event::WindowFocused(true)))
         }) {
             self.volumes.refresh(&ctx);
+            self.wsl = crate::fs::wsl::distros();
         }
         self.volumes.poll();
         self.icons.poll(&ctx);
@@ -574,6 +575,7 @@ impl App {
                     self.volumes.finding(),
                     &mut marks,
                     &self.places,
+                    &self.wsl,
                     &current,
                     self.focused,
                     &mut self.sections,

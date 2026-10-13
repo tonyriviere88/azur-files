@@ -1,6 +1,7 @@
 //! The sidebar: places, drives, network machines, bookmarks, and the splitter beside them.
 
 use super::*;
+use crate::ui::sidebar::Section;
 
 #[test]
 fn a_sidebar_place_navigates() {
@@ -1111,4 +1112,109 @@ fn hiding_the_left_panel_gives_the_panes_the_whole_window() {
     h.settle();
     assert_eq!(h.pane_rect(0).left(), body_left);
     assert_eq!(h.app.sidebar_width, width);
+}
+
+/// A point in the panel's own space, under the last group.
+fn panel_space(h: &Harness) -> Pos2 {
+    pos2(crate::ui::GUTTER + 80.0, h.size.y - 12.0)
+}
+
+/// Right-click the panel's empty space, and return the menu that opened as the words it put on
+/// screen — the headings carry the same names, so its entries are what was not there before.
+fn open_panel_menu(h: &mut Harness) -> Vec<(Pos2, String)> {
+    let before = h.texts();
+    h.click_with(panel_space(h), PointerButton::Secondary, Modifiers::NONE);
+    h.texts()
+        .into_iter()
+        .filter(|(at, _)| !before.iter().any(|(had, _)| had == at))
+        .collect()
+}
+
+fn entry(menu: &[(Pos2, String)], label: &str) -> Option<Pos2> {
+    menu.iter().find(|(_, text)| text == label).map(|(at, _)| *at)
+}
+
+/// The panel's own right-click menu: every group with a tick, reachable from the empty space under
+/// the last group, and unticking one takes that group off the panel.
+///
+/// **Sticky**, so the same menu puts it back with a second click — the menu is a list of settings,
+/// and one that closed after each tick would have to be reopened for every group.
+///
+/// A distribution is planted rather than read, so the test does not depend on what this machine has
+/// installed — and it is never clicked, since opening a WSL share boots the distribution.
+#[test]
+fn the_panels_right_click_menu_takes_a_group_off_and_puts_it_back() {
+    let mut h = Harness::new();
+    h.app.wsl = vec![crate::fs::wsl::Distro::new("Test-Distro", None)];
+    h.frame(Vec::new());
+    assert!(
+        h.hovers(Id::new("sidebar-back"), panel_space(&h)),
+        "the space under the last group is not the panel's own"
+    );
+
+    let menu = open_panel_menu(&mut h);
+    for label in ["Drives", "Bookmarks", "Places", "WSL", "Network"] {
+        assert!(entry(&menu, label).is_some(), "the menu has no `{label}`: {menu:?}");
+    }
+
+    let places = entry(&menu, "Places").expect("a Places entry");
+    let tick = pos2(places.x + 2.0, places.y + 6.0);
+    let done = h.click_at(tick);
+    assert!(done.contains(&"ShowSection"), "unticking did nothing, got {done:?}");
+    assert!(!h.app.sections.shown(Section::Places));
+    assert!(
+        !h.app.settings().sections.shown(Section::Places),
+        "and it was not written down"
+    );
+    assert!(
+        h.find(Id::new(("place", "Home")), crate::ui::GUTTER + 80.0, 30..640)
+            .is_none(),
+        "a group taken off the panel still has its rows"
+    );
+
+    // Still open, and the same entry puts it back.
+    assert!(
+        h.texts().contains(&(places, "Places".to_owned())),
+        "the menu closed after one tick"
+    );
+    h.click_at(tick);
+    assert!(h.app.sections.shown(Section::Places));
+}
+
+/// With nothing installed there is no WSL group, and the menu does not offer to show one.
+#[test]
+fn without_wsl_there_is_no_wsl_group_to_tick() {
+    let mut h = Harness::new();
+    h.app.wsl.clear();
+    h.frame(Vec::new());
+    let heading = h.find(
+        Id::new(("sidebar-group", "WSL")),
+        crate::ui::GUTTER + 80.0,
+        30..640,
+    );
+    assert!(heading.is_none(), "a WSL heading with nothing under it");
+
+    let menu = open_panel_menu(&mut h);
+    assert!(entry(&menu, "Drives").is_some(), "the menu did not open: {menu:?}");
+    assert!(entry(&menu, "WSL").is_none(), "the menu offers WSL: {menu:?}");
+}
+
+/// A heading is a handle: dragging Network up onto Drives puts it first, and it is drawn there.
+/// That a *click* on a heading still folds it is [`a_sidebar_group_header_folds_it`].
+#[test]
+fn dragging_a_heading_moves_its_group() {
+    let mut h = Harness::new();
+    let x = crate::ui::GUTTER + 80.0;
+    let heading = |h: &mut Harness, label: &str| {
+        h.find(Id::new(("sidebar-group", label)), x, 20..640)
+            .unwrap_or_else(|| panic!("the {label} heading is not reachable"))
+    };
+    let (network, drives) = (heading(&mut h, "Network"), heading(&mut h, "Drives"));
+    let done = h.drag(network, drives);
+    assert!(done.contains(&"MoveSection"), "the drag moved nothing, got {done:?}");
+    assert_eq!(h.app.sections.order[0], Section::Network);
+    assert_eq!(h.app.settings().sections.order[0], Section::Network);
+
+    let (network, drives) = (heading(&mut h, "Network"), heading(&mut h, "Drives"));
+    assert!(network.y < drives.y, "Network was not drawn first");
 }

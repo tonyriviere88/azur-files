@@ -47,7 +47,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::theme::Palette;
-use crate::ui::sidebar::{Bookmarks, Entry, Sections};
+use crate::ui::sidebar::{Bookmarks, Entry, Section, Sections};
 
 /// One pane's worth of tabs, as it was left.
 #[derive(Clone, Debug, Default)]
@@ -509,12 +509,21 @@ impl Config {
                         None => fallback,
                     };
                     if !flags.is_empty() {
-                        config.sections = Sections {
-                            drives: open(0, true),
-                            network: open(3, true),
-                            bookmarks: open(1, true),
-                            places: open(2, true),
-                        };
+                        config.sections.drives = open(0, true);
+                        config.sections.bookmarks = open(1, true);
+                        config.sections.places = open(2, true);
+                        config.sections.network = open(3, true);
+                        config.sections.wsl = open(4, true);
+                    }
+                }
+                // **By name**, unlike `sections=` above, so a group added later cannot shift what an
+                // arrangement already on disk means. A name it does not know is skipped and a group
+                // it does not name goes back beside its neighbour — see [`Sections::set_order`].
+                "sidebar_order" => config.sections.set_order(named(value)),
+                // The groups taken off the panel, by name. An empty line is none of them.
+                "sidebar_hidden" => {
+                    for section in named(value) {
+                        config.sections.set_shown(section, false);
                     }
                 }
                 "window" => {
@@ -672,14 +681,20 @@ impl Config {
         text.push_str(&format!("dependency={}\n", self.preview.deps.as_str()));
         // **Network last, out of panel order**, and deliberately: the first three positions are
         // what every settings file already written means by this line, and moving one of them
-        // would silently reinterpret those files. A new group goes on the end.
+        // would silently reinterpret those files. A new group goes on the end, which is where WSL
+        // went.
         text.push_str(&format!(
-            "sections={},{},{},{}\n",
+            "sections={},{},{},{},{}\n",
             flag(self.sections.drives),
             flag(self.sections.bookmarks),
             flag(self.sections.places),
             flag(self.sections.network),
+            flag(self.sections.wsl),
         ));
+        // The arrangement and what is taken off the panel, by name — see the reading side.
+        let hidden = Section::ALL.into_iter().filter(|s| !self.sections.shown(*s));
+        text.push_str(&format!("sidebar_order={}\n", keys(self.sections.order)));
+        text.push_str(&format!("sidebar_hidden={}\n", keys(hidden)));
         if let Some([w, h]) = self.window {
             text.push_str(&format!("window={w:.0},{h:.0}\n"));
         }
@@ -729,6 +744,17 @@ impl Config {
 
 fn flag(value: bool) -> u8 {
     u8::from(value)
+}
+
+/// Sidebar groups as a comma-separated list of their names.
+fn keys(sections: impl IntoIterator<Item = Section>) -> String {
+    let names: Vec<&str> = sections.into_iter().map(Section::key).collect();
+    names.join(",")
+}
+
+/// And back: the groups a list of names names, skipping any it does not know.
+fn named(value: &str) -> impl Iterator<Item = Section> + '_ {
+    value.split(',').filter_map(|key| Section::from_key(key.trim()))
 }
 
 /// Where the settings live.

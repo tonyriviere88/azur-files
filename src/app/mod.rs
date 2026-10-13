@@ -377,6 +377,9 @@ pub struct App {
 
     volumes: Volumes,
     places: Vec<Place>,
+    /// The Linux distributions WSL has installed, for the sidebar's WSL group. Read again whenever
+    /// the volumes are, since the registry read costs 0.1 ms — see [`crate::fs::wsl`].
+    wsl: Vec<crate::fs::wsl::Distro>,
     bookmarks: crate::ui::sidebar::Bookmarks,
     sections: Sections,
     sidebar_width: f32,
@@ -680,6 +683,7 @@ impl App {
             file_drag: None,
             volumes,
             places,
+            wsl: fs::wsl::distros(),
             bookmarks: config.bookmarks.clone(),
             sections: config.sections,
             sidebar_width: config.sidebar_width,

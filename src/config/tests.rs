@@ -249,6 +249,8 @@ fn which_sidebar_groups_are_folded_survives_a_new_group_appearing() {
             network: true,
             bookmarks: false,
             places: true,
+            wsl: false,
+            ..Sections::default()
         },
         ..Config::default()
     };
@@ -257,6 +259,7 @@ fn which_sidebar_groups_are_folded_survives_a_new_group_appearing() {
     assert!(back.network);
     assert!(!back.bookmarks);
     assert!(back.places);
+    assert!(!back.wsl);
 
     // **The line a previous build wrote**, which had no fourth position at all. The three
     // decisions in it are kept — a length check here dropped all three and reopened every group
@@ -266,15 +269,77 @@ fn which_sidebar_groups_are_folded_survives_a_new_group_appearing() {
     assert!(older.bookmarks);
     assert!(!older.places);
     assert!(older.network, "a group with no flag yet opens");
+    assert!(older.wsl, "a group with no flag yet opens");
+
+    // The four-flag line the build before WSL wrote keeps all four.
+    let four = Config::parse("sections=1,0,1,0\n").sections;
+    assert!(four.drives && !four.bookmarks && four.places && !four.network);
+    assert!(four.wsl);
 
     // Network is written *last*, out of panel order, so that those first three positions go on
-    // meaning what they have always meant. A file that put it second would read an old
-    // `sections=1,0,1` as "bookmarks folded" turning into "network folded".
+    // meaning what they have always meant — and WSL after it, for the same reason. A file that put
+    // a new group second would read an old `sections=1,0,1` as "bookmarks folded" turning into
+    // "network folded".
     assert!(
-        saved.to_text().contains("sections=0,0,1,1"),
+        saved.to_text().contains("sections=0,0,1,1,0\n"),
         "the flags moved: {}",
         saved.to_text()
     );
+}
+
+/// How the left panel is arranged — its order and which groups are taken off it — survives a
+/// round trip, and an arrangement written before a group existed still means what it said.
+///
+/// Both lines are by name rather than by position, which is the claim this checks: a group the
+/// line does not mention goes back beside its neighbour instead of shifting everything after it.
+#[test]
+fn the_left_panels_arrangement_survives_a_new_group_appearing() {
+    let mut sections = Sections::default();
+    assert!(sections.move_beside(Section::Network, Section::Drives, false));
+    assert!(sections.set_shown(Section::Places, false));
+    let saved = Config {
+        sections,
+        ..Config::default()
+    };
+    let text = saved.to_text();
+    assert!(text.contains("sidebar_order=network,drives,bookmarks,places,wsl\n"), "{text}");
+    assert!(text.contains("sidebar_hidden=places\n"), "{text}");
+    let back = Config::parse(&text).sections;
+    assert_eq!(back.order, sections.order);
+    assert!(!back.shown(Section::Places));
+    assert!(back.shown(Section::Network));
+
+    // **An order from before WSL**: it goes in after Places, wherever Places was put.
+    let older = Config::parse("sidebar_order=places,network,drives,bookmarks\n").sections;
+    assert_eq!(
+        older.order,
+        [
+            Section::Places,
+            Section::Wsl,
+            Section::Network,
+            Section::Drives,
+            Section::Bookmarks,
+        ]
+    );
+
+    // Hand-edited nonsense: an unknown name and a repeat are dropped, and every group is still
+    // there exactly once — each missing one beside the group it follows by default, so Network
+    // comes in behind WSL.
+    let edited = Config::parse("sidebar_order=wsl, cloud ,wsl,drives\nsidebar_hidden=,nope\n");
+    assert_eq!(
+        edited.sections.order,
+        [
+            Section::Wsl,
+            Section::Network,
+            Section::Drives,
+            Section::Bookmarks,
+            Section::Places,
+        ]
+    );
+    assert!(Section::ALL.into_iter().all(|s| edited.sections.shown(s)));
+
+    // No line at all is the first-run arrangement.
+    assert_eq!(Config::parse("").sections, Sections::default());
 }
 
 /// The bookmarks come back arranged the way they were left: the order, the groups, what is in

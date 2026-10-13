@@ -226,6 +226,7 @@ impl App {
                 // the kind of thing someone presses F5 about. The probes are threads,
                 // so this costs nothing here.
                 self.volumes.refresh(ctx);
+                self.wsl = crate::fs::wsl::distros();
                 let path = self.pane_mut(pane).map(|p| p.tab().path.clone());
                 if let Some(path) = path {
                     // **F5 on a refused share is a request to be asked again**, possibly as
@@ -1097,6 +1098,13 @@ impl App {
             // moment it was asked, not a preference, and a machine that has gone quiet should not
             // come back next launch as a row that leads nowhere.
             Action::DiscoverNetwork => self.volumes.discover(ctx),
+            Action::MoveSection { from, to, after } => {
+                self.config_dirty |= self.sections.move_beside(from, to, after);
+            }
+            Action::ShowSection { section, shown } => {
+                self.config_dirty |= self.sections.set_shown(section, shown);
+            }
+            Action::ResetSectionOrder => self.config_dirty |= self.sections.reset_order(),
             Action::AddBookmarkGroup => {
                 // Made and named in one gesture: the `+` is pressed, the group appears at the
                 // end of the list with its name in a field, and typing over `New group` is the
