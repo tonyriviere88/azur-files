@@ -15,6 +15,31 @@ use super::*;
 /// [`MENU_LIMIT`] rests on, two orders of magnitude further out.
 pub(crate) const OFFERS_SHOWN: usize = 10;
 
+/// How many folders out of the history and the bookmarks go above the folder's own offers.
+///
+/// Fewer than [`OFFERS_SHOWN`], so that typing into a folder still shows what is in it: these are
+/// the few places you most likely meant, and the rows under them are everything that is there.
+pub(crate) const RECALLED_SHOWN: usize = 5;
+
+/// What the field recalls from: where the panes have been, the bookmarks, and the folder this pane
+/// is in, which is never offered — you are already there.
+///
+/// `bookmarks` is `None` with `From bookmarks` unticked; `From history` is the history's own
+/// [`crate::history::History::paused`].
+pub struct Recall<'a> {
+    pub visits: &'a crate::history::History,
+    pub bookmarks: Option<&'a crate::ui::sidebar::Bookmarks>,
+    pub here: &'a Path,
+}
+
+impl Recall<'_> {
+    /// What the places recalled were worked out from, so a change to either source — a folder
+    /// forgotten, or a tick in the menu — shows on the next frame.
+    fn key(&self) -> (u64, bool) {
+        (self.visits.generation(), self.bookmarks.is_some())
+    }
+}
+
 /// What the path field is offering to complete, and which of it the keyboard is on.
 ///
 /// **The chevron dropdown, opened by typing.** The bar already answers "what is inside that
@@ -24,8 +49,8 @@ pub(crate) const OFFERS_SHOWN: usize = 10;
 /// new part is what moves down it:
 ///
 /// - **Down** and **Up** walk the offers, and either one puts the dropdown up if it is not.
-///   Past the last and before the first is *what you typed*, which is how you get back to your
-///   own text without deleting anything.
+///   **Down stops on the last offer**, and **Up from the first is *what you typed***, which is
+///   how you get back to your own text without deleting anything.
 /// - **Right** and **Tab** put the highlighted name in the field with the separator after it, so
 ///   what is offered next is what is inside it. That is the whole gesture: `Down Right Down
 ///   Right` walks a tree from the keyboard without a pointer or an `Enter` anywhere in it.
@@ -34,6 +59,12 @@ pub(crate) const OFFERS_SHOWN: usize = 10;
 ///
 /// Matching is by prefix and **case-insensitive**, because a Windows file name is: having to
 /// match the case of a folder whose name you are asking for would be no help at all.
+///
+/// **Above the folder's own offers, the places you have been**, as a browser's address bar offers
+/// its history: up to [`RECALLED_SHOWN`] folders out of [`crate::history`] and the bookmarks, every
+/// word typed somewhere in their path, best first, each with its whole path for a label and a clock
+/// or a star for an icon. They are walked by the same keys as the rows under them — Right and Tab
+/// put the whole path in the field — and `Shift+Delete` on one takes it out of the history.
 ///
 /// **Nothing here reads the disk.** The folder is asked of [`crate::loader`] — the same service
 /// the listings come from, which reads on a worker — and the offers are whatever has come back.
@@ -69,6 +100,13 @@ pub struct PathComplete {
     pub(crate) offers: Vec<(String, PathBuf)>,
     /// Whether there were more than [`MENU_LIMIT`] of them.
     pub(crate) truncated: bool,
+    /// The folders out of the history and the bookmarks that match what is typed, drawn above
+    /// [`Self::offers`]. Indices into the dropdown count these first — see [`Self::target`].
+    pub(crate) recalled: Vec<crate::history::Recalled>,
+    /// What [`Self::recalled`] was worked out against — the history's generation and whether the
+    /// bookmarks were asked — so an entry forgotten with `Shift+Delete`, or a source ticked off in
+    /// the menu, leaves the list on the next frame. See [`Recall::key`].
+    pub(crate) recalled_at: (u64, bool),
     /// Which offer the keyboard is on. `None` is what was typed, and is where it starts: `Enter`
     /// on a field you have only typed into has always gone where the text says, and a highlight
     /// that arrived by itself would quietly change what that key does.
@@ -79,6 +117,16 @@ pub struct PathComplete {
     /// Bring the highlighted offer into view, on the frame the highlight moves and not on the
     /// ones after it: a list that scrolled itself every frame could not be scrolled by hand.
     pub(crate) follow: bool,
+    /// The keyboard has the dropdown, and the pointer has not moved since it took it.
+    ///
+    /// **One highlight at a time**, as in a browser's bar. The dropdown comes up under wherever the
+    /// pointer happens to be resting — usually somewhere over the listing — and a row that lit up
+    /// beside the one the arrows are on would be a second highlight nobody asked for. Worse, it lit
+    /// up *late*: this window draws only when something happens, so the hover appeared on the next
+    /// caret blink, half a second after the keystroke, on whichever row was under the pointer. While
+    /// this is set the rows take no hover at all; the first movement of the pointer clears it, and
+    /// from then on the highlight goes where the pointer does. See [`edit_field`].
+    pub(crate) quiet: bool,
 }
 
 /// What a key asked of the offers.
@@ -96,9 +144,32 @@ impl PathComplete {
     /// Down and Right do is a question about whether there is anything to move onto. Costs two
     /// comparisons on a frame where neither the text nor the listing has changed, which is nearly
     /// all of them.
-    pub(crate) fn refresh(&mut self, pane: PaneId, text: &str, loader: &mut crate::loader::Loader) {
+    pub(crate) fn refresh(
+        &mut self,
+        pane: PaneId,
+        text: &str,
+        loader: &mut crate::loader::Loader,
+        recall: &Recall<'_>,
+    ) {
         let opened = self.pane != Some(pane);
-        if opened || text != self.typed {
+        let changed = opened || text != self.typed;
+        // The places recalled, when the text changes or the history does. The highlight stays
+        // where it was for the second — an entry forgotten from under it should leave the keyboard
+        // on its neighbour, as a browser's does — and the folder's own offers are worked out again,
+        // since which of them the list above already holds may have changed.
+        if changed || recall.key() != self.recalled_at {
+            self.recalled_at = recall.key();
+            self.recalled = recall.visits.recall(
+                text,
+                recall.bookmarks.into_iter().flat_map(|marks| marks.paths()),
+                recall.here,
+                crate::history::now(),
+                RECALLED_SHOWN,
+            );
+            self.ready = false;
+            self.hot = self.hot.filter(|at| *at < self.len());
+        }
+        if changed {
             self.pane = Some(pane);
             self.typed = text.to_owned();
             self.folder = fs::typed_folder(split_typed(text).0);
@@ -110,6 +181,7 @@ impl PathComplete {
             // something you can already read on the bar behind it. The first keystroke brings it
             // up, and so does Down.
             self.hidden = opened;
+            self.quiet = true;
         }
 
         let (_, leaf) = split_typed(text);
@@ -129,9 +201,8 @@ impl PathComplete {
         self.truncated = false;
         match &folder {
             // Nothing names a folder yet, and what a path typed from nothing can still become is
-            // a volume: `d` offers `D:`. Explorer offers your history here as well; this program
-            // keeps none, and a guess about where you meant is worse than a short list of places
-            // that are certainly there.
+            // a volume: `d` offers `D:`. The places you have been are offered above these, as
+            // Explorer offers them — see [`Self::recalled`].
             None => {
                 for drive in fs::drives::list_letters() {
                     if starts_with_folded(&drive.letter, leaf) {
@@ -169,7 +240,15 @@ impl PathComplete {
                     if !starts_with_folded(name, leaf) {
                         continue;
                     }
-                    self.offers.push((name.to_owned(), dir.target(i)));
+                    // Once in the dropdown: a folder the list above already offers is not offered
+                    // again down here.
+                    let target = dir.target(i);
+                    if self.recalled.iter().any(|offer| {
+                        offer.path.as_os_str().eq_ignore_ascii_case(target.as_os_str())
+                    }) {
+                        continue;
+                    }
+                    self.offers.push((name.to_owned(), target));
                 }
                 self.offers.sort_by(|a, b| fs::sort::natural_cmp(&a.0, &b.0));
                 // A menu is for picking one of a few, exactly as it is for a chevron.
@@ -182,17 +261,22 @@ impl PathComplete {
 
     /// Move the highlight, and put the dropdown up if it was down.
     ///
-    /// Past either end is `None` — what was typed — rather than a wrap straight round to the
-    /// other end: the text you wrote is one of the choices, and a list that stepped over it would
-    /// leave `Escape`, which throws the whole field away, as the only way back to it.
+    /// **Down stops on the last offer.** It used to go on past it to `None` — what was typed — and
+    /// round again, which with one offer made every press of Down a toggle: the row lit, went dark,
+    /// lit again, and holding the key made it flicker. Nobody pressing Down means "and now nothing".
+    ///
+    /// **Up from the first offer is `None`**, still, because the text you wrote is one of the
+    /// choices: a list with no way back to it would leave `Escape`, which throws the whole field
+    /// away, as the only way out. Up from `None` starts at the end.
     pub(crate) fn step(&mut self, down: bool) {
         self.hidden = false;
         self.follow = true;
-        let last = self.offers.len().saturating_sub(1);
+        self.quiet = true;
+        let last = self.len().saturating_sub(1);
         self.hot = match (self.hot, down) {
             (None, true) => Some(0),
             (None, false) => Some(last),
-            (Some(at), true) if at >= last => None,
+            (Some(at), true) if at >= last => Some(last),
             (Some(at), true) => Some(at + 1),
             (Some(0), false) => None,
             (Some(at), false) => Some(at - 1),
@@ -207,7 +291,21 @@ impl PathComplete {
     /// stays something they can read. Returns where the field now points, or `None` if nothing was
     /// highlighted.
     pub(crate) fn accept(&self, text: &mut String, slashes: bool) -> Option<PathBuf> {
-        let (name, path) = self.offers.get(self.hot?)?;
+        let hot = self.hot?;
+        // A place recalled is a whole path rather than a name to put after one, so it replaces the
+        // text — written with the slash the text was being typed with, and the setting's if neither.
+        if let Some(offer) = self.recalled.get(hot) {
+            let slashes = match (text.contains('/'), text.contains('\\')) {
+                (true, false) => true,
+                (false, true) => false,
+                _ => slashes,
+            };
+            let mut next = offer.path.display().to_string();
+            next.push(std::path::MAIN_SEPARATOR);
+            *text = with_separator(&next, slashes);
+            return Some(offer.path.clone());
+        }
+        let (name, path) = self.offers.get(hot - self.recalled.len())?;
         let (prefix, _) = split_typed(text);
         // The separator they have been using. A path typed with forward slashes lists, navigates
         // and draws a breadcrumb — `fs::normalize` is what sees to that at the door — so turning
@@ -226,6 +324,22 @@ impl PathComplete {
         let next = format!("{prefix}{name}{sep}");
         *text = next;
         Some(path.clone())
+    }
+
+    /// How many rows the dropdown has: the places recalled, then the folder's own offers.
+    pub(crate) fn len(&self) -> usize {
+        self.recalled.len() + self.offers.len()
+    }
+
+    /// Where the row at `at` leads, counting the places recalled first.
+    pub(crate) fn target(&self, at: usize) -> Option<&Path> {
+        match self.recalled.get(at) {
+            Some(offer) => Some(&offer.path),
+            None => self
+                .offers
+                .get(at - self.recalled.len())
+                .map(|(_, path)| path.as_path()),
+        }
     }
 
     /// The field on `pane` has gone. Forget what it was offering, so the next one opens fresh.
@@ -281,11 +395,17 @@ impl PathComplete {
         )
     }
 
+    /// The places recalled above the folder's own offers, for the tests.
+    #[cfg(test)]
+    pub fn recalling(&self) -> Vec<&Path> {
+        self.recalled.iter().map(|offer| offer.path.as_path()).collect()
+    }
+
     /// Whether the dropdown is up, which is the same question as whether there is anything in it
     /// that has not been put away.
     #[cfg(test)]
     pub fn showing(&self) -> bool {
-        !self.hidden && !self.offers.is_empty()
+        !self.hidden && self.len() > 0
     }
 }
 
@@ -377,6 +497,7 @@ pub(crate) fn edit_field(
     complete: &mut PathComplete,
     loader: &mut crate::loader::Loader,
     icons_cache: &mut crate::shell::icons::Icons,
+    recall: &Recall<'_>,
     slashes: bool,
     out: &mut Vec<Action>,
 ) {
@@ -388,7 +509,7 @@ pub(crate) fn edit_field(
     // **What is on offer, before anything is drawn and before a key is read.** Both of the things
     // below need it: what Down and Right do is a question about whether there is anything to move
     // onto. See [`PathComplete::refresh`], which is cheap on the frames where nothing changed.
-    complete.refresh(pane, &tab.edit_text, loader);
+    complete.refresh(pane, &tab.edit_text, loader, recall);
 
     // ---- The keys the dropdown takes -------------------------------------
     //
@@ -404,7 +525,7 @@ pub(crate) fn edit_field(
     // Nothing is ever highlighted while the dropdown is down — every path that puts it away clears
     // the highlight with it — so those two need no separate test for that.
     let mut pick: Option<Pick> = None;
-    if !complete.offers.is_empty() {
+    if complete.len() > 0 {
         ui.input_mut(|i| {
             const NONE: egui::Modifiers = egui::Modifiers::NONE;
             // Down and Up put the dropdown up if it is not up *and* land on an offer, in the one
@@ -434,6 +555,14 @@ pub(crate) fn edit_field(
                     pick = Some(Pick::Go);
                 }
             }
+            // **`Shift+Delete` forgets a place recalled from the history**, as it does in a
+            // browser's bar. Only on one of those: on a folder's own offer it would be a delete
+            // key next to a folder, which is the last thing this field should look like it does.
+            if let Some(offer) = complete.hot.and_then(|at| complete.recalled.get(at)) {
+                if i.consume_key(egui::Modifiers::SHIFT, egui::Key::Delete) {
+                    out.push(Action::ForgetVisit(offer.path.clone()));
+                }
+            }
         });
     }
 
@@ -448,14 +577,14 @@ pub(crate) fn edit_field(
                 // What is on offer now is what is inside the folder just named. Refreshed here
                 // rather than left to the next frame, so the dropdown never spends a frame
                 // showing the old folder's children under a field that has moved on.
-                complete.refresh(pane, &tab.edit_text, loader);
+                complete.refresh(pane, &tab.edit_text, loader, recall);
             }
         }
         Some(Pick::Go) => {
             go = complete
                 .hot
-                .and_then(|at| complete.offers.get(at))
-                .map(|(_, path)| path.clone());
+                .and_then(|at| complete.target(at))
+                .map(Path::to_path_buf);
         }
         None => {}
     }
@@ -486,8 +615,15 @@ pub(crate) fn edit_field(
 
     // ---- The field's own menu --------------------------------------------
     //
-    // Which slash the field writes, and nothing else in it. See [`slash_menu`].
-    let menu_rect = slash_menu(ui, &response, slashes, out);
+    // Which slash the field writes, and where its suggestions come from. See [`field_menu`].
+    let menu_rect = field_menu(
+        ui,
+        &response,
+        slashes,
+        recall.bookmarks.is_some(),
+        !recall.visits.paused(),
+        out,
+    );
     // **A click in that menu is not a click away from the field.**
     //
     // A field surrenders the keyboard to a click outside it — egui's rule, and the right one — and a
@@ -529,13 +665,22 @@ pub(crate) fn edit_field(
     // this dropdown and a chevron's cannot drift apart; what it cannot express is a list that has
     // to be a stated number of rows tall *whatever it was tall a moment ago*. See
     // [`offers_height`], which is the bug this is written around.
-    let showing = !complete.hidden && !complete.offers.is_empty();
+    let showing = !complete.hidden && complete.len() > 0;
     let mut open = showing;
+    // The pointer has moved, or pressed — so the rows answer to it again. A press counts on its
+    // own because a click need not move the pointer at all, and the press has to find the row
+    // rather than the cover below. See [`PathComplete::quiet`].
+    if ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO || i.pointer.any_pressed()) {
+        complete.quiet = false;
+    }
+    let quiet = complete.quiet;
+    // The row the pointer is over, which becomes the highlighted one — see below.
+    let mut hovered: Option<usize> = None;
     let hot = complete.hot;
     let follow = std::mem::take(&mut complete.follow);
     let mut clicked: Option<PathBuf> = None;
     let width = field.width();
-    let wanted = offers_height(complete.offers.len());
+    let wanted = offers_height(complete.recalled.len(), complete.offers.len());
     egui::Popup::menu(&anchor)
         .open_bool(&mut open)
         // **Under the field, always.** A popup that does not fit picks another side by itself, and
@@ -575,12 +720,30 @@ pub(crate) fn edit_field(
             // would put a 14-point gutter of nothing down the right edge of every dropdown and
             // ellipsize the widest name into it.
             list.style_mut().spacing.scroll.floating = true;
+            // **No edge fade.** egui paints a gradient of the menu's surface over the bottom of a
+            // scroll area whose content runs past it, and a scroll to a row is animated — so every
+            // press of Down, which scrolls the highlighted row into view, put the content briefly
+            // past the edge and the gradient over the lower half of the row. Holding the key made
+            // it blink. This list ends on a whole row and has a scrollbar to say there is more; a
+            // fade on top only darkens the row being read.
+            list.style_mut().spacing.scroll.fade.strength = 0.0;
             egui::ScrollArea::vertical()
                 .id_salt(("crumb-complete", pane))
                 .max_height(wanted)
                 .show(&mut list, |ui| {
-                    offers(ui, t, complete, hot, follow, icons_cache, &mut clicked);
+                    offers(
+                        ui, t, complete, hot, follow, icons_cache, slashes, quiet,
+                        &mut hovered, &mut clicked,
+                    );
                 });
+            // **Over the rows, while the keyboard has them.** Interacted after them, which puts it
+            // on top — egui hands the pointer to the last widget that claimed its position — so a
+            // pointer resting where the dropdown happened to open lights nothing up. It senses a
+            // click because that is what it takes: egui gives the hover to the topmost widget that
+            // can be *clicked*, and one that only sensed hover would lie on top and hide nothing.
+            if quiet {
+                ui.interact(taken, Id::new(("crumb-complete-quiet", pane)), Sense::click());
+            }
             ui.advance_cursor_after_rect(taken);
         });
     // The popup has put itself away — `Escape`, or a click outside it. Recorded, or it would come
@@ -593,6 +756,12 @@ pub(crate) fn edit_field(
     if showing && !open && !response.clicked() {
         complete.hidden = true;
         complete.hot = None;
+    }
+    // **The highlight goes where the pointer does**, once the pointer is moving: one highlight,
+    // the keyboard's and the pointer's being the same thing, so `Enter` goes where the eye is. The
+    // next arrow key carries on from there.
+    if !quiet && hovered.is_some() {
+        complete.hot = hovered;
     }
     // Somewhere the field is to go, by the arrow keys or by a click on an offer.
     let go = go.or(clicked);
@@ -645,14 +814,25 @@ pub(crate) fn edit_field(
 /// `Menu`'s own 320-point default: that is 11.43 rows, so the twelfth came out as a two-point sliver
 /// along the bottom edge. A list you walk with the arrow keys should end where a row ends — a
 /// half-drawn one reads as a rendering fault, and "there is more below" is the scrollbar's job.
-pub(crate) fn offers_height(count: usize) -> f32 {
-    count.clamp(1, OFFERS_SHOWN) as f32 * azur_egui_theme::components::menu_item_height()
+///
+/// The places recalled count as rows like any other, and the divider under them is added on top:
+/// they are at the head of the list, so a dropdown scrolled to the top shows them, the divider and
+/// then whole rows down to the bottom edge.
+pub(crate) fn offers_height(recalled: usize, offers: usize) -> f32 {
+    let rows = (recalled + offers).clamp(1, OFFERS_SHOWN) as f32;
+    let divider = if recalled > 0 && offers > 0 {
+        azur_egui_theme::components::menu_divider_height()
+    } else {
+        0.0
+    };
+    rows * azur_egui_theme::components::menu_item_height() + divider
 }
 
-/// The rows of the dropdown.
+/// The rows of the dropdown: the places recalled, a divider, and the folder's own offers.
 ///
 /// Split out of [`edit_field`] only because the popup body it goes in is already three closures
 /// deep; nothing here is reusable and nothing else calls it.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn offers(
     ui: &mut Ui,
     t: &Theme,
@@ -660,14 +840,55 @@ pub(crate) fn offers(
     hot: Option<usize>,
     follow: bool,
     icons_cache: &mut crate::shell::icons::Icons,
+    slashes: bool,
+    quiet: bool,
+    hovered: &mut Option<usize>,
     clicked: &mut Option<PathBuf>,
 ) {
-    for (index, (name, path)) in complete.offers.iter().enumerate() {
-        // Reserved so the keyboard's highlight can be painted *behind* the row: by the
-        // time the row has been added its label is already down, and a fill over the top
-        // of it is a fill over the top of the name. The same trick the open chevron's pair
-        // uses in `segments`.
+    // Every row as drawn, with the slot reserved behind it for the highlight — painted once they
+    // are all down, because which row it goes on depends on the pointer. See [`highlight`].
+    let mut rows: Vec<(egui::layers::ShapeIdx, Rect)> = Vec::with_capacity(complete.len());
+    // One row of either kind. Its index in the dropdown is how many came before it, which is what
+    // `hot` and `hovered` count in — the places recalled first, then the folder's own offers.
+    let mut add = |ui: &mut Ui, label: String, icon: azur_icons::Icon<'_>, path: &Path| {
+        let index = rows.len();
         let slot = ui.painter().add(egui::Shape::Noop);
+        let row = ui.add(MenuItem::new(label).icon(icon));
+        // Into view on the frame the highlight moved — **and only if it is not already in view.** A
+        // scroll to a row that is already showing is not nothing: it is an animation, the list moves
+        // for a few frames while it settles, and with the key held it never settles at all.
+        if follow && hot == Some(index) && !ui.clip_rect().contains_rect(row.rect) {
+            row.scroll_to_me(Some(egui::Align::Center));
+        }
+        rows.push((slot, row.rect));
+        if row.hovered() {
+            *hovered = Some(index);
+        }
+        // Clicking an offer goes there, which is what clicking an entry in any of this bar's
+        // dropdowns does.
+        if row.clicked() {
+            *clicked = Some(path.to_path_buf());
+        }
+    };
+
+    for offer in &complete.recalled {
+        // The whole path, since the point of these is that they are not inside the folder typed —
+        // and in the separator the field is showing, so the row reads as what Right would put there.
+        // A star for a bookmark, a clock for somewhere you have only been: painted rather than the
+        // shell's, because asking the shell for a folder's icon is asking it to go and look, and the
+        // folder may be on a share that has gone.
+        let label = with_separator(&offer.path.display().to_string(), slashes);
+        let glyph: azur_icons::Icon<'_> = if offer.bookmarked {
+            &icons::star_filled
+        } else {
+            &icons::history
+        };
+        add(ui, label, glyph, &offer.path);
+    }
+    if !complete.recalled.is_empty() && !complete.offers.is_empty() {
+        azur_egui_theme::components::menu_divider(ui);
+    }
+    for (name, path) in &complete.offers {
         // Windows' own icon, exactly as a chevron dropdown gets it: by path for a volume,
         // because that is the only way to a drive's own glyph, and by kind for a folder,
         // which is one lookup shared by every row here and for the rest of the session.
@@ -685,34 +906,43 @@ pub(crate) fn offers(
                 None => icons::folder(painter, rect, color),
             }
         };
-        let row = ui.add(MenuItem::new(name.clone()).icon(&paint));
-        if hot == Some(index) {
-            // `control-hover`, which is the fill `MenuItem` gives a row under the pointer:
-            // the keyboard is doing the pointer's job here, and two different greys for
-            // one meaning would read as two different things.
-            ui.painter().set(
-                slot,
-                egui::epaint::RectShape::filled(
-                    row.rect,
-                    CornerRadius::ZERO,
-                    t.bg.control_hover,
-                ),
-            );
-            if follow {
-                row.scroll_to_me(Some(egui::Align::Center));
-            }
-        }
-        // Clicking an offer goes there, which is what clicking an entry in any of this
-        // bar's dropdowns does.
-        if row.clicked() {
-            *clicked = Some(path.clone());
-        }
+        add(ui, name.clone(), &paint, path);
     }
+    highlight(ui, t, &rows, hot, *hovered, quiet);
     if complete.truncated {
         azur_egui_theme::components::menu_divider(ui);
         ui.add(
             azur_egui_theme::components::Text::new(format!("First {MENU_LIMIT} shown"))
                 .color(azur_egui_theme::components::TextColor::Tertiary),
+        );
+    }
+}
+
+/// The highlight, painted into the slot reserved *behind* its row — by the time a row has been
+/// added its label is already down, and a fill over the top of it is a fill over the top of the
+/// name. The same trick the open chevron's pair uses in `segments`.
+///
+/// **On the row under a moving pointer when there is one, and on the keyboard's otherwise**, so that
+/// the frame the pointer arrives on a row is not a frame with two rows lit: the keyboard's highlight
+/// moves to it in [`edit_field`] only after this frame, and this is where the frame itself agrees.
+/// See [`PathComplete::quiet`].
+///
+/// `control-hover`, which is the fill `MenuItem` gives a row under the pointer: the keyboard is
+/// doing the pointer's job here, and two different greys for one meaning would read as two
+/// different things.
+fn highlight(
+    ui: &Ui,
+    t: &Theme,
+    rows: &[(egui::layers::ShapeIdx, Rect)],
+    hot: Option<usize>,
+    hovered: Option<usize>,
+    quiet: bool,
+) {
+    let lit = if quiet { hot } else { hovered.or(hot) };
+    if let Some(&(slot, rect)) = lit.and_then(|at| rows.get(at)) {
+        ui.painter().set(
+            slot,
+            egui::epaint::RectShape::filled(rect, CornerRadius::ZERO, t.bg.control_hover),
         );
     }
 }

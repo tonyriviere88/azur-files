@@ -915,9 +915,18 @@ impl App {
             auto_tiles,
             providers,
             search_subfolders,
+            visits,
+            bookmarks,
+            suggest_bookmarks,
             ..
         } = self;
         let tab = panes[index].tab_mut();
+        let here = tab.path.clone();
+        let recall = breadcrumb::Recall {
+            visits,
+            bookmarks: suggest_bookmarks.then_some(&*bookmarks),
+            here: &here,
+        };
         // Held by its own `Arc` for the length of the frame, because the tab it hangs off is lent to
         // the listing mutably while the status line reads it.
         let found = tab
@@ -928,8 +937,8 @@ impl App {
             .or(found.as_ref().map(|(c, left)| c.half(*left).1.summary.as_str()));
 
         breadcrumb::show(
-            child, t, bar, id, tab, crumbs, complete, loader, icons, preview, *flat_mode, *regroup,
-            *forward_slashes, *search_subfolders, actions,
+            child, t, bar, id, tab, crumbs, complete, &recall, loader, icons, preview, *flat_mode,
+            *regroup, *forward_slashes, *search_subfolders, actions,
         );
         filelist::show(
             child, t, zone, list, floor, id, tab, focused, icons, links, thumbs, cut, status,

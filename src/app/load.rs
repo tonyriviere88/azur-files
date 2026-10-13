@@ -23,6 +23,8 @@ impl App {
         // Folders on a mapped drive Windows has not reconnected, with the letter to bring back.
         // Gathered here for the same reason as `refused`.
         let mut unmounted: Vec<(crate::pane::PaneId, PathBuf, String)> = Vec::new();
+        // Folders somebody went to that have now opened, for the history — see [`crate::history`].
+        let mut visited: Vec<PathBuf> = Vec::new();
         let Self {
             panes,
             providers,
@@ -61,6 +63,12 @@ impl App {
                         {
                             connected = true;
                         }
+                        // A visit is a folder that *opened*: one that came back with an error was
+                        // a typo, a share that is down or a folder since deleted, and offering it
+                        // back from the path field would be offering a dead end.
+                        if let Some(path) = tab.take_visit(loaded.dir.error.is_none()) {
+                            visited.push(path);
+                        }
                         tab.apply(loaded.dir.clone());
                         // And, if this is a folder being *opened*, whether it is one to open as
                         // tiles — which only the listing that just arrived can say. See
@@ -73,6 +81,10 @@ impl App {
         }
         if connected {
             self.volumes.relist();
+        }
+        let now = crate::history::now();
+        for path in visited {
+            self.visits.visit(&path, now);
         }
         for (pane, path) in refused {
             self.ask_credentials(pane, &path, ctx);
@@ -531,7 +543,14 @@ impl App {
     /// and revisiting a folder appear in the same frame as the click.
     pub(super) fn start_scans(&mut self, ctx: &egui::Context, now: f64) {
         let auto = self.auto_tiles;
-        let Self { panes, loader, providers, .. } = self;
+        let Self {
+            panes,
+            loader,
+            providers,
+            visits,
+            ..
+        } = self;
+        let seconds = crate::history::now();
         let mut asked = false;
         for pane in panes.iter_mut() {
             for tab in pane.tabs.iter_mut() {
@@ -550,6 +569,10 @@ impl App {
                 }
                 match loader.cached(&tab.path) {
                     Some(dir) => {
+                        // A visit, like a worker's answer is — see [`Tab::take_visit`].
+                        if let Some(path) = tab.take_visit(dir.error.is_none()) {
+                            visits.visit(&path, seconds);
+                        }
                         tab.apply(dir);
                         // The cache's answer is a listing arriving, exactly as a worker's is — and
                         // this is the path Back, Forward and a revisited folder take, which is

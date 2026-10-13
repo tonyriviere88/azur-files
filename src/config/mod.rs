@@ -179,6 +179,14 @@ pub struct Config {
     /// program for somewhere else is the case the setting was added for, and a copied path is that
     /// case more literally than the field is.
     pub forward_slashes: bool,
+    /// Whether the path field offers bookmarks, and whether it offers — and so keeps — the folders
+    /// you have been to. Ticked under `Suggestions` in the field's own context menu.
+    ///
+    /// **On**, both, and read as "anything but `0`" like [`Self::regroup`], so a file written before
+    /// these keys existed keeps the suggestions it was getting. With history off nothing is
+    /// recorded either — see [`crate::history::History::set_paused`].
+    pub suggest_bookmarks: bool,
+    pub suggest_history: bool,
     /// How often the window asks GitHub whether a newer release has been published: never, every
     /// day or every week. `update=day`.
     ///
@@ -281,6 +289,8 @@ impl Default for Config {
             show_hidden: false,
             sort: crate::fs::Sort::default(),
             forward_slashes: false,
+            suggest_bookmarks: true,
+            suggest_history: true,
             update_every: crate::update::Every::default(),
             update_skip: String::new(),
             auto_tiles: crate::pane::AutoTiles::default(),
@@ -429,6 +439,8 @@ impl Config {
                     }
                 }
                 "forward_slashes" => config.forward_slashes = value == "1",
+                "suggest_bookmarks" => config.suggest_bookmarks = value != "0",
+                "suggest_history" => config.suggest_history = value != "0",
                 // A word this build does not know leaves the default, like `sort` above.
                 "update" => {
                     if let Some(every) = crate::update::Every::parse(value) {
@@ -648,6 +660,11 @@ impl Config {
             "forward_slashes={}\n",
             flag(self.forward_slashes)
         ));
+        text.push_str(&format!(
+            "suggest_bookmarks={}\n",
+            flag(self.suggest_bookmarks)
+        ));
+        text.push_str(&format!("suggest_history={}\n", flag(self.suggest_history)));
         text.push_str(&format!("update={}\n", self.update_every.as_str()));
         if !self.update_skip.is_empty() {
             text.push_str(&format!("update_skip={}\n", self.update_skip));

@@ -763,3 +763,312 @@ fn the_text_fields_are_square_and_wear_the_right_fill() {
         "the rename field should be the only `background-layer` one of the three"
     );
 }
+
+/// Open the path field on `pane` and type `text` into it, over the path it opens with — a real
+/// keystroke, since a field that has only been filled keeps its dropdown down. The places recalled
+/// are worked out on the keystroke's own frame, so nothing has to be waited for, unlike
+/// [`open_path_field`].
+fn type_path(h: &mut Harness, pane: PaneId, text: &str) {
+    h.app.pane_mut(pane).expect("the pane").tab_mut().editing_path = true;
+    // Two frames for the field to ask for the keyboard and be given it — see
+    // `arriving_in_a_field_selects_what_is_there`, which is also why the text typed replaces it.
+    h.frame(Vec::new());
+    h.frame(Vec::new());
+    h.frame(vec![Event::Text(text.to_owned())]);
+    h.frame(Vec::new());
+    assert_eq!(h.tab(0).edit_text, text, "the typing did not land in the field");
+}
+
+/// What the history recalls with nothing typed, for asserting on what got into it.
+fn remembered(h: &Harness) -> Vec<PathBuf> {
+    h.app
+        .visits
+        .recall("", std::iter::empty(), Path::new(""), crate::history::now(), 100)
+        .into_iter()
+        .map(|offer| offer.path)
+        .collect()
+}
+
+/// **A word typed into the field offers the folders you have been to with that word in them**, the
+/// way a browser's bar offers its history — and `Down`, `Enter` goes there.
+///
+/// A bare word, so there is no folder for the field's own completion to list: what is offered is
+/// the history and nothing else.
+#[test]
+fn the_path_field_offers_where_you_have_been() {
+    let mut h = Harness::new();
+    let pane = h.app.panes[0].id;
+    let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    let now = crate::history::now();
+    h.app.visits.visit(&src.join("ui"), now);
+    h.app.visits.visit(&src.join("fs"), now);
+
+    type_path(&mut h, pane, "UI");
+    assert_eq!(
+        h.app.complete.recalling(),
+        [src.join("ui").as_path()],
+        "the field did not offer the one visited folder with `ui` in it"
+    );
+    assert!(h.app.complete.showing(), "a keystroke did not bring the dropdown up");
+
+    h.frame(tap(egui::Key::ArrowDown));
+    assert_eq!(h.app.complete.offering().1, Some(0), "Down did not land on it");
+    h.frame(tap(egui::Key::Enter));
+    h.settle();
+    assert_eq!(h.tab(0).path, src.join("ui"), "Enter on it did not go there");
+}
+
+/// `Shift+Delete` on a place recalled takes it out of the history, and off the list.
+#[test]
+fn shift_delete_forgets_a_place_the_field_recalled() {
+    let mut h = Harness::new();
+    let pane = h.app.panes[0].id;
+    let ui = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src").join("ui");
+    h.app.visits.visit(&ui, crate::history::now());
+
+    type_path(&mut h, pane, "ui");
+    h.frame(tap(egui::Key::ArrowDown));
+    h.chord(egui::Key::Delete, Modifiers::SHIFT);
+    h.frame(Vec::new());
+    assert!(
+        h.app.complete.recalling().is_empty(),
+        "the forgotten folder is still offered"
+    );
+    assert!(!remembered(&h).contains(&ui), "and it is still in the history");
+    assert_eq!(h.tab(0).edit_text, "ui", "Shift+Delete edited the text instead");
+}
+
+/// **A visit is a folder somebody went to that opened.** Not the folder a tab was restored on, and
+/// not a path that turned out not to be there.
+#[test]
+fn only_a_folder_that_opened_is_a_visit() {
+    let mut h = Harness::new();
+    let pane = h.app.panes[0].id;
+    let here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    assert!(remembered(&h).is_empty(), "the folder the window opened on was counted");
+
+    h.app.perform(&h.ctx.clone(), Action::Navigate { pane, path: here.join("src") });
+    h.settle();
+    assert_eq!(remembered(&h), [here.join("src")]);
+
+    // **Back, to a folder the cache already holds**: it opens on the spot, without a worker, and
+    // that is still a visit. Missing this path is what made the history look empty.
+    h.app.perform(&h.ctx.clone(), Action::Back(pane));
+    h.settle();
+    assert!(
+        remembered(&h).contains(&here),
+        "a folder opened from the cache was not counted: {:?}",
+        remembered(&h)
+    );
+
+    let missing = crate::sandbox::dir("history-missing").join("not-there");
+    h.app.perform(&h.ctx.clone(), Action::Navigate { pane, path: missing.clone() });
+    h.settle();
+    assert!(!remembered(&h).contains(&missing), "a folder that is not there was counted");
+}
+
+/// **One highlight in the dropdown, never two.**
+///
+/// The dropdown comes up under wherever the pointer is resting, and the row under it used to light
+/// up beside the one the arrow keys were on — late, too, on the next caret blink, which is what made
+/// it read as a glitch. So: a pointer that has not moved since the keyboard took the dropdown lights
+/// nothing, and once it does move, the highlight goes with it and is still the only one.
+///
+/// Found by driving the real build with `SendInput` and a resting mouse; reproduced here by putting
+/// the pointer where the dropdown will open *before* the keystroke that opens it.
+#[test]
+fn the_dropdown_has_one_highlight_whatever_the_pointer_is_resting_on() {
+    let root = crate::sandbox::dir("one-highlight");
+    crate::sandbox::remove(&root);
+    for i in 0..6 {
+        std::fs::create_dir_all(root.join(format!("folder-{i:02}"))).expect("a directory");
+    }
+    let mut h = Harness::new();
+    h.settle();
+    let pane = h.app.panes[0].id;
+    open_path_field(&mut h, pane, &format!("{}\\", root.display()));
+
+    // Where the fourth row will be, with the pointer already resting there.
+    let field = h
+        .ctx
+        .read_response(Id::new(("crumb-complete", pane)))
+        .expect("the path field's dropdown anchor")
+        .rect;
+    let row = azur::components::menu_item_height();
+    let resting = pos2(field.center().x, field.bottom() + row * 3.5);
+    h.frame(vec![Event::PointerMoved(resting)]);
+
+    // Rows filled `control-hover`, which is both the keyboard's highlight and the pointer's. Within a
+    // step or two per channel, because the popup's fade stops a shade short of opaque — see
+    // [`dropdown_rect`].
+    let lit = |h: &Harness| {
+        let fill = h.app.theme.bg.control_hover.to_array();
+        let rect = dropdown_rect(h, pane);
+        h.rects()
+            .into_iter()
+            .filter(|(r, _, f)| {
+                let f = f.to_array();
+                (0..3).all(|c| f[c].abs_diff(fill[c]) <= 2)
+                    && rect.expand(1.0).contains_rect(*r)
+                    && r.height() > row - 2.0
+            })
+            .map(|(r, _, _)| r)
+            .fold(Vec::<Rect>::new(), |mut rows, r| {
+                // The pointer's hover and the highlight both fill the row they agree on, which is
+                // one row lit and not two.
+                if !rows.contains(&r) {
+                    rows.push(r);
+                }
+                rows
+            })
+    };
+
+    h.frame(tap(egui::Key::ArrowDown));
+    for _ in 0..8 {
+        h.frame(Vec::new());
+    }
+    assert_eq!(h.app.complete.offering().1, Some(0), "Down did not land on the first row");
+    let rows = lit(&h);
+    assert_eq!(
+        rows.len(),
+        1,
+        "the row under a resting pointer lit up beside the keyboard's: {rows:?}"
+    );
+
+    // The pointer moves: the highlight goes where it is, and is still the only one.
+    h.frame(vec![Event::PointerMoved(resting + vec2(1.0, 0.0))]);
+    // **On the frame of the move itself**: the keyboard's highlight leaves the first row in the same
+    // frame the pointer's arrives on the fourth, so no frame shows both.
+    let rows = lit(&h);
+    assert_eq!(rows.len(), 1, "the frame the pointer moved showed two rows lit: {rows:?}");
+    h.frame(Vec::new());
+    assert_eq!(
+        h.app.complete.offering().1,
+        Some(3),
+        "the highlight did not follow the pointer onto the row it moved over"
+    );
+    let rows = lit(&h);
+    assert_eq!(rows.len(), 1, "two rows lit once the pointer moved: {rows:?}");
+}
+
+/// **Holding Down over one offer draws nothing over it.**
+///
+/// The row blinked: every press scrolled it into view although it was already showing, the scroll
+/// is animated, and egui paints a fade of the menu's surface over the bottom of a scroll area whose
+/// content is past its edge — so the lower half of the row went dark and came back on every repeat
+/// of the key. The fade is a gradient, which reaches the frame as a mesh; none may land on the
+/// dropdown, on any frame of the gesture.
+#[test]
+fn holding_down_over_one_offer_draws_no_fade_over_it() {
+    let root = crate::sandbox::dir("held-down");
+    crate::sandbox::remove(&root);
+    std::fs::create_dir_all(root.join("only")).expect("a directory");
+    let mut h = Harness::new();
+    h.settle();
+    let pane = h.app.panes[0].id;
+    open_path_field(&mut h, pane, &format!("{}\\", root.display()));
+    h.frame(tap(egui::Key::ArrowDown));
+    for _ in 0..8 {
+        h.frame(Vec::new());
+    }
+    let dropdown = dropdown_rect(&h, pane);
+
+    for press in 0..12 {
+        h.frame(tap(egui::Key::ArrowDown));
+        for frame in 0..3 {
+            let meshes: Vec<Rect> = h
+                .shapes
+                .iter()
+                .filter_map(|shape| match shape {
+                    // Untextured: the shell's icons are meshes too, on the icon atlas.
+                    egui::Shape::Mesh(mesh) if mesh.texture_id == egui::TextureId::default() => {
+                        Some(mesh.calc_bounds())
+                    }
+                    _ => None,
+                })
+                .filter(|bounds| bounds.intersects(dropdown))
+                .collect();
+            assert!(
+                meshes.is_empty(),
+                "press {press}, frame {frame}: something was painted over the dropdown: {meshes:?}"
+            );
+            h.frame(Vec::new());
+        }
+        assert_eq!(h.app.complete.offering().1, Some(0), "the highlight left the only offer");
+    }
+}
+
+/// **`Suggestions` in the field's menu, and what each tick does.** The heading and both entries are
+/// there and on; unticking `From history` stops a folder being recorded as well as offered, and
+/// unticking `From bookmarks` takes the bookmarks out of the dropdown. Both are written down.
+///
+/// Through the field's real right-click menu, because a setting nobody can reach is not a setting.
+#[test]
+fn the_fields_menu_turns_each_kind_of_suggestion_off() {
+    let mut h = Harness::new();
+    h.settle();
+    let pane = h.app.panes[0].id;
+    let ctx = h.ctx.clone();
+    let here = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    h.app.perform(&ctx, Action::EditPath(pane));
+    h.frame(Vec::new());
+    h.frame(Vec::new());
+    let field = h
+        .ctx
+        .read_response(Id::new(("crumb-complete", pane)))
+        .map(|r| r.rect)
+        .expect("the path field was not laid out");
+    h.click_with(field.center(), PointerButton::Secondary, Modifiers::NONE);
+    let entry = |h: &Harness, label: &str| {
+        h.texts()
+            .into_iter()
+            .find(|(_, text)| text == label)
+            .map(|(at, _)| pos2(at.x + 2.0, at.y + 6.0))
+            .unwrap_or_else(|| {
+                panic!(
+                    "the field's menu has no `{label}`: {:?}",
+                    h.texts().into_iter().map(|(_, t)| t).collect::<Vec<_>>()
+                )
+            })
+    };
+    entry(&h, "Suggestions");
+    assert!(h.app.suggest_bookmarks && !h.app.visits.paused(), "both start on");
+
+    // ---- From history ----------------------------------------------------------------------
+    let done = h.click_at(entry(&h, "From history"));
+    assert!(done.contains(&"SetSuggestHistory"), "the tick did nothing: {done:?}");
+    assert!(h.app.visits.paused(), "unticking did not stop the history");
+    assert!(!h.app.settings().suggest_history, "and it was not written down");
+    // Still open — the menu is sticky — so the bookmarks' entry is the next click.
+    let done = h.click_at(entry(&h, "From bookmarks"));
+    assert!(done.contains(&"SetSuggestBookmarks"), "the tick did nothing: {done:?}");
+    assert!(!h.app.suggest_bookmarks);
+    assert!(!h.app.settings().suggest_bookmarks, "and it was not written down");
+
+    // Nothing is recorded while the history is off.
+    h.app.pane_mut(pane).expect("the pane").tab_mut().editing_path = false;
+    h.frame(Vec::new());
+    h.app.perform(&ctx, Action::Navigate { pane, path: here.join("src") });
+    h.settle();
+    assert!(
+        h.app
+            .visits
+            .recall("", std::iter::empty(), Path::new(""), crate::history::now(), 10)
+            .is_empty(),
+        "a folder was recorded with the history off"
+    );
+
+    // And a bookmark is not offered with the bookmarks off.
+    h.app.bookmarks.add(here.join("src").join("ui"));
+    type_path(&mut h, pane, "ui");
+    assert!(
+        h.app.complete.recalling().is_empty(),
+        "a bookmark was offered with the bookmarks off: {:?}",
+        h.app.complete.recalling()
+    );
+    // Ticked back on, it is — on the next frame, without anything being typed again.
+    h.app.perform(&ctx, Action::SetSuggestBookmarks(true));
+    h.frame(Vec::new());
+    assert_eq!(h.app.complete.recalling(), [here.join("src").join("ui").as_path()]);
+}

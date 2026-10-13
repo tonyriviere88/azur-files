@@ -496,3 +496,15 @@ fn the_moved_context_menu_entries_survive_a_write_and_a_read() {
     assert!(!Config::default().to_text().contains("menu_promote"));
     assert!(!Config::default().to_text().contains("menu_demote"));
 }
+
+/// The path field's two sources of suggestions are on unless a file says `0`, so a file written
+/// before the keys existed keeps the suggestions it was getting.
+#[test]
+fn suggestions_are_on_unless_turned_off() {
+    let fresh = Config::parse("");
+    assert!(fresh.suggest_bookmarks && fresh.suggest_history);
+    let off = Config::parse("suggest_bookmarks=0\nsuggest_history=0\n");
+    assert!(!off.suggest_bookmarks && !off.suggest_history);
+    let back = Config::parse(&off.to_text());
+    assert!(!back.suggest_bookmarks && !back.suggest_history, "{}", off.to_text());
+}

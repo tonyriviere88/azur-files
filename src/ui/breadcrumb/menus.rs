@@ -282,7 +282,8 @@ pub(crate) fn funnel_menu(
     });
 }
 
-/// The path field's own menu: which slash it writes between the parts of a path.
+/// The path field's own menu: which slash it writes between the parts of a path, and where its
+/// suggestions come from.
 ///
 /// **Sticky**, like the two button menus above and for the same reason — it holds a setting rather
 /// than a command, and a menu that vanished on the tick would have to be reopened to see what the
@@ -297,13 +298,20 @@ pub(crate) fn funnel_menu(
 ///
 /// Returns where the menu is while it is showing, because [`edit_field`] has to know whether a click
 /// that took the keyboard off the field landed in here or somewhere else entirely.
-pub(crate) fn slash_menu(
+///
+/// **`Suggestions`** is the list the field offers above a folder's own children: your bookmarks and
+/// the folders you have been to — see [`super::PathComplete`]. Each can be ticked off, and `From
+/// history` off stops the history being *kept*, not only offered: a list you have said you do not
+/// want is not one to go on writing down. What is already in it stays, for when it is ticked again.
+pub(crate) fn field_menu(
     ui: &Ui,
     trigger: &egui::Response,
     slashes: bool,
+    bookmarks: bool,
+    history: bool,
     out: &mut Vec<Action>,
 ) -> Option<Rect> {
-    use azur_egui_theme::components::ContextMenu;
+    use azur_egui_theme::components::{menu_divider, menu_header, ContextMenu};
 
     ContextMenu::new(trigger)
         .sticky(true)
@@ -313,6 +321,20 @@ pub(crate) fn slash_menu(
                 .clicked()
             {
                 out.push(Action::SetForwardSlashes(!slashes));
+            }
+            menu_divider(ui);
+            menu_header(ui, "Suggestions");
+            if ui
+                .add(ticked(MenuItem::new("From bookmarks"), bookmarks))
+                .clicked()
+            {
+                out.push(Action::SetSuggestBookmarks(!bookmarks));
+            }
+            if ui
+                .add(ticked(MenuItem::new("From history"), history))
+                .clicked()
+            {
+                out.push(Action::SetSuggestHistory(!history));
             }
         })
         .map(|shown| shown.response.rect)

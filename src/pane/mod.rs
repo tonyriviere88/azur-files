@@ -639,6 +639,11 @@ pub struct Tab {
     /// So it is set by [`Tab::new`] and by [`Tab::go_to`], which are the two ways a tab comes to be
     /// pointing at a folder it has not shown yet, and consumed by the first listing that lands.
     pub opening: bool,
+    /// Whether the next listing to arrive is somewhere somebody *went*, and so a visit for
+    /// [`crate::history`] once it has read. Set by [`Tab::go_to`] — a navigation, Back, Forward,
+    /// Up — and by [`Tab::visited`] for a folder opened in a new tab or pane; never by a tab
+    /// restored at startup, which is where somebody was rather than somewhere they went.
+    pub visiting: bool,
     /// Where the tiles go, when it is showing tiles.
     ///
     /// Cached rather than worked out per frame, because in a tree it is not arithmetic: a folder's
@@ -898,6 +903,7 @@ impl Tab {
             // And this folder has not been looked at yet, so the listing that lands may still make
             // it the tiles. See [`AutoTiles`].
             opening: true,
+            visiting: false,
             grid: crate::ui::grid::Layout::default(),
             reveal: None,
             keep_selected: Vec::new(),
@@ -967,6 +973,13 @@ impl Tab {
         tab.sort_by = sort.by;
         tab.ascending = sort.ascending;
         tab
+    }
+
+    /// The same tab, as a folder somebody has just opened rather than one put back. See
+    /// [`Self::visiting`].
+    pub fn visited(mut self) -> Self {
+        self.visiting = true;
+        self
     }
 
     /// A copy of this tab pointing at the same place — what the `+` button and a

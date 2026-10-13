@@ -150,8 +150,13 @@ pub enum Action {
     SetTilesThreshold(f32),
     /// Write `/` rather than `\` between the parts of a path in the path field, or stop. The
     /// window's preference again, and the path field's own context menu is where it is ticked —
-    /// see [`crate::ui::breadcrumb::slash_menu`].
+    /// see [`crate::ui::breadcrumb::field_menu`].
     SetForwardSlashes(bool),
+    /// `From bookmarks` under `Suggestions` in the path field's menu.
+    SetSuggestBookmarks(bool),
+    /// `From history`, which also starts or stops the recording. See
+    /// [`crate::history::History::set_paused`].
+    SetSuggestHistory(bool),
     /// Show one of the listings a *name* cannot ask for, or go back to the whole folder.
     ///
     /// What the filter box's funnel menu offers, and what the status line's `N changed` asks for —
@@ -303,6 +308,8 @@ pub enum Action {
     },
     /// Put the left panel's groups back in their first-run order.
     ResetSectionOrder,
+    /// Take a folder out of the history the path field offers — `Shift+Delete` on the offer.
+    ForgetVisit(PathBuf),
     /// Fold a group away, or open it again. `usize` is a position in the bookmark list.
     ToggleBookmarkGroup(usize),
     /// Put a group's name in a field. The three of these are the same trio a file rename uses,
@@ -393,6 +400,8 @@ impl Action {
             Self::SetAutoTiles(_) => "SetAutoTiles",
             Self::SetTilesThreshold(_) => "SetTilesThreshold",
             Self::SetForwardSlashes(_) => "SetForwardSlashes",
+            Self::SetSuggestBookmarks(_) => "SetSuggestBookmarks",
+            Self::SetSuggestHistory(_) => "SetSuggestHistory",
             Self::SetLens { .. } => "SetLens",
             Self::ToggleCollapsed { .. } => "ToggleCollapsed",
             Self::TogglePreview(_) => "TogglePreview",
@@ -439,6 +448,7 @@ impl Action {
             Self::MoveSection { .. } => "MoveSection",
             Self::ShowSection { .. } => "ShowSection",
             Self::ResetSectionOrder => "ResetSectionOrder",
+            Self::ForgetVisit(_) => "ForgetVisit",
             Self::ToggleBookmarkGroup(_) => "ToggleBookmarkGroup",
             Self::BeginRenameBookmarkGroup(_) => "BeginRenameBookmarkGroup",
             Self::CommitRenameBookmarkGroup { .. } => "CommitRenameBookmarkGroup",

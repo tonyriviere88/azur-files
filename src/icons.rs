@@ -1163,6 +1163,19 @@ pub fn sync_status(p: &Painter, rect: Rect, state: crate::fs::dir::Sync, ink: Co
     }
 }
 
+/// History: a clock face, its hands at ten past twelve-ish — somewhere you have been.
+///
+/// The ring is [`refresh`]'s radius, so the two read as one family on the same bar, and closed,
+/// because a clock that is not a whole circle reads as the arrow it is standing next to.
+pub fn history(p: &Painter, rect: Rect, color: Color32) {
+    let g = Grid::new(rect);
+    let stroke = g.stroke(color);
+    let center = g.at(8.0, 8.0);
+    p.circle_stroke(center, g.scale * 5.4, stroke);
+    p.line_segment([center, g.at(8.0, 4.6)], stroke);
+    p.line_segment([center, g.at(10.6, 9.4)], stroke);
+}
+
 /// Refresh: a nearly-closed circle with an arrowhead.
 pub fn refresh(p: &Painter, rect: Rect, color: Color32) {
     let g = Grid::new(rect);

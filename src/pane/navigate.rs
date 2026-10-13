@@ -69,6 +69,16 @@ impl Tab {
         }
     }
 
+    /// The folder this tab has just gone to, once, if its listing `opened` — a visit for
+    /// [`crate::history`]. See [`Self::visiting`].
+    ///
+    /// Asked by **both** places a listing reaches a tab: a worker's answer arriving, and the cache
+    /// answering on the spot. The second is how Back, Forward and any folder the listing has read
+    /// ahead into are opened, which is most of them; asking only the first counted almost nothing.
+    pub fn take_visit(&mut self, opened: bool) -> Option<PathBuf> {
+        (std::mem::take(&mut self.visiting) && opened).then(|| self.path.clone())
+    }
+
     /// Point the tab at a path without touching the history.
     pub(crate) fn go_to(&mut self, path: PathBuf) {
         // Here as well as in `navigate`, for a history or a saved tab written before the bin had a
@@ -110,6 +120,7 @@ impl Tab {
             self.title = display_name(&path);
         }
         self.path = path;
+        self.visiting = true;
         self.dir = None;
         self.awaiting = None;
         self.asked_at = None;

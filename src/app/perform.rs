@@ -53,6 +53,13 @@ impl App {
             // writes nothing when nothing this window holds has actually changed.
             self.save_settings();
         }
+        // The history, less often: a visit is a click, and a click a second does not need a write a
+        // second. Whatever is pending when the window closes is written on the way out.
+        const VISITS_EVERY: f64 = 10.0;
+        if self.visits.dirty() && now - self.visits_saved_at >= VISITS_EVERY {
+            self.visits_saved_at = now;
+            self.save_visits();
+        }
     }
 
     pub(super) fn perform(&mut self, ctx: &egui::Context, action: Action) {
@@ -176,7 +183,7 @@ impl App {
             }
 
             Action::OpenInSplit { pane, path, side } => {
-                let id = self.spawn_pane(Tab::showing(path, self.show_hidden, self.sort));
+                let id = self.spawn_pane(Tab::showing(path, self.show_hidden, self.sort).visited());
                 if !self.layout.split(pane, side, id) {
                     self.panes.retain(|p| p.id != id);
                     return;
@@ -195,7 +202,7 @@ impl App {
             Action::NavigateNewTab { pane, path } => {
                 let (hidden, sort) = (self.show_hidden, self.sort);
                 if let Some(p) = self.pane_mut(pane) {
-                    p.tabs.push(Tab::showing(path, hidden, sort));
+                    p.tabs.push(Tab::showing(path, hidden, sort).visited());
                     p.show_tab(p.tabs.len() - 1);
                 }
                 self.focused = pane;
@@ -498,6 +505,14 @@ impl App {
             // leaves the caret in front of the same character — see
             // [`crate::ui::breadcrumb::with_separator`], and [`PathComplete::rewritten`] for why the
             // completion has to be told the text moved without anybody typing.
+            Action::SetSuggestBookmarks(on) => {
+                self.suggest_bookmarks = on;
+                self.config_dirty = true;
+            }
+            Action::SetSuggestHistory(on) => {
+                self.visits.set_paused(!on);
+                self.config_dirty = true;
+            }
             Action::SetForwardSlashes(on) => {
                 self.forward_slashes = on;
                 for p in &mut self.panes {
@@ -1105,6 +1120,7 @@ impl App {
                 self.config_dirty |= self.sections.set_shown(section, shown);
             }
             Action::ResetSectionOrder => self.config_dirty |= self.sections.reset_order(),
+            Action::ForgetVisit(path) => self.visits.forget(&path),
             Action::AddBookmarkGroup => {
                 // Made and named in one gesture: the `+` is pressed, the group appears at the
                 // end of the list with its name in a field, and typing over `New group` is the

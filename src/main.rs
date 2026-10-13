@@ -89,6 +89,7 @@ mod diff;
 mod dock;
 mod fs;
 mod git;
+mod history;
 mod icons;
 mod loader;
 mod markdown;
@@ -845,6 +846,7 @@ impl eframe::App for Window {
         // day overwrote a bookmark added in another one.
         if self.shot.is_none() {
             self.app.save_settings();
+            self.app.save_visits();
         }
         // Whatever was pulled out of an archive to be previewed or opened. After `shell::flush`
         // above, deliberately: a copy taken out of an archive and left on the clipboard names these

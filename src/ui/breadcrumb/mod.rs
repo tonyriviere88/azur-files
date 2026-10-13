@@ -23,7 +23,7 @@
 //!   an editable path field, as does `Ctrl+L`. `Enter` navigates, `Esc` puts it
 //!   back — and what is typed into it completes, from the same dropdown a chevron
 //!   opens. See [`PathComplete`]. Right-clicking it offers `Use / in path`, which is
-//!   which slash it writes between the parts of a path — see [`slash_menu`].
+//!   which slash it writes between the parts of a path — see [`field_menu`].
 
 use azur_egui_theme::components::{MenuItem, Size};
 use azur_egui_theme::icons as azur_icons;
@@ -252,6 +252,8 @@ pub fn show(
     tab: &mut Tab,
     menu: &mut CrumbMenu,
     complete: &mut PathComplete,
+    // What the path field offers besides the folder's own children. See [`Recall`].
+    recall: &Recall<'_>,
     loader: &mut crate::loader::Loader,
     icons_cache: &mut crate::shell::icons::Icons,
     layout: &mut crate::ui::preview::Layout,
@@ -720,7 +722,7 @@ pub fn show(
     let path_rect = Rect::from_min_max(pos2(x, rect.top()), pos2(right.max(x), rect.bottom()));
     if tab.editing_path {
         edit_field(
-            ui, t, path_rect, pane, tab, complete, loader, icons_cache, slashes, out,
+            ui, t, path_rect, pane, tab, complete, loader, icons_cache, recall, slashes, out,
         );
     } else {
         // No field on this pane, so nothing it was offering is still wanted. A no-op for the
@@ -801,7 +803,7 @@ pub(crate) fn active_index(crumbs: &[(String, PathBuf)], path: &Path) -> usize {
 /// open showing is where you are.
 ///
 /// With the separator the field is set to write, which is the whole of what `Use / in path` does to
-/// a field that is opening — see [`with_separator`], and [`slash_menu`] for where it is ticked.
+/// a field that is opening — see [`with_separator`], and [`field_menu`] for where it is ticked.
 pub fn start_editing(tab: &mut Tab, slashes: bool) {
     // The two places that are not paths open under the names the field takes back. See
     // [`crate::fs::resolve_input`].

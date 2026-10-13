@@ -284,6 +284,10 @@ pub struct App {
     /// Read by [`Action::CopyPaths`] as well as by the field, since a path being copied out is that
     /// "somewhere else" more literally than the bar is.
     forward_slashes: bool,
+    /// Whether the path field offers bookmarks. See [`crate::config::Config::suggest_bookmarks`].
+    /// Its twin for the history is not here: it is [`crate::history::History::paused`], because a
+    /// history that is off does not record either, and the history is what records.
+    suggest_bookmarks: bool,
     /// Whether a folder that is opened becomes tiles on its own, and at what share of pictures.
     ///
     /// The window's preference again, and read in exactly one place — [`crate::pane::Tab::choose_view`],
@@ -323,6 +327,11 @@ pub struct App {
     /// [`crate::shell::ops::history`], which sets out both what is undoable and why none of it
     /// outlives the window.
     history: crate::shell::ops::history::History,
+    /// The folders panes have opened, ranked, for the path field to offer back. Not the undo
+    /// `history` above, and unlike it written down — see [`crate::history`].
+    visits: crate::history::History,
+    /// When [`Self::visits`] was last written. See [`App::apply`].
+    visits_saved_at: f64,
     /// Items cut but not yet pasted, shown ghosted the way Explorer shows them.
     cut: Vec<PathBuf>,
     /// The last thing that went wrong, for the status line.
@@ -664,6 +673,12 @@ impl App {
             ops: crate::shell::ops::Operations::new(),
             closing: Closing::No,
             history: crate::shell::ops::history::History::default(),
+            visits: {
+                let mut visits = crate::history::History::load();
+                visits.set_paused(!config.suggest_history);
+                visits
+            },
+            visits_saved_at: f64::NEG_INFINITY,
             cut: Vec::new(),
             notice: None,
             extracting: String::new(),
@@ -700,6 +715,7 @@ impl App {
             show_hidden: config.show_hidden,
             sort: config.sort,
             forward_slashes: config.forward_slashes,
+            suggest_bookmarks: config.suggest_bookmarks,
             auto_tiles: config.auto_tiles,
             menu_moves: config.menu_moves.clone(),
             providers: crate::shell::providers::Providers::new(),
@@ -791,6 +807,12 @@ impl App {
         self.config.save();
     }
 
+    /// Write the folders visited since the history was last saved, merged into the file. See
+    /// [`crate::history::History::save`]; a no-op when there have been none.
+    pub fn save_visits(&mut self) {
+        self.visits.save();
+    }
+
     /// Settings to write back on the way out.
     pub fn settings(&self) -> Config {
         let mut config = Config {
@@ -808,6 +830,8 @@ impl App {
             show_hidden: self.show_hidden,
             sort: self.sort,
             forward_slashes: self.forward_slashes,
+            suggest_bookmarks: self.suggest_bookmarks,
+            suggest_history: !self.visits.paused(),
             update_every: self.update_every,
             update_skip: self.update_skip.clone(),
             auto_tiles: self.auto_tiles,

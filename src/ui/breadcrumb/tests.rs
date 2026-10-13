@@ -188,12 +188,16 @@ fn sample() -> PathComplete {
         hot: None,
         hidden: false,
         follow: false,
+        ..PathComplete::default()
     }
 }
 
-/// Down and Up walk the offers, and both ends come back to what was typed rather than
-/// wrapping straight round — `Escape` throws the field away, so it cannot be the only way
-/// back to your own text.
+/// Down walks the offers and stops on the last; Up walks back and, past the first, comes to what
+/// was typed — `Escape` throws the field away, so it cannot be the only way back to your own text.
+///
+/// **Down stopping is the fix for a flicker.** It used to go past the last offer to the typed text
+/// and round again, so with one offer every press toggled the highlight off and on, and a held key
+/// made the row blink.
 #[test]
 fn the_highlight_walks_the_offers_and_back_to_what_was_typed() {
     let mut complete = sample();
@@ -204,9 +208,18 @@ fn the_highlight_walks_the_offers_and_back_to_what_was_typed() {
     complete.step(true);
     assert_eq!(complete.hot, Some(1));
     complete.step(true);
-    assert_eq!(complete.hot, None, "past the last offer is what was typed");
+    assert_eq!(complete.hot, Some(1), "Down past the last offer stays on it");
     complete.step(true);
-    assert_eq!(complete.hot, Some(0), "and then round again");
+    assert_eq!(complete.hot, Some(1), "however many times it is pressed");
+
+    // The case that blinked: one offer, Down held.
+    complete.offers.truncate(1);
+    complete.hot = None;
+    for _ in 0..5 {
+        complete.step(true);
+        assert_eq!(complete.hot, Some(0), "Down toggled the only offer off");
+    }
+    complete = sample();
 
     complete.hot = None;
     complete.step(false);
