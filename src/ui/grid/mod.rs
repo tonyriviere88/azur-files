@@ -56,7 +56,6 @@ use crate::shell::icons::Icons;
 use crate::shell::thumbs::Thumbs;
 use crate::theme::Theme;
 use crate::ui::filelist::{self, Outcome};
-use crate::ui::truncated;
 
 /// The picture box on a tile, in points.
 ///
@@ -829,7 +828,12 @@ pub fn show(
         // Every visible twisty and the row it opens, for the click below.
         let mut twisties: Vec<(Rect, usize)> = Vec::new();
         let git = tab.git.clone();
-        let mut chain_text = String::new();
+        // The filter's words, marked in every name on screen exactly as the details view marks them
+        // — against the whole path the filter kept the cell for. See `filelist::highlight`.
+        let marks = filelist::Marks::parse(&tab.filter);
+        let mut marks_path = String::new();
+        let marks_base =
+            if marks.is_empty() { 0 } else { crate::fs::sort::prefix(&dir, &mut marks_path) };
 
         for (index, cell) in placed.iter().enumerate() {
             let position = cell.position;
@@ -951,24 +955,37 @@ pub fn show(
                     // A merged chain reads exactly as it does in the details view: the folders in
                     // front dimmed, the row's own name in body ink.
                     let merged = tab.row_merged(position);
+                    let name = dir.name(entry_index);
+                    let hits = marks.in_row(&mut marks_path, marks_base, name);
+                    let marked = filelist::Marked {
+                        hits: &hits,
+                        fill: filelist::hit_fill(t, under),
+                        ink: name_color,
+                    };
                     let galley = if merged > 0 {
                         filelist::chain_cell(
                             ui.painter(),
-                            dir.name(entry_index),
+                            name,
                             merged,
                             t.fonts.body.clone(),
                             name_color,
                             t.text.secondary,
                             name_right - name_left,
-                            &mut chain_text,
+                            marked,
                         )
                     } else {
-                        truncated(
+                        let leaf = dir.leaf(entry_index);
+                        filelist::name_galley(
                             ui.painter(),
-                            dir.leaf(entry_index),
+                            leaf,
+                            name.len() - leaf.len(),
+                            None,
+                            None,
                             t.fonts.body.clone(),
                             name_color,
+                            t.text.secondary,
                             name_right - name_left,
+                            marked,
                         )
                     };
                     crate::ui::text_left(
@@ -1067,12 +1084,21 @@ pub fn show(
                     body.right() - space::S3,
                 ));
             } else {
+                let name = dir.name(entry_index);
+                let leaf = dir.leaf(entry_index);
+                let hits = marks.in_row(&mut marks_path, marks_base, name);
                 let galley = wrapped(
                     ui.painter(),
-                    dir.leaf(entry_index),
+                    leaf,
                     t.fonts.body.clone(),
                     name_color,
                     label.width(),
+                    filelist::Marked {
+                        hits: &hits,
+                        fill: filelist::hit_fill(t, under),
+                        ink: name_color,
+                    },
+                    name.len() - leaf.len(),
                 );
                 // Centred by the *layout job*, so each of the two lines is centred rather than a
                 // left-aligned block being centred as a whole — which on a name that wraps to a
@@ -1331,17 +1357,19 @@ fn fit(picture: Rect, size: [u32; 2]) -> Rect {
 /// `break_anywhere`, because a file name is not a sentence: `translations_fr.json` has no space to
 /// break at, and a wrapper that only breaks at spaces would put the whole of it on one line and
 /// elide half. Explorer breaks mid-name for the same reason.
+///
+/// `marked` is the filter's hits in the cell's stored name, and `at` where `name` starts in it.
 fn wrapped(
     painter: &egui::Painter,
     name: &str,
     font: egui::FontId,
     color: Color32,
     width: f32,
+    marked: filelist::Marked<'_>,
+    at: usize,
 ) -> std::sync::Arc<egui::Galley> {
-    let mut job = egui::text::LayoutJob::single_section(
-        name.to_owned(),
-        egui::TextFormat::simple(font, color),
-    );
+    let mut job = egui::text::LayoutJob::default();
+    marked.append(&mut job, name, Some(at), &egui::TextFormat::simple(font, color));
     job.halign = egui::Align::Center;
     job.wrap = egui::text::TextWrapping {
         max_width: width.max(1.0),

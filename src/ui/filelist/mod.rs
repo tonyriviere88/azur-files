@@ -61,6 +61,7 @@ mod tests;
 pub(crate) use band::*;
 pub(crate) use chain::*;
 pub(crate) use columns::*;
+pub(crate) use highlight::{hit_fill, Marked, Marks};
 pub(crate) use keywords::*;
 pub(crate) use rename::*;
 pub(crate) use rows::*;

@@ -62,6 +62,8 @@ pub(crate) fn chain_ahead(folders: &str, elided: bool, into: &mut String) {
 /// The two halves of that — [`chain_split`] then [`chain_galley`] — as one call, so
 /// [`crate::ui::grid`] cannot get the division wrong in its own copy of it. A tree's folder rows are
 /// drawn there exactly as they are here, chains included.
+///
+/// `marked` is the filter's hits as ranges of `name`, which the chain is the tail of.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn chain_cell(
     painter: &egui::Painter,
@@ -71,10 +73,10 @@ pub(crate) fn chain_cell(
     color: egui::Color32,
     dim: egui::Color32,
     width: f32,
-    ahead: &mut String,
+    marked: Marked<'_>,
 ) -> std::sync::Arc<egui::Galley> {
     let (_, chain) = chain_split(name, merged);
-    chain_galley(painter, chain, font, color, dim, width, ahead)
+    chain_galley(painter, chain, name.len() - chain.len(), font, color, dim, width, marked)
 }
 
 /// The Name cell of a merged chain: `src > main > java > com`, cut from the **front** when it will
@@ -88,32 +90,52 @@ pub(crate) fn chain_cell(
 ///
 /// The folders in front are dimmed and the last one is not, for the reason the dimmed half of an
 /// ordinary flattened row is dimmed: they are where the row *is* rather than what it is.
+///
+/// `chain_at` is where `chain` starts in the row's stored name, which is what `marked`'s ranges are
+/// of. Each folder is appended at its own offset in it, so a hit in a folder in front is marked
+/// there — in the row's ink, on the fill — however many folders the elision has dropped.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn chain_galley(
     painter: &egui::Painter,
     chain: &str,
+    chain_at: usize,
     font: egui::FontId,
     color: egui::Color32,
     dim: egui::Color32,
     width: f32,
-    ahead: &mut String,
+    marked: Marked<'_>,
 ) -> std::sync::Arc<egui::Galley> {
     // No separator in it is no chain: one folder, drawn the way any other row's name is.
     let Some((folders, leaf)) = chain.rsplit_once(['\\', '/']) else {
-        return truncated(painter, chain, font, color, width);
+        return name_galley(painter, chain, chain_at, None, None, font, color, dim, width, marked);
     };
+    let leaf_at = chain_at + chain.len() - leaf.len();
+    let plain = egui::TextFormat::simple(font.clone(), color);
+    let dimmed = egui::TextFormat::simple(font.clone(), dim);
 
-    let lay = |ahead: &str| {
+    // `from` is a tail of `folders`: what is left in front once the elision has dropped the rest.
+    let lay = |from: &str| {
         let mut job = egui::text::LayoutJob::default();
-        job.append(ahead, 0.0, egui::TextFormat::simple(font.clone(), dim));
-        job.append(leaf, 0.0, egui::TextFormat::simple(font.clone(), color));
+        if from.len() < folders.len() {
+            marked.append(&mut job, "…", None, &dimmed);
+            marked.append(&mut job, CONTEXT, None, &dimmed);
+        }
+        let mut at = chain_at + folders.len() - from.len();
+        for folder in from.split(['\\', '/']) {
+            if !folder.is_empty() {
+                marked.append(&mut job, folder, Some(at), &dimmed);
+                marked.append(&mut job, CONTEXT, None, &dimmed);
+            }
+            at += folder.len() + 1;
+        }
+        marked.append(&mut job, leaf, Some(leaf_at), &plain);
         job.wrap = egui::text::TextWrapping::truncate_at_width(width.max(0.0));
         painter.layout_job(job)
     };
 
     let mut from = folders;
     loop {
-        chain_ahead(from, from.len() < folders.len(), ahead);
-        let galley = lay(ahead);
+        let galley = lay(from);
         if !galley.elided {
             return galley;
         }

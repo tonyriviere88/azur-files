@@ -89,13 +89,14 @@ fn a_row_says_where_it_is_after_its_name_and_gives_that_up_first() {
             name_galley(
                 painter,
                 "translations_fr.json",
+                0,
                 context,
+                None,
                 font.clone(),
                 ink,
                 dim,
                 width,
-                &[],
-                egui::Color32::TRANSPARENT,
+                Marked::NONE,
             )
         };
 
@@ -104,13 +105,14 @@ fn a_row_says_where_it_is_after_its_name_and_gives_that_up_first() {
         let marked = name_galley(
             painter,
             "translations_fr.json",
+            0,
+            None,
             None,
             font.clone(),
             ink,
             dim,
             400.0,
-            &[0..5, 13..15],
-            fill,
+            Marked { hits: &[0..5, 13..15], fill, ink },
         );
         assert_eq!(marked.text(), "translations_fr.json");
         let runs: Vec<(&str, bool)> = marked
@@ -177,6 +179,97 @@ fn a_row_says_where_it_is_after_its_name_and_gives_that_up_first() {
             squeezed.text().starts_with("translations_fr.json"),
             "what survived was {:?}, which is not the name",
             squeezed.text()
+        );
+        checked = true;
+    });
+    assert!(checked, "the pass never ran, so nothing was checked");
+}
+
+/// A search marks a row wherever its words are: in the name, in the folders shown after it, and in
+/// the folders of a merged chain — on the fill, and **in the row's own ink** where the text around
+/// the hit is dimmed, so the folder a row was found by is not the faintest thing on it.
+#[test]
+fn a_search_marks_the_folders_a_row_was_found_by() {
+    let ctx = egui::Context::default();
+    azur_egui_theme::fonts::install(&ctx);
+    let font = egui::FontId::proportional(14.0);
+    let (ink, dim, fill) = (Color32::WHITE, Color32::GRAY, Color32::from_rgb(1, 2, 3));
+    let runs = |galley: &egui::Galley| -> Vec<(String, bool, Color32)> {
+        let job = &galley.job;
+        job.sections
+            .iter()
+            .map(|s| {
+                let text = job.text[s.byte_range.start.0..s.byte_range.end.0].to_owned();
+                (text, s.format.background == fill, s.format.color)
+            })
+            .collect()
+    };
+    let run = |text: &str, marked: bool, color: Color32| (text.to_owned(), marked, color);
+    let mut checked = false;
+    let _ = ctx.run_ui(Default::default(), |ui| {
+        let painter = ui.painter();
+
+        // One word across the separator: its folder half in the context, its file half in the name.
+        let name = r"Res\Lang\translations.json";
+        let hits = Marks::parse(r"lang\trans").find(name);
+        let galley = name_galley(
+            painter,
+            "translations.json",
+            9,
+            Some(r"Res\Lang"),
+            Some(0),
+            font.clone(),
+            ink,
+            dim,
+            900.0,
+            Marked { hits: &hits, fill, ink },
+        );
+        assert_eq!(
+            runs(&galley),
+            [
+                run("trans", true, ink),
+                run("lations.json", false, ink),
+                run(r" > Res\", false, dim),
+                run("Lang", true, ink),
+            ]
+        );
+
+        // A shortcut's target is not part of the name, and nothing in it is marked.
+        let galley = name_galley(
+            painter,
+            "translations.json",
+            9,
+            Some(r"C:\Lang"),
+            None,
+            font.clone(),
+            ink,
+            dim,
+            900.0,
+            Marked { hits: &hits, fill, ink },
+        );
+        assert_eq!(
+            runs(&galley),
+            [
+                run("trans", true, ink),
+                run("lations.json", false, ink),
+                run(r" > C:\Lang", false, dim),
+            ]
+        );
+
+        // A merged chain: a hit in a folder in front of the row's own.
+        let name = r"x\src\main\java";
+        let hits = Marks::parse("main").find(name);
+        let galley =
+            chain_cell(painter, name, 2, font.clone(), ink, dim, 900.0, Marked { hits: &hits, fill, ink });
+        assert_eq!(galley.text(), "src > main > java");
+        assert_eq!(
+            runs(&galley),
+            [
+                run("src > ", false, dim),
+                run("main", true, ink),
+                run(" > ", false, dim),
+                run("java", false, ink),
+            ]
         );
         checked = true;
     });

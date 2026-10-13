@@ -227,6 +227,7 @@ pub(super) fn show(
                     vec2(ui.available_width(), ROW_HEIGHT),
                     Sense::hover(),
                 );
+                let under = row_fill(t, false, response.hovered()).unwrap_or(t.bg.layer);
                 if let Some(fill) = row_fill(t, false, response.hovered()) {
                     ui.painter().rect_filled(row, CornerRadius::ZERO, fill);
                 }
@@ -259,13 +260,14 @@ pub(super) fn show(
                 let galley = name_galley(
                     ui.painter(),
                     &planned.new,
+                    0,
+                    None,
                     None,
                     t.fonts.body.clone(),
                     ink,
                     t.text.tertiary,
                     (new.width() - mark).max(0.0),
-                    hits.as_slice(),
-                    t.accent.subtle,
+                    Marked { hits: hits.as_slice(), fill: hit_fill(t, under), ink },
                 );
                 let width = galley.size().x;
                 text_left(ui.painter(), new, galley);

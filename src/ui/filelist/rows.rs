@@ -462,11 +462,15 @@ pub(crate) fn rows(
         };
         let name_font = t.fonts.body.clone();
         let meta_font = t.fonts.caption.clone();
-        // The filter's words, read once for every row on screen: what each kept row's name is marked
-        // with, so a row found by a search says why it is there. `accent.subtle` behind the row's
-        // own ink, the find bar's pair for a hit, whose contrast is measured in both themes by
-        // `every_ink_in_the_find_bar_can_be_read`. See [`super::highlight`].
+        // The filter's words, read once for every row on screen: what each kept row is marked with,
+        // so a row found by a search says why it is there. Asked of the same whole path the filter
+        // kept the row for, so the folder's own path is written once here and each row's name is
+        // appended to it in turn. The fill is chosen against each row's own surface — see
+        // [`super::highlight::hit_fill`].
         let marks = super::highlight::Marks::parse(&tab.filter);
+        let mut marks_path = String::new();
+        let marks_base =
+            if marks.is_empty() { 0 } else { crate::fs::sort::prefix(&dir, &mut marks_path) };
 
         // Every row's shell icon, drawn in one batch once the rows are done.
         //
@@ -889,34 +893,41 @@ pub(crate) fn rows(
                     text_row,
                 ));
             } else if name_right > name_left {
+                let name = dir.name(entry_index);
+                let hits = marks.in_row(&mut marks_path, marks_base, name);
+                let marked = super::highlight::Marked {
+                    hits: &hits,
+                    fill: super::highlight::hit_fill(t, under),
+                    ink: name_color,
+                };
                 let galley = if merged > 0 {
-                    let (_, chain) = chain_split(dir.name(entry_index), merged);
-                    chain_galley(
+                    chain_cell(
                         ui.painter(),
-                        chain,
+                        name,
+                        merged,
                         name_font.clone(),
                         name_color,
                         meta_color,
                         name_right - name_left,
-                        &mut chain_text,
+                        marked,
                     )
                 } else {
                     let leaf = dir.leaf(entry_index);
-                    let hits = if marks.is_empty() {
-                        Vec::new()
-                    } else {
-                        marks.find(leaf)
-                    };
+                    // The row's folders are the front of its name; a shortcut's target, the one
+                    // context that is owned, is not part of it and has nothing to mark.
+                    let context_at =
+                        matches!(context, Some(std::borrow::Cow::Borrowed(_))).then_some(0);
                     name_galley(
                         ui.painter(),
                         leaf,
+                        name.len() - leaf.len(),
                         context.as_deref(),
+                        context_at,
                         name_font.clone(),
                         name_color,
                         meta_color,
                         name_right - name_left,
-                        &hits,
-                        t.accent.subtle,
+                        marked,
                     )
                 };
                 if inked {
@@ -1397,66 +1408,53 @@ pub(crate) fn rows(
 /// on screen; egui caches finished galleys, so a row that has not changed costs a hash lookup
 /// on every frame after the first.
 ///
-/// `hits` are the stretches of `name` the filter's words cover — see [`super::highlight`] — set on
-/// `hit_fill`, so a row found by a search says why it is there. Empty for the ordinary case, which
-/// is the one-section galley it always was.
+/// `marked` is what the filter's words cover — see [`super::highlight`] — as ranges of the row's
+/// *name as stored*, which `name` and `context` are two pieces of: `name_at` says where `name` starts
+/// in it, and `context_at` where `context` does, or `None` when the context is not part of it (a
+/// shortcut's target). So a word found in the folders a flattened row is in is marked in the
+/// context, and one that runs across the separator is marked on both sides of the `>`. Empty for the
+/// ordinary case, which is the one-section galley it always was.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn name_galley(
     painter: &egui::Painter,
     name: &str,
+    name_at: usize,
     context: Option<&str>,
+    context_at: Option<usize>,
     font: egui::FontId,
     color: egui::Color32,
     dim: egui::Color32,
     width: f32,
-    hits: &[std::ops::Range<usize>],
-    hit_fill: egui::Color32,
+    marked: super::highlight::Marked<'_>,
 ) -> std::sync::Arc<egui::Galley> {
     let context = context.filter(|text| !text.is_empty());
-    if context.is_none() && hits.is_empty() {
+    if context.is_none() && marked.is_empty() {
         return truncated(painter, name, font, color, width);
     }
-
-    // The name, in runs: its own ink throughout, and the hits on the fill as well.
-    let name_into = |job: &mut egui::text::LayoutJob| {
-        let plain = egui::TextFormat::simple(font.clone(), color);
-        let marked = egui::TextFormat {
-            background: hit_fill,
-            ..plain.clone()
-        };
-        let mut at = 0;
-        for hit in hits {
-            if hit.start > at {
-                job.append(&name[at..hit.start], 0.0, plain.clone());
-            }
-            job.append(&name[hit.clone()], 0.0, marked.clone());
-            at = hit.end;
-        }
-        if at < name.len() {
-            job.append(&name[at..], 0.0, plain);
-        }
-    };
+    let plain = egui::TextFormat::simple(font.clone(), color);
+    let dimmed = egui::TextFormat::simple(font.clone(), dim);
 
     let Some(context) = context else {
         let mut job = egui::text::LayoutJob::default();
-        name_into(&mut job);
+        marked.append(&mut job, name, Some(name_at), &plain);
         job.wrap = egui::text::TextWrapping::truncate_at_width(width.max(0.0));
         return painter.layout_job(job);
     };
 
-    let lay = |context: &str| {
+    // The context from byte `cut` on, behind an ellipsis once anything has been cut.
+    let lay = |cut: usize| {
         let mut job = egui::text::LayoutJob::default();
-        name_into(&mut job);
-        job.append(
-            &format!("{CONTEXT}{context}"),
-            0.0,
-            egui::TextFormat::simple(font.clone(), dim),
-        );
+        marked.append(&mut job, name, Some(name_at), &plain);
+        marked.append(&mut job, CONTEXT, None, &dimmed);
+        if cut > 0 {
+            marked.append(&mut job, "…\\", None, &dimmed);
+        }
+        marked.append(&mut job, &context[cut..], context_at.map(|at| at + cut), &dimmed);
         job.wrap = egui::text::TextWrapping::truncate_at_width(width.max(0.0));
         painter.layout_job(job)
     };
 
-    let whole = lay(context);
+    let whole = lay(0);
     if !whole.elided {
         return whole;
     }
@@ -1464,7 +1462,7 @@ pub(crate) fn name_galley(
     let mut cut = 0;
     while let Some(at) = context[cut..].find(['\\', '/']) {
         cut += at + 1;
-        let galley = lay(&format!("…\\{}", &context[cut..]));
+        let galley = lay(cut);
         let fits = !galley.elided;
         shortest = Some(galley);
         if fits {

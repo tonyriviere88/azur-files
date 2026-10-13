@@ -933,7 +933,10 @@ fn digits_end(s: &[u8], mut i: usize) -> usize {
 /// 190,000 entries is 190,000 paths per keystroke, and [`Dir::target`] would allocate every
 /// one of them. Empty for a synthetic listing — "This PC", whose rows carry their own
 /// targets — where the row's name (`Windows (C:)`) is already the whole of what it says.
-fn prefix(dir: &Dir, path: &mut String) -> usize {
+///
+/// Also what [`crate::ui::filelist`] marks a row's hits against, so the words it marks are found in
+/// exactly the string the filter kept the row for.
+pub(crate) fn prefix(dir: &Dir, path: &mut String) -> usize {
     path.push_str(&dir.path.to_string_lossy());
     if !path.is_empty() && !path.ends_with(['\\', '/']) {
         path.push('\\');
