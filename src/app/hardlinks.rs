@@ -8,11 +8,16 @@ impl App {
     ///
     /// **The active tab of each pane only**, as [`App::collect_cloud`] does: a background tab asks
     /// when it is switched to.
+    ///
+    /// **Nor while the Hard links column is hidden**: the count is a walk of the folder's file IDs,
+    /// and with nowhere to show it that is work for a tooltip line. The tab is not marked asked, so
+    /// putting the column back asks on the next frame. See [`crate::pane::Columns`].
     pub(super) fn collect_hard_links(&mut self) {
+        let wanted = self.columns.shown(crate::fs::Column::HardLinks);
         for pane in &mut self.panes {
             let tab = pane.tab_mut();
             let Some(dir) = tab.dir.as_ref() else { continue };
-            if tab.hard_links_asked {
+            if !wanted || tab.hard_links_asked {
                 continue;
             }
             tab.hard_links_asked = true;

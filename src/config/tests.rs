@@ -342,6 +342,49 @@ fn the_left_panels_arrangement_survives_a_new_group_appearing() {
     assert_eq!(Config::parse("").sections, Sections::default());
 }
 
+/// The details view's columns come back in the order they were dragged into, with the ones taken
+/// off still off — and **Name is never one of those**, whatever the file says.
+#[test]
+fn the_columns_come_back_arranged_and_ticked_the_way_they_were_left() {
+    use crate::fs::Column;
+    let mut columns = crate::pane::Columns::default();
+    assert!(columns.move_beside(Column::Modified, Column::Name, false));
+    assert!(columns.set_shown(Column::HardLinks, false));
+    assert!(columns.set_shown(Column::Status, false));
+    let saved = Config {
+        columns,
+        ..Config::default()
+    };
+    let text = saved.to_text();
+    assert!(
+        text.contains("columns=modified,name,keywords,status,hardlinks,size,type\n"),
+        "{text}"
+    );
+    assert!(text.contains("columns_hidden=status,hardlinks\n"), "{text}");
+    assert_eq!(Config::parse(&text).columns, columns);
+
+    // Hand-edited: an unknown name is skipped, Name cannot be hidden, and a column the order
+    // leaves out goes back beside the one it follows by default.
+    let edited = Config::parse("columns=type, nope ,name\ncolumns_hidden=name,size\n").columns;
+    assert_eq!(
+        edited.order(),
+        [
+            Column::Type,
+            Column::Modified,
+            Column::Name,
+            Column::Keywords,
+            Column::Status,
+            Column::HardLinks,
+            Column::Size,
+        ]
+    );
+    assert!(edited.shown(Column::Name));
+    assert!(!edited.shown(Column::Size));
+
+    // No line at all is every column, in the first-run order.
+    assert!(Config::parse("").columns.is_default());
+}
+
 /// The bookmarks come back arranged the way they were left: the order, the groups, what is in
 /// each of them, and which of them were folded shut.
 ///

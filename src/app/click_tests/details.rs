@@ -801,3 +801,124 @@ fn a_keywords_cell_edits_only_once_the_pointer_has_rested_on_it() {
         "and keeps nothing"
     );
 }
+
+/// Where a column's header can be reached by the pointer: its leftmost and rightmost points along
+/// the header line, scanned in 2-point steps.
+fn header_span(h: &mut Harness, column: crate::fs::Column) -> Option<(Pos2, Pos2)> {
+    let id = Id::new(("th", h.app.panes[0].id, column.index()));
+    let (pane, y) = (h.pane_rect(0), h.header_y(0));
+    let hits: Vec<Pos2> = (0..pane.width() as i32)
+        .step_by(2)
+        .map(|dx| pos2(pane.left() + dx as f32, y))
+        .filter(|at| h.hovers(id, *at))
+        .collect();
+    Some((*hits.first()?, *hits.last()?))
+}
+
+/// A header is a handle: dragging Modified onto the left half of Name puts it first, it is drawn
+/// there, and the arrangement is the window's setting. That a *click* still sorts is
+/// [`a_column_header_sorts`].
+#[test]
+fn dragging_a_header_moves_its_column() {
+    use crate::fs::Column;
+    let mut h = Harness::new();
+    let (modified, _) = header_span(&mut h, Column::Modified).expect("a Modified header");
+    let (name, _) = header_span(&mut h, Column::Name).expect("a Name header");
+    let done = h.drag(modified + vec2(8.0, 0.0), name + vec2(4.0, 0.0));
+    assert!(done.contains(&"MoveColumn"), "the drag moved nothing, got {done:?}");
+    assert!(!done.contains(&"Sort"), "and a drag is not a click, got {done:?}");
+    assert_eq!(h.app.columns.order()[0], Column::Modified);
+    assert_eq!(h.app.settings().columns.order()[0], Column::Modified);
+
+    let (modified, _) = header_span(&mut h, Column::Modified).expect("Modified is still there");
+    let (name, _) = header_span(&mut h, Column::Name).expect("so is Name");
+    assert!(modified.x < name.x, "Modified was not drawn first");
+    // And the rows follow the header: a click at the far left of a row is on Modified's cell now,
+    // and still selects the row, whose name is drawn after it.
+    h.click_at(pos2(modified.x + 4.0, h.row_center(0, 0).y));
+    assert_eq!(h.tab(0).selected_count, 1, "a row no longer selects from its first column");
+}
+
+/// Half a grip, less a little, so the press lands inside it whichever way the edge rounds.
+const GRIP_HALF: f32 = crate::ui::filelist::GRIP - 2.0;
+
+/// A grip straddles an edge, so half of it is over the next column's header — which can be dragged
+/// now. A drag that starts on that half still resizes, and moves nothing.
+#[test]
+fn a_drag_on_a_grip_resizes_rather_than_moving_the_next_column() {
+    use crate::fs::Column;
+    let mut h = Harness::new();
+    let (_, size_right) = header_span(&mut h, Column::Size).expect("a Size header");
+    let before = h.tab(0).widths[Column::Size.index()];
+    // Just past Size's right edge: over Type's header, and inside Size's grip.
+    let from = size_right + vec2(GRIP_HALF, 0.0);
+    let done = h.drag(from, from + vec2(30.0, 0.0));
+    assert!(!done.contains(&"MoveColumn"), "the grip picked Type up, got {done:?}");
+    assert!(
+        h.tab(0).widths[Column::Size.index()] > before,
+        "and Size did not widen"
+    );
+}
+
+/// Right-click a header, and return the menu that opened as the words it put on screen — the
+/// headers carry the same names, so its entries are what was not there before.
+fn open_columns_menu(h: &mut Harness, at: Pos2) -> Vec<(Pos2, String)> {
+    let before = h.texts();
+    h.click_with(at, PointerButton::Secondary, Modifiers::NONE);
+    h.texts()
+        .into_iter()
+        .filter(|(at, _)| !before.iter().any(|(had, _)| had == at))
+        .collect()
+}
+
+/// The header's right-click menu: every column with a tick, Name among them and greyed. Unticking
+/// Type takes it off — and the listing, sorted by Type, goes back to Name — and the same menu, still
+/// open, puts it back.
+#[test]
+fn the_headers_right_click_menu_hides_a_column_but_never_name() {
+    use crate::fs::Column;
+    let mut h = Harness::new();
+    h.app.panes[0].tab_mut().sort_by = Column::Type;
+    let (name, _) = header_span(&mut h, Column::Name).expect("a Name header");
+    let menu = open_columns_menu(&mut h, name + vec2(20.0, 0.0));
+    let entry = |label: &str| menu.iter().find(|(_, text)| text == label).map(|(at, _)| *at);
+    for column in Column::ALL {
+        assert!(entry(column.header()).is_some(), "no `{}` in {menu:?}", column.header());
+    }
+
+    let tick = |at: Pos2| pos2(at.x + 2.0, at.y + 6.0);
+    let done = h.click_at(tick(entry("Name").unwrap()));
+    assert!(!done.contains(&"ShowColumn"), "Name could be unticked, got {done:?}");
+    assert!(h.app.columns.shown(Column::Name));
+
+    let done = h.click_at(tick(entry("Type").unwrap()));
+    assert!(done.contains(&"ShowColumn"), "unticking Type did nothing, got {done:?}");
+    assert!(!h.app.columns.shown(Column::Type));
+    assert!(!h.app.settings().columns.shown(Column::Type), "and it was not written down");
+    assert_eq!(h.tab(0).sort_by, Column::Name, "still sorted by a column nobody can see");
+    h.frame(Vec::new());
+    assert!(header_span(&mut h, Column::Type).is_none(), "a hidden column kept its header");
+
+    let done = h.click_at(tick(entry("Type").unwrap()));
+    assert!(done.contains(&"ShowColumn"), "the menu closed after one tick, got {done:?}");
+    assert!(h.app.columns.shown(Column::Type));
+}
+
+/// A hidden Hard links column is never asked about — the count is a walk of the folder — and the
+/// tab is not marked asked, so putting the column back asks on the next frame.
+#[test]
+fn a_hidden_hard_links_column_is_not_counted() {
+    use crate::fs::Column;
+    let mut h = Harness::new();
+    h.app.columns.set_shown(Column::HardLinks, false);
+    assert!(h.tab(0).dir.is_some(), "the listing never landed");
+    // As a freshly landed listing is.
+    h.app.panes[0].tab_mut().hard_links_asked = false;
+    h.frame(Vec::new());
+    h.frame(Vec::new());
+    assert!(!h.tab(0).hard_links_asked, "a hidden column was counted");
+
+    h.app.columns.set_shown(Column::HardLinks, true);
+    h.frame(Vec::new());
+    assert!(h.tab(0).hard_links_asked, "putting the column back did not ask");
+}

@@ -32,6 +32,7 @@ use crate::ui::{filelist, GUTTER};
 mod action;
 mod capture;
 mod cloud;
+mod columns;
 mod hardlinks;
 mod connect;
 mod diff;
@@ -279,6 +280,10 @@ pub struct App {
     /// open: sorting one pane by size is not a request to re-sort the other. See
     /// [`crate::fs::Sort`].
     sort: crate::fs::Sort,
+    /// Which columns the details view shows, and in what order — the same for every pane, and
+    /// written down like [`App::sort`]. Read by the drawing, and by the jobs that fill a column in:
+    /// a hidden Status or Hard links column is never asked about. See [`crate::pane::Columns`].
+    columns: crate::pane::Columns,
     /// Whether the path field writes `/` between the parts of a path rather than `\`.
     ///
     /// The window's preference again — which slash you want is a habit, and it is about where the
@@ -719,6 +724,7 @@ impl App {
             batch_mode: config.batch_mode,
             show_hidden: config.show_hidden,
             sort: config.sort,
+            columns: config.columns,
             forward_slashes: config.forward_slashes,
             suggest_bookmarks: config.suggest_bookmarks,
             auto_tiles: config.auto_tiles,
@@ -834,6 +840,7 @@ impl App {
             batch_mode: self.batch_mode,
             show_hidden: self.show_hidden,
             sort: self.sort,
+            columns: self.columns,
             forward_slashes: self.forward_slashes,
             suggest_bookmarks: self.suggest_bookmarks,
             suggest_history: !self.visits.paused(),

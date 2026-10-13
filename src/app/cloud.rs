@@ -8,11 +8,17 @@ impl App {
     /// **The active tab of each pane only**, for the reason [`App::collect_git`] gives: a background
     /// tab asks when it is switched to. Only a listing that is [`crate::fs::Dir::synced`] asks at
     /// all, so every other folder costs one bool per frame.
+    ///
+    /// **Nor while the Status column is hidden**, which is the only thing on screen the answers are
+    /// for. The tab is not marked asked either, so putting the column back asks on the next frame.
+    /// See [`crate::pane::Columns`].
     pub(super) fn collect_cloud(&mut self) {
+        let wanted = self.columns.shown(crate::fs::Column::Status);
         for pane in &mut self.panes {
             let tab = pane.tab_mut();
             let Some(dir) = tab.dir.as_ref() else { continue };
-            if tab.cloud_asked
+            if !wanted
+                || tab.cloud_asked
                 || !dir.synced
                 || crate::fs::is_synthetic(&tab.path)
                 || crate::archive::is_virtual_location(&tab.path)

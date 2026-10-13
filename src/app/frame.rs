@@ -918,6 +918,7 @@ impl App {
             auto_tiles,
             providers,
             search_subfolders,
+            columns,
             visits,
             bookmarks,
             suggest_bookmarks,
@@ -945,7 +946,8 @@ impl App {
         );
         filelist::show(
             child, t, zone, list, floor, id, tab, focused, icons, links, thumbs, cut, status,
-            console_open, *auto_tiles, providers, reserved, scratch, *search_subfolders, actions,
+            console_open, *auto_tiles, providers, reserved, scratch, *search_subfolders, columns,
+            actions,
         )
     }
 

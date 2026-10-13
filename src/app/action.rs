@@ -323,6 +323,20 @@ pub enum Action {
     },
     /// Put the left panel's groups back in their first-run order.
     ResetSectionOrder,
+    /// Move a details-view column beside another, because its header was dragged there — in every
+    /// pane, since the arrangement is the window's. See [`crate::pane::Columns::move_beside`].
+    MoveColumn {
+        from: crate::fs::Column,
+        to: crate::fs::Column,
+        after: bool,
+    },
+    /// Show a details-view column or hide it, from the header's right-click menu. Name is refused.
+    ShowColumn {
+        column: crate::fs::Column,
+        shown: bool,
+    },
+    /// Every column back, in the first-run order.
+    ResetColumns,
     /// Take a folder out of the history the path field offers — `Shift+Delete` on the offer.
     ForgetVisit(PathBuf),
     /// Fold a group away, or open it again. `usize` is a position in the bookmark list.
@@ -465,6 +479,9 @@ impl Action {
             Self::MoveSection { .. } => "MoveSection",
             Self::ShowSection { .. } => "ShowSection",
             Self::ResetSectionOrder => "ResetSectionOrder",
+            Self::MoveColumn { .. } => "MoveColumn",
+            Self::ShowColumn { .. } => "ShowColumn",
+            Self::ResetColumns => "ResetColumns",
             Self::ForgetVisit(_) => "ForgetVisit",
             Self::ToggleBookmarkGroup(_) => "ToggleBookmarkGroup",
             Self::BeginRenameBookmarkGroup(_) => "BeginRenameBookmarkGroup",

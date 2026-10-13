@@ -330,6 +330,7 @@ pub(crate) fn rows(
     tab: &mut Tab,
     focused: bool,
     widths: &[f32; Column::COUNT],
+    order: &[Column; Column::COUNT],
     icons_cache: &mut crate::shell::icons::Icons,
     links_cache: &mut crate::shell::links::Links,
     cut: &[std::path::PathBuf],
@@ -451,14 +452,10 @@ pub(crate) fn rows(
         });
         let pressed_row = press.and_then(row_at);
 
-        let edges = column_x(visible, widths);
+        let spans = column_x(visible, widths, order);
         // A column's cell on a row: its edges less the padding either side, on the line `row` is.
         let cell_of = |column: Column, row: Rect| {
-            let at = column.index();
-            Rect::from_min_max(
-                pos2(edges[at] + CELL_PAD, row.top()),
-                pos2(edges[at + 1] - CELL_PAD, row.bottom()),
-            )
+            Rect::from_x_y_ranges(spans[column.index()].shrink(CELL_PAD), row.y_range())
         };
         let name_font = t.fonts.body.clone();
         let meta_font = t.fonts.caption.clone();
@@ -540,7 +537,7 @@ pub(crate) fn rows(
         // cell while another field has the keyboard or a band is being dragged, and a row with no
         // file ID has nowhere to keep keywords, so it never arms.
         let keywords_col = Column::Keywords.index();
-        let keywords_x = edges[keywords_col]..=edges[keywords_col + 1];
+        let keywords_x = spans[keywords_col];
         let now = ui.input(|i| i.time);
         let resting = hovered_row
             .filter(|_| {
@@ -549,7 +546,7 @@ pub(crate) fn rows(
                     && tab.keywords.is_none()
                     && tab.band.is_none()
             })
-            .filter(|_| response.hover_pos().is_some_and(|at| keywords_x.contains(&at.x)))
+            .filter(|_| response.hover_pos().is_some_and(|at| keywords_x.contains(at.x)))
             .and_then(|position| tab.entry_at(position))
             .filter(|&entry| dir.key(entry).is_some());
         match (resting, tab.keywords_hover) {
@@ -681,7 +678,10 @@ pub(crate) fn rows(
             // How many folders are merged into this row's name, which is what turns it from `com`
             // into `src > main > java > com`. Never anything but zero outside a tree.
             let merged = tab.row_merged(position);
-            let stem = stem_x(row, depth);
+            // From the Name column's own left edge, which is the row's only while Name is the first
+            // column — it can be dragged anywhere along the header. See [`crate::pane::Columns`].
+            let name_cell = Rect::from_x_y_ranges(spans[Column::Name.index()], row.y_range());
+            let stem = stem_x(name_cell, depth);
             let glyph_x = if tree { stem + TWISTY } else { stem };
             let box_rect = icon_rect(row, glyph_x, GLYPH);
 
@@ -698,7 +698,7 @@ pub(crate) fn rows(
                 let shut = tab.collapsed.contains(dir.name(entry_index));
                 let has_kids = shut || tab.has_children_below(position);
                 if has_kids {
-                    let hit = twisty_rect(row, depth);
+                    let hit = twisty_rect(name_cell, depth);
                     let chevron: azur_icons::Icon<'_> = if shut {
                         &azur_icons::chevron_right
                     } else {
@@ -853,7 +853,7 @@ pub(crate) fn rows(
             }
 
             let name_left = glyph_x + GLYPH + space::S3;
-            let name_right = edges[Column::Name.index() + 1] - CELL_PAD;
+            let name_right = name_cell.right() - CELL_PAD;
             // A folder row is somewhere files can be dropped. Recorded for every visible one,
             // because that is what makes dragging onto a folder mean "into that folder" rather
             // than "into the folder I am looking at".
@@ -992,7 +992,7 @@ pub(crate) fn rows(
                 // `columns::GLYPH_COLUMN`, which is the glyph and its padding either side.
                 if let Some(state) = tab.sync_of(entry_index) {
                     let glyph =
-                        icon_rect(meta_row, edges[Column::Status.index()] + CELL_PAD, GLYPH);
+                        icon_rect(meta_row, spans[Column::Status.index()].min + CELL_PAD, GLYPH);
                     sync_marks.push((glyph, state, under, dim));
                     if inked {
                         ink.push(Rect::from_x_y_ranges(glyph.x_range(), row.y_range()));

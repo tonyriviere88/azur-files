@@ -15,6 +15,8 @@ use std::sync::Arc;
 
 use crate::fs::{display_name, sort, Column, Dir};
 
+pub use columns::Columns;
+
 /// Identifies a pane for the lifetime of the window. Never reused, so a stale
 /// reference resolves to nothing rather than to the wrong pane.
 pub type PaneId = u32;
@@ -1197,6 +1199,7 @@ mod tests;
 // One `impl Tab` per concern, along the banners this file used to carry. The types and the two
 // constructors stay here; what a tab *does* is next door.
 pub mod batch;
+mod columns;
 mod listing;
 mod navigate;
 mod select;

@@ -163,6 +163,19 @@ pub struct Config {
     /// is what lets one line hold it: it is what every tab is opened with, the restored ones included.
     /// `sort=modified,desc`. See [`crate::fs::Sort`].
     pub sort: crate::fs::Sort,
+    /// Which columns the details view shows, and left to right in what order: dragged by their
+    /// headers and ticked in the header's right-click menu. One answer for every pane, like
+    /// [`Self::sort`]. Two lines, both by name like `sidebar_order=`, so a column added later cannot
+    /// shift what a file already on disk means:
+    ///
+    /// ```text
+    /// columns=name,modified,size,type,keywords,status,hardlinks
+    /// columns_hidden=hardlinks,status
+    /// ```
+    ///
+    /// A file with neither line shows every column in the first-run order. See
+    /// [`crate::pane::Columns`].
+    pub columns: crate::pane::Columns,
     /// Whether the path field writes `/` between the parts of a path instead of `\`.
     ///
     /// **Off**, because `\` is what Windows shows everywhere else and a path bar that disagreed
@@ -288,6 +301,7 @@ impl Default for Config {
             batch_mode: crate::pane::batch::Mode::default(),
             show_hidden: false,
             sort: crate::fs::Sort::default(),
+            columns: crate::pane::Columns::default(),
             forward_slashes: false,
             suggest_bookmarks: true,
             suggest_history: true,
@@ -436,6 +450,15 @@ impl Config {
                 "sort" => {
                     if let Some(sort) = crate::fs::Sort::parse(value) {
                         config.sort = sort;
+                    }
+                }
+                // By name, like `sidebar_order` below. A name this build does not know is skipped,
+                // and a column the line does not name goes back beside its neighbour.
+                "columns" => config.columns.set_order(columns_named(value)),
+                // Name among them is ignored: it is the one column that cannot be taken off.
+                "columns_hidden" => {
+                    for column in columns_named(value) {
+                        config.columns.set_shown(column, false);
                     }
                 }
                 "forward_slashes" => config.forward_slashes = value == "1",
@@ -656,6 +679,8 @@ impl Config {
         text.push_str(&format!("batch_mode={}\n", self.batch_mode.as_str()));
         text.push_str(&format!("show_hidden={}\n", flag(self.show_hidden)));
         text.push_str(&format!("sort={}\n", self.sort.as_text()));
+        text.push_str(&format!("columns={}\n", column_keys(self.columns.order())));
+        text.push_str(&format!("columns_hidden={}\n", column_keys(self.columns.hidden())));
         text.push_str(&format!(
             "forward_slashes={}\n",
             flag(self.forward_slashes)
@@ -772,6 +797,18 @@ fn keys(sections: impl IntoIterator<Item = Section>) -> String {
 /// And back: the groups a list of names names, skipping any it does not know.
 fn named(value: &str) -> impl Iterator<Item = Section> + '_ {
     value.split(',').filter_map(|key| Section::from_key(key.trim()))
+}
+
+/// Columns as a comma-separated list of their names: [`crate::fs::Column::key`], not the header,
+/// which is screen text and free to change.
+fn column_keys(columns: impl IntoIterator<Item = crate::fs::Column>) -> String {
+    let names: Vec<&str> = columns.into_iter().map(crate::fs::Column::key).collect();
+    names.join(",")
+}
+
+/// And back, skipping any name it does not know.
+fn columns_named(value: &str) -> impl Iterator<Item = crate::fs::Column> + '_ {
+    value.split(',').filter_map(|key| crate::fs::Column::parse(key.trim()))
 }
 
 /// Where the settings live.

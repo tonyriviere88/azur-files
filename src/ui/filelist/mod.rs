@@ -31,7 +31,7 @@ use crate::app::Action;
 use crate::fs::time::LocalZone;
 use crate::fs::{fmt, Column};
 use crate::icons;
-use crate::pane::{PaneId, Tab, ROW_HEIGHT};
+use crate::pane::{Columns, PaneId, Tab, ROW_HEIGHT};
 // `crate::icons` is this program's painted glyphs; this is the shell's icon service.
 use crate::shell::icons as shell_icons;
 use crate::shell::icons::Icons;
@@ -137,6 +137,9 @@ pub fn show(
     // Whether a filter searches subfolders, so an empty result and the status line can say what
     // was and was not searched. See [`crate::config::Config::search_subfolders`].
     subfolders: bool,
+    // Which columns are on show and in what order, the same in every pane. See
+    // [`crate::pane::Columns`].
+    columns: &Columns,
     out: &mut Vec<Action>,
 ) -> Outcome {
     // The frame's clock, for the one thing here that depends on how long something has taken:
@@ -175,7 +178,8 @@ pub fn show(
     // header and the status line are worth more than a row nobody could read.
     if rect.bottom() - reserved <= header.bottom() + ROW_HEIGHT {
         if !tiles {
-            header_strip(ui, t, header, pane, tab, &resolved_widths(tab, rect.width()), out);
+            let widths = resolved_widths(tab, columns, rect.width());
+            header_strip(ui, t, header, pane, tab, columns, &widths, out);
         }
         status_line(
             ui, t, floor, pane, tab, console_open, auto_tiles, providers, status, now, subfolders,
@@ -196,10 +200,10 @@ pub fn show(
         [0.0; Column::COUNT]
     } else {
         if !tab.widths_measured {
-            measure_columns(ui, t, tab, scratch);
+            measure_columns(ui, t, tab, columns, scratch);
         }
-        let widths = resolved_widths(tab, body.width());
-        header_strip(ui, t, header, pane, tab, &widths, out);
+        let widths = resolved_widths(tab, columns, body.width());
+        header_strip(ui, t, header, pane, tab, columns, &widths, out);
         widths
     };
 
@@ -290,6 +294,7 @@ pub fn show(
             tab,
             focused,
             &widths,
+            &columns.order(),
             icons_cache,
             links_cache,
             cut,

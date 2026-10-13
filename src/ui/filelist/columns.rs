@@ -1,7 +1,9 @@
 //! The column strip: how wide each column ends up, and where its header sits.
 
 use super::*;
+use azur_egui_theme::components::{ContextMenu, MenuItem};
 use azur_egui_theme::tokens::typography;
+use egui::Rangef;
 
 /// The header strip: a body line with `space-2` above and below, which is Azur's
 /// table header at this density.
@@ -28,7 +30,16 @@ pub(crate) const SORT_ARROW: f32 = 10.0 + space::S2;
 ///   by comparing lengths in bytes rather than by laying anything out.
 /// - **Type** has as many distinct labels as the folder has kinds of file, which is
 ///   a handful — collected with a small linear scan of already-interned strings.
-pub(crate) fn measure_columns(ui: &Ui, t: &Theme, tab: &mut Tab, scratch: &mut String) {
+///
+/// A column the user has hidden is not measured where measuring costs anything — Keywords is a
+/// hash lookup a row — and comes out of [`resolved_widths`] at zero whatever is stored for it.
+pub(crate) fn measure_columns(
+    ui: &Ui,
+    t: &Theme,
+    tab: &mut Tab,
+    columns: &Columns,
+    scratch: &mut String,
+) {
     // The font the cells are drawn in — `meta_font` in `rows` — or every fitted column comes out
     // wider than what is in it, by the difference between two sizes of the same text.
     let font = t.fonts.caption.clone();
@@ -56,7 +67,7 @@ pub(crate) fn measure_columns(ui: &Ui, t: &Theme, tab: &mut Tab, scratch: &mut S
     let mut type_width: f32 = 0.0;
     let mut keywords_width: f32 = 0.0;
     let synced = tab.dir.as_ref().is_some_and(|dir| dir.synced);
-    let keyed = tab.dir.as_ref().is_some_and(|dir| dir.keyed());
+    let keyed = columns.shown(Column::Keywords) && tab.dir.as_ref().is_some_and(|dir| dir.keyed());
 
     if let Some(dir) = tab.dir.clone() {
         // Size: the widest formatted string, found without formatting them all.
@@ -176,14 +187,17 @@ pub(crate) const KEYWORDS_MIN: f32 = 120.0;
 /// the names; the rest is elided, and the tooltip has it whole.
 pub(crate) const KEYWORDS_MAX: f32 = 260.0;
 
-/// Widths for this frame: the fitted columns as stored, and whatever is left
-/// for Name.
+/// Widths for this frame: the fitted columns as stored, less any the user has hidden, and whatever
+/// is left for Name. Indexed by [`Column::index`] whatever order they are drawn in.
 ///
 /// When the pane is too narrow for all of them, the fitted columns give way —
 /// Type first, then Modified, then Keywords, then Status, then Hard links — because a name you cannot
 /// read is worse than a date you cannot see.
-pub(crate) fn resolved_widths(tab: &Tab, total: f32) -> [f32; Column::COUNT] {
+pub(crate) fn resolved_widths(tab: &Tab, columns: &Columns, total: f32) -> [f32; Column::COUNT] {
     let mut widths = tab.widths;
+    for column in columns.hidden() {
+        widths[column.index()] = 0.0;
+    }
     const NAME_MIN: f32 = 120.0;
     let fitted = |widths: &[f32; Column::COUNT]| widths[1..].iter().sum::<f32>();
 
@@ -209,44 +223,71 @@ pub(crate) fn resolved_widths(tab: &Tab, total: f32) -> [f32; Column::COUNT] {
     widths
 }
 
-/// The left edge of each column, given the resolved widths, and the right edge of the last.
-pub(crate) fn column_x(rect: Rect, widths: &[f32; Column::COUNT]) -> [f32; Column::COUNT + 1] {
-    let mut edges = [rect.left(); Column::COUNT + 1];
-    for i in 0..Column::COUNT {
-        edges[i + 1] = edges[i] + widths[i];
+/// Where each column runs across `rect`: laid out left to right in `order`, and indexed by
+/// [`Column::index`] so a cell is found by what it is rather than by where it has been put. A column
+/// with no width is an empty span at the place it would have been.
+pub(crate) fn column_x(
+    rect: Rect,
+    widths: &[f32; Column::COUNT],
+    order: &[Column; Column::COUNT],
+) -> [Rangef; Column::COUNT] {
+    let mut spans = [Rangef::point(rect.left()); Column::COUNT];
+    let mut x = rect.left();
+    for column in order {
+        let width = widths[column.index()];
+        spans[column.index()] = Rangef::new(x, x + width);
+        x += width;
     }
-    edges
+    spans
 }
 
 /// The header: labels, the sort indicator, and the drag grips between columns.
+///
+/// **A click sorts, a drag moves the column, and a right click is the list of columns to tick** —
+/// the same three gestures the sidebar's group headings have, and egui tells the first two apart by
+/// distance. A move and a tick are pushed as actions, because the arrangement is the window's and
+/// every pane draws it: see [`crate::app::Action::MoveColumn`].
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn header_strip(
     ui: &mut Ui,
     t: &Theme,
     rect: Rect,
     pane: PaneId,
     tab: &mut Tab,
+    columns: &Columns,
     widths: &[f32; Column::COUNT],
     out: &mut Vec<Action>,
 ) {
     ui.painter().rect_filled(rect, CornerRadius::ZERO, t.surfaces.header);
-    let edges = column_x(rect, widths);
+    let order = columns.order();
+    let spans = column_x(rect, widths, &order);
+    // The columns on show, left to right, for a header being dragged to land between.
+    let mut shown: Vec<(Column, Rangef)> = Vec::with_capacity(Column::COUNT);
+    // The header under the pointer's drag, and whether this is the frame it was let go.
+    let mut held: Option<(Column, bool)> = None;
 
-    for (index, column) in Column::ALL.into_iter().enumerate() {
+    for column in order {
+        let index = column.index();
         if widths[index] <= 0.0 {
             continue;
         }
-        let cell = Rect::from_min_max(
-            pos2(edges[index], rect.top()),
-            pos2(edges[index + 1], rect.bottom()),
-        );
-        let response = ui.interact(cell, Id::new(("th", pane, index)), Sense::click());
-        if response.hovered() {
+        shown.push((column, spans[index]));
+        let cell = Rect::from_x_y_ranges(spans[index], rect.y_range());
+        let response = ui.interact(cell, Id::new(("th", pane, index)), Sense::click_and_drag());
+        if response.dragged() {
+            ui.painter()
+                .rect_filled(cell, CornerRadius::ZERO, t.bg.control_active);
+        } else if response.hovered() {
             ui.painter()
                 .rect_filled(cell, CornerRadius::ZERO, t.bg.control_hover);
         }
         if response.clicked() {
             out.push(Action::Sort { pane, column });
         }
+        if response.dragged() || response.drag_stopped() {
+            held = Some((column, response.drag_stopped()));
+        }
+        columns_menu(&response, columns, out);
 
         let sorted = tab.sort_by == column;
         let color = if response.hovered() || sorted {
@@ -296,10 +337,18 @@ pub(crate) fn header_strip(
                 }
             }
         }
+    }
 
+    // The grips, **in a second pass, after every cell.** A grip straddles an edge, so half of it is
+    // over the next column's header — and a header can be dragged now, which it could not when it
+    // only took clicks. Interacted after all of them, every grip is on top of both its neighbours,
+    // and a drag that starts on an edge resizes rather than picking the next column up.
+    for &(column, span) in &shown {
+        let index = column.index();
+        let cell = Rect::from_x_y_ranges(span, rect.y_range());
         // The grip on this column's right edge. Not on Name, whose width is whatever
         // the others leave behind.
-        if index > 0 {
+        if column != Column::Name {
             let grip = Rect::from_min_max(
                 pos2(cell.right() - GRIP, rect.top()),
                 pos2(cell.right() + GRIP, rect.bottom()),
@@ -332,6 +381,10 @@ pub(crate) fn header_strip(
         }
     }
 
+    if let Some((from, released)) = held {
+        moving_column(ui, t, rect, &shown, from, released, out);
+    }
+
     // A rule under the header, which is what separates a header strip from the
     // rows in Azur's table.
     //
@@ -350,6 +403,84 @@ pub(crate) fn header_strip(
         CornerRadius::ZERO,
         t.surfaces.separator,
     );
+}
+
+/// Which columns the details view shows, as a list of ticks, on every header.
+///
+/// **Sticky**, like the sidebar's list of groups and for the same reason: these are settings rather
+/// than commands, and taking two columns off should not mean opening the menu twice. Listed in the
+/// order they are drawn in, hidden ones where they would be. **Name is ticked and greyed** — it is
+/// the one column that cannot go, and leaving it out of the list would read as a column this
+/// program does not have.
+fn columns_menu(target: &egui::Response, columns: &Columns, out: &mut Vec<Action>) {
+    ContextMenu::new(target).sticky(true).show(&target.ctx, |ui| {
+        for column in columns.order() {
+            let shown = columns.shown(column);
+            let item = MenuItem::new(column.header()).selected(shown);
+            if column == Column::Name {
+                ui.add_enabled(false, item);
+            } else if ui.add(item).clicked() {
+                out.push(Action::ShowColumn {
+                    column,
+                    shown: !shown,
+                });
+            }
+        }
+        // Only once there is something to undo.
+        if !columns.is_default() {
+            azur_egui_theme::components::menu_divider(ui);
+            if ui.add(MenuItem::new("Reset columns")).clicked() {
+                out.push(Action::ResetColumns);
+                ui.close();
+            }
+        }
+    });
+}
+
+/// A header being dragged: where it would go while it is held, and the move when it is let go.
+///
+/// The accent caret the sidebar draws between groups, stood upright on the edge of a column.
+fn moving_column(
+    ui: &Ui,
+    t: &Theme,
+    strip: Rect,
+    shown: &[(Column, Rangef)],
+    from: Column,
+    released: bool,
+    out: &mut Vec<Action>,
+) {
+    let Some(pointer) = ui.ctx().pointer_interact_pos() else {
+        return;
+    };
+    let Some((to, span, after)) = column_landing(shown, pointer.x) else {
+        return;
+    };
+    if released {
+        if to != from {
+            out.push(Action::MoveColumn { from, to, after });
+        }
+        return;
+    }
+    let x = if after { span.max } else { span.min };
+    // Kept inside the strip, so the caret on its outer edges is not half clipped away.
+    let x = x.clamp(strip.left() + 1.0, strip.right() - 1.0);
+    ui.painter().rect_filled(
+        Rect::from_min_max(pos2(x - 1.0, strip.top()), pos2(x + 1.0, strip.bottom())),
+        CornerRadius::same(radius::CIRCULAR),
+        t.accent.default,
+    );
+    ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+}
+
+/// Which column a dragged header is going beside, where that column is, and whether it goes after
+/// it: the first column the pointer is left of the right edge of, and which half of it. Right of the
+/// last column is after the last column; left of the first is before the first.
+fn column_landing(shown: &[(Column, Rangef)], x: f32) -> Option<(Column, Rangef, bool)> {
+    let &(last, span) = shown.last()?;
+    match shown.iter().find(|(_, span)| x < span.max) {
+        Some(&(column, span)) => Some((column, span, x >= span.center())),
+        None => Some((last, span, true)),
+    }
 }
 
 /// The glyph a [glyph-only](Column::glyph_only) column's header shows: the one its cells show most.

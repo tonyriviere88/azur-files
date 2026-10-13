@@ -1135,6 +1135,23 @@ impl App {
                 self.config_dirty |= self.sections.set_shown(section, shown);
             }
             Action::ResetSectionOrder => self.config_dirty |= self.sections.reset_order(),
+            // The arrangement is the window's, so a move is a setting and nothing else: every pane
+            // lays its columns out from it on the next frame, and no width changes.
+            Action::MoveColumn { from, to, after } => {
+                self.config_dirty |= self.columns.move_beside(from, to, after);
+            }
+            Action::ShowColumn { column, shown } => {
+                if self.columns.set_shown(column, shown) {
+                    self.config_dirty = true;
+                    self.columns_changed();
+                }
+            }
+            Action::ResetColumns => {
+                if self.columns.reset() {
+                    self.config_dirty = true;
+                    self.columns_changed();
+                }
+            }
             Action::ForgetVisit(path) => self.visits.forget(&path),
             Action::AddBookmarkGroup => {
                 // Made and named in one gesture: the `+` is pressed, the group appears at the
