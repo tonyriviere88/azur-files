@@ -79,6 +79,9 @@ pub struct Open {
     /// clipboard. Remembered rather than re-read so that [`Open::arrange`] does not take the
     /// desktop's one clipboard on every right click.
     can_paste: bool,
+    /// The links to the clipboard's files that go under Paste — see
+    /// [`crate::shell::menu::with_our_paste`]. Read with `can_paste`, for the same reason.
+    paste_links: Vec<(crate::shell::links::Make, bool)>,
     /// Whether the selection is exactly two folders, and so gets `Folder diff`. Decided by whoever
     /// raised the menu, from the listing — see [`Open::diffable`].
     diffable: bool,
@@ -161,6 +164,7 @@ impl Open {
             entries,
             handlers: crate::shell::menu::Handlers::new(),
             can_paste: false,
+            paste_links: Vec::new(),
             diffable: false,
             disconnectable: false,
             depth,
@@ -191,10 +195,12 @@ impl Open {
         mut self,
         handlers: crate::shell::menu::Handlers,
         can_paste: bool,
+        paste_links: Vec<(crate::shell::links::Make, bool)>,
         moves: &Moves,
     ) -> Self {
         self.handlers = handlers;
         self.can_paste = can_paste;
+        self.paste_links = paste_links;
         self.arrange(moves);
         self
     }
@@ -234,7 +240,7 @@ impl Open {
         // here — see `App::paste_into_folder` — and a Paste that could never be enabled is an entry
         // saying something false about the folder.
         let entries = if self.items.is_empty() && !crate::fs::recycle::is_bin(&self.folder) {
-            crate::shell::menu::with_our_paste(entries, self.can_paste)
+            crate::shell::menu::with_our_paste(entries, self.can_paste, &self.paste_links)
         } else {
             entries
         };

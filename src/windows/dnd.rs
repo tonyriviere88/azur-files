@@ -253,6 +253,10 @@ pub struct Target {
     /// What the drag in flight is carrying, read between `DragEnter` and `Drop` so the
     /// effect rules can see where it came from.
     held: Mutex<Option<Incoming>>,
+    /// How many links the drag in flight could make in a folder, for the last folder asked about —
+    /// so an Alt-drag says whether it will ask, without [`crate::shell::links::offered`] reading
+    /// every item's attributes on every mouse move. Dropped with [`Self::held`].
+    links: Mutex<Option<(PathBuf, usize)>>,
     /// The window this is registered on, for turning a screen point into a client one.
     /// Held here rather than in `shared` because the callbacks convert points while
     /// holding that lock, and a `Mutex` is not reentrant.
@@ -269,6 +273,7 @@ impl Target {
         Self {
             shared,
             held: Mutex::new(None),
+            links: Mutex::new(None),
             hwnd,
             wake,
         }
@@ -301,6 +306,7 @@ impl Target {
                 all_folders: false,
                 promised: true,
             })),
+            links: Mutex::new(None),
             hwnd: 0,
             wake,
         }
@@ -321,6 +327,7 @@ impl Target {
                 all_folders,
                 promised: false,
             })),
+            links: Mutex::new(None),
             hwnd: 0,
             wake,
         }
@@ -701,6 +708,41 @@ impl Target_Impl {
         permitted(wanted, allowed)
     }
 
+    /// How many links the drag in flight could make in `into` — see [`Self::links`]. `0` for a drag
+    /// that has not named its items yet, which then says *Link to* and decides when it lands.
+    fn links_possible(&self, into: &std::path::Path) -> usize {
+        let Ok(mut known) = self.links.lock() else { return 0 };
+        if let Some((folder, count)) = known.as_ref() {
+            if folder == into {
+                return *count;
+            }
+        }
+        let count = self
+            .held
+            .lock()
+            .ok()
+            .and_then(|held| {
+                let incoming = held.as_ref().filter(|incoming| !incoming.promised)?;
+                Some(
+                    crate::shell::links::offered(&incoming.items, into)
+                        .iter()
+                        .filter(|(_, can)| *can)
+                        .count(),
+                )
+            })
+            .unwrap_or(0);
+        *known = Some((into.to_owned(), count));
+        count
+    }
+
+    /// Drop [`Self::links`] with the drag it was about: whatever one drag could link to says nothing
+    /// about the next.
+    fn forget_links(&self) {
+        if let Ok(mut links) = self.links.lock() {
+            *links = None;
+        }
+    }
+
     /// Work out what to say this drop will do, and publish it for the frame loop to draw.
     ///
     /// The **destination decides the verb, not the effect**: a drop onto the sidebar pins whatever
@@ -734,7 +776,9 @@ impl Target_Impl {
                 // Before the copy, because `permitted` degrades a link the source will not allow
                 // *to* a copy — so by the time this is reached, `LINK` means the source agreed to
                 // it and a shortcut really is what the drop will make.
-                Onto::Folder(_) if would.0 & DROPEFFECT_LINK.0 != 0 => Some(Doing::Link),
+                Onto::Folder(ref into) if would.0 & DROPEFFECT_LINK.0 != 0 => {
+                    Some(if self.links_possible(into) > 1 { Doing::Choose } else { Doing::Link })
+                }
                 Onto::Folder(_) => Some(Doing::Copy),
             },
             _ => None,
@@ -805,6 +849,7 @@ impl IDropTarget_Impl for Target_Impl {
         if let Ok(mut held) = self.held.lock() {
             *held = Some(Incoming::read(data.as_ref()));
         }
+        self.forget_links();
         // SAFETY: OLE always passes a valid out-pointer here. It is read before it is
         // written because on the way in it holds the effects the source allows.
         unsafe {
@@ -832,6 +877,7 @@ impl IDropTarget_Impl for Target_Impl {
         if let Ok(mut held) = self.held.lock() {
             *held = None;
         }
+        self.forget_links();
         if let Ok(mut shared) = self.shared.lock() {
             shared.hovering = None;
             shared.right_button = false;
@@ -872,6 +918,7 @@ impl IDropTarget_Impl for Target_Impl {
         // out of the lock whichever list it held, and **kept only if it was paths**: a promise is a
         // list of relative names, not a fallback. See [`Incoming::promised`].
         let held = self.held.lock().ok().and_then(|mut held| held.take());
+        self.forget_links();
         let promised = held.as_ref().is_some_and(|incoming| incoming.promised);
         let cached = held
             .filter(|incoming| !incoming.promised)

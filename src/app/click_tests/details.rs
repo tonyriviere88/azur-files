@@ -221,6 +221,11 @@ fn every_column_header_is_reachable() {
             assert_eq!(h.tab(0).widths[index], 0.0, "an unsynced folder grew a Status column");
             continue;
         }
+        // And Hard links only where a file has a second name, which none in the harness has.
+        if column == crate::fs::Column::HardLinks {
+            assert_eq!(h.tab(0).widths[index], 0.0, "single names grew a Hard links column");
+            continue;
+        }
         let id = Id::new(("th", h.app.panes[0].id, index));
         let pane = h.pane_rect(0);
         let found = (0..pane.width() as i32)

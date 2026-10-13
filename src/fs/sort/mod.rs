@@ -25,6 +25,10 @@ use super::dir::Dir;
 /// `ui::filelist::measure_columns`, which decides it off [`Dir::synced`] — so every other
 /// folder looks exactly as it did before there was one.
 ///
+/// **Hard links is only there when some file in the folder has more than one name.** The count is
+/// not in the directory read, so it arrives a moment after the listing does — see
+/// [`crate::hardlinks`] — and the column opens when the first count of two or more lands.
+///
 /// **Keywords is only there where a row can have any** — a listing read with file IDs, which is NTFS
 /// and ReFS: see [`Dir::keyed`] and [`crate::fs::keywords`].
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -33,16 +37,18 @@ pub enum Column {
     Name = 0,
     Keywords = 1,
     Status = 2,
-    Size = 3,
-    Type = 4,
-    Modified = 5,
+    HardLinks = 3,
+    Size = 4,
+    Type = 5,
+    Modified = 6,
 }
 
 impl Column {
-    pub const ALL: [Column; 6] = [
+    pub const ALL: [Column; 7] = [
         Self::Name,
         Self::Keywords,
         Self::Status,
+        Self::HardLinks,
         Self::Size,
         Self::Type,
         Self::Modified,
@@ -61,6 +67,7 @@ impl Column {
             Self::Name => "Name",
             Self::Keywords => "Keywords",
             Self::Status => "Status",
+            Self::HardLinks => "Hard links",
             Self::Size => "Size",
             Self::Type => "Type",
             Self::Modified => "Modified",
@@ -78,14 +85,14 @@ impl Column {
 
     /// Right-aligned, because the digits should line up.
     pub fn numeric(self) -> bool {
-        matches!(self, Self::Size)
+        matches!(self, Self::Size | Self::HardLinks)
     }
 
     /// A column of glyphs, whose header is a glyph too, with the word in its tooltip. It is fitted to
     /// the glyph and its padding alone and **never draws a sort arrow** — in a column that narrow the
     /// arrow would be most of the width — so being sorted shows only as the header's ink.
     pub fn glyph_only(self) -> bool {
-        matches!(self, Self::Status)
+        matches!(self, Self::Status | Self::HardLinks)
     }
 
     /// Which way a fresh click on this header should sort.
@@ -104,6 +111,7 @@ impl Column {
             Self::Name => "name",
             Self::Keywords => "keywords",
             Self::Status => "status",
+            Self::HardLinks => "hardlinks",
             Self::Size => "size",
             Self::Type => "type",
             Self::Modified => "modified",
@@ -554,7 +562,8 @@ pub fn sort_order(
 /// `sizes` is what every row's Size cell is *showing*, by entry index — a file's own bytes and a
 /// folder's counted ones — and `Some` only when the listing is being sorted by Size while the folders
 /// are measured. See [`crate::sizes::Measurement::keys`], which resolves it once per row for the same
-/// reason `ranks` is resolved once per row.
+/// reason `ranks` is resolved once per row. **Or, sorted by Hard links, each row's count**, which is
+/// not in the listing either; `0` for a row with one name.
 fn compare(
     dir: &Dir,
     ranks: &[u32],
@@ -606,6 +615,11 @@ fn compare(
             let key = |e: &super::dir::Entry| (e.sync().is_none(), e.sync());
             key(ea).cmp(&key(eb))
         }
+        // Folders have no count and keep their block, so this only ever orders files.
+        Column::HardLinks => match sizes {
+            Some(counts) => counts[a as usize].cmp(&counts[b as usize]),
+            None => Ordering::Equal,
+        },
     };
     let primary = if ascending { primary } else { primary.reverse() };
 

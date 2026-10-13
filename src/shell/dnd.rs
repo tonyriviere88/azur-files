@@ -121,6 +121,10 @@ pub enum Doing {
     Move,
     /// Making a shortcut to each item — the Alt-drag. See [`crate::shell::ops::Job::Link`].
     Link,
+    /// An Alt-drag that will **ask** which link to make, because more than one can be: a menu opens
+    /// on the drop. See [`crate::shell::links::offered`]. Only `Link` is ever said when the shortcut
+    /// is the one link possible, since then the drop makes it without asking.
+    Choose,
     /// Pinning in the sidebar, which is what Explorer calls the same gesture onto Quick access.
     Pin,
     /// Opening each folder in a tab of its own — the drop onto a tab strip. See [`Onto::Tabs`].
@@ -154,6 +158,9 @@ impl Doing {
             // without the word appearing twice, and `in` rather than `into` because what goes
             // into the folder is the shortcut and not the file.
             Self::Link => ("Link to ", "Cannot link to ", " in "),
+            // *Choose a link to one.txt in docs* — the same sentence with the menu it is about to
+            // open in front of it.
+            Self::Choose => ("Choose a link to ", "Cannot link to ", " in "),
             Self::Pin => ("Pin ", "Cannot pin ", " to "),
             // *Open src in a new tab* — and the far end is the only one in this table that is not a
             // name, which is what [`Told::runs`] keeps out of the accent.
@@ -2020,6 +2027,10 @@ mod tests {
     /// | Alt | link | *Link to one.txt in src* |
     /// | Ctrl+Shift | link, the same as Alt | *Link to one.txt in src* |
     ///
+    /// **Or *Choose a link to one.txt in src*** where this process may make a symbolic link: a file
+    /// that is not there has no hard link to offer, so the shortcut is the only other one, and the
+    /// symbolic link is what decides whether the drop will ask. See [`crate::shell::links::offered`].
+    ///
     /// The last row is the one with a trap in it, and it is the same trap `Ctrl+Shift+T` has in
     /// [`crate::app::App::keyboard`]: `Ctrl` alone is *also* true when Shift is down, so a pair
     /// tested after its halves never wins. Ctrl+Shift asked for a plain copy until it was tested
@@ -2074,7 +2085,14 @@ mod tests {
         const ALT: u32 = windows::Win32::System::Ole::MK_ALT;
         let moving = (DROPEFFECT_MOVE, Some("Move one.txt into src".to_owned()));
         let copying = (DROPEFFECT_COPY, Some("Copy one.txt into src".to_owned()));
-        let linking = (DROPEFFECT_LINK, Some("Link to one.txt in src".to_owned()));
+        let linking = (
+            DROPEFFECT_LINK,
+            Some(if crate::shell::links::may_symlink() {
+                "Choose a link to one.txt in src".to_owned()
+            } else {
+                "Link to one.txt in src".to_owned()
+            }),
+        );
 
         assert_eq!(told(0), moving, "the same volume, so the plain drag moves");
         assert_eq!(told(MK_CONTROL.0), copying);

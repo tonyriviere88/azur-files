@@ -775,6 +775,9 @@ fn drag_sign(
         Doing::Move => crate::icons::arrow_right,
         // The badge Windows puts on every shortcut, which is what the drop is about to make.
         Doing::Link => crate::icons::link,
+        // And a chain for the menu of links the drop is about to open, three of which are not
+        // shortcuts — the Hard links column's mark.
+        Doing::Choose => crate::icons::chain,
         Doing::Pin => crate::icons::star,
         Doing::Open => crate::icons::folder_open,
     };

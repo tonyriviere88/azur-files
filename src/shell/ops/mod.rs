@@ -237,13 +237,18 @@ pub enum Job {
     /// the names are checked before any of this is asked for.
     RenameMany { items: Vec<(PathBuf, String)> },
     NewFolder { parent: PathBuf, name: String },
-    /// Make a shortcut in `into` for each item — the Alt-drag, and the right-drag menu's
-    /// *Create shortcuts here*.
+    /// Make a link in `into` for each item — a shortcut, a symbolic link, a hard link or a junction:
+    /// the Alt-drag, the right-drag menu's *Create shortcuts here*, and the *Paste as* entries.
     ///
     /// The one job here that creates something without copying anything, which is why it is not a
-    /// [`Self::Copy`] with a flag. See [`crate::shell::links::shortcuts_into`] for what it makes
-    /// and what the names are measured against.
-    Link { items: Vec<PathBuf>, into: PathBuf },
+    /// [`Self::Copy`] with a flag. See [`crate::shell::links::make_into`] for what it makes and how
+    /// the names are chosen. Undone like anything else that was created: what it made goes to the
+    /// Recycle Bin, and a link there is the link and never what it points at.
+    Link {
+        items: Vec<PathBuf>,
+        into: PathBuf,
+        kind: crate::shell::links::Make,
+    },
 
     // ---- The two that only undo asks for -------------------------------------
     //
@@ -281,8 +286,12 @@ impl Job {
             Self::NewFolder { .. } => "Creating a folder…".to_owned(),
             // Counted in shortcuts rather than in items, because that is what is being made and
             // "a shortcut for 1 item" says the number twice.
-            Self::Link { items, .. } if items.len() == 1 => "Making a shortcut…".to_owned(),
-            Self::Link { items, .. } => format!("Making {} shortcuts…", items.len()),
+            Self::Link { items, kind, .. } if items.len() == 1 => {
+                format!("Making a {}…", kind.noun(false))
+            }
+            Self::Link { items, kind, .. } => {
+                format!("Making {} {}…", items.len(), kind.noun(true))
+            }
             // Both undo jobs say "Putting back", which is what they are from where the user is
             // standing: they pressed Ctrl+Z, and whether the shell is being asked to move a file
             // or to empty one out of the Recycle Bin is not their problem.

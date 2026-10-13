@@ -76,6 +76,9 @@ impl Tab {
         // And for the sync provider, for the same reason.
         self.cloud = Vec::new();
         self.cloud_asked = false;
+        // And for the link counts, which are entry indices into the listing being replaced.
+        self.hard_links = Vec::new();
+        self.hard_links_asked = false;
         self.selected_count = 0;
         self.selected_size = 0;
         self.cursor = None;
@@ -574,6 +577,12 @@ impl Tab {
         self.rebuild_order();
     }
 
+    /// How many names the file at `entry` has, once counted — and `0` for one name, for a folder,
+    /// and for a file not counted yet, all of which the Hard links cell leaves blank.
+    pub fn hard_links_of(&self, entry: usize) -> u32 {
+        self.hard_links.get(entry).copied().unwrap_or(0)
+    }
+
     /// What the Status column says about one entry: the provider's answer where it has given one,
     /// and the entry's own attributes until then. See [`crate::fs::dir::Sync`].
     pub fn sync_of(&self, entry: usize) -> Option<crate::fs::dir::Sync> {
@@ -650,6 +659,12 @@ impl Tab {
         // tree rebuild whatever the column. `fs::sort` still learns nothing about how the totals are
         // stored — these are plain byte counts. See [`crate::sizes::Measurement::keys`].
         let keys = self.sizes.keys(&dir, self.sort_by == Column::Size);
+        // Sorted by Hard links, the counts are those keys instead: not a field of the entry either.
+        let keys = if self.sort_by == Column::HardLinks {
+            Some((0..dir.len()).map(|entry| self.hard_links_of(entry) as u64).collect())
+        } else {
+            keys
+        };
         // Remember what the cursor was pointing at, since its position moves.
         let cursor_entry = self.cursor.and_then(|at| self.order.get(at).copied());
         // The two flatten modes are two orders over one listing, and this is the only place that

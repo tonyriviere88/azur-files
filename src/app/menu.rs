@@ -240,6 +240,15 @@ impl App {
                     let can_paste = asking.items.is_empty()
                         && !fs::is_synthetic(&asking.folder)
                         && crate::shell::clipboard::has_files();
+                    // And which links to those files make sense here, for the *Paste as* entries
+                    // under Paste: read once, with the clipboard, rather than on every rearrangement.
+                    let paste_links = if can_paste {
+                        crate::shell::clipboard::get()
+                            .map(|on| crate::shell::links::offered(&on.items, &asking.folder))
+                            .unwrap_or_default()
+                    } else {
+                        Vec::new()
+                    };
                     // **No Rename on a drive.** The shell's renames the volume label from inside
                     // a view this menu has none of, and ours — see `ours_rather_than_the_shell_s`
                     // — renames the row under the pane's cursor, which from the sidebar is some
@@ -267,7 +276,7 @@ impl App {
                         )
                         .diffable(asking.diffable)
                         .disconnectable(disconnectable)
-                        .banded(handlers, can_paste, &self.menu_moves),
+                        .banded(handlers, can_paste, paste_links, &self.menu_moves),
                     );
                 }
                 Said::Filled { token, id, children } => {
@@ -703,6 +712,18 @@ impl App {
                 },
             },
             Own::Cancel => return None,
+            // An Alt-drag's menu, answered with the link it asked for.
+            Own::MakeLinks(kind) => Action::MakeLinks {
+                pane: menu.pane,
+                items: menu.items.clone(),
+                into: menu.folder.clone(),
+                kind,
+            },
+            // Into the folder the menu was raised in, as [`Own::Paste`] is.
+            Own::PasteLinks(kind) => Action::PasteLinks {
+                into: menu.folder.clone(),
+                kind,
+            },
             // The two in the order the listing shows them, which is the order they were selected in
             // on screen: the upper one on the left.
             Own::FolderDiff => match &menu.items[..] {

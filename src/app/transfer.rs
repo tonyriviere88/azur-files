@@ -127,6 +127,38 @@ impl App {
         self.ops.start_then(job, after, self.owner, ctx);
     }
 
+    /// Link to each file on the clipboard from `into`, as `kind` — *Paste as symbolic link* and the
+    /// rest. The clipboard is left as it is: a cut is not finished by linking to it, because nothing
+    /// has moved.
+    pub(super) fn paste_links_into(
+        &mut self,
+        into: PathBuf,
+        kind: crate::shell::links::Make,
+        ctx: &egui::Context,
+    ) {
+        if fs::is_synthetic(&into) {
+            self.notice = Some(format!(
+                "{} is not a folder to paste into",
+                fs::display_name(&into)
+            ));
+            return;
+        }
+        let Some(pasteable) = crate::shell::clipboard::get() else {
+            self.notice = Some("There are no files on the clipboard".to_owned());
+            return;
+        };
+        self.notice = None;
+        self.ops.start(
+            crate::shell::ops::Job::Link {
+                items: pasteable.items,
+                into,
+                kind,
+            },
+            self.owner,
+            ctx,
+        );
+    }
+
     /// Keep a drag in flight painting, and clear up after it once it has landed.
     ///
     /// The drag runs on its own thread — see [`crate::shell::dnd::Drag`] — and while it does,
@@ -594,7 +626,33 @@ impl App {
         let job = match dropped.effect {
             Effect::Move => Job::Move { items, into },
             Effect::Copy => Job::Copy { items, into },
-            Effect::Link => Job::Link { items, into },
+            // **An Alt-drag asks which link**, unless only one can be made — which is the shortcut
+            // whenever the file system's three do not apply, and then it is made at once, as the
+            // sentence under the pointer already said. See [`crate::shell::links::offered`].
+            Effect::Link => {
+                let offered = crate::shell::links::offered(&items, &into);
+                let possible: Vec<_> =
+                    offered.iter().filter(|(_, can)| *can).map(|(kind, _)| *kind).collect();
+                match possible[..] {
+                    [] => return,
+                    [only] => Job::Link { items, into, kind: only },
+                    _ => {
+                        self.close_menu();
+                        // Built here, as the right-button menu above is: every entry is this
+                        // program's own, so there is nothing to ask the shell.
+                        self.menu = Some(crate::ui::menu::Open::new(
+                            pane,
+                            at,
+                            items,
+                            into,
+                            crate::shell::menu::with_our_links(&offered),
+                            crate::shell::menu::Depth::Full,
+                            0,
+                        ));
+                        return;
+                    }
+                }
+            }
         };
         self.ops.start(job, self.owner, ctx);
     }

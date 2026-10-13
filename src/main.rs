@@ -89,6 +89,7 @@ mod diff;
 mod dock;
 mod fs;
 mod git;
+mod hardlinks;
 mod history;
 mod icons;
 mod loader;
@@ -793,6 +794,7 @@ impl eframe::App for Window {
             || self.app.sizes_pending()
             || self.app.thumbs_pending()
             || self.app.cloud_pending()
+            || self.app.hard_links_pending()
             || self.app.diff_pending()
             // The copy, until its panel is on screen to be photographed.
             || !self.copy.is_empty()

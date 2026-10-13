@@ -135,6 +135,13 @@ pub enum Own {
     /// which is worth keeping: the label is a menu entry rather than a sentence about this drag.
     LinkHere,
     Cancel,
+    /// One of the links an **Alt-drag** offers when it lands — the shortcut [`Own::LinkHere`] makes,
+    /// or one of the file system's three. Only those that apply to what was dropped are offered; see
+    /// [`crate::shell::links::offered`] and [`with_our_links`].
+    MakeLinks(crate::shell::links::Make),
+    /// A link to each file on the clipboard, under this program's Paste on a background menu — the
+    /// same three the Alt-drag offers, without the shortcut. See [`with_our_paste`].
+    PasteLinks(crate::shell::links::Make),
     /// Paste, on a folder's **background** menu — the one gap the shell leaves.
     ///
     /// Every other entry in that menu comes from Windows, and this one has to be ours because
@@ -192,11 +199,20 @@ pub enum Own {
 
 impl Own {
     pub fn label(self) -> &'static str {
+        use crate::shell::links::Make;
         match self {
             Self::CopyHere => "Copy here",
             Self::MoveHere => "Move here",
             Self::LinkHere => "Create shortcuts here",
             Self::Cancel => "Cancel",
+            Self::MakeLinks(Make::Shortcut) => "Create shortcuts here",
+            Self::MakeLinks(Make::Symbolic) => "Create symbolic links here",
+            Self::MakeLinks(Make::Hard) => "Create hard links here",
+            Self::MakeLinks(Make::Junction) => "Create junctions here",
+            Self::PasteLinks(Make::Shortcut) => "Paste as shortcut",
+            Self::PasteLinks(Make::Symbolic) => "Paste as symbolic link",
+            Self::PasteLinks(Make::Hard) => "Paste as hard link",
+            Self::PasteLinks(Make::Junction) => "Paste as junction",
             // English, among a menu Windows has filled in French. Deliberate, and the same
             // choice as the three above: these entries are this program's, and this program's
             // interface is in English throughout — the sidebar says Drives and Bookmarks. What
@@ -518,11 +534,27 @@ impl Entry {
 /// carries an opaque `source` id instead — read the note there. Nothing else in an entry is a
 /// position in this list either: a [`Command::Shell`]'s `id` and `path` are positions in the
 /// shell's own `HMENU`, recorded when it was read and untouched by what is put in front of them.
-pub fn with_our_paste(entries: Vec<Entry>, can_paste: bool) -> Vec<Entry> {
+///
+/// # And the links under it
+///
+/// `links` is what [`crate::shell::links::offered`] said of the clipboard's files and this folder,
+/// less the shortcut: each one that applies, straight under Paste, and the symbolic link greyed with
+/// its reason when this process may not make one. Empty when the clipboard holds no files.
+pub fn with_our_paste(
+    entries: Vec<Entry>,
+    can_paste: bool,
+    links: &[(crate::shell::links::Make, bool)],
+) -> Vec<Entry> {
     let mut paste = Entry::own(Own::Paste);
     paste.enabled = can_paste;
 
     let mut ours = vec![paste];
+    ours.extend(
+        links
+            .iter()
+            .filter(|(kind, _)| *kind != crate::shell::links::Make::Shortcut)
+            .map(|&(kind, enabled)| link_entry(Own::PasteLinks(kind), enabled)),
+    );
     // Only when there is something to be divided from. The shell's background menu is never
     // actually empty, but a separator hanging off the bottom of a menu is the kind of thing that
     // shows up the one time it is.
@@ -531,6 +563,36 @@ pub fn with_our_paste(entries: Vec<Entry>, can_paste: bool) -> Vec<Entry> {
     }
     ours.extend(entries);
     ours
+}
+
+/// The entries an Alt-drag offers when it lands: the shortcut, a divider, and whichever of the file
+/// system's three links apply. `links` is [`crate::shell::links::offered`]'s answer.
+pub fn with_our_links(links: &[(crate::shell::links::Make, bool)]) -> Vec<Entry> {
+    let (shortcut, rest): (Vec<_>, Vec<_>) = links
+        .iter()
+        .partition(|(kind, _)| *kind == crate::shell::links::Make::Shortcut);
+    let entry = |&(kind, enabled): &(crate::shell::links::Make, bool)| {
+        link_entry(Own::MakeLinks(kind), enabled)
+    };
+    let mut entries: Vec<Entry> = shortcut.into_iter().map(entry).collect();
+    if !entries.is_empty() && !rest.is_empty() {
+        entries.push(Entry::separator());
+    }
+    entries.extend(rest.into_iter().map(entry));
+    entries
+}
+
+/// One link entry, greyed when it cannot be made — and, for the symbolic link, which is the one a
+/// missing right stands in the way of, saying so.
+fn link_entry(which: Own, enabled: bool) -> Entry {
+    use crate::shell::links::Make;
+    let mut entry = Entry::own(which);
+    entry.enabled = enabled;
+    let symbolic = matches!(which, Own::MakeLinks(Make::Symbolic) | Own::PasteLinks(Make::Symbolic));
+    if !enabled && symbolic {
+        entry.label = format!("{} (requires admin rights)", entry.label);
+    }
+    entry
 }
 
 /// Where the shell's Properties entry is in a level, if it has one.

@@ -61,8 +61,8 @@ pub(crate) fn run(job: &Job, owner: Owner) -> Ran {
                 }
                 error
             }
-            Job::Link { items, into } => {
-                let (error, made) = crate::shell::links::shortcuts_into(items, into);
+            Job::Link { items, into, kind } => {
+                let (error, made) = crate::shell::links::make_into(*kind, items, into);
                 recorded.with(|outcome| outcome.created = made);
                 error
             }

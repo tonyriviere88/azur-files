@@ -997,6 +997,36 @@ pub fn link(p: &Painter, rect: Rect, color: Color32) {
     arrow(p, rect, color, 0.5);
 }
 
+/// Two links of a chain: the Hard links column's header.
+///
+/// **Not [`link`]**, which is a shortcut — a name that *stands for* somewhere else. A hard link is two
+/// names *joined to* one file, and the chain is what every interface draws for "joined".
+///
+/// Two stadiums on the rising diagonal, each 9 units long and 4.6 across, overlapping by three. Laid
+/// out symmetric about the grid's centre, so the glyph is centred by its ink without a nudge.
+pub fn chain(p: &Painter, rect: Rect, color: Color32) {
+    let g = Grid::new(rect);
+    let stroke = g.stroke(color);
+    // Unit vectors along the diagonal (up and right) and across it.
+    let s = std::f32::consts::FRAC_1_SQRT_2;
+    let (along, across) = ((s, -s), (s, s));
+    let (half, radius) = (2.2, 2.3);
+    for (cx, cy) in [(5.9, 10.1), (10.1, 5.9)] {
+        let mut points = Vec::with_capacity(26);
+        for (end, from) in [(half, -90.0f32), (-half, 90.0)] {
+            for step in 0..=12 {
+                let angle = (from + step as f32 * 15.0).to_radians();
+                let (u, v) = (end + radius * angle.cos(), radius * angle.sin());
+                points.push(g.at(
+                    cx + u * along.0 + v * across.0,
+                    cy + u * along.1 + v * across.1,
+                ));
+            }
+        }
+        closed(p, points, stroke);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Git
 // ---------------------------------------------------------------------------

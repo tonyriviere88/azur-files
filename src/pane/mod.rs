@@ -488,6 +488,15 @@ pub struct Tab {
     pub cloud: Vec<Option<crate::fs::dir::Sync>>,
     /// Whether this view of this folder has asked the provider yet.
     pub cloud_asked: bool,
+    /// How many names each file has, by entry index — `0` for one name or not yet counted. The Hard
+    /// links column's answer; see [`crate::hardlinks`].
+    ///
+    /// **Empty until a file with two names or more is found**, which in most folders is never, so
+    /// the column — and the four bytes per row — exist only where there is something to show. The
+    /// listing's lifetime, like [`Tab::cloud`].
+    pub hard_links: Vec<u32>,
+    /// Whether this view of this folder has asked for the counts yet.
+    pub hard_links_asked: bool,
 
     /// Display order: indices into `dir.entries`, sorted and filtered.
     pub order: Vec<u32>,
@@ -758,9 +767,10 @@ pub struct Tab {
 }
 
 /// Widths for the fitted columns before anything has been measured. Only
-/// visible for the frame between a listing arriving and being drawn — and Keywords and Status
-/// are nothing until then, so a folder that has neither never shows a blank one for that frame.
-const DEFAULT_WIDTHS: [f32; Column::COUNT] = [240.0, 0.0, 0.0, 88.0, 130.0, 132.0];
+/// visible for the frame between a listing arriving and being drawn — and Keywords, Status and
+/// Hard links are nothing until then, so a folder that has none of them never shows a blank one for
+/// that frame.
+const DEFAULT_WIDTHS: [f32; Column::COUNT] = [240.0, 0.0, 0.0, 0.0, 88.0, 130.0, 132.0];
 
 /// What a folder diff's tab is called until both halves have landed and it can name them.
 pub const DIFF_TITLE: &str = "Folder diff";
@@ -862,6 +872,8 @@ impl Tab {
             git_settled_at: None,
             cloud: Vec::new(),
             cloud_asked: false,
+            hard_links: Vec::new(),
+            hard_links_asked: false,
             order: Vec::new(),
             order_gen: next_order_gen(),
             tree: Vec::new(),

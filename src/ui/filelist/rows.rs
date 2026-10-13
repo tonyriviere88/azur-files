@@ -1000,6 +1000,34 @@ pub(crate) fn rows(
                 }
             }
 
+            // ---- Hard links ----
+            //
+            // Only a folder with some file of two names or more has the column. The count, in the
+            // metadata ink, right-aligned like Size; one name is a blank cell, as is a folder.
+            if widths[Column::HardLinks.index()] > 0.0 {
+                let count = tab.hard_links_of(entry_index);
+                if count > 1 {
+                    use std::fmt::Write as _;
+                    let cell = cell_of(Column::HardLinks, meta_row);
+                    scratch.clear();
+                    let _ = write!(scratch, "{count}");
+                    let galley = truncated(
+                        ui.painter(),
+                        scratch,
+                        meta_font.clone(),
+                        meta_color,
+                        cell.width(),
+                    );
+                    if inked {
+                        ink.push(Rect::from_min_max(
+                            pos2((cell.right() - galley.size().x).max(cell.left()), row.top()),
+                            pos2(cell.right(), row.bottom()),
+                        ));
+                    }
+                    text_right(ui.painter(), cell, galley);
+                }
+            }
+
             // ---- Size ----
             //
             // A file's own bytes, as ever — and, while the status line's measure button is on, a
@@ -1544,11 +1572,29 @@ pub(crate) fn row_tooltip(
     // Whatever has already been resolved for the Name column — nothing is read here, so a tooltip
     // never costs a `.lnk` read, and a row hovered before its answer landed simply has no `Target`
     // line for the frame or two that takes. The grid never asks, so there it has none at all.
-    if let Some(target) = tab
-        .links
-        .get(&(entry_index as u32))
-        .and_then(|target| target.as_ref())
-    {
+    let target = tab.links.get(&(entry_index as u32)).and_then(|target| target.as_ref());
+
+    // **What kind of link the row is**, which the row itself only shows as a dimmed target: a
+    // shortcut, a symbolic link, a junction or a mount point — and a file with more than one name.
+    // A `.lnk` is a shortcut by its name alone, before its target is read; a reparse point says which
+    // kind with its target, so it has no line until that has landed.
+    let count = tab.hard_links_of(entry_index);
+    let kind = match crate::shell::links::kind_of(dir.ext(entry_index), entry.is_link()) {
+        Some(crate::shell::links::Kind::Shortcut) => Some("Shortcut"),
+        Some(crate::shell::links::Kind::Reparse) => target.map(|target| target.what),
+        None => None,
+    };
+    let hard = (count > 1).then(|| format!("Hard link, one of {count} names"));
+    match (kind, hard) {
+        (Some(kind), Some(hard)) => {
+            about.push(("Link", format!("{kind}; {}", hard.to_lowercase())))
+        }
+        (Some(kind), None) => about.push(("Link", kind.to_owned())),
+        (None, Some(hard)) => about.push(("Link", hard)),
+        (None, None) => {}
+    }
+
+    if let Some(target) = target {
         about.push(("Target", target.path.clone()));
         if !target.arguments.is_empty() {
             about.push(("Arguments", target.arguments.clone()));
@@ -1603,6 +1649,16 @@ pub(crate) fn row_tooltip(
     // out of.
     if let Some(state) = tab.sync_of(entry_index) {
         about.push(("Status", state.describe().to_owned()));
+    }
+    // **Every name the file has**, the row's own among them, which is what the Hard links count is a
+    // count of. Last, because it is the one entry here that can run to many lines. Read here, for the
+    // one row under the pointer — see [`crate::hardlinks::names_of`].
+    if count > 1 {
+        let names =
+            crate::hardlinks::names_of(tab.view, entry_index as u32, &dir.target(entry_index));
+        if !names.is_empty() {
+            about.push(("Hard links", names.join("\n")));
+        }
     }
     Some(about)
 }

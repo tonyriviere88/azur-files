@@ -131,6 +131,7 @@ impl Tab {
         self.file_icons = Vec::new();
         self.file_icons.shrink_to_fit();
         self.links = std::collections::HashMap::new();
+        self.hard_links = Vec::new();
         // The measurement goes with the folder it was about — a fresh generation inside `forget`
         // rather than waiting for the next listing to land, so the walks under way are abandoned on
         // this frame instead of at whatever point the new folder arrives. See

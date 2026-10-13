@@ -496,6 +496,11 @@ impl App {
         self.cloud.pending()
     }
 
+    /// The same, for the link counts, so a shot of a folder of hard links shows its column.
+    pub fn hard_links_pending(&self) -> bool {
+        self.hard_links.pending()
+    }
+
     /// Whether a capture should keep waiting for the console: a shell still to start, or a command
     /// still to answer.
     ///

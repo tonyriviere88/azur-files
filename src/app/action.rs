@@ -207,6 +207,13 @@ pub enum Action {
     CutItems(Vec<PathBuf>),
     CopyItems(Vec<PathBuf>),
     PasteIntoFolder(PathBuf),
+    /// Link to what is on the clipboard rather than paste it: the context menu's *Paste as symbolic
+    /// link*, *Paste as hard link* and *Paste as junction*. A cut on the clipboard is linked to as it
+    /// is and stays on the clipboard, since nothing has moved.
+    PasteLinks {
+        into: PathBuf,
+        kind: crate::shell::links::Make,
+    },
     /// `permanent` is Shift+Delete; otherwise it goes to the Recycle Bin.
     Delete { pane: PaneId, permanent: bool },
     /// Take back the last file operation this window performed, or do the last undone one again.
@@ -239,6 +246,14 @@ pub enum Action {
         items: Vec<PathBuf>,
         into: PathBuf,
         effect: crate::shell::clipboard::Effect,
+    },
+    /// An Alt-drag, answered: one of the links its menu offered. See
+    /// [`crate::shell::links::offered`].
+    MakeLinks {
+        pane: PaneId,
+        items: Vec<PathBuf>,
+        into: PathBuf,
+        kind: crate::shell::links::Make,
     },
     /// Show the shell context menu for these items at this screen position.
     ///
@@ -416,6 +431,7 @@ impl Action {
             Self::CutItems(_) => "CutItems",
             Self::CopyItems(_) => "CopyItems",
             Self::PasteIntoFolder(_) => "PasteIntoFolder",
+            Self::PasteLinks { .. } => "PasteLinks",
             Self::Delete { .. } => "Delete",
             // Named apart, because a test that drives Ctrl+Z and Ctrl+Y wants to see which
             // arrived and the journal is the only place it can.
@@ -432,6 +448,7 @@ impl Action {
             Self::DriveMenu { .. } => "DriveMenu",
             Self::DragOut { .. } => "DragOut",
             Self::DropHere { .. } => "DropHere",
+            Self::MakeLinks { .. } => "MakeLinks",
             Self::Open(_) => "Open",
             Self::OpenNewTab(_) => "OpenNewTab",
             Self::Reveal(_) => "Reveal",

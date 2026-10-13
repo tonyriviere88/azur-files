@@ -815,6 +815,7 @@ fn shortcuts_from_a_drop_can_be_undone() {
         Job::Link {
             items: vec![one.clone(), two.clone()],
             into: into.clone(),
+            kind: crate::shell::links::Make::Shortcut,
         },
         Owner::default(),
         &ctx,
@@ -881,6 +882,117 @@ fn shortcuts_from_a_drop_can_be_undone() {
         into.display()
     );
 
+    crate::sandbox::remove(&root);
+}
+
+/// **A junction and a hard link, and Ctrl+Z after each — which must take the link and never what
+/// it leads to.**
+///
+/// The undo of anything created is a recycle through `IFileOperation`, and the shell recycling a
+/// junction *as a folder* would empty the folder it points at into the bin. So this is the test
+/// that it does not: the target's file is still there after the junction has gone, and the original
+/// name of a hard-linked file still holds its bytes after the second name has gone.
+#[test]
+#[cfg(windows)]
+fn links_from_a_drop_are_undone_as_links() {
+    use crate::shell::links::Make;
+    use crate::shell::ops::history::History;
+
+    let _serialised = crate::shell::serialised();
+    crate::shell::init();
+    let _for_real = for_real();
+
+    let ctx = egui::Context::default();
+    let root = sandbox("link-kinds-undo");
+    let into = root.join("into");
+    let folder = root.join("folder");
+    std::fs::create_dir_all(&into).expect("sandbox");
+    std::fs::create_dir_all(&folder).expect("sandbox");
+    let inside = folder.join("inside.txt");
+    let file = root.join("file.txt");
+    std::fs::write(&inside, b"inside").expect("write");
+    std::fs::write(&file, b"file").expect("write");
+
+    let mut ops = Operations::new();
+    let mut history = History::default();
+    let settle = |ops: &mut Operations, history: &mut History| {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut arrived: Vec<Done> = Vec::new();
+        while std::time::Instant::now() < deadline {
+            for done in ops.drain() {
+                history.record(done.clone());
+                arrived.push(done);
+            }
+            if ops.in_progress().is_none() {
+                break;
+            }
+            std::thread::yield_now();
+        }
+        arrived
+    };
+
+    let mut recycled = Vec::new();
+    for (kind, item, made) in [
+        (Make::Junction, &folder, into.join("folder")),
+        (Make::Hard, &file, into.join("file.txt")),
+    ] {
+        ops.start(
+            Job::Link {
+                items: vec![item.clone()],
+                into: into.clone(),
+                kind,
+            },
+            Owner::default(),
+            &ctx,
+        );
+        let arrived = settle(&mut ops, &mut history);
+        assert_eq!(arrived.len(), 1, "the {kind:?} job never reported back");
+        assert_eq!(arrived[0].error, None, "the {kind:?} was refused");
+        assert_eq!(
+            arrived[0].outcome.created,
+            std::slice::from_ref(&made),
+            "a {kind:?} has to be reported"
+        );
+        let meta = std::fs::symlink_metadata(&made).expect("the link is there");
+        match kind {
+            Make::Junction => {
+                assert!(meta.file_type().is_symlink() || meta.is_dir(), "not a junction");
+                assert_eq!(std::fs::read(made.join("inside.txt")).unwrap(), b"inside");
+            }
+            _ => assert_eq!(std::fs::read(&made).unwrap(), b"file"),
+        }
+
+        // ---- Ctrl+Z ----
+        let back = history.undo().expect("an undo job");
+        assert!(matches!(&back, Job::Delete { to_bin: true, .. }), "{back:?}");
+        ops.start_then(back, After::Settle, Owner::default(), &ctx);
+        let arrived = settle(&mut ops, &mut history);
+        assert_eq!(arrived.len(), 1, "the undo never reported back");
+        assert_eq!(arrived[0].error, None, "the undo was refused");
+        assert!(std::fs::symlink_metadata(&made).is_err(), "Ctrl+Z left the {kind:?} behind");
+        recycled.extend(arrived[0].outcome.recycled.clone());
+    }
+    assert_eq!(
+        std::fs::read(&inside).ok().as_deref(),
+        Some(&b"inside"[..]),
+        "recycling the junction took what it pointed at"
+    );
+    assert_eq!(
+        std::fs::read(&file).ok().as_deref(),
+        Some(&b"file"[..]),
+        "recycling the second name took the file"
+    );
+
+    // ---- And out of the bin, so nothing of this is left in it ----
+    assert_eq!(recycled.len(), 2, "the recycles did not say what went to the bin");
+    assert_eq!(run_now(Job::Restore { items: recycled }), None);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let back = || {
+        std::fs::symlink_metadata(into.join("folder")).is_ok() && into.join("file.txt").exists()
+    };
+    while !back() && std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
     crate::sandbox::remove(&root);
 }
 
@@ -1268,7 +1380,8 @@ fn descriptions_count_and_name_the_operation() {
     assert_eq!(
         Job::Link {
             items: vec![PathBuf::from("x")],
-            into: PathBuf::from("z")
+            into: PathBuf::from("z"),
+            kind: crate::shell::links::Make::Shortcut,
         }
         .describe(),
         "Making a shortcut…"
@@ -1276,7 +1389,8 @@ fn descriptions_count_and_name_the_operation() {
     assert_eq!(
         Job::Link {
             items: vec![PathBuf::from("x"), PathBuf::from("y")],
-            into: PathBuf::from("z")
+            into: PathBuf::from("z"),
+            kind: crate::shell::links::Make::Shortcut,
         }
         .describe(),
         "Making 2 shortcuts…"

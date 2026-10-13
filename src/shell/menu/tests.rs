@@ -1240,7 +1240,7 @@ fn probe_banding() {
         let handlers = super::handlers_of(&entries);
         eprintln!("  (the shell gave {} rows)", entries.len());
         let banded = super::regroup(entries, &handlers, &Moves::default());
-        let with_paste = with_our_paste(banded, false);
+        let with_paste = with_our_paste(banded, false, &[]);
         show_banded(&with_our_copy_paths(with_paste));
     }
     crate::sandbox::remove(&scratch_dir);
@@ -2066,7 +2066,7 @@ fn the_background_menu_gets_this_program_s_paste() {
         ]
     };
 
-    let with = with_our_paste(shell_entries(), true);
+    let with = with_our_paste(shell_entries(), true, &[]);
     assert!(
         matches!(with[0].kind, Kind::Command(Command::Own(Own::Paste))),
         "Paste is not the first entry of the background menu"
@@ -2087,7 +2087,7 @@ fn the_background_menu_gets_this_program_s_paste() {
     assert_eq!(with[2].kind.unasked(), Some(7));
 
     // Nothing to paste greys it rather than removing it.
-    let empty = with_our_paste(shell_entries(), false);
+    let empty = with_our_paste(shell_entries(), false, &[]);
     assert!(
         matches!(empty[0].kind, Kind::Command(Command::Own(Own::Paste))),
         "Paste disappeared when the clipboard was empty"
@@ -2095,7 +2095,7 @@ fn the_background_menu_gets_this_program_s_paste() {
     assert!(!empty[0].enabled, "Paste was offered with nothing to paste");
 
     // And no separator dangling off a menu the shell gave nothing for.
-    let alone = with_our_paste(Vec::new(), true);
+    let alone = with_our_paste(Vec::new(), true, &[]);
     assert_eq!(alone.len(), 1, "a separator with nothing under it");
 }
 

@@ -99,3 +99,236 @@ pub(super) fn write_shortcut(at: &Path, target: &Path, arguments: &str) -> bool 
     }
 }
 
+
+/// Whether this process may make a symbolic link. See [`super::may_symlink`].
+///
+/// **Two ways, and either will do.** The privilege is what `CreateSymbolicLinkW` checks, and it is in
+/// the token of an elevated administrator and of nobody else by default — an administrator's
+/// *unelevated* token has it filtered out. Developer Mode is the other: with it on,
+/// `SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE` (which `std` passes on every call) lets a standard
+/// token make one. Read from the registry key the Settings page writes, because there is no API.
+#[cfg(windows)]
+pub(super) fn may_symlink() -> bool {
+    holds_symlink_privilege() || developer_mode()
+}
+
+#[cfg(windows)]
+fn holds_symlink_privilege() -> bool {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LUID};
+    use windows_sys::Win32::Security::{
+        GetTokenInformation, LookupPrivilegeValueW, TokenPrivileges,
+        TOKEN_PRIVILEGES, TOKEN_QUERY,
+    };
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+    let name: Vec<u16> = "SeCreateSymbolicLinkPrivilege".encode_utf16().chain(Some(0)).collect();
+    let mut wanted = LUID { LowPart: 0, HighPart: 0 };
+    // SAFETY: a NUL-terminated name and a local to write the LUID into.
+    if unsafe { LookupPrivilegeValueW(std::ptr::null(), name.as_ptr(), &mut wanted) } == 0 {
+        return false;
+    }
+    let mut token: HANDLE = std::ptr::null_mut();
+    // SAFETY: the pseudo-handle needs no closing; the token does, below.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
+        return false;
+    }
+    let mut needed = 0u32;
+    // SAFETY: asking for the size first, with no buffer.
+    unsafe { GetTokenInformation(token, TokenPrivileges, std::ptr::null_mut(), 0, &mut needed) };
+    // `u64`s, so the buffer is aligned for the `LUID_AND_ATTRIBUTES` inside it.
+    let mut buffer = vec![0u64; (needed as usize).div_ceil(8).max(1)];
+    // SAFETY: the buffer is at least `needed` bytes.
+    let ok = unsafe {
+        GetTokenInformation(
+            token,
+            TokenPrivileges,
+            buffer.as_mut_ptr().cast(),
+            (buffer.len() * 8) as u32,
+            &mut needed,
+        )
+    } != 0;
+    // SAFETY: opened above, closed once.
+    unsafe { CloseHandle(token) };
+    if !ok {
+        return false;
+    }
+    // SAFETY: the call filled the buffer with a `TOKEN_PRIVILEGES` and its trailing array, whose
+    // length is the count it starts with.
+    let privileges = unsafe {
+        let head = &*(buffer.as_ptr() as *const TOKEN_PRIVILEGES);
+        std::slice::from_raw_parts(
+            head.Privileges.as_ptr(),
+            head.PrivilegeCount as usize,
+        )
+    };
+    // Present in the token is enough: `CreateSymbolicLinkW` enables it itself.
+    privileges
+        .iter()
+        .any(|p| p.Luid.LowPart == wanted.LowPart && p.Luid.HighPart == wanted.HighPart)
+}
+
+#[cfg(windows)]
+fn developer_mode() -> bool {
+    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD};
+    let key: Vec<u16> = r"SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock"
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    let value: Vec<u16> =
+        "AllowDevelopmentWithoutDevLicense".encode_utf16().chain(Some(0)).collect();
+    let mut data = 0u32;
+    let mut size = 4u32;
+    // SAFETY: NUL-terminated names, and a DWORD-sized local for a DWORD value.
+    let status = unsafe {
+        RegGetValueW(
+            HKEY_LOCAL_MACHINE,
+            key.as_ptr(),
+            value.as_ptr(),
+            RRF_RT_REG_DWORD,
+            std::ptr::null_mut(),
+            (&mut data as *mut u32).cast(),
+            &mut size,
+        )
+    };
+    status == 0 && data != 0
+}
+
+/// The file system's name for the volume at `root` — `NTFS`, `ReFS`, `FAT32` — or `None`.
+#[cfg(windows)]
+pub(super) fn file_system(root: &Path) -> Option<String> {
+    use windows_sys::Win32::Storage::FileSystem::GetVolumeInformationW;
+    let mut wide = crate::shell::wide(root);
+    // `C:` is the current directory on C:, not its root; the call wants the slash.
+    if wide.len() >= 2 && wide[wide.len() - 2] != u16::from(b'\\') {
+        wide.insert(wide.len() - 1, u16::from(b'\\'));
+    }
+    let mut name = [0u16; 64];
+    // SAFETY: a NUL-terminated root and a buffer as long as said; nothing else is asked for.
+    let ok = unsafe {
+        GetVolumeInformationW(
+            wide.as_ptr(),
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            name.as_mut_ptr(),
+            name.len() as u32,
+        )
+    } != 0;
+    let len = name.iter().position(|&unit| unit == 0).unwrap_or(0);
+    ok.then(|| String::from_utf16_lossy(&name[..len]))
+}
+
+/// Make `at` a junction to the folder `target`: an empty folder carrying a mount-point reparse buffer.
+///
+/// What `mklink /J` does — there is no API for it. The buffer holds the target twice, as the
+/// substitute name the file system follows (`\??\C:\target`) and as the print name a listing shows
+/// (`C:\target`). Removed again if the reparse data does not take, because an empty folder where a
+/// link should be is worse than nothing.
+#[cfg(windows)]
+pub(super) fn junction(at: &Path, target: &Path) -> Result<(), String> {
+    use std::ffi::c_void;
+    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateDirectoryW, CreateFileW, RemoveDirectoryW, FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_FLAG_OPEN_REPARSE_POINT, OPEN_EXISTING,
+    };
+    use windows::Win32::System::IO::DeviceIoControl;
+
+    const FSCTL_SET_REPARSE_POINT: u32 = 0x0009_00A4;
+    const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+    let words = |code: u32| std::io::Error::from_raw_os_error(code as i32).to_string();
+
+    // The target as a plain absolute path: no `\\?\`, which is the substitute name's job to add.
+    let text = target.to_string_lossy();
+    let print = text.strip_prefix(r"\\?\").unwrap_or(&text).trim_end_matches('\\');
+    if !print.as_bytes().get(1).is_some_and(|&c| c == b':') {
+        return Err("a junction can only lead to a folder on a local drive".to_owned());
+    }
+    let substitute: Vec<u16> = format!(r"\??\{print}").encode_utf16().collect();
+    let print: Vec<u16> = print.encode_utf16().collect();
+
+    // REPARSE_DATA_BUFFER: tag, data length, reserved; then the mount point's four offsets and
+    // lengths, in bytes; then both names, each NUL-terminated.
+    let names = (substitute.len() + 1 + print.len() + 1) * 2;
+    let data_length = 8 + names;
+    let mut buffer: Vec<u8> = Vec::with_capacity(8 + data_length);
+    buffer.extend_from_slice(&IO_REPARSE_TAG_MOUNT_POINT.to_le_bytes());
+    buffer.extend_from_slice(&(data_length as u16).to_le_bytes());
+    buffer.extend_from_slice(&0u16.to_le_bytes());
+    buffer.extend_from_slice(&0u16.to_le_bytes());
+    buffer.extend_from_slice(&((substitute.len() * 2) as u16).to_le_bytes());
+    buffer.extend_from_slice(&(((substitute.len() + 1) * 2) as u16).to_le_bytes());
+    buffer.extend_from_slice(&((print.len() * 2) as u16).to_le_bytes());
+    for unit in substitute.iter().chain(&[0]).chain(&print).chain(&[0]) {
+        buffer.extend_from_slice(&unit.to_le_bytes());
+    }
+
+    let wide = crate::shell::wide(at);
+    // SAFETY: a NUL-terminated path and no security attributes.
+    if unsafe { CreateDirectoryW(wide.as_ptr(), std::ptr::null()) } == 0 {
+        return Err(words(unsafe { GetLastError() }));
+    }
+    // SAFETY: as above; opened as itself, for writing its reparse data.
+    let folder = unsafe {
+        CreateFileW(
+            wide.as_ptr(),
+            GENERIC_WRITE,
+            0,
+            std::ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT,
+            std::ptr::null_mut(),
+        )
+    };
+    let written = if folder == INVALID_HANDLE_VALUE {
+        Err(words(unsafe { GetLastError() }))
+    } else {
+        // SAFETY: an open handle; the buffer is as long as said and outlives the call.
+        let result = unsafe {
+            DeviceIoControl(
+                windows::Win32::Foundation::HANDLE(folder),
+                FSCTL_SET_REPARSE_POINT,
+                Some(buffer.as_ptr() as *const c_void),
+                buffer.len() as u32,
+                None,
+                0,
+                None,
+                None,
+            )
+        }
+        .map_err(|e| e.message());
+        // SAFETY: opened above, closed once.
+        unsafe { CloseHandle(folder) };
+        result
+    };
+    if written.is_err() {
+        // SAFETY: the folder made above, still empty.
+        unsafe { RemoveDirectoryW(wide.as_ptr()) };
+    }
+    written
+}
+
+/// The reparse tag of the reparse point at `path`, which tells a junction from a symbolic link.
+///
+/// From the find data, whose `dwReserved0` carries the tag for a reparse point — the same field the
+/// listing reads it from. One directory read of one name, and nothing is followed.
+#[cfg(windows)]
+pub(super) fn reparse_tag(path: &Path) -> Option<u32> {
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FindClose, FindFirstFileW, FILE_ATTRIBUTE_REPARSE_POINT, WIN32_FIND_DATAW,
+    };
+    let wide = crate::shell::wide(path);
+    // SAFETY: a NUL-terminated path, and a local for the call to fill.
+    let mut found: WIN32_FIND_DATAW = unsafe { std::mem::zeroed() };
+    let find = unsafe { FindFirstFileW(wide.as_ptr(), &mut found) };
+    if find == INVALID_HANDLE_VALUE {
+        return None;
+    }
+    // SAFETY: opened above, closed once.
+    unsafe { FindClose(find) };
+    (found.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0).then_some(found.dwReserved0)
+}

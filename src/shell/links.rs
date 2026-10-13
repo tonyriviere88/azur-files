@@ -55,6 +55,10 @@ pub struct Target {
     pub path: String,
     /// The command line the target is run with, empty when there is none.
     pub arguments: String,
+    /// What kind of link this is, as the tooltip names it: `Shortcut`, `Symbolic link`, `Junction`
+    /// or `Mount point`. Read with the target, from the reparse tag, because the listing only knows
+    /// that a row is a reparse point and not which kind.
+    pub what: &'static str,
 }
 
 impl Target {
@@ -261,6 +265,7 @@ fn shortcut_target(path: &Path) -> Option<Target> {
     read_shortcut(path).map(|link| Target {
         path: link.target,
         arguments: link.arguments,
+        what: "Shortcut",
     })
 }
 
@@ -310,14 +315,28 @@ fn reparse_target(path: &Path) -> Option<Target> {
     let text = target.to_string_lossy();
     // A junction stores `\\?\C:\…`. The prefix is there to get the path past the Win32 parser
     // and means nothing to a person reading a row.
+    let shown = text
+        .strip_prefix(r"\\?\")
+        .unwrap_or(&text)
+        .trim_end_matches('\\')
+        .to_owned();
+    // `IO_REPARSE_TAG_MOUNT_POINT` is a junction, unless what it names is a volume rather than a
+    // folder — which is a mount point, the same tag put to a different use.
+    const MOUNT_POINT: u32 = 0xA000_0003;
+    #[cfg(windows)]
+    let tag = win::reparse_tag(path);
+    #[cfg(not(windows))]
+    let tag: Option<u32> = None;
+    let what = match tag {
+        Some(MOUNT_POINT) if shown.starts_with("Volume{") => "Mount point",
+        Some(MOUNT_POINT) => "Junction",
+        _ => "Symbolic link",
+    };
     Some(Target {
-        path: text
-            .strip_prefix(r"\\?\")
-            .unwrap_or(&text)
-            .trim_end_matches('\\')
-            .to_owned(),
+        path: shown,
         // Nothing is run: a reparse point is a place, not a command.
         arguments: String::new(),
+        what,
     })
 }
 
@@ -402,6 +421,209 @@ pub fn shortcuts_into(items: &[PathBuf], into: &Path) -> (Option<String>, Vec<Pa
     (error, made)
 }
 
+/// Which kind of link a link drop or a link paste makes.
+///
+/// A [`Self::Shortcut`] is the shell's own: a `.lnk` file whose target is in its contents. The other
+/// three are the file system's, and each is a different promise:
+///
+/// | | what it is | of | where |
+/// | --- | --- | --- | --- |
+/// | **symbolic** | a reparse point naming a path | files and folders | anywhere, a share included |
+/// | **hard** | a second name for the same file record | files only | the same volume |
+/// | **junction** | a reparse point naming a local folder | folders only | local volumes |
+///
+/// A symbolic link needs a right a standard user does not hold: administrator, or Developer Mode
+/// switched on. See [`may_symlink`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Make {
+    Shortcut,
+    Symbolic,
+    Hard,
+    Junction,
+}
+
+impl Make {
+    /// What one of them is called, and many.
+    pub fn noun(self, many: bool) -> &'static str {
+        match (self, many) {
+            (Self::Shortcut, false) => "shortcut",
+            (Self::Shortcut, true) => "shortcuts",
+            (Self::Symbolic, false) => "symbolic link",
+            (Self::Symbolic, true) => "symbolic links",
+            (Self::Hard, false) => "hard link",
+            (Self::Hard, true) => "hard links",
+            (Self::Junction, false) => "junction",
+            (Self::Junction, true) => "junctions",
+        }
+    }
+}
+
+/// Which of the four links `items` can be given in `into`, each with whether it can be made *now*.
+///
+/// **Shown is not the same as possible**, and the one that differs is [`Make::Symbolic`]: it applies
+/// to anything, so it is always offered, and greyed when this process may not make one — a menu
+/// that silently lacks it reads as a program that cannot make symlinks rather than one that has not
+/// been allowed to. A hard link and a junction are left out where they cannot apply at all.
+///
+/// Asked once per menu and once per drag over a folder, so the cheap tests go first: nothing is asked
+/// of a file on a share, and a path on another drive than `into` is never a hard link. What is left
+/// is one attribute read per item, on a local volume.
+pub fn offered(items: &[PathBuf], into: &Path) -> Vec<(Make, bool)> {
+    let mut offered = Vec::with_capacity(4);
+    if items.is_empty() {
+        return offered;
+    }
+    // A drive root has no name to give its link.
+    if items.iter().all(|item| item.file_name().is_some()) {
+        offered.push((Make::Shortcut, true));
+        offered.push((Make::Symbolic, may_symlink()));
+    } else {
+        return offered;
+    }
+    if crate::shell::over_network(into) || !keeps_links(into) {
+        return offered;
+    }
+    let is_dir = |item: &Path| std::fs::metadata(item).ok().map(|meta| meta.is_dir());
+    let root = |path: &Path| path.components().next().map(|c| c.as_os_str().to_ascii_lowercase());
+    if items.iter().all(|item| root(item) == root(into) && is_dir(item) == Some(false)) {
+        offered.push((Make::Hard, true));
+    }
+    if items
+        .iter()
+        .all(|item| !crate::shell::over_network(item) && is_dir(item) == Some(true))
+    {
+        offered.push((Make::Junction, true));
+    }
+    offered
+}
+
+/// Whether this process may make a symbolic link: it holds `SeCreateSymbolicLinkPrivilege`, which
+/// an elevated administrator does, or Developer Mode is on, which lets anybody make one. Asked once
+/// per run.
+pub fn may_symlink() -> bool {
+    #[cfg(windows)]
+    {
+        static MAY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *MAY.get_or_init(win::may_symlink)
+    }
+    #[cfg(not(windows))]
+    {
+        true
+    }
+}
+
+/// Whether the volume `into` is on keeps hard links and junctions: NTFS, or ReFS. Asked once per
+/// drive and remembered, like [`crate::shell::over_network`].
+fn keeps_links(into: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        use std::collections::HashMap;
+        use std::sync::Mutex;
+        let Some(root) = into.ancestors().last().filter(|r| !r.as_os_str().is_empty()) else {
+            return false;
+        };
+        static KNOWN: Mutex<Option<HashMap<PathBuf, bool>>> = Mutex::new(None);
+        let mut known = KNOWN.lock().unwrap_or_else(|e| e.into_inner());
+        let known = known.get_or_insert_with(HashMap::new);
+        *known
+            .entry(root.to_owned())
+            .or_insert_with(|| matches!(win::file_system(root).as_deref(), Some("NTFS" | "ReFS")))
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = into;
+        false
+    }
+}
+
+/// Make a `kind` link in `into` for each of `items`, and say where each one landed.
+///
+/// What [`crate::shell::ops::Job::Link`] runs, on the operation's own thread. A shortcut is
+/// [`shortcuts_into`]; the other three are named after what they point at, **the same name**, since
+/// a link is that thing reached from somewhere else — and take ` (2)` before the extension, counting
+/// up, where the name is taken.
+///
+/// A symbolic link and a junction store `item` as given, which is absolute: a link that survives
+/// being moved is a relative one, and the place to choose that is a command line.
+pub fn make_into(kind: Make, items: &[PathBuf], into: &Path) -> (Option<String>, Vec<PathBuf>) {
+    if kind == Make::Shortcut {
+        return shortcuts_into(items, into);
+    }
+    let mut made = Vec::new();
+    let mut last = None;
+    for item in items {
+        let Some(at) = item.file_name().and_then(|name| free_link_name(into, Path::new(name)))
+        else {
+            last = Some("no name is free for it".to_owned());
+            continue;
+        };
+        match make_one(kind, item, &at) {
+            Ok(()) => made.push(at),
+            Err(why) => last = Some(why),
+        }
+    }
+    let refused = items.len() - made.len();
+    // Why the last one failed, because a hard link refused across volumes or a symlink refused for
+    // want of the right is the one thing the user can do something about.
+    let why = last
+        .map(|why| format!(": {}", why.trim_end_matches(['\r', '\n', '.'])))
+        .unwrap_or_default();
+    let error = match (refused, made.is_empty()) {
+        (0, _) => None,
+        (_, true) => Some(format!("Could not make the {}{why}", kind.noun(items.len() > 1))),
+        (n, false) => Some(format!(
+            "{n} of {} {} could not be made{why}",
+            items.len(),
+            kind.noun(true)
+        )),
+    };
+    (error, made)
+}
+
+/// One link, as itself. `Err` carries the system's own words.
+fn make_one(kind: Make, item: &Path, at: &Path) -> Result<(), String> {
+    #[cfg(windows)]
+    {
+        let words = |e: std::io::Error| e.to_string();
+        match kind {
+            Make::Shortcut if write_shortcut(at, item, "") => Ok(()),
+            Make::Shortcut => Err("the shell refused".to_owned()),
+            Make::Symbolic if item.is_dir() => {
+                std::os::windows::fs::symlink_dir(item, at).map_err(words)
+            }
+            Make::Symbolic => std::os::windows::fs::symlink_file(item, at).map_err(words),
+            Make::Hard => std::fs::hard_link(item, at).map_err(words),
+            Make::Junction => win::junction(at, item),
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = (kind, item, at);
+        Err("not on this platform".to_owned())
+    }
+}
+
+/// `into\name`, or `into\stem (2).ext` and up until one is free — the rule [`free_name`] keeps for a
+/// shortcut, with the number before the extension because here the extension is the item's own.
+///
+/// Free means **nothing there, not even a dangling link**: `symlink_metadata` rather than `exists`,
+/// which follows a link and calls a broken one free.
+fn free_link_name(into: &Path, name: &Path) -> Option<PathBuf> {
+    let taken = |at: &Path| std::fs::symlink_metadata(at).is_ok();
+    let first = into.join(name);
+    if !taken(&first) {
+        return Some(first);
+    }
+    let stem = name.file_stem()?.to_string_lossy();
+    let ext = name
+        .extension()
+        .map(|ext| format!(".{}", ext.to_string_lossy()))
+        .unwrap_or_default();
+    (2..=TRIES)
+        .map(|n| into.join(format!("{stem} ({n}){ext}")))
+        .find(|candidate| !taken(candidate))
+}
+
 /// `into\name.lnk`, or `into\name (2).lnk` and up until one is free.
 ///
 /// `None` when the folder somehow holds every name this will try, which is not a real folder and is
@@ -428,6 +650,90 @@ const TRIES: usize = 1000;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What each selection is offered: a hard link for files only, a junction for folders only,
+    /// neither for a mix — and the shortcut and the symbolic link for all of them, the symbolic link
+    /// enabled exactly when this process may make one.
+    #[cfg(windows)]
+    #[test]
+    fn each_link_is_offered_where_it_applies() {
+        let root = crate::sandbox::fresh("links-offered");
+        let into = root.join("into");
+        let folder = root.join("folder");
+        let file = root.join("file.txt");
+        std::fs::create_dir_all(&into).unwrap();
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(&file, b"x").unwrap();
+
+        let kinds = |items: &[PathBuf]| {
+            offered(items, &into).into_iter().map(|(kind, _)| kind).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            kinds(std::slice::from_ref(&file)),
+            [Make::Shortcut, Make::Symbolic, Make::Hard]
+        );
+        assert_eq!(
+            kinds(std::slice::from_ref(&folder)),
+            [Make::Shortcut, Make::Symbolic, Make::Junction]
+        );
+        assert_eq!(kinds(&[file.clone(), folder.clone()]), [Make::Shortcut, Make::Symbolic]);
+        assert_eq!(kinds(&[]), []);
+        let symbolic = offered(std::slice::from_ref(&file), &into)
+            .into_iter()
+            .find(|(kind, _)| *kind == Make::Symbolic);
+        assert_eq!(symbolic, Some((Make::Symbolic, may_symlink())));
+    }
+
+    /// A hard link and a junction made for real, with the second of each taking ` (2)`; and a
+    /// symbolic link where this process may make one.
+    #[cfg(windows)]
+    #[test]
+    fn each_link_is_made_as_itself() {
+        let root = crate::sandbox::fresh("links-made");
+        let into = root.join("into");
+        let folder = root.join("folder");
+        let file = root.join("file.txt");
+        std::fs::create_dir_all(&into).unwrap();
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("inside.txt"), b"inside").unwrap();
+        std::fs::write(&file, b"file").unwrap();
+
+        let (error, made) = make_into(Make::Hard, std::slice::from_ref(&file), &into);
+        assert_eq!(error, None);
+        assert_eq!(made, [into.join("file.txt")]);
+        let (_, again) = make_into(Make::Hard, std::slice::from_ref(&file), &into);
+        assert_eq!(again, [into.join("file (2).txt")]);
+        assert_eq!(std::fs::read(into.join("file (2).txt")).unwrap(), b"file");
+
+        let (error, made) = make_into(Make::Junction, std::slice::from_ref(&folder), &into);
+        assert_eq!(error, None);
+        assert_eq!(made, [into.join("folder")]);
+        assert_eq!(std::fs::read(into.join("folder").join("inside.txt")).unwrap(), b"inside");
+        // The row's dimmed half reads the target back the way a junction made by `mklink /J` reads.
+        assert_eq!(
+            reparse_target(&into.join("folder")).map(|target| (target.path, target.what)),
+            Some((folder.display().to_string(), "Junction"))
+        );
+        let (_, again) = make_into(Make::Junction, std::slice::from_ref(&folder), &into);
+        assert_eq!(again, [into.join("folder (2)")]);
+
+        // A hard link to a folder is refused by the file system, and said so.
+        let (error, made) = make_into(Make::Hard, std::slice::from_ref(&folder), &into);
+        assert!(made.is_empty());
+        assert!(error.is_some_and(|e| e.starts_with("Could not make the hard link")));
+
+        if may_symlink() {
+            let (error, made) = make_into(Make::Symbolic, &[file.clone(), folder.clone()], &into);
+            assert_eq!(error, None);
+            assert_eq!(made, [into.join("file (3).txt"), into.join("folder (3)")]);
+            assert!(std::fs::symlink_metadata(&made[0]).unwrap().file_type().is_symlink());
+            for link in &made {
+                assert_eq!(reparse_target(link).map(|target| target.what), Some("Symbolic link"));
+            }
+            assert_eq!(std::fs::read(made[1].join("inside.txt")).unwrap(), b"inside");
+        }
+        crate::sandbox::remove(&root);
+    }
 
     #[test]
     fn only_a_lnk_or_a_reparse_point_is_a_shortcut() {

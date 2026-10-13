@@ -16,6 +16,9 @@ pub(crate) const SORT_ARROW: f32 = 10.0 + space::S2;
 ///
 /// - **Status** is a glyph under its header, and only there at all in a synced folder — see
 ///   [`crate::fs::Dir::synced`], decided when the listing was read.
+/// - **Hard links** is a glyph header over a count, and only there once some file in the folder has
+///   been counted at two names or more — see [`crate::hardlinks`]. Fitted to the glyph, or to the
+///   widest count if that is wider.
 /// - **Keywords** is only there where rows can have any — see [`crate::fs::Dir::keyed`] — and is
 ///   measured from the longest keywords a row on show has, between [`KEYWORDS_MIN`] and
 ///   [`KEYWORDS_MAX`]. One hash lookup per row, once per listing.
@@ -146,6 +149,13 @@ pub(crate) fn measure_columns(ui: &Ui, t: &Theme, tab: &mut Tab, scratch: &mut S
     } else {
         0.0
     };
+    // The largest count is the widest one: every digit is the same width in the caption font.
+    tab.widths[Column::HardLinks.index()] = match tab.hard_links.iter().copied().max() {
+        Some(most) if most > 1 => {
+            (measure(&most.to_string()).max(GLYPH) + CELL_PAD * 2.0).ceil()
+        }
+        _ => 0.0,
+    };
     tab.widths[Column::Size.index()] =
         (size_width.max(header_of(Column::Size)) + CELL_PAD * 2.0).ceil();
     tab.widths[Column::Type.index()] =
@@ -170,8 +180,8 @@ pub(crate) const KEYWORDS_MAX: f32 = 260.0;
 /// for Name.
 ///
 /// When the pane is too narrow for all of them, the fitted columns give way —
-/// Type first, then Modified, then Keywords, then Status — because a name you cannot read is worse
-/// than a date you cannot see.
+/// Type first, then Modified, then Keywords, then Status, then Hard links — because a name you cannot
+/// read is worse than a date you cannot see.
 pub(crate) fn resolved_widths(tab: &Tab, total: f32) -> [f32; Column::COUNT] {
     let mut widths = tab.widths;
     const NAME_MIN: f32 = 120.0;
@@ -184,6 +194,7 @@ pub(crate) fn resolved_widths(tab: &Tab, total: f32) -> [f32; Column::COUNT] {
             Column::Modified,
             Column::Keywords,
             Column::Status,
+            Column::HardLinks,
             Column::Size,
         ] {
             if spare >= NAME_MIN {
@@ -345,6 +356,7 @@ pub(crate) fn header_strip(
 fn header_glyph(p: &egui::Painter, column: Column, rect: Rect, ink: Color32, under: Color32) {
     match column {
         Column::Status => crate::icons::sync_status(p, rect, crate::fs::dir::Sync::Online, ink, under),
+        Column::HardLinks => crate::icons::chain(p, rect, ink),
         // Named rather than `_`, so a new column has to say whether it is one.
         Column::Name | Column::Keywords | Column::Size | Column::Type | Column::Modified => {}
     }

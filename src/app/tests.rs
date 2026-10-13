@@ -878,7 +878,7 @@ fn a_drive_menu_opens_a_terminal_and_never_renames_the_pane_s_row() {
             crate::shell::menu::Depth::Full,
             0,
         )
-        .banded(Handlers::new(), false, &Moves::default())
+        .banded(Handlers::new(), false, Vec::new(), &Moves::default())
     };
     let has_terminal = |menu: &crate::ui::menu::Open| {
         menu.entries

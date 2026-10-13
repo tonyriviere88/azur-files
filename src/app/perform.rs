@@ -701,6 +701,7 @@ impl App {
             Action::CutItems(items) => self.put_these_on_clipboard(ctx, items, true),
             Action::CopyItems(items) => self.put_these_on_clipboard(ctx, items, false),
             Action::PasteIntoFolder(into) => self.paste_into_folder(into, ctx),
+            Action::PasteLinks { into, kind } => self.paste_links_into(into, kind, ctx),
             Action::Delete { pane, permanent } => {
                 let items = self
                     .pane_mut(pane)
@@ -953,9 +954,23 @@ impl App {
                 let job = match effect {
                     Effect::Move => crate::shell::ops::Job::Move { items, into },
                     Effect::Copy => crate::shell::ops::Job::Copy { items, into },
-                    Effect::Link => crate::shell::ops::Job::Link { items, into },
+                    Effect::Link => crate::shell::ops::Job::Link {
+                        items,
+                        into,
+                        kind: crate::shell::links::Make::Shortcut,
+                    },
                 };
                 self.ops.start(job, self.owner, ctx);
+            }
+            Action::MakeLinks {
+                pane,
+                items,
+                into,
+                kind,
+            } => {
+                self.focused = pane;
+                self.ops
+                    .start(crate::shell::ops::Job::Link { items, into, kind }, self.owner, ctx);
             }
             Action::DragOut { pane, items } => {
                 // Out of the bin, the only thing a drag could carry is the `$R…` file, and wherever

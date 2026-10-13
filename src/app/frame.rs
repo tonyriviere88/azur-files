@@ -203,6 +203,7 @@ impl App {
         // [`crate::shell::thumbs::Thumbs::poll`], which is where that has to happen and why.
         self.thumbs.only(&views);
         self.cloud.only(&views);
+        self.hard_links.only(&views);
         self.deliver_icons();
         self.deliver_links();
         self.collect_previews(&ctx, now);
@@ -265,6 +266,8 @@ impl App {
         // The same moment for the same reason: a synced listing that landed this frame is asked
         // about this frame. See [`crate::shell::cloud`].
         self.collect_cloud();
+        // And the link counts, at the same moment for the same reason. See [`crate::hardlinks`].
+        self.collect_hard_links();
         // And after both, for the same reason: a listing that landed this frame is a folder to start
         // counting this frame, and a folder counted this frame is one whose bars are right on the
         // frame it appears in rather than one behind. See [`crate::sizes`].
