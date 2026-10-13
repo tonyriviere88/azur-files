@@ -988,8 +988,8 @@ pub(crate) fn rows(
             // width alone. A painted glyph, like the git badge — nothing here is a texture, so the
             // row loop's one draw call stays one.
             if widths[Column::Status.index()] > 0.0 {
-                // No fitting against the cell: the column is never narrower than the 48 a drag
-                // stops at, which is room for the glyph and its padding either side.
+                // No fitting against the cell: the column is never narrower than
+                // `columns::GLYPH_COLUMN`, which is the glyph and its padding either side.
                 if let Some(state) = tab.sync_of(entry_index) {
                     let glyph =
                         icon_rect(meta_row, edges[Column::Status.index()] + CELL_PAD, GLYPH);

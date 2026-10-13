@@ -87,6 +87,12 @@ pub struct Store {
 }
 
 impl Store {
+    /// Whether no file has any keywords.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.tags.is_empty()
+    }
+
     /// The keywords of a file, if it has any.
     #[inline]
     pub fn get(&self, key: FileKey) -> Option<&str> {
@@ -112,11 +118,6 @@ impl Store {
     #[cfg(test)]
     fn len(&self) -> usize {
         self.tags.len()
-    }
-
-    #[cfg(test)]
-    fn is_empty(&self) -> bool {
-        self.tags.is_empty()
     }
 
     /// Read the file's contents. Anything that does not parse is skipped.

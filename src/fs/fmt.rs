@@ -17,29 +17,62 @@ use super::time::{DateTime, LocalZone};
 /// one. This keeps three significant figures instead: `847 B`, `9.34 KB`,
 /// `72.1 MB`, `1.42 GB`.
 pub fn size(bytes: u64, out: &mut String) {
-    const UNITS: [&str; 6] = ["B", "KB", "MB", "GB", "TB", "PB"];
-
     if bytes < 1024 {
         let _ = write!(out, "{bytes} B");
         return;
     }
+    let (value, unit, branch) = scaled(bytes);
+    let suffix = UNITS[unit];
+    let _ = match branch {
+        0 => write!(out, "{value:.2} {suffix}"),
+        1 => write!(out, "{value:.1} {suffix}"),
+        _ => write!(out, "{value:.0} {suffix}"),
+    };
+}
 
-    // Decimal place chosen so the number is always 3-4 characters wide, which is
-    // what keeps the column from jumping as you scroll.
+const UNITS: [&str; 6] = ["B", "KB", "MB", "GB", "TB", "PB"];
+
+/// A size of a kilobyte or more as [`size`] writes it: the value in its unit, the unit, and which
+/// of three decimal places — the one choice both [`size`] and [`size_shape`] are made from, so the
+/// two cannot disagree. Divided in `f64` and not shifted, because past 2^53 bytes the conversion
+/// rounds and can carry a value into the next branch or unit.
+///
+/// The decimal place is chosen so the number is always 3-4 characters wide, which is what keeps
+/// the column from jumping as you scroll.
+#[inline]
+fn scaled(bytes: u64) -> (f64, usize, usize) {
     let mut value = bytes as f64;
     let mut unit = 0;
     while value >= 1024.0 && unit + 1 < UNITS.len() {
         value /= 1024.0;
         unit += 1;
     }
-    let suffix = UNITS[unit];
-    let _ = if value < 10.0 {
-        write!(out, "{value:.2} {suffix}")
+    let branch = if value < 10.0 {
+        0
     } else if value < 100.0 {
-        write!(out, "{value:.1} {suffix}")
+        1
     } else {
-        write!(out, "{value:.0} {suffix}")
+        2
     };
+    (value, unit, branch)
+}
+
+/// How many layouts [`size`] has: bytes, and three decimal places in each of five units.
+pub const SIZE_SHAPES: usize = 1 + (UNITS.len() - 1) * 3;
+
+/// Which of [`size`]'s layouts `bytes` comes out in — its unit and where the point falls — without
+/// formatting it, for a scan over every row of a flattened drive.
+///
+/// Within one layout the text only grows with the value — rounding can carry a digit, `9.999` into
+/// `10.00`, never take one away — so the largest value in each is that layout's widest string, and
+/// the Size column is measured from at most [`SIZE_SHAPES`] of them.
+#[inline]
+pub fn size_shape(bytes: u64) -> usize {
+    if bytes < 1024 {
+        return 0;
+    }
+    let (_, unit, branch) = scaled(bytes);
+    1 + (unit - 1) * 3 + branch
 }
 
 /// The widest string [`size`] can produce, for measuring the column against a value nobody has
@@ -472,6 +505,40 @@ mod tests {
         out.clear();
         size(1023 * 1024u64.pow(5), &mut out);
         assert_eq!(out.len(), SIZE_TEMPLATE.len(), "one petabyte short of it");
+    }
+
+    /// [`size_shape`] is what lets the Size column be measured off one value per layout, so it has
+    /// to agree with [`size`]: within one shape, the largest value's text is the widest, and every
+    /// other value's text is that one's with digits dropped off the front.
+    #[test]
+    fn a_size_shape_is_one_layout_whose_widest_is_its_largest() {
+        let normal = |bytes: u64| {
+            let mut out = String::new();
+            size(bytes, &mut out);
+            out.chars().map(|c| if c.is_ascii_digit() { '0' } else { c }).collect::<String>()
+        };
+        let mut samples: Vec<u64> = (0..2048).collect();
+        for unit in 1..6u32 {
+            let scale = 1024u64.pow(unit);
+            for value in [1.0, 1.5, 9.99, 9.995, 9.9999, 10.0, 99.9, 99.95, 99.999, 100.0, 999.5, 1023.0, 1023.6] {
+                samples.push((value * scale as f64) as u64);
+            }
+            samples.extend([scale - 1, scale, scale + 1, 10 * scale - 1, 100 * scale - 1]);
+        }
+        samples.push(u64::MAX);
+        let mut largest = [None::<u64>; SIZE_SHAPES];
+        for &bytes in &samples {
+            let slot = &mut largest[size_shape(bytes)];
+            *slot = Some(slot.map_or(bytes, |seen| seen.max(bytes)));
+        }
+        for &bytes in &samples {
+            let widest = normal(largest[size_shape(bytes)].unwrap());
+            let this = normal(bytes);
+            assert!(
+                widest.ends_with(&this),
+                "{bytes} bytes is `{this}`, not a narrower `{widest}` of its shape"
+            );
+        }
     }
 
     #[test]

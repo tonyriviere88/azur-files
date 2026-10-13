@@ -81,6 +81,13 @@ impl Column {
         matches!(self, Self::Size)
     }
 
+    /// A column of glyphs, whose header is a glyph too, with the word in its tooltip. It is fitted to
+    /// the glyph and its padding alone and **never draws a sort arrow** — in a column that narrow the
+    /// arrow would be most of the width — so being sorted shows only as the header's ink.
+    pub fn glyph_only(self) -> bool {
+        matches!(self, Self::Status)
+    }
+
     /// Which way a fresh click on this header should sort.
     ///
     /// Names want A→Z, but a click on Size or Modified almost always means "what

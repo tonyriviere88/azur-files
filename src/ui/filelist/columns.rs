@@ -26,7 +26,9 @@ pub(crate) const SORT_ARROW: f32 = 10.0 + space::S2;
 /// - **Type** has as many distinct labels as the folder has kinds of file, which is
 ///   a handful — collected with a small linear scan of already-interned strings.
 pub(crate) fn measure_columns(ui: &Ui, t: &Theme, tab: &mut Tab, scratch: &mut String) {
-    let font = t.fonts.body.clone();
+    // The font the cells are drawn in — `meta_font` in `rows` — or every fitted column comes out
+    // wider than what is in it, by the difference between two sizes of the same text.
+    let font = t.fonts.caption.clone();
     let measure = |text: &str| {
         ui.painter()
             .layout_no_wrap(text.to_owned(), font.clone(), Color32::PLACEHOLDER)
@@ -54,7 +56,7 @@ pub(crate) fn measure_columns(ui: &Ui, t: &Theme, tab: &mut Tab, scratch: &mut S
     let keyed = tab.dir.as_ref().is_some_and(|dir| dir.keyed());
 
     if let Some(dir) = tab.dir.clone() {
-        // Size: the longest formatted string, found without formatting them all.
+        // Size: the widest formatted string, found without formatting them all.
         //
         // **Except while the folders are being measured**, where it is the template instead. The
         // totals arrive one folder at a time over seconds — see [`crate::sizes`] — and a column
@@ -63,25 +65,33 @@ pub(crate) fn measure_columns(ui: &Ui, t: &Theme, tab: &mut Tab, scratch: &mut S
         // The template is what [`fmt::size`] can produce at its widest, so the column is decided
         // once and no answer can ever need more room than it has.
         if tab.sizes.on {
+            // And the same shape in every other unit, because the template's length is the widest
+            // there is and its `KB` is not: `1023 MB` is the same four digits and wider.
             size_width = measure(fmt::SIZE_TEMPLATE);
+            for unit in 2..=5 {
+                scratch.clear();
+                fmt::size(1023 * 1024u64.pow(unit), scratch);
+                size_width = size_width.max(measure(scratch));
+            }
         } else {
-            let mut widest_size = 0u64;
-            let mut longest = 0usize;
+            // Not the longest string by bytes: `4.56 MB` and `1.23 KB` are the same length and
+            // not the same width, and a column measured off the narrower one crops the other. The
+            // largest value in each of `fmt::size`'s layouts instead, which is that layout's widest
+            // text — found with integer arithmetic, so the scan formats nothing, and then at most
+            // `SIZE_SHAPES` strings measured. See [`fmt::size_shape`].
+            let mut largest = [None::<u64>; fmt::SIZE_SHAPES];
             for &i in &tab.order {
                 let entry = &dir.entries[i as usize];
-                if entry.is_dir() {
-                    continue;
-                }
-                scratch.clear();
-                fmt::size(entry.size, scratch);
-                if scratch.len() > longest {
-                    longest = scratch.len();
-                    widest_size = entry.size;
+                if !entry.is_dir() {
+                    let slot = &mut largest[fmt::size_shape(entry.size)];
+                    *slot = Some(slot.map_or(entry.size, |seen| seen.max(entry.size)));
                 }
             }
-            scratch.clear();
-            fmt::size(widest_size, scratch);
-            size_width = measure(scratch);
+            for bytes in largest.into_iter().flatten() {
+                scratch.clear();
+                fmt::size(bytes, scratch);
+                size_width = size_width.max(measure(scratch));
+            }
         }
 
         // Type: the distinct *extensions*, which is a much smaller set than the
@@ -106,10 +116,11 @@ pub(crate) fn measure_columns(ui: &Ui, t: &Theme, tab: &mut Tab, scratch: &mut S
             seen.push(key);
         }
 
-        // Keywords: the longest set on show, by bytes, and then measured once — the same shortcut
-        // Size takes.
-        if keyed {
-            let store = crate::fs::keywords::read();
+        // Keywords: the longest set on show, by bytes, and then measured once. One hash lookup a
+        // row, so none at all while no file anywhere has keywords — which is a flattened drive's
+        // million lookups for nothing.
+        let store = keyed.then(crate::fs::keywords::read);
+        if let Some(store) = store.filter(|store| !store.is_empty()) {
             let longest = tab
                 .order
                 .iter()
@@ -131,7 +142,7 @@ pub(crate) fn measure_columns(ui: &Ui, t: &Theme, tab: &mut Tab, scratch: &mut S
         0.0
     };
     tab.widths[Column::Status.index()] = if synced {
-        (header_of(Column::Status).max(GLYPH) + CELL_PAD * 2.0).ceil()
+        GLYPH_COLUMN
     } else {
         0.0
     };
@@ -143,6 +154,10 @@ pub(crate) fn measure_columns(ui: &Ui, t: &Theme, tab: &mut Tab, scratch: &mut S
         (date_width.max(header_of(Column::Modified)) + CELL_PAD * 2.0).ceil();
     tab.widths_measured = true;
 }
+
+/// A [glyph-only](Column::glyph_only) column: one glyph and its padding, and no room for a sort
+/// arrow — the header turning to the sorted ink is what says the listing is in its order.
+pub(crate) const GLYPH_COLUMN: f32 = GLYPH + CELL_PAD * 2.0;
 
 /// The least the Keywords column is fitted to: room to aim at, in a folder where nothing has any yet
 /// — an empty cell is the one place a first keyword can be typed into.
@@ -233,31 +248,41 @@ pub(crate) fn header_strip(
             pos2(cell.left() + CELL_PAD, cell.top()),
             pos2(cell.right() - CELL_PAD, cell.bottom()),
         );
-        let galley = truncated(
-            ui.painter(),
-            column.header_over(tab.dir.as_deref()),
-            t.fonts.body_strong.clone(),
-            color,
-            (inner.width() - arrow).max(0.0),
-        );
-        let label_width = galley.size().x;
-        if column.numeric() {
-            // Right-aligned, with the arrow tucked inside the padding so the label
-            // stays flush with the numbers below it.
-            let shifted = Rect::from_min_max(
-                inner.min,
-                pos2(inner.right() - arrow, inner.bottom()),
-            );
-            text_right(ui.painter(), shifted, galley);
-            if sorted {
-                let x = shifted.right() + space::S2 * 0.5;
-                sort_glyph(ui, t, icon_rect(cell, x, 10.0), tab.ascending, color);
-            }
+
+        // A column of glyphs has a glyph for a header, in the header's ink rather than the cells'
+        // colours, with the word in the tooltip — and no sort arrow. Drawn where the cells draw
+        // theirs, so the two line up.
+        if column.glyph_only() {
+            let under = if response.hovered() { t.bg.control_hover } else { t.surfaces.header };
+            header_glyph(ui.painter(), column, icon_rect(cell, inner.left(), GLYPH), color, under);
+            azur_egui_theme::components::tooltip(response, column.header());
         } else {
-            text_left(ui.painter(), inner, galley);
-            if sorted {
-                let x = inner.left() + label_width + space::S2;
-                sort_glyph(ui, t, icon_rect(cell, x, 10.0), tab.ascending, color);
+            let galley = truncated(
+                ui.painter(),
+                column.header_over(tab.dir.as_deref()),
+                t.fonts.body_strong.clone(),
+                color,
+                (inner.width() - arrow).max(0.0),
+            );
+            let label_width = galley.size().x;
+            if column.numeric() {
+                // Right-aligned, with the arrow tucked inside the padding so the label
+                // stays flush with the numbers below it.
+                let shifted = Rect::from_min_max(
+                    inner.min,
+                    pos2(inner.right() - arrow, inner.bottom()),
+                );
+                text_right(ui.painter(), shifted, galley);
+                if sorted {
+                    let x = shifted.right() + space::S2 * 0.5;
+                    sort_glyph(ui, t, icon_rect(cell, x, 10.0), tab.ascending, color);
+                }
+            } else {
+                text_left(ui.painter(), inner, galley);
+                if sorted {
+                    let x = inner.left() + label_width + space::S2;
+                    sort_glyph(ui, t, icon_rect(cell, x, 10.0), tab.ascending, color);
+                }
             }
         }
 
@@ -283,7 +308,10 @@ pub(crate) fn header_strip(
             }
             if drag.dragged() {
                 let delta = drag.drag_delta().x;
-                tab.widths[index] = (tab.widths[index] + delta).clamp(48.0, 480.0);
+                // A glyph column fits in less than a drag otherwise stops at, and would jump wider
+                // on the first pixel of one.
+                let least = if column.glyph_only() { GLYPH_COLUMN } else { 48.0 };
+                tab.widths[index] = (tab.widths[index] + delta).clamp(least, 480.0);
             }
             // Double-clicking an edge re-fits the column, which is the gesture every
             // table in every operating system has.
@@ -311,6 +339,15 @@ pub(crate) fn header_strip(
         CornerRadius::ZERO,
         t.surfaces.separator,
     );
+}
+
+/// The glyph a [glyph-only](Column::glyph_only) column's header shows: the one its cells show most.
+fn header_glyph(p: &egui::Painter, column: Column, rect: Rect, ink: Color32, under: Color32) {
+    match column {
+        Column::Status => crate::icons::sync_status(p, rect, crate::fs::dir::Sync::Online, ink, under),
+        // Named rather than `_`, so a new column has to say whether it is one.
+        Column::Name | Column::Keywords | Column::Size | Column::Type | Column::Modified => {}
+    }
 }
 
 pub(crate) fn sort_glyph(ui: &Ui, _t: &Theme, rect: Rect, ascending: bool, color: Color32) {
