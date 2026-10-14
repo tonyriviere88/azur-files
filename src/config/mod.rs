@@ -251,6 +251,12 @@ pub struct Config {
     /// one space where "1920, -8" is a place. See `main::restore_position`.
     pub position: Option<[f32; 2]>,
     pub maximized: bool,
+    /// The interface's zoom, `Ctrl` `+` / `-` / `0`: egui's own
+    /// [`zoom_factor`](egui::Context::zoom_factor), on top of the monitor's scale.
+    ///
+    /// [`Self::window`] is **not** in zoomed points, though everything inside the window is. It is
+    /// in the monitor's points, which are what the window is created at — see `App::frame`.
+    pub zoom: f32,
     /// Which palette the window opens on. Azur ships both sides and this program adds
     /// coloured variants of the light one; see [`crate::theme::Palette`].
     pub palette: Palette,
@@ -281,6 +287,10 @@ const PANES: usize = 24;
 /// it: four columns, a sidebar and a status line all fit, which is the point of the density
 /// choices throughout. Comfortably above the 720×420 minimum the window refuses to go below.
 pub const WINDOW_SIZE: [f32; 2] = [1024.0, 600.0];
+
+/// The zoom a settings file may ask for: egui's `gui_zoom` keeps `Ctrl` `+` and `-` to this.
+const ZOOM_MIN: f32 = 0.2;
+const ZOOM_MAX: f32 = 5.0;
 
 impl Default for Config {
     fn default() -> Self {
@@ -313,6 +323,7 @@ impl Default for Config {
             window: None,
             position: None,
             maximized: false,
+            zoom: 1.0,
             palette: Palette::default(),
         }
     }
@@ -586,6 +597,15 @@ impl Config {
                     }
                 }
                 "maximized" => config.maximized = value == "1",
+                // `is_finite` for the reason `sidebar_width` gives, and clamped to the range egui's
+                // own keyboard zoom keeps to, so a hand-edited file cannot open an unusable window.
+                "zoom" => {
+                    if let Ok(zoom) = value.parse::<f32>() {
+                        if zoom.is_finite() {
+                            config.zoom = zoom.clamp(ZOOM_MIN, ZOOM_MAX);
+                        }
+                    }
+                }
                 // An unreadable name leaves the default rather than refusing to start: a
                 // settings file written by a *newer* build, naming a palette this one has never
                 // heard of, is the ordinary way this line meets a word it does not know.
@@ -744,6 +764,7 @@ impl Config {
             text.push_str(&format!("position={x:.0},{y:.0}\n"));
         }
         text.push_str(&format!("maximized={}\n", flag(self.maximized)));
+        text.push_str(&format!("zoom={}\n", self.zoom));
         text.push_str(&format!("theme={}\n", self.palette.key()));
         // The bookmarks, in the order the sidebar shows them — a group's own line, then the
         // folders in it, so the file reads the way the panel looks. See [`Self::bookmarks`].

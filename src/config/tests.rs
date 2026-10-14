@@ -444,6 +444,19 @@ fn a_file_from_before_panes_opens_as_one_pane() {
     assert_eq!(back.layout, None, "and no layout to try to build");
 }
 
+/// The zoom comes back as it went out, and a file that never said one, or said nonsense, opens
+/// at 100% — or at the nearest zoom the keyboard could have reached.
+#[test]
+fn the_zoom_round_trips_and_is_kept_in_range() {
+    let saved = Config { zoom: 1.25, ..Config::default() };
+    assert_eq!(Config::parse(&saved.to_text()).zoom, 1.25);
+    assert_eq!(Config::parse("theme=dark\n").zoom, 1.0);
+    assert_eq!(Config::parse("zoom=NaN\n").zoom, 1.0);
+    assert_eq!(Config::parse("zoom=banana\n").zoom, 1.0);
+    assert_eq!(Config::parse("zoom=40\n").zoom, 5.0);
+    assert_eq!(Config::parse("zoom=0\n").zoom, 0.2);
+}
+
 /// The caps hold, and never by dropping a pane.
 ///
 /// A pane with no tabs cannot be drawn, and `layout=` is a tree over exactly the panes

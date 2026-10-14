@@ -99,6 +99,13 @@ impl App {
         if self.fullscreen_video.is_none() {
             self.maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
         }
+        // `Ctrl` `+` / `-` / `0` are egui's own, so the zoom changes without an action passing
+        // through here; it is noticed instead, and remembered.
+        let zoom = ctx.zoom_factor();
+        if zoom != self.zoom {
+            self.zoom = zoom;
+            self.config_dirty = true;
+        }
         self.close_on_blur(&ctx);
         // Keep painting while the window is being restored, resized or rescaled, so the
         // compositor never has to stretch a frame that was drawn for a different shape.
@@ -231,7 +238,11 @@ impl App {
             // Only a restored window's size is worth remembering; a maximised one is
             // described by the flag, and saving the screen size would pin the window
             // to this monitor.
-            let size = ctx.viewport_rect().size();
+            //
+            // **Unzoomed.** egui's points are the monitor's times the zoom, while the size the
+            // window is created at, and the one `ResetSize` asks for, are the monitor's alone —
+            // so a session closed at 150% would otherwise reopen two-thirds the size.
+            let size = ctx.viewport_rect().size() * ctx.zoom_factor();
             if size.x >= 640.0 && size.y >= 400.0 {
                 self.window_size = Some([size.x, size.y]);
             }

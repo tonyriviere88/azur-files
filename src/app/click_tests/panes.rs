@@ -340,6 +340,24 @@ fn reset_window_size_asks_for_the_default_and_unmaximises_first() {
     // And the default is one value, not two: the size the window opens at on a first run is
     // the size this puts it back to.
     assert_eq!(Config::default().window.unwrap_or(crate::config::WINDOW_SIZE), [w, hh]);
+
+    // From a zoomed window the zoom goes back to 100% too, and the size asked for is divided by
+    // the old zoom, because that is what `egui-winit` multiplies it by when the command is carried
+    // out — the new zoom only lands on the pass after.
+    h.ctx.set_zoom_factor(1.5);
+    h.frame(Vec::new());
+    assert_eq!(h.ctx.zoom_factor(), 1.5, "the harness did not take the zoom");
+    h.commands.clear();
+    h.app
+        .perform(&h.ctx.clone(), Action::Window(WindowAction::ResetSize));
+    h.frame(Vec::new());
+    let asked: Vec<&Cmd> = h
+        .commands
+        .iter()
+        .filter(|c| matches!(c, Cmd::InnerSize(_)))
+        .collect();
+    assert_eq!(asked, vec![&Cmd::InnerSize(egui::vec2(w, hh) / 1.5)]);
+    assert_eq!(h.ctx.zoom_factor(), 1.0, "the zoom was not reset");
 }
 
 /// **Two panes side by side can be resized, scrollbar or no scrollbar.**

@@ -341,6 +341,8 @@ fn main() -> eframe::Result {
                     // session: where it was left is not part of what is being photographed,
                     // and a screenshot run that moves the window about is a nuisance.
                     config.position = None;
+                    // Nor how far it was zoomed: a stated size is a statement about the picture.
+                    config.zoom = 1.0;
                 }
             }
         }
@@ -414,6 +416,9 @@ fn main() -> eframe::Result {
             // One wheel notch is one "line", which egui makes 40 points: a row and two thirds,
             // which felt slow. 72 is exactly three rows of `ROW_HEIGHT`.
             cc.egui_ctx.options_mut(|o| o.input_options.line_scroll_speed = 72.0);
+            // The zoom the last session ended at. The window's size above is in the monitor's
+            // points and so does not change with it — see `Config::zoom`.
+            cc.egui_ctx.set_zoom_factor(config.zoom);
             restore_position(cc, position);
             if config.maximized {
                 open_maximized(cc, placed);

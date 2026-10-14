@@ -1294,7 +1294,14 @@ impl App {
                         if self.maximized {
                             ctx.send_viewport_cmd(Cmd::Maximized(false));
                         }
-                        ctx.send_viewport_cmd(Cmd::InnerSize(egui::vec2(w, h)));
+                        // The zoom goes back to 100% with it: a window put back to the default is
+                        // one that looks the way a first run does. `egui-winit` turns this size
+                        // into pixels with the zoom included, and the new zoom only lands at the
+                        // start of the next pass — after this command is carried out — so the
+                        // size is divided by the zoom it will be multiplied by.
+                        let zoom = ctx.zoom_factor();
+                        ctx.set_zoom_factor(1.0);
+                        ctx.send_viewport_cmd(Cmd::InnerSize(egui::vec2(w, h) / zoom));
                         // Both remembered now rather than left to the frame that observes the
                         // new shape. That frame does set them, so this is belt and braces for
                         // the window being closed in between — which would otherwise save the

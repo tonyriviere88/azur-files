@@ -434,8 +434,11 @@ pub struct App {
     /// Not in the settings file. Where the preview panel goes is a habit worth keeping; a video
     /// filling the screen is a thing you were doing a minute ago.
     fullscreen_video: Option<PaneId>,
-    /// The window's inner size, tracked so it can be restored next launch.
+    /// The window's inner size, tracked so it can be restored next launch. In the monitor's points,
+    /// not zoomed ones — see [`crate::config::Config::zoom`].
     window_size: Option<[f32; 2]>,
+    /// [`egui::Context::zoom_factor`], as last seen, so a change to it marks the settings dirty.
+    zoom: f32,
     /// And where it is: the outer top-left corner in *physical pixels*. See
     /// [`crate::config::Config::position`] for why that unit and not points.
     window_position: Option<[f32; 2]>,
@@ -754,6 +757,7 @@ impl App {
             update_skip: config.update_skip.clone(),
             fullscreen_video: None,
             window_size: config.window,
+            zoom: config.zoom,
             window_position: config.position,
             actions: Vec::new(),
             extracted,
@@ -855,6 +859,7 @@ impl App {
             window: self.window_size,
             position: self.window_position,
             maximized: self.maximized,
+            zoom: self.zoom,
             palette: self.theme.palette,
         };
 
