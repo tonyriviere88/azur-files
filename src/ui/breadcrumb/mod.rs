@@ -406,12 +406,8 @@ pub fn show(
         // key first and give up the focus — which is egui's answer to `Escape`, and still this
         // window's for an empty box: there is nothing to clear, so the key goes on to do what it
         // always did and puts the keyboard back on the listing. See `App::keyboard`.
-        //
-        // The field's id is last frame's, the only one there is before it is drawn; it is the same
-        // widget in the same place every frame, so that is its id this frame too.
         let field_key = Id::new(("filter-field", pane));
-        let last_id = ui.data(|d| d.get_temp::<Id>(field_key));
-        let focused_here = last_id.is_some() && ui.memory(|m| m.focused()) == last_id;
+        let focused_here = filter_focused(ui.ctx(), pane);
         if focused_here
             && !tab.filter.is_empty()
             && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
@@ -428,7 +424,10 @@ pub fn show(
             if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)) {
                 out.push(Action::FilterDown(pane));
             }
-            if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
+            // Before the bare `Enter`, which egui matches logically and would take with Ctrl held.
+            if ui.input_mut(|i| crate::app::shortcuts::FILTER_SELECT.consume(i)) {
+                out.push(Action::FilterSelect(pane));
+            } else if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)) {
                 out.push(Action::FilterEnter(pane));
             }
         }
@@ -792,6 +791,17 @@ fn keep_tab(ui: &Ui, id: Id) {
             },
         );
     });
+}
+
+/// Whether pane `pane`'s filter box has the caret.
+///
+/// By the field's id from the last frame it was drawn, the only one there is before it is drawn
+/// again — the same widget in the same place every frame, so that is its id this frame too. Asked by
+/// the box itself for its own keys, and by the status line, whose `Ctrl+Enter` hint is about a key
+/// only the box reads.
+pub(crate) fn filter_focused(ctx: &egui::Context, pane: PaneId) -> bool {
+    let last_id = ctx.data(|d| d.get_temp::<Id>(Id::new(("filter-field", pane))));
+    last_id.is_some() && ctx.memory(|m| m.focused()) == last_id
 }
 
 /// Which segment of the trail is the folder actually being shown.

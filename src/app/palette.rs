@@ -128,6 +128,8 @@ pub(crate) enum Command {
     Redo,
     SelectAll,
     ClearSelection,
+    InvertSelection,
+    SelectSameExtension,
     Compare,
     OpenTerminal,
     Reveal,
@@ -254,6 +256,8 @@ pub(crate) fn listed(action: &Action) -> bool {
         | Action::Undo { .. }
         | Action::SelectAll(_)
         | Action::ClearSelection(_)
+        | Action::InvertSelection(_)
+        | Action::SelectSameExtension(_)
         | Action::DiffFolders { .. }
         | Action::OpenTerminal(_)
         | Action::Reveal(_)
@@ -305,6 +309,7 @@ pub(crate) fn listed(action: &Action) -> bool {
         | Action::FilterFlat { .. }
         | Action::FilterDown(_)
         | Action::FilterEnter(_)
+        | Action::FilterSelect(_)
         | Action::SearchSubfoldersHere(_)
         | Action::BatchApply(_)
         | Action::BatchCancel(_)
@@ -592,6 +597,11 @@ impl App {
         add(Command::SelectAll, row(FILES, "Select all"));
         if selected > 0 {
             add(Command::ClearSelection, row(FILES, "Clear selection"));
+        }
+        add(Command::InvertSelection, row(FILES, "Invert selection"));
+        // Only on a file: on a folder there is no type to match, and the command would do nothing.
+        if tab.cursor.is_some() && !cursor_dir {
+            add(Command::SelectSameExtension, row(FILES, "Select files of the same type"));
         }
         if self.two_folders_selected().is_some() {
             add(Command::Compare, row(FILES, "Compare the two selected folders"));
@@ -925,6 +935,8 @@ impl App {
             Command::Redo => Action::Undo { redo: true },
             Command::SelectAll => Action::SelectAll(pane),
             Command::ClearSelection => Action::ClearSelection(pane),
+            Command::InvertSelection => Action::InvertSelection(pane),
+            Command::SelectSameExtension => Action::SelectSameExtension(pane),
             Command::Compare => {
                 let (left, right) = self.two_folders_selected()?;
                 Action::DiffFolders { pane, left, right }

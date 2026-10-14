@@ -81,6 +81,11 @@ pub enum Action {
     /// Nothing selected — `Escape` in the listing, for the palette, which has no listing to press
     /// it in.
     ClearSelection(PaneId),
+    /// Every row on screen that was not selected, and none that was. See
+    /// [`crate::pane::Tab::invert_selection`].
+    InvertSelection(PaneId),
+    /// Add every file of the cursor's extension. See [`crate::pane::Tab::select_same_extension`].
+    SelectSameExtension(PaneId),
     /// Put the caret in this pane's filter box, as `Ctrl+F` does. See [`crate::pane::Tab::find_wanted`].
     FocusFilter(PaneId),
     /// Show the files Windows marks hidden, or stop — the window's preference, so every pane
@@ -104,6 +109,9 @@ pub enum Action {
     FilterDown(PaneId),
     /// `Enter` in the filter box: open the match under the cursor, or the first.
     FilterEnter(PaneId),
+    /// `Ctrl+Enter` in the filter box: select every match and go back to the listing. See
+    /// [`crate::pane::Tab::select_matches`].
+    FilterSelect(PaneId),
     /// The batch rename panel's Rename: every name the rule makes, as one job. See
     /// [`crate::pane::batch`].
     BatchApply(PaneId),
@@ -429,6 +437,8 @@ impl Action {
             Self::Sort { .. } => "Sort",
             Self::SelectAll(_) => "SelectAll",
             Self::ClearSelection(_) => "ClearSelection",
+            Self::InvertSelection(_) => "InvertSelection",
+            Self::SelectSameExtension(_) => "SelectSameExtension",
             Self::FocusFilter(_) => "FocusFilter",
             Self::ToggleHidden => "ToggleHidden",
             Self::ToggleFlat(_) => "ToggleFlat",
@@ -437,6 +447,7 @@ impl Action {
             Self::SetSearchSubfolders(_) => "SetSearchSubfolders",
             Self::FilterDown(_) => "FilterDown",
             Self::FilterEnter(_) => "FilterEnter",
+            Self::FilterSelect(_) => "FilterSelect",
             Self::BatchApply(_) => "BatchApply",
             Self::BatchCancel(_) => "BatchCancel",
             Self::SetBatchMode { .. } => "SetBatchMode",

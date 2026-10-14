@@ -340,6 +340,59 @@ fn a_re_read_keeps_the_selection_and_a_new_folder_does_not() {
     );
 }
 
+/// Invert and same-extension keep the count and the byte total as the other gestures do, a folder
+/// adds no bytes, and the extension is matched without case and never on a folder.
+#[test]
+fn invert_and_same_extension_select_what_they_say() {
+    use crate::fs::dir::{DirBuilder, FLAG_DIR};
+
+    let mut builder = DirBuilder::new(r"C:\here");
+    builder.push("a.txt", 100, 0, 0);
+    builder.push("B.TXT", 20, 0, 0);
+    builder.push("c.rs", 3, 0, 0);
+    builder.push("README", 7, 0, 0);
+    builder.push("notes.txt", 4096, 0, FLAG_DIR);
+    let mut tab = Tab::new(r"C:\here");
+    tab.apply(Arc::new(builder.finish(0)));
+
+    let picked = |tab: &Tab| -> Vec<String> {
+        let dir = tab.dir.as_ref().expect("a listing");
+        let mut names: Vec<String> = (0..dir.len())
+            .filter(|&entry| tab.selected[entry])
+            .map(|entry| dir.name(entry).to_owned())
+            .collect();
+        names.sort();
+        names
+    };
+
+    tab.select_only(leaf_at(&tab, "a.txt"));
+    tab.invert_selection();
+    assert_eq!(picked(&tab), ["B.TXT", "README", "c.rs", "notes.txt"]);
+    assert_eq!((tab.selected_count, tab.selected_size), (4, 30), "the folder adds no bytes");
+    tab.invert_selection();
+    assert_eq!(picked(&tab), ["a.txt"], "twice is where it started");
+    assert_eq!((tab.selected_count, tab.selected_size), (1, 100));
+
+    // Added to what is there, and `TXT` is `txt`; the folder named `.txt` is not a text file.
+    tab.select_only(leaf_at(&tab, "c.rs"));
+    tab.cursor = Some(leaf_at(&tab, "a.txt"));
+    tab.select_same_extension();
+    assert_eq!(picked(&tab), ["B.TXT", "a.txt", "c.rs"]);
+    assert_eq!((tab.selected_count, tab.selected_size), (3, 123));
+
+    // No extension is a type of its own.
+    tab.clear_selection();
+    tab.cursor = Some(leaf_at(&tab, "README"));
+    tab.select_same_extension();
+    assert_eq!(picked(&tab), ["README"]);
+
+    // And on a folder, nothing.
+    tab.clear_selection();
+    tab.cursor = Some(leaf_at(&tab, "notes.txt"));
+    tab.select_same_extension();
+    assert_eq!(tab.selected_count, 0);
+}
+
 /// A temp-free listing of whatever names you name, for the two tests below.
 #[cfg(test)]
 fn listing(folder: &std::path::Path, names: &[&str]) -> Arc<crate::fs::dir::Dir> {

@@ -291,6 +291,16 @@ impl App {
                     p.tab_mut().clear_selection();
                 }
             }
+            Action::InvertSelection(pane) => {
+                if let Some(p) = self.pane_mut(pane) {
+                    p.tab_mut().invert_selection();
+                }
+            }
+            Action::SelectSameExtension(pane) => {
+                if let Some(p) = self.pane_mut(pane) {
+                    p.tab_mut().select_same_extension();
+                }
+            }
             // A flag the filter box reads as it is drawn, because the box is the one thing that has
             // the field's id to hand the keyboard to.
             Action::FocusFilter(pane) => {
@@ -418,6 +428,40 @@ impl App {
                     Action::Open(path)
                 };
                 self.perform(ctx, action);
+            }
+            // **`Ctrl+Enter` in the filter box turns the matches into a selection.** Nothing matched
+            // leaves everything as it is, the caret included, so the pattern can be fixed.
+            //
+            // Over this folder the filter then goes, and the whole folder is back with the matches
+            // selected in it. **Over a search of the subfolders it stays**: the matches are files the
+            // folder's own listing does not show, and clearing the box would fold them away while
+            // they were still selected — a Delete would then act on files nobody can see.
+            Action::FilterSelect(pane) => {
+                let now = ctx.input(|i| i.time);
+                let Some(p) = self.pane_mut(pane) else { return };
+                let tab = p.tab_mut();
+                // As for `↓`: the word is applied before it is asked what it matched.
+                if tab.filter_at.is_some() {
+                    tab.rebuild_order();
+                }
+                let Some(first) = tab.select_matches() else { return };
+                ctx.memory_mut(|m| m.stop_text_input());
+                // On the first match, without touching the selection, and carried across the rebuild
+                // by the file it is on rather than the place.
+                tab.cursor = Some(first);
+                tab.anchor = Some(first);
+                if !(tab.flat && tab.flat_by_filter) {
+                    // The folder as it was before the typing is what a cleared filter puts back, and
+                    // this selection is the point of clearing it: forgotten, or the old one wins.
+                    tab.before_filter = None;
+                    tab.filter.clear();
+                    // Through the door a keystroke goes through, as the box's own `Escape` does —
+                    // and then at once, so the folder is back on this frame rather than after the
+                    // typing wait.
+                    tab.filter_changed(now);
+                    tab.rebuild_order();
+                }
+                tab.scroll_to_cursor = true;
             }
             // And this one changes neither what was read nor how it is ordered: the rows, the sort,
             // the selection and the scroll are all untouched, and what changes is that a folder's

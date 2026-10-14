@@ -454,6 +454,103 @@ fn down_and_enter_take_the_filter_to_its_results() {
     assert_eq!(h.app.pane_mut(pane).unwrap().tab().path, want);
 }
 
+/// **`Ctrl+Enter` in the box selects the matches.** Over this folder the filter then goes and the
+/// whole folder is back with them selected; over a search of the subfolders it stays, because
+/// clearing it would fold the selected files out of sight.
+#[test]
+fn ctrl_enter_turns_the_matches_into_a_selection() {
+    let ctrl_enter = || Event::Key {
+        key: egui::Key::Enter,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: Modifiers::COMMAND,
+    };
+    let selected = |h: &Harness| -> Vec<String> {
+        let tab = h.tab(0);
+        let dir = tab.dir.as_ref().expect("a listing");
+        let mut names: Vec<String> = (0..dir.len())
+            .filter(|&i| tab.selected[i])
+            .map(|i| dir.name(i).to_owned())
+            .collect();
+        names.sort();
+        names
+    };
+
+    // ---- This folder only: the filter goes ------------------------------
+    let mut h = Harness::new();
+    h.app.perform(&h.ctx.clone(), Action::SetSearchSubfolders(false));
+    filter_in_src(&mut h);
+    let all = h.tab(0).order.len();
+    // The filter is asked of the whole path, so a leaf is anchored by the separator before it.
+    h.frame(vec![Event::Text("\\main.rs$".to_owned())]);
+    past_the_wait(&mut h);
+    h.settle();
+    assert_eq!(h.tab(0).match_count(), 1);
+
+    h.take_journal();
+    h.modifiers = Modifiers::COMMAND;
+    h.frame(vec![ctrl_enter()]);
+    h.modifiers = Modifiers::NONE;
+    h.frame(Vec::new());
+    let done = h.take_journal();
+    assert!(done.contains(&"FilterSelect"), "{done:?}");
+    assert_eq!(selected(&h), ["main.rs"], "{done:?}");
+    // Still so once the cleared filter has settled — which is when the folder as it was before the
+    // typing would be put back.
+    past_the_wait(&mut h);
+    h.settle();
+    assert_eq!(selected(&h), ["main.rs"], "the selection from before the filter came back");
+    let tab = h.tab(0);
+    assert!(tab.filter.is_empty(), "the filter is still up: {:?}", tab.filter);
+    assert_eq!(tab.order.len(), all, "the whole folder is not back");
+    let on = tab.cursor.and_then(|at| tab.entry_at(at)).expect("a cursor");
+    assert_eq!(tab.dir.as_ref().unwrap().name(on), "main.rs", "the cursor is not on the match");
+    assert_eq!(
+        h.ctx.memory(|m| m.focused()),
+        None,
+        "Ctrl+Enter left the keyboard in the box"
+    );
+
+    // Nothing matched: nothing changes, and the caret stays to fix the pattern.
+    filter_in_src_again(&mut h);
+    h.frame(vec![Event::Text("no such file anywhere".to_owned())]);
+    past_the_wait(&mut h);
+    h.settle();
+    h.modifiers = Modifiers::COMMAND;
+    h.frame(vec![ctrl_enter()]);
+    h.modifiers = Modifiers::NONE;
+    h.frame(Vec::new());
+    assert_eq!(selected(&h), ["main.rs"], "an empty match changed the selection");
+    assert_eq!(h.tab(0).filter, "no such file anywhere");
+    assert!(h.ctx.memory(|m| m.focused()).is_some(), "the caret left the box");
+
+    // ---- A search of the subfolders: the filter stays -------------------
+    let mut h = Harness::new();
+    h.app.perform(&h.ctx.clone(), Action::SetSearchSubfolders(true));
+    filter_in_src(&mut h);
+    h.frame(vec![Event::Text("\\mod.rs$".to_owned())]);
+    past_the_wait(&mut h);
+    h.settle();
+    assert!(h.tab(0).flat, "the filter did not search the subfolders");
+    let found = h.tab(0).match_count();
+    assert!(found > 3, "too few mod.rs under src to mean anything: {found}");
+
+    h.modifiers = Modifiers::COMMAND;
+    h.frame(vec![ctrl_enter()]);
+    h.modifiers = Modifiers::NONE;
+    h.frame(Vec::new());
+    let tab = h.tab(0);
+    assert_eq!(tab.filter, "\\mod.rs$", "the search was cleared");
+    assert!(tab.flat, "and folded away");
+    let picked = selected(&h);
+    assert_eq!(picked.len(), found, "matches, and only matches: {picked:?}");
+    assert!(
+        picked.iter().all(|name| name.ends_with("mod.rs")),
+        "a folder on the way to a match was selected: {picked:?}"
+    );
+}
+
 /// Ctrl+F again, without navigating — for a test that has already filtered.
 fn filter_in_src_again(h: &mut Harness) {
     let held = Modifiers::COMMAND;

@@ -211,6 +211,88 @@ impl Tab {
         self.selected_count = self.order.len();
     }
 
+    /// Every row on screen that was not selected, and none that was.
+    ///
+    /// **Only the rows in `order`.** A row the filter hid while it was selected stays selected:
+    /// inverting what you cannot see is not something you can check before acting on it. The cursor
+    /// and the anchor stay where they are, as they do for [`Tab::select_all`].
+    pub fn invert_selection(&mut self) {
+        let dir = self.dir.clone();
+        for &entry in &self.order {
+            let entry = entry as usize;
+            let size = Self::size_at(dir.as_ref(), entry);
+            let now = !self.selected[entry];
+            self.selected[entry] = now;
+            if now {
+                self.selected_count += 1;
+                self.selected_size += size;
+            } else {
+                self.selected_count = self.selected_count.saturating_sub(1);
+                self.selected_size = self.selected_size.saturating_sub(size);
+            }
+        }
+    }
+
+    /// Every row the filter matched, added to the selection: `Ctrl+Enter` in the filter box.
+    ///
+    /// **Matches, not rows** — the rows the status line counts in `N matches`, by the same test
+    /// ([`super::listing::filter_matcher`]). A tree keeps the folders on the way to each match so it
+    /// can be opened, and selecting those would put every parent folder into a delete of `.log$`.
+    /// Added rather than replacing, so `.log$` and then `.txt$` builds up both.
+    ///
+    /// The position of the first match, for the cursor to land on; `None` when nothing matched, or
+    /// there are no words in the box to match with.
+    pub fn select_matches(&mut self) -> Option<usize> {
+        let query = azur_egui_theme::filter::Query::parse(&self.filter);
+        if query.is_empty() {
+            return None;
+        }
+        let dir = self.dir.clone()?;
+        let mut matches = super::listing::filter_matcher(&dir, query);
+        let mut first = None;
+        for (position, &entry) in self.order.iter().enumerate() {
+            let entry = entry as usize;
+            if !matches(entry) {
+                continue;
+            }
+            first.get_or_insert(position);
+            if !self.selected[entry] {
+                self.selected[entry] = true;
+                self.selected_count += 1;
+                self.selected_size += Self::size_at(Some(&dir), entry);
+            }
+        }
+        first
+    }
+
+    /// Every file on screen with the extension of the one under the cursor, added to the selection
+    /// — so `.rs` and then `.toml` builds up both.
+    ///
+    /// Nothing on a folder: a folder's "extension" is part of its name, not a type. A file with no
+    /// extension selects the others with none, which is the type it has. Read from what the listing
+    /// already holds ([`crate::fs::Dir::ext`]), so it costs a pass over the order and never the disk.
+    pub fn select_same_extension(&mut self) {
+        let Some(at) = self.cursor.and_then(|position| self.entry_at(position)) else {
+            return;
+        };
+        let Some(dir) = self.dir.clone() else { return };
+        if dir.entries[at].is_dir() {
+            return;
+        }
+        let ext = dir.ext(at);
+        for &entry in &self.order {
+            let entry = entry as usize;
+            if !self.selected[entry]
+                && !dir.entries[entry].is_dir()
+                && dir.ext(entry).eq_ignore_ascii_case(ext)
+            {
+                self.selected[entry] = true;
+                self.selected_count += 1;
+                self.selected_size += Self::size_at(Some(&dir), entry);
+            }
+        }
+    }
+
     /// The paths of everything selected, in display order.
     pub fn selection_paths(&self) -> Vec<PathBuf> {
         let Some(dir) = &self.dir else { return Vec::new() };

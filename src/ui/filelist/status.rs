@@ -482,6 +482,24 @@ pub(crate) fn status_line(
                     left = at + size.x;
                 }
             }
+            // **The key that turns the matches into a selection**, said where the count of them is
+            // and only while the box has the caret: it is the box that reads it, and a hint for a key
+            // that would do nothing is worse than none. Dropped rather than truncated when it does
+            // not fit — the count before it is the part worth the room.
+            if tab.match_count() > 0
+                && !(tab.searching_tree() && tab.awaiting.is_some())
+                && crate::ui::breadcrumb::filter_focused(ui.ctx(), pane)
+            {
+                let at = left + space::S2;
+                let hint = painter.layout_no_wrap(
+                    format!("· {} selects them", crate::app::shortcuts::FILTER_SELECT.label()),
+                    t.fonts.caption.clone(),
+                    t.text.tertiary,
+                );
+                if at + hint.size().x <= edge {
+                    galley_on_baseline(&painter, at, baseline, hint);
+                }
+            }
             // A walk in flight has a count that moves, and nothing else would ask for the frame
             // that shows it: the walk only wakes the window when it is done.
             if tab.searching_tree() && tab.awaiting.is_some() {

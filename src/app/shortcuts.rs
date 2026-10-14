@@ -73,6 +73,11 @@ const fn shift(key: Key) -> Chord {
 /// The command palette's own key. Not a [`Command`], since the palette does not list itself.
 pub(crate) const PALETTE: Chord = ctrl_shift(Key::P);
 
+/// `Ctrl+Enter` in the filter box: select what the filter matched. Not a [`Command`] either: it means
+/// something only while the box has the caret, so the box reads it, and the status line prints it
+/// from here as the hint that says it exists.
+pub(crate) const FILTER_SELECT: Chord = ctrl(Key::Enter);
+
 /// Every bound command, in the order the palette lists them.
 pub(crate) static BINDINGS: &[(Command, &[Chord])] = &[
     // Tabs and panes
@@ -119,6 +124,8 @@ pub(crate) static BINDINGS: &[(Command, &[Chord])] = &[
     (Command::Redo, &[ctrl(Key::Y), ctrl_shift(Key::Z)]),
     (Command::SelectAll, &[ctrl(Key::A)]),
     (Command::ClearSelection, &[bare(Key::Escape)]),
+    (Command::InvertSelection, &[ctrl(Key::I)]),
+    (Command::SelectSameExtension, &[ctrl_shift(Key::A)]),
     // Window
     (Command::SpanScreens, &[Chord::Named("Ctrl+Win+↑")]),
     (Command::ResetSize, &[Chord::Named("Ctrl+Win+↓")]),
@@ -241,6 +248,10 @@ mod tests {
         assert!(
             !seen.iter().any(|(chord, _)| *chord == PALETTE),
             "the palette's own key is bound to a command too"
+        );
+        assert!(
+            !seen.iter().any(|(chord, _)| *chord == FILTER_SELECT),
+            "the filter box's Ctrl+Enter is bound to a command too"
         );
     }
 

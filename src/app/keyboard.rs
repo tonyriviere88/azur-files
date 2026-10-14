@@ -338,6 +338,12 @@ impl App {
             if on(Command::SelectAll) {
                 push(Action::SelectAll(pane));
             }
+            if on(Command::InvertSelection) {
+                push(Action::InvertSelection(pane));
+            }
+            if on(Command::SelectSameExtension) {
+                push(Action::SelectSameExtension(pane));
+            }
             // No pane, unlike its neighbours: the window's preference, and every pane follows.
             if on(Command::Hidden) {
                 push(Action::ToggleHidden);

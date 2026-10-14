@@ -514,19 +514,10 @@ impl Tab {
         }
         let count = match &self.dir {
             Some(dir) => {
-                let query = azur_egui_theme::filter::Query::parse(&self.filter);
-                let mut path = dir.path.to_string_lossy().into_owned();
-                if !path.is_empty() && !path.ends_with(['\\', '/']) {
-                    path.push('\\');
-                }
-                let base = path.len();
+                let mut matches = filter_matcher(dir, azur_egui_theme::filter::Query::parse(&self.filter));
                 self.order
                     .iter()
-                    .filter(|&&entry| {
-                        path.truncate(base);
-                        path.push_str(dir.name(entry as usize));
-                        query.matches(&path)
-                    })
+                    .filter(|&&entry| matches(entry as usize))
                     .count()
             }
             None => 0,
@@ -853,5 +844,26 @@ impl Tab {
     /// [`crate::sizes::Measurement::shown`], which is what the cell and its tooltip both draw from.
     pub fn size_shown(&self, entry: usize) -> Option<u64> {
         self.sizes.shown(self.dir.as_ref()?, entry)
+    }
+}
+
+/// The filter's question of one entry, asked as [`crate::fs::sort::build_order`] asks it: of the
+/// row's whole path. One buffer for the whole pass, so walking the order allocates once.
+///
+/// Shared by [`Tab::match_count`] and [`Tab::select_matches`], so that what the status line counts
+/// as a match and what `Ctrl+Enter` selects are one answer.
+pub(crate) fn filter_matcher(
+    dir: &Dir,
+    query: azur_egui_theme::filter::Query,
+) -> impl FnMut(usize) -> bool + '_ {
+    let mut path = dir.path.to_string_lossy().into_owned();
+    if !path.is_empty() && !path.ends_with(['\\', '/']) {
+        path.push('\\');
+    }
+    let base = path.len();
+    move |entry| {
+        path.truncate(base);
+        path.push_str(dir.name(entry));
+        query.matches(&path)
     }
 }
