@@ -140,6 +140,12 @@ Four structural invariants. Breaking any of them compiles and then misbehaves at
    one names its counterpart in its own `//!` header. Types live in the portable half so
    what a thing *is* stays platform-neutral.
 
+**Every command is on the command palette** (`Ctrl+Shift+P`, [`app/palette.rs`](src/app/palette.rs)).
+A new `Action` variant does not compile until `palette::listed` puts it in one of its two lists. In
+the first, it also needs an entry in `App::catalogue` and an arm in `App::palette_action`;
+`every_listed_action_is_on_the_palette` fails until both exist. The second list is for gesture
+halves, field commits and duplicates of a listed action, and is not where a new command goes.
+
 Anything allocated because of a folder is freed when you leave it. A per-file answer
 carries the *view* that asked and the *row* it asked about; an answer arriving after you
 have gone finds no view and is discarded. Do not key a per-file cache on `PathBuf` — that

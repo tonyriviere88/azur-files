@@ -187,6 +187,7 @@ fn main() -> eframe::Result {
     let mut menu = false;
     let mut rename = false;
     let mut batch: Option<Option<String>> = None;
+    let mut palette: Option<String> = None;
     let mut path: Option<String> = None;
     let mut stack = false;
     let mut tiles = false;
@@ -255,6 +256,10 @@ fn main() -> eframe::Result {
             batch = Some(None);
         } else if let Some(pattern) = arg.strip_prefix("--batch=") {
             batch = Some(Some(pattern.to_owned()));
+        } else if arg == "--palette" {
+            palette = Some(String::new());
+        } else if let Some(text) = arg.strip_prefix("--palette=") {
+            palette = Some(text.to_owned());
         } else if let Some(text) = arg.strip_prefix("--path=") {
             path = Some(text.to_owned());
         } else if arg == "--tiles" {
@@ -446,6 +451,7 @@ fn main() -> eframe::Result {
                 menu,
                 rename,
                 batch,
+                palette,
                 path,
                 tiles,
                 diff,
@@ -599,6 +605,9 @@ struct Window {
     /// in Pattern mode with that pattern when one is given. Behind a selection and F2, which a
     /// capture run has no keyboard for — the same reason `--rename` exists.
     batch: Option<Option<String>>,
+    /// `--palette[=text]`: put the command palette up, with that typed into it. Behind a chord, which
+    /// a capture run has no keyboard for.
+    palette: Option<String>,
     /// `--path=<text>`: open the path field with that text half-typed in it, so a capture can show
     /// the completion dropdown. Behind `Ctrl+L` and then a keystroke, which a capture run has no
     /// keyboard for — the same reason `--rename` exists.
@@ -712,6 +721,11 @@ impl eframe::App for Window {
         if self.batch.is_some() && self.shot.as_ref().is_some_and(|s| s.frame >= 8) && self.app.has_rows() {
             let pattern = self.batch.take().flatten();
             self.app.begin_batch_here(pattern);
+        }
+        // Once the listing is in, since what the palette lists depends on it.
+        if self.palette.is_some() && self.shot.as_ref().is_some_and(|s| s.frame >= 8) && self.app.has_rows() {
+            let text = self.palette.take().unwrap_or_default();
+            self.app.open_palette_with(&text);
         }
         // The same window, for the same reason: the panel follows the keyboard, and a scan
         // landing afterwards would move the keyboard off the row that was chosen for it.

@@ -286,6 +286,19 @@ impl App {
                     p.tab_mut().select_all();
                 }
             }
+            Action::ClearSelection(pane) => {
+                if let Some(p) = self.pane_mut(pane) {
+                    p.tab_mut().clear_selection();
+                }
+            }
+            // A flag the filter box reads as it is drawn, because the box is the one thing that has
+            // the field's id to hand the keyboard to.
+            Action::FocusFilter(pane) => {
+                if let Some(p) = self.pane_mut(pane) {
+                    p.tab_mut().find_wanted = true;
+                }
+                self.focused = pane;
+            }
             // Whether hidden files are rows, for every tab of every pane at once — the window's
             // preference like `SetFlatMode` and `SetRegroup` below, and written down like them.
             //
@@ -792,6 +805,14 @@ impl App {
                     }
                 }
             }
+            // Remembered first, so the rename below opens the panel in it.
+            Action::BeginBatch { pane, mode } => {
+                if self.batch_mode != mode {
+                    self.batch_mode = mode;
+                    self.config_dirty = true;
+                }
+                self.perform(ctx, Action::BeginRename(pane));
+            }
             // The panel's Rename: the plan against the listing as it is now — the preview's own copy
             // only if that is still the listing it was made from — and nothing at all done unless
             // every row is clear. One job, so one Ctrl+Z.
@@ -1203,6 +1224,13 @@ impl App {
                 self.installed = false;
                 self.config_dirty = true;
             }
+
+            Action::Zoom(zoom) => match zoom {
+                crate::app::Zoom::In => egui::gui_zoom::zoom_in(ctx),
+                crate::app::Zoom::Out => egui::gui_zoom::zoom_out(ctx),
+                crate::app::Zoom::Reset => ctx.set_zoom_factor(1.0),
+            },
+            Action::TogglePalette => self.toggle_palette(),
 
             Action::SetWinKey(on) => {
                 // Nothing is marked dirty and nothing reaches `config.ini`: the registry is the

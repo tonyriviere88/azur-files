@@ -341,6 +341,7 @@ impl App {
         if azur_egui_theme::desktop::close_popups_on_blur(ctx) {
             self.close_menu();
             self.crumbs.close();
+            self.palette = None;
         }
     }
 
@@ -360,18 +361,23 @@ impl App {
     /// photographs the background one. Before this it was always the second, and the tile row could
     /// not be captured at all.
     pub fn open_folder_menu(&mut self, ctx: &egui::Context) {
-        let Some(pane) = self.panes.iter().find(|p| p.id == self.focused) else {
-            return;
-        };
+        if let Some(action) = self.folder_menu_action(ctx) {
+            self.actions.push(action);
+        }
+    }
+
+    /// The action [`App::open_folder_menu`] pushes: the focused pane's menu, over its listing. Also
+    /// the command palette's `Show context menu`, which has no pointer to put it at either.
+    pub(super) fn folder_menu_action(&self, ctx: &egui::Context) -> Option<Action> {
+        let pane = self.panes.iter().find(|p| p.id == self.focused)?;
         let rect = pane.rect;
         let scale = ctx.pixels_per_point();
         let at = rect.min + egui::vec2(rect.width() * 0.22, rect.height() * 0.30);
-        let items = pane.tab().selection_paths();
-        self.actions.push(Action::ShellMenu {
+        Some(Action::ShellMenu {
             pane: pane.id,
-            items,
+            items: pane.tab().selection_paths(),
             at: ((at.x * scale) as i32, (at.y * scale) as i32),
-        });
+        })
     }
 
     /// Draw the context menu, if one is open, and act on what it says.

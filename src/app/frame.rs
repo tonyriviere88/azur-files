@@ -392,6 +392,8 @@ impl App {
 
         // Over everything, and in the root `Ui` so its coordinates are the screen's.
         self.draw_menu(ui, &theme);
+        // And the palette over that, since it is what the keyboard is in while it is up.
+        self.draw_palette(&ctx, &theme, screen);
 
         // The drag itself — the files under the pointer, and what letting go would do — over the
         // highlight that says where. After the panes, because it is the one thing on screen that

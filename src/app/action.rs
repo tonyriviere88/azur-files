@@ -78,6 +78,11 @@ pub enum Action {
     // The view
     Sort { pane: PaneId, column: Column },
     SelectAll(PaneId),
+    /// Nothing selected — `Escape` in the listing, for the palette, which has no listing to press
+    /// it in.
+    ClearSelection(PaneId),
+    /// Put the caret in this pane's filter box, as `Ctrl+F` does. See [`crate::pane::Tab::find_wanted`].
+    FocusFilter(PaneId),
     /// Show the files Windows marks hidden, or stop — the window's preference, so every pane
     /// follows, like [`Self::SetRegroup`] below. `Ctrl+H`, and written to the settings file.
     ///
@@ -224,6 +229,12 @@ pub enum Action {
     Undo { redo: bool },
     /// Start renaming the row under the cursor.
     BeginRename(PaneId),
+    /// Open the batch rename panel on the selection in this mode — the palette's three entries for
+    /// `F2` on several rows. The mode is remembered as [`Self::SetBatchMode`] remembers it.
+    BeginBatch {
+        pane: PaneId,
+        mode: crate::pane::batch::Mode,
+    },
     /// Finish a rename, or do nothing if the name is unchanged or empty.
     CommitRename { pane: PaneId, name: String },
     CancelRename(PaneId),
@@ -352,6 +363,11 @@ pub enum Action {
     /// Remove a group, and the bookmarks in it with it.
     RemoveBookmarkGroup(usize),
     SetTheme(crate::theme::Palette),
+    /// egui's own zoom, a step either way or back to none — what `Ctrl` `+`, `-` and `0` do, for the
+    /// palette. The new factor is noticed and written down by the frame like any other.
+    Zoom(crate::app::Zoom),
+    /// Put the command palette up, or take it down. `Ctrl+Shift+P`. See [`crate::app::palette`].
+    TogglePalette,
     /// Claim `Win+E` — Windows' own folder key — or give it back to Explorer. In the application
     /// menu under the mark, and nowhere else.
     ///
@@ -412,6 +428,8 @@ impl Action {
             Self::EditPath(_) => "EditPath",
             Self::Sort { .. } => "Sort",
             Self::SelectAll(_) => "SelectAll",
+            Self::ClearSelection(_) => "ClearSelection",
+            Self::FocusFilter(_) => "FocusFilter",
             Self::ToggleHidden => "ToggleHidden",
             Self::ToggleFlat(_) => "ToggleFlat",
             Self::FilterFlat { .. } => "FilterFlat",
@@ -452,6 +470,7 @@ impl Action {
             Self::Undo { redo: false } => "Undo",
             Self::Undo { redo: true } => "Redo",
             Self::BeginRename(_) => "BeginRename",
+            Self::BeginBatch { .. } => "BeginBatch",
             Self::CommitRename { .. } => "CommitRename",
             Self::CancelRename(_) => "CancelRename",
             Self::BeginKeywords { .. } => "BeginKeywords",
@@ -490,6 +509,8 @@ impl Action {
             Self::UngroupBookmarks(_) => "UngroupBookmarks",
             Self::RemoveBookmarkGroup(_) => "RemoveBookmarkGroup",
             Self::SetTheme { .. } => "SetTheme",
+            Self::Zoom(_) => "Zoom",
+            Self::TogglePalette => "TogglePalette",
             Self::SetWinKey(_) => "SetWinKey",
             Self::SetUpdateEvery(_) => "SetUpdateEvery",
             Self::CheckForUpdate => "CheckForUpdate",

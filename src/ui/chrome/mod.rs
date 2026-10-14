@@ -866,6 +866,18 @@ fn app_menu(
     let room = ui.ctx().content_rect().height() - HEIGHT - space::S1 * 2.0 - space::S2 * 2.0;
     let menu = Menu::new(trigger).min_width(220.0).max_height(room.max(120.0));
     menu.show(ui.ctx(), |ui| {
+        // First, because it is the way to everything below it and to everything that is not here.
+        if ui
+            .add(
+                MenuItem::new("Command palette...")
+                    .shortcut("Ctrl+Shift+P")
+                    .icon(&azur_icons::search),
+            )
+            .clicked()
+        {
+            out.push(Action::TogglePalette);
+        }
+        azur_egui_theme::components::menu_divider(ui);
         if ui
             .add(MenuItem::new("New tab").shortcut("Ctrl+T").icon(&azur_icons::plus))
             .clicked()

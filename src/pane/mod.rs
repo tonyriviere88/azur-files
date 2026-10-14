@@ -686,6 +686,9 @@ pub struct Tab {
     /// The breadcrumb has been turned into an editable path field.
     pub editing_path: bool,
     pub edit_text: String,
+    /// The filter box is to take the keyboard when it is next drawn — [`crate::app::Action::FocusFilter`],
+    /// the palette's way of pressing `Ctrl+F`. Read and cleared by the box.
+    pub find_wanted: bool,
 
     /// Last frame's scroll offset, so a scroll-into-view can nudge rather than jump.
     pub scroll_y: f32,
@@ -929,6 +932,7 @@ impl Tab {
             typeahead_at: 0.0,
             editing_path: false,
             edit_text: String::new(),
+            find_wanted: false,
             scroll_y: 0.0,
             scroll_to: None,
             band: None,

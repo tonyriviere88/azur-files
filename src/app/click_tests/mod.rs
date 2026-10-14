@@ -28,12 +28,14 @@ use egui::{pos2, vec2, Event, Id, Modifiers, PointerButton, Pos2, RawInput, Rect
 // | [`preview`] | the preview panel, every view of it |
 // | [`grid`] | the tiles view |
 // | [`menu`] | the context menu, this program's half and the shell's |
+// | [`command_palette`] | `Ctrl+Shift+P`: what it lists, what narrows it, what a pick does |
 // | [`transfer`] | the clipboard, and drag and drop |
 // | [`rescan`] | a folder changing underneath the listing |
 // | [`memory`] | does browsing let go of what it read? |
 mod band;
 mod batch;
 mod breadcrumb;
+mod command_palette;
 mod details;
 mod filter;
 mod flatten;

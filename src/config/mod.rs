@@ -210,6 +210,10 @@ pub struct Config {
     /// The release the user said to skip, from the badge's menu: an offer of exactly this version
     /// stays hidden, and the next one shows. Empty for none.
     pub update_skip: String,
+    /// The commands last picked from the command palette, newest first, by name — what it lists
+    /// before anything is typed. `palette_recent=NewTab,Hidden`. A name this build does not know is
+    /// kept and never listed. See `crate::app::palette`.
+    pub palette_recent: Vec<String>,
     /// When a folder opens as tiles rather than as rows without the switch being pressed.
     ///
     /// The one setting here that touches [`crate::pane::ViewMode`], and it is a *rule* rather than a
@@ -317,6 +321,7 @@ impl Default for Config {
             suggest_history: true,
             update_every: crate::update::Every::default(),
             update_skip: String::new(),
+            palette_recent: Vec::new(),
             auto_tiles: crate::pane::AutoTiles::default(),
             menu_moves: crate::shell::menu::Moves::default(),
             sections: Sections::default(),
@@ -482,6 +487,14 @@ impl Config {
                     }
                 }
                 "update_skip" => config.update_skip = value.to_owned(),
+                "palette_recent" => {
+                    config.palette_recent = value
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|key| !key.is_empty())
+                        .map(str::to_owned)
+                        .collect();
+                }
                 // The same again: opening a folder as tiles on its own is off until somebody asks
                 // for it. See [`crate::pane::AutoTiles`].
                 // Read as "anything but 0", like `regroup` above and `diff` below: its default is
@@ -713,6 +726,9 @@ impl Config {
         text.push_str(&format!("update={}\n", self.update_every.as_str()));
         if !self.update_skip.is_empty() {
             text.push_str(&format!("update_skip={}\n", self.update_skip));
+        }
+        if !self.palette_recent.is_empty() {
+            text.push_str(&format!("palette_recent={}\n", self.palette_recent.join(",")));
         }
         text.push_str(&format!("auto_tiles={}\n", flag(self.auto_tiles.on)));
         // Whole percent: it is what the slider produces — see `ui::filelist::tiles_menu`, whose step

@@ -212,17 +212,14 @@ impl History {
 
     /// Whether Ctrl+Z has anything to act on.
     ///
-    /// **Only the tests ask.** Nothing in the window is greyed out or ticked according to the
-    /// history — the two shortcuts are the whole of the interface, and one that has nothing to do
-    /// says so through [`Self::why_not`] when it is pressed. A menu entry offering Undo would want
-    /// this, and would be the reason to make it public.
-    #[cfg(test)]
+    /// **The tests ask, and the command palette**, which leaves Undo off its list when there is
+    /// nothing to undo. Nothing else in the window is greyed out or ticked according to the history —
+    /// the two shortcuts say so through [`Self::why_not`] when pressed.
     pub fn can_undo(&self) -> bool {
         self.running.is_none() && !self.done.is_empty()
     }
 
-    /// Whether Ctrl+Y has anything to act on. As [`Self::can_undo`], and as test-only.
-    #[cfg(test)]
+    /// Whether Ctrl+Y has anything to act on. As [`Self::can_undo`].
     pub fn can_redo(&self) -> bool {
         self.running.is_none() && !self.undone.is_empty()
     }

@@ -165,8 +165,11 @@ impl App {
         });
         // A menu on screen owns the keyboard: its own arrows and Enter are handled where
         // it is drawn, and the listing must not move underneath it at the same time.
-        let typing =
-            renaming || self.menu.is_some() || ctx.memory(|m| m.focused()).is_some();
+        // And the palette, whose field holds the caret and whose list takes the arrows.
+        let typing = renaming
+            || self.menu.is_some()
+            || self.palette.is_some()
+            || ctx.memory(|m| m.focused()).is_some();
 
         // **The video's own keys, before anything else can claim them.** Space and the arrows, for the
         // player that was last clicked — see [`App::video_keys`].
@@ -222,6 +225,20 @@ impl App {
         // not something either gesture means. See [`App::window_keys`].
         self.window_keys(ctx);
 
+        // **`Ctrl+Shift+P`, the palette**, from anywhere a chord can be pressed — a field included,
+        // since the filter box is where the caret usually is — and the same key takes it down again.
+        // Not over a rename or a menu, which own the keyboard outright.
+        //
+        // **Read before `Ctrl+P`, and consumed**, because `consume_key` and `key_pressed` both match
+        // `Ctrl+P` with Shift held as well: left in the queue it would open the preview panel too.
+        if !renaming
+            && self.menu.is_none()
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, K::P))
+        {
+            self.actions.push(Action::TogglePalette);
+            return;
+        }
+
         if typing {
             // **`Ctrl+E` and `Ctrl+P` still get through.** Both are questions about the folder you
             // are looking at rather than about the field the caret happens to be in, and both
@@ -234,7 +251,7 @@ impl App {
             // re-reading the folder would throw away, and a menu owns the keyboard outright.
             // `consume_key` rather than `key_pressed`, so the field it was typed into does not
             // also see it.
-            let allowed = !renaming && self.menu.is_none();
+            let allowed = !renaming && self.menu.is_none() && self.palette.is_none();
             if allowed {
                 for (key, action) in [
                     (K::E, Action::ToggleFlat(self.focused)),

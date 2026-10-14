@@ -41,6 +41,7 @@ mod git;
 mod keyboard;
 mod load;
 mod menu;
+mod palette;
 mod perform;
 mod preview;
 mod transfer;
@@ -54,6 +55,7 @@ mod tests;
 // here; everything a frame *does* with it lives next door, and the split follows the banners this
 // file used to carry rather than inventing new lines.
 pub use action::{Action, WindowAction};
+pub use palette::Zoom;
 use action::Asking;
 use capture::{process_memory, Scrolling, Settling, Shape, Walk};
 use git::GIT_WRITE_SETTLE;
@@ -371,6 +373,10 @@ pub struct App {
     modal: crate::shell::Modal,
     /// The context menu, while one is open.
     menu: Option<crate::ui::menu::Open>,
+    /// The command palette, while it is up. `Ctrl+Shift+P`; see [`palette`].
+    palette: Option<palette::Palette>,
+    /// The commands last picked from it, newest first. See [`crate::config::Config::palette_recent`].
+    palette_recent: Vec<String>,
     /// A context menu that has been asked for and is not on screen yet.
     asking: Option<Asking>,
     /// Builds the shell's half of the context menu, off this thread — half a second of
@@ -702,6 +708,8 @@ impl App {
             drops: crate::shell::dnd::Zone::new(),
             modal: crate::shell::Modal::new(ctx),
             menu: None,
+            palette: None,
+            palette_recent: config.palette_recent.clone(),
             asking: None,
             menu_builder: crate::shell::menu::Builder::new(ctx),
             differ: crate::diff::Differ::new(ctx),
@@ -852,6 +860,7 @@ impl App {
             update_skip: self.update_skip.clone(),
             auto_tiles: self.auto_tiles,
             menu_moves: self.menu_moves.clone(),
+            palette_recent: self.palette_recent.clone(),
             sections: self.sections,
             panes: Vec::new(),
             layout: None,

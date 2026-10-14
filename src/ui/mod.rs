@@ -18,6 +18,7 @@ pub mod deps;
 pub mod filelist;
 pub mod grid;
 pub mod menu;
+pub mod palette;
 pub mod preview;
 pub mod sidebar;
 pub mod transfers;

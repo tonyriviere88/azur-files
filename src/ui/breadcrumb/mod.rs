@@ -553,7 +553,9 @@ pub fn show(
             .ctx()
             .memory(|m| m.focused())
             .is_some_and(|id| id != response.id);
-        if ui.input_mut(|i| {
+        // And the palette's `Filter this folder`, which is the same request arriving as a flag.
+        let wanted = std::mem::take(&mut tab.find_wanted);
+        if wanted || ui.input_mut(|i| {
             i.consume_shortcut(&egui::KeyboardShortcut::new(
                 egui::Modifiers::COMMAND,
                 egui::Key::F,
