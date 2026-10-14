@@ -76,6 +76,39 @@ fn a_tab_and_its_close_button_are_clickable() {
     assert_eq!(h.app.panes[0].tabs.len(), 1);
 }
 
+/// A background tab's close button only shows while the pointer is over the tab, and the button
+/// itself takes the hover away from the tab beneath it. Keyed on the tab's `hovered()`, the button
+/// vanished the frame after it appeared, so a click on it never landed.
+#[test]
+fn a_background_tabs_close_button_is_clickable() {
+    let mut h = Harness::new();
+    h.app.panes[0]
+        .tabs
+        .push(Tab::new(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src")));
+    h.app.panes[0].active = 0;
+    h.settle();
+
+    let pane = h.app.panes[0].id;
+    let strip_y = crate::ui::chrome::HEIGHT * 0.5;
+
+    let close = (0..800)
+        .step_by(2)
+        .map(|dx| pos2(dx as f32, strip_y))
+        .find(|at| h.hovers(Id::new(("tab-close", pane, 1usize)), *at))
+        .expect("a background tab's close button is not reachable");
+    // Held still for a few frames, as a real pointer is before it presses.
+    for _ in 0..3 {
+        h.frame(vec![Event::PointerMoved(close)]);
+    }
+    let done = h.click_at(close);
+    assert!(
+        done.contains(&"CloseTab"),
+        "the background tab's close button did not fire, got {done:?}"
+    );
+    assert_eq!(h.app.panes[0].tabs.len(), 1);
+    assert_eq!(h.app.panes[0].active, 0);
+}
+
 /// The console's switch takes a click, and it is the same toggle the shortcut is.
 ///
 /// **The reachability is the point of it.** `chrome::resize_borders` is registered *last* so that

@@ -619,6 +619,11 @@ fn paint_tab(
         Id::new(("tab", pane, index)),
         Sense::click_and_drag(),
     );
+    // Whether the pointer is over the tab, close button included. Not `hovered()`: the close
+    // button sits on top and takes the hover, so a background tab keyed on it lost its button the
+    // frame after showing it, and the button could never be clicked. Nothing being dragged, which
+    // `hovered()` also said, so a tab carried across the strip does not light up the ones it passes.
+    let pointer_over = response.contains_pointer() && ui.ctx().dragged_id().is_none();
 
     let corner = TAB_CORNER;
     // Whether this tab has a surface of its own, which is what decides whether it needs a
@@ -674,7 +679,7 @@ fn paint_tab(
         );
     } else if response.is_pointer_button_down_on() {
         ui.painter().rect_filled(rect, corner, crate::ui::bar(t));
-    } else if response.hovered() {
+    } else if pointer_over {
         ui.painter().rect_filled(rect, corner, t.bg.layer_alt);
     } else {
         filled = false;
@@ -690,7 +695,7 @@ fn paint_tab(
     // legible of the two channels anyway.
     let text_color = if being_dragged {
         t.text.disabled
-    } else if (active && pane_focused) || response.hovered() {
+    } else if (active && pane_focused) || pointer_over {
         t.text.primary
     } else {
         t.text.secondary
@@ -746,7 +751,7 @@ fn paint_tab(
     // The close button, which only appears when there is room for it.
     let mut text_right = rect.right() - space::S2;
     let close_room = rect.width() > TAB_MIN + 8.0;
-    let show_close = close_room && (active || response.hovered());
+    let show_close = close_room && (active || pointer_over);
     if close_room {
         let close = Rect::from_min_size(
             pos2(
