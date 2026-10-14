@@ -94,10 +94,27 @@ fn halves(path: &Path) -> (String, String) {
 }
 
 pub(super) fn load(path: &Path) -> Payload {
+    match read(path) {
+        Ok(mut text) => {
+            // Asked for after the file has been read, so a folder with no repository above it costs
+            // the `stat` walk and nothing else — see [`crate::git::changes`]. An empty answer is kept
+            // as `None`: "nothing changed" and "no diff to show" are the same thing to the panel.
+            text.changes = crate::git::changes(path).filter(|changes| !changes.is_empty());
+            Payload::Text(text)
+        }
+        Err(why) => why,
+    }
+}
+
+/// The file as text, and nothing git says about it — or the payload that says why it could not be read.
+///
+/// The half of [`load`] that a comparison of two files wants: their changes against `HEAD` are not
+/// what it shows, and asking would be a `git diff` per side for an answer that is thrown away.
+pub(super) fn read(path: &Path) -> Result<Text, Payload> {
     use std::io::Read as _;
 
     let Ok(mut file) = std::fs::File::open(path) else {
-        return Payload::Failed("Cannot be opened".to_owned());
+        return Err(Payload::Failed("Cannot be opened".to_owned()));
     };
     // One byte past the cap, so a file exactly at it is not reported as truncated.
     let mut buffer = Vec::new();
@@ -107,7 +124,7 @@ pub(super) fn load(path: &Path) -> Payload {
         .read_to_end(&mut buffer)
         .is_err()
     {
-        return Payload::Failed("Cannot be read".to_owned());
+        return Err(Payload::Failed("Cannot be read".to_owned()));
     }
     let truncated = buffer.len() > TEXT_CAP;
     buffer.truncate(TEXT_CAP);
@@ -127,14 +144,11 @@ pub(super) fn load(path: &Path) -> Payload {
     // Asked of the name first and of the body only where the name said nothing — and after the two
     // substitutions above, so what is probed is the string the panel will actually lay out.
     let (lang, code) = lang_and_face(path, &body);
-    Payload::Text(Text {
+    Ok(Text {
         body,
         truncated,
         code,
         lang,
-        // Asked for after the file has been read, so a folder with no repository above it costs the
-        // `stat` walk and nothing else — see [`crate::git::changes`]. An empty answer is kept as
-        // `None`: "nothing changed" and "no diff to show" are the same thing to the panel.
-        changes: crate::git::changes(path).filter(|changes| !changes.is_empty()),
+        changes: None,
     })
 }

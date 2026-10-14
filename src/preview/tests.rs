@@ -823,7 +823,7 @@ fn two_pictures_are_compared_at_the_larger_of_the_two_sizes() {
     one.save(&a).expect("a PNG");
     other.save(&b).expect("another PNG");
 
-    let Payload::Diff(diff) = read(&Ask::Pair(a.clone(), b.clone())) else {
+    let Payload::Diff(diff) = read(&Ask::Pair(a.clone(), b.clone(), Kind::Picture)) else {
         panic!("two pictures did not come back as a comparison");
     };
     assert_eq!(diff.a.pixels.size, [4, 2]);
@@ -850,7 +850,7 @@ fn two_pictures_are_compared_at_the_larger_of_the_two_sizes() {
     image::RgbaImage::from_pixel(4, 2, image::Rgba([11, 20, 30, 255]))
         .save(&faint)
         .expect("a PNG");
-    let Payload::Diff(diff) = read(&Ask::Pair(a.clone(), faint.clone())) else {
+    let Payload::Diff(diff) = read(&Ask::Pair(a.clone(), faint.clone(), Kind::Picture)) else {
         panic!("not a comparison");
     };
     assert_eq!(diff.mask.pixels.pixels[0].a(), 8, "one level, amplified");
@@ -860,10 +860,180 @@ fn two_pictures_are_compared_at_the_larger_of_the_two_sizes() {
     let lie = scratch("lie.png");
     std::fs::write(&lie, b"not a PNG").expect("a file");
     assert!(matches!(
-        read(&Ask::Pair(a.clone(), lie.clone())),
+        read(&Ask::Pair(a.clone(), lie.clone(), Kind::Picture)),
         Payload::Failed(_)
     ));
     for path in [a, b, faint, lie] {
+        crate::sandbox::remove_file(&path);
+    }
+}
+
+/// Rebuild `after` from `before` and the hunks, failing if any hunk misdescribes either side.
+///
+/// What the panel relies on, put as a check: every line outside a hunk is one both files have, at the
+/// place the numbering says, and every removed line is the first file's line at `removed_at`.
+fn replay(before: &str, after: &str, changes: &crate::git::Changes) -> Vec<String> {
+    let old: Vec<&str> = before.lines().collect();
+    let new: Vec<&str> = after.lines().collect();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    for hunk in &changes.hunks {
+        // Where the removed lines start, 0-based; an empty removal sits after `removed_at`.
+        let from = if hunk.removed.is_empty() {
+            hunk.removed_at as usize
+        } else {
+            hunk.removed_at as usize - 1
+        };
+        out.extend(old[i..from].iter().map(|line| line.to_string()));
+        assert_eq!(
+            out.len(),
+            hunk.after as usize,
+            "a hunk's `after` is not the count of lines before it"
+        );
+        assert_eq!(&old[from..from + hunk.removed.len()], &hunk.removed[..]);
+        i = from + hunk.removed.len();
+        if hunk.added_count > 0 {
+            assert_eq!(hunk.added, hunk.after + 1);
+        } else {
+            assert_eq!(hunk.added, hunk.after);
+        }
+        let start = hunk.after as usize;
+        out.extend(
+            new[start..start + hunk.added_count as usize]
+                .iter()
+                .map(|line| line.to_string()),
+        );
+    }
+    out.extend(old[i..].iter().map(|line| line.to_string()));
+    out
+}
+
+/// Two text files are diffed into exactly what `git diff -U0` says about them.
+///
+/// The example is the one [`crate::git`]'s parser documents, so the two halves of the panel's diff —
+/// the one git computes against `HEAD` and the one computed here between two files — are held to one
+/// shape, number for number.
+#[test]
+fn two_texts_are_diffed_into_the_hunks_git_would_give() {
+    let before = "a\nb\nc\nd\ne\nf\ng\n";
+    let after = "a\nB\nc\nNEW1\nNEW2\nd\ne\n";
+    let changes = diff::lines(before, after);
+    let shape: Vec<_> = changes
+        .hunks
+        .iter()
+        .map(|h| (h.added, h.added_count, h.after, h.removed.clone(), h.removed_at))
+        .collect();
+    assert_eq!(
+        shape,
+        vec![
+            (2, 1, 1, vec!["b".to_owned()], 2),
+            (4, 2, 3, vec![], 3),
+            (7, 0, 7, vec!["f".to_owned(), "g".to_owned()], 6),
+        ]
+    );
+    assert_eq!(replay(before, after, &changes), after.lines().collect::<Vec<_>>());
+
+    // A missing final newline is not a difference of one empty line.
+    assert!(diff::lines("a\nb\n", "a\nb").is_empty());
+    assert!(diff::lines("", "").is_empty());
+    // Everything added, and everything removed.
+    let all = diff::lines("", "x\ny\n");
+    assert_eq!((all.hunks.len(), all.hunks[0].added, all.hunks[0].added_count), (1, 1, 2));
+    let none = diff::lines("x\ny\n", "");
+    assert_eq!((none.hunks[0].added, none.hunks[0].after, none.hunks[0].removed.len()), (0, 0, 2));
+}
+
+/// Over many random pairs: the hunks rebuild the second file, and the diff is a shortest one.
+///
+/// Shortest is checked against the longest common subsequence, by the textbook table — `n + m − 2·LCS`
+/// edits is the least any script can do, and Myers' walk promises exactly that.
+#[test]
+fn a_text_diff_rebuilds_the_second_file_in_the_fewest_edits() {
+    // A small fixed generator, so a failure is the same failure every run.
+    let mut seed = 0x2545_f491_4f6c_dd1du64;
+    let mut next = move |below: u64| {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        seed % below
+    };
+    for _ in 0..400 {
+        // Few distinct lines, so there is a lot to align and many equally short scripts to choose from.
+        let mut side = |len: u64| -> String {
+            (0..next(len)).map(|_| format!("{}\n", next(5))).collect()
+        };
+        let (before, after) = (side(14), side(14));
+        let changes = diff::lines(&before, &after);
+        assert_eq!(
+            replay(&before, &after, &changes),
+            after.lines().collect::<Vec<_>>(),
+            "{before:?} -> {after:?}"
+        );
+
+        let (a, b): (Vec<&str>, Vec<&str>) = (before.lines().collect(), after.lines().collect());
+        let mut table = vec![vec![0usize; b.len() + 1]; a.len() + 1];
+        for i in (0..a.len()).rev() {
+            for j in (0..b.len()).rev() {
+                table[i][j] = if a[i] == b[j] {
+                    table[i + 1][j + 1] + 1
+                } else {
+                    table[i + 1][j].max(table[i][j + 1])
+                };
+            }
+        }
+        let least = a.len() + b.len() - 2 * table[0][0];
+        let (added, removed) = changes.counts();
+        let made = added + removed;
+        assert_eq!(made, least, "{before:?} -> {after:?}");
+    }
+}
+
+/// Two files with nothing in common past the edit budget are one replacement, and still exact.
+#[test]
+fn a_text_diff_past_its_budget_is_one_replacement() {
+    let before: String = (0..1500).map(|n| format!("old {n}\n")).collect();
+    let after: String = (0..1500).map(|n| format!("new {n}\n")).collect();
+    let changes = diff::lines(&format!("same\n{before}end\n"), &format!("same\n{after}end\n"));
+    assert_eq!(changes.hunks.len(), 1);
+    let hunk = &changes.hunks[0];
+    assert_eq!((hunk.added, hunk.added_count, hunk.removed.len(), hunk.removed_at), (2, 1500, 1500, 2));
+}
+
+/// Two text files selected and compared come back as the second, with the first as its changes —
+/// and a file that is not text says so by name rather than being diffed.
+#[test]
+fn two_text_files_come_back_as_the_second_diffed_against_the_first() {
+    let a = scratch("left.txt");
+    let b = scratch("right.txt");
+    std::fs::write(&a, "one\r\ntwo\r\nthree\r\n").expect("a file");
+    std::fs::write(&b, "one\n\tTWO\nthree\nfour\n").expect("a file");
+
+    let Payload::Text(text) = read(&Ask::Pair(a.clone(), b.clone(), Kind::Text)) else {
+        panic!("two text files did not come back as text");
+    };
+    assert_eq!(text.body, "one\n    TWO\nthree\nfour\n", "the second file is the one shown");
+    let changes = text.changes.expect("a pair always carries its changes");
+    let shape: Vec<_> = changes
+        .hunks
+        .iter()
+        .map(|h| (h.added, h.added_count, h.removed.clone()))
+        .collect();
+    // The `\r` of the first file is not a difference; the tab of the second is drawn as four spaces.
+    assert_eq!(shape, vec![(2, 1, vec!["two".to_owned()]), (4, 1, vec![])]);
+
+    // Identical files still carry an answer, and it is an empty one.
+    let Payload::Text(same) = read(&Ask::Pair(a.clone(), a.clone(), Kind::Text)) else {
+        panic!("not text");
+    };
+    assert!(same.changes.is_some_and(|changes| changes.is_empty()));
+
+    let binary = scratch("blob.txt");
+    std::fs::write(&binary, b"MZ\0\0\x01\x02").expect("a file");
+    let Payload::Failed(why) = read(&Ask::Pair(a.clone(), binary.clone(), Kind::Text)) else {
+        panic!("a binary was diffed as text");
+    };
+    assert_eq!(why, "blob.txt is not text");
+    for path in [a, b, binary] {
         crate::sandbox::remove_file(&path);
     }
 }

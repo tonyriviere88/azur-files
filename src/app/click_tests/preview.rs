@@ -1111,6 +1111,73 @@ fn two_selected_pictures_are_compared_in_three_views() {
     crate::sandbox::remove(&root);
 }
 
+/// **Two selected text files are diffed by the same button**: one tile, the second file with the
+/// first's lines as its changes, and how many lines differ in the bar.
+///
+/// Through the real button rather than [`crate::ui::preview::Preview::set_compare`], because the
+/// claim is that the button is *there* over two text files — and a button that only appears for a
+/// pair of pictures reads perfectly correctly at the call site.
+#[test]
+fn two_selected_text_files_are_diffed_by_the_compare_button() {
+    let root = crate::sandbox::dir("text-diff");
+    crate::sandbox::remove(&root);
+    std::fs::create_dir_all(&root).expect("a directory in the temp folder");
+    std::fs::write(root.join("a.txt"), "one\ntwo\nthree\n").expect("a file");
+    std::fs::write(root.join("b.txt"), "one\nTWO\nthree\nfour\n").expect("a file");
+
+    let mut h = Harness::new();
+    let pane = h.app.panes[0].id;
+    h.app.perform(
+        &h.ctx.clone(),
+        Action::Navigate {
+            pane,
+            path: root.clone(),
+        },
+    );
+    h.settle();
+    h.app.panes[0].tab_mut().preview.open = true;
+    // Room for the bar's details, which a narrow panel drops before the name.
+    h.app.preview.share = 0.66;
+    h.app.panes[0].tab_mut().select_only(0);
+    h.app.panes[0].tab_mut().toggle(1);
+    settle_preview(&mut h);
+    assert_eq!(h.app.panes[0].tab().preview.count(), 2, "two text files are two tiles first");
+
+    let button = Id::new(("preview-diff", pane));
+    let at = h
+        .ctx
+        .read_response(button)
+        .expect("no compare button over two text files")
+        .rect
+        .center();
+    assert!(h.hovers(button, at), "the compare button cannot be reached");
+    h.click_at(at);
+    assert!(h.app.panes[0].tab().preview.comparing(), "the click did not latch the comparison");
+    settle_preview(&mut h);
+    assert_eq!(h.app.panes[0].tab().preview.count(), 1, "a diff is one tile, not two");
+
+    let texts: Vec<String> = h.texts().into_iter().map(|(_, text)| text).collect();
+    assert!(
+        texts.iter().any(|text| text.contains("a.txt \u{2194} b.txt")),
+        "the bar does not name both files: {texts:?}"
+    );
+    assert!(
+        texts.iter().any(|text| text.contains("+2 \u{2212}1 lines")),
+        "how much differs is not reported: {texts:?}"
+    );
+    // The line the first file had is put back where it was, as a diff against `HEAD` puts one.
+    assert!(
+        texts.iter().any(|text| text.contains("two")),
+        "the removed line is not shown: {texts:?}"
+    );
+
+    // And pressed again, back to the two tiles.
+    h.click_at(at);
+    settle_preview(&mut h);
+    assert_eq!(h.app.panes[0].tab().preview.count(), 2);
+    crate::sandbox::remove(&root);
+}
+
 /// Let the focused pane's preview panel notice the selection and finish reading.
 fn settle_preview(h: &mut Harness) {
     h.time += crate::ui::preview::FOLLOW_DELAY * 2.0;

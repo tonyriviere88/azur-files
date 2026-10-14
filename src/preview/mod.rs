@@ -44,7 +44,7 @@
 //! | [`text`] | anything with lines in it, up to [`TEXT_CAP`] |
 //! | [`picture`] | raster art, through `image`, bounded by [`CAP`] |
 //! | [`vector`] | `.svg`, rasterised by `resvg` at the size asked for |
-//! | [`diff`] | two pictures, or one against `HEAD` |
+//! | [`diff`] | two pictures, one against `HEAD`, or two text files |
 //! | [`search`] | the find bar's walk over a text body |
 //! | [`video`] | anything to play, through Media Foundation — a player, not a read |
 //! | [`visual`] | everything else, through whatever Windows has registered for it |
@@ -54,6 +54,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 
 pub mod diff;
+pub(crate) mod myers;
 pub mod picture;
 pub mod search;
 pub mod text;
@@ -353,8 +354,10 @@ pub enum Payload {
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Ask {
     One(std::path::PathBuf, Kind),
-    /// Two pictures, in the order they appear in the listing.
-    Pair(std::path::PathBuf, std::path::PathBuf),
+    /// Two files, in the order they appear in the listing, and what both are: two pictures are
+    /// blended, two texts diffed line by line. See [`crate::app::App::selected_previews`], which only
+    /// pairs two of a kind.
+    Pair(std::path::PathBuf, std::path::PathBuf, Kind),
     /// One picture, and the same picture as `HEAD` has it.
     ///
     /// **The same comparison [`Ask::Pair`] asks for, against a version that is not a file.** A diff
@@ -373,26 +376,21 @@ impl Ask {
     pub fn first(&self) -> &Path {
         match self {
             Self::One(path, _) => path,
-            Self::Pair(a, _) => a,
+            Self::Pair(a, ..) => a,
             Self::AgainstHead(path) => path,
         }
     }
 
     /// What the panel's bar calls it.
     pub fn title(&self) -> String {
-        let name = |path: &Path| {
-            path.file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default()
-        };
         match self {
-            Self::One(path, _) => name(path),
+            Self::One(path, _) => leaf(path).into_owned(),
             // The two names, and a mark that says they are being compared rather than listed.
-            Self::Pair(a, b) => format!("{} \u{2194} {}", name(a), name(b)),
+            Self::Pair(a, b, _) => format!("{} \u{2194} {}", leaf(a), leaf(b)),
             // Its own name and no more: there is one file here, and what the two views of it are is
             // written above each of them. The latched diff button is what says the panel is
             // comparing.
-            Self::AgainstHead(path) => name(path),
+            Self::AgainstHead(path) => leaf(path).into_owned(),
         }
     }
 }
@@ -478,7 +476,8 @@ fn read(ask: &Ask) -> Payload {
 
     let (path, kind) = match ask {
         Ask::One(path, kind) => (path.as_path(), *kind),
-        Ask::Pair(a, b) => return diff::compare(a, b),
+        Ask::Pair(a, b, Kind::Picture) => return diff::compare(a, b),
+        Ask::Pair(a, b, _) => return diff::text_pair(a, b),
         Ask::AgainstHead(path) => return diff::against_head(path),
     };
     match kind {
@@ -536,7 +535,7 @@ fn materialise(ask: &Ask) -> Result<Ask, String> {
     let real = |path: &Path| crate::archive::extracted(path);
     match ask {
         Ask::One(path, kind) => Ok(Ask::One(real(path)?, *kind)),
-        Ask::Pair(a, b) => Ok(Ask::Pair(real(a)?, real(b)?)),
+        Ask::Pair(a, b, kind) => Ok(Ask::Pair(real(a)?, real(b)?, *kind)),
         // A file in an archive has no `HEAD` to be compared against, and no way to acquire one: git
         // tracks working trees, and an archive is not one. Not reachable by clicking — the diff
         // button only appears for a file with a git status, and [`crate::git`] is not asked about a
@@ -545,6 +544,11 @@ fn materialise(ask: &Ask) -> Result<Ask, String> {
             Err("A file inside an archive has no version history to compare against".to_owned())
         }
     }
+}
+
+/// The file's own name, for anything that says which file it is.
+pub(crate) fn leaf(path: &Path) -> std::borrow::Cow<'_, str> {
+    path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default()
 }
 
 /// The extension, lowercased, for the panel's "no preview for this" line.

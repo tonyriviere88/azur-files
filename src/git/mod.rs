@@ -271,6 +271,13 @@ impl Changes {
     pub fn is_empty(&self) -> bool {
         self.hunks.is_empty()
     }
+
+    /// How many lines were added, and how many removed.
+    pub fn counts(&self) -> (usize, usize) {
+        self.hunks.iter().fold((0, 0), |(added, removed), hunk| {
+            (added + hunk.added_count as usize, removed + hunk.removed.len())
+        })
+    }
 }
 
 /// Ask git what changed in one file, or answer `None` because nothing did or nobody could say.

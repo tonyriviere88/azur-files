@@ -30,8 +30,8 @@ pub(super) fn header(
     preview: &mut Preview,
     layout: &mut Layout,
     changed: bool,
-    // Whether the selection is two pictures, which is what turns the diff button into the compare
-    // button. See [`crate::app::App::can_compare`].
+    // Whether the selection is two files that can be compared, which is what turns the diff button
+    // into the compare button. See [`crate::app::App::can_compare`].
     can_compare: bool,
     scratch: &mut String,
     out: &mut Vec<Action>,
@@ -109,6 +109,37 @@ pub(super) fn header(
     // **None of them while the chooser is up**, nor find or zoom below: each acts on a canvas that is
     // not on screen, and a button whose effect cannot be seen is one that seems not to work.
     let viewing = !slot.choosing;
+
+    // **With two comparable files selected, the diff button is the compare button**, whatever the
+    // focused tile holds: two pictures blended, or two text files diffed line by line. The same glyph
+    // as the git toggle below, because it is the same question — *show me the difference* — asked of
+    // two files rather than of two versions of one, and it takes that toggle's place because it is
+    // about the files in front of you, where `layout.diff` is a standing preference.
+    //
+    // Above the match rather than in its arms because the latch is the panel's, not the content's: a
+    // pair whose read failed — one side is not text — is still a pair, and needs the button to let go.
+    if viewing && can_compare {
+        let at = button(right);
+        if tool_button(
+            ui,
+            t,
+            at,
+            Id::new(("preview-diff", pane)),
+            &crate::icons::diff,
+            "Compare the two selected files",
+            true,
+            *compare,
+            surface,
+        )
+        .clicked()
+        {
+            // Not a preference and not remembered: it dies with these two files. See
+            // [`Preview::compare`].
+            *compare = !*compare;
+        }
+        right = at.left() - PAD;
+    }
+
     match &mut slot.content {
         _ if !viewing => {}
         Content::Picture(picture) => {
@@ -124,19 +155,8 @@ pub(super) fn header(
             // an `AgainstHead` for anything but a [`crate::preview::Kind::Picture`] and this button
             // would sit there latching a preference that changed nothing on screen. A control that
             // does nothing is worse than no control; the same argument the two text toggles make.
-            // **With two pictures selected this is the compare button instead**, and that is what
-            // keeps the blended view reachable now that selecting two files tiles them side by side.
-            // The same glyph, because it is the same question — *show me the difference* — asked of
-            // two files rather than of two versions of one. It takes precedence because it is about
-            // the files in front of you, where `layout.diff` is a standing preference.
-            let offering = if can_compare {
-                Some((*compare, "Compare the two selected pictures"))
-            } else if changed && !picture.shell {
-                Some((layout.diff, "Show what changed since the last commit"))
-            } else {
-                None
-            };
-            if let Some((latched, tip)) = offering {
+            // And not while two files are selected, where the compare button above has the slot.
+            if !can_compare && changed && !picture.shell {
                 let at = button(right);
                 if tool_button(
                     ui,
@@ -144,21 +164,15 @@ pub(super) fn header(
                     at,
                     Id::new(("preview-diff", pane)),
                     &crate::icons::diff,
-                    tip,
+                    "Show what changed since the last commit",
                     true,
-                    latched,
+                    layout.diff,
                     surface,
                 )
                 .clicked()
                 {
-                    if can_compare {
-                        // Not a preference and not remembered: it dies with these two files. See
-                        // [`Preview::compare`].
-                        *compare = !*compare;
-                    } else {
-                        layout.diff = !layout.diff;
-                        out.push(Action::RememberLayout);
-                    }
+                    layout.diff = !layout.diff;
+                    out.push(Action::RememberLayout);
                 }
                 right = at.left() - PAD;
             }
@@ -211,8 +225,9 @@ pub(super) fn header(
             }
             // **Only over a file git has something to say about**, which is the same argument the
             // numbers toggle makes: a control that does nothing is worse than no control. It appearing
-            // is itself the news that this file has changed.
-            if text.diffable() {
+            // is itself the news that this file has changed. Not while two files are selected, where
+            // the compare button above has the slot.
+            if !can_compare && text.diffable() {
                 let at = button(right);
                 if tool_button(
                     ui,
@@ -231,29 +246,34 @@ pub(super) fn header(
                     out.push(Action::RememberLayout);
                 }
                 right = at.left() - PAD;
-
-                // And inside it, the one that only means anything while the diff is on: a file with
-                // its unchanged stretches left out.
-                if layout.diff {
-                    let at = button(right);
-                    if tool_button(
-                        ui,
-                        t,
-                        at,
-                        Id::new(("preview-collapse", pane)),
-                        &crate::icons::collapse,
-                        "Leave out the parts that have not changed",
-                        true,
-                        layout.collapse,
-                        surface,
-                    )
-                    .clicked()
-                    {
-                        layout.collapse = !layout.collapse;
-                        out.push(Action::RememberLayout);
-                    }
-                    right = at.left() - PAD;
+            }
+            // And beside it, the one that only means anything while a diff is on screen: a file with
+            // its unchanged stretches left out. For a pair, only once the pair has arrived — until
+            // then the slot is still showing one of the two tiles. See `Text::pair`.
+            let diffing = if can_compare {
+                *compare && text.pair
+            } else {
+                text.diffable() && layout.diff
+            };
+            if diffing {
+                let at = button(right);
+                if tool_button(
+                    ui,
+                    t,
+                    at,
+                    Id::new(("preview-collapse", pane)),
+                    &crate::icons::collapse,
+                    "Leave out the parts that have not changed",
+                    true,
+                    layout.collapse,
+                    surface,
+                )
+                .clicked()
+                {
+                    layout.collapse = !layout.collapse;
+                    out.push(Action::RememberLayout);
                 }
+                right = at.left() - PAD;
             }
             if text.renderable() {
                 let at = button(right);
@@ -435,6 +455,20 @@ pub(super) fn header(
                         comment.push_str("scaled to fit memory");
                     }
                 }
+            }
+        }
+        // **For a pair the headline is how much differs**, as it is for two pictures, and the size of
+        // the file shown is not worth the slot: it is one of two sizes, and not the difference.
+        Content::Text(text) if text.pair => {
+            let (added, removed) = text.changes.as_ref().map_or((0, 0), crate::git::Changes::counts);
+            if added == 0 && removed == 0 {
+                size.push_str("Identical");
+            } else {
+                let _ = write!(size, "+{added} \u{2212}{removed} lines");
+                mark = Some(t.status.danger);
+            }
+            if text.truncated {
+                comment.push_str("first part only");
             }
         }
         Content::Text(text) => {

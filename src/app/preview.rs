@@ -235,12 +235,13 @@ impl App {
             Vec::new()
         };
 
-        // Two pictures, blended, because the diff button asked for it. One tile, not two.
+        // Two pictures blended, or two text files diffed, because the diff button asked for it. One
+        // tile, not two.
         if comparing && picked.len() == 2 {
             if let [a, b] = picked[..] {
-                if kind_at(a) == Some(Kind::Picture) && kind_at(b) == Some(Kind::Picture) {
+                if let Some(kind) = Self::comparable(kind_at(a), kind_at(b)) {
                     if let (Some(a), Some(b)) = (tab.target_at(a), tab.target_at(b)) {
-                        return vec![Ask::Pair(a, b)];
+                        return vec![Ask::Pair(a, b, kind)];
                     }
                 }
             }
@@ -274,21 +275,43 @@ impl App {
         vec![Ask::One(path, kind)]
     }
 
-    /// Whether the diff button should be offering the two-picture blend rather than git's changes.
+    /// Whether the diff button should be offering to compare the two selected files rather than
+    /// git's changes.
     ///
-    /// Exactly two selected pictures and nothing else. Asked so that the header can label its button
-    /// for what pressing it will actually do, and so that [`crate::ui::preview::Preview::compare`] is
-    /// dropped the moment the selection stops being the one it was about — a latch that outlived its
-    /// two files would blend the next two the moment they were picked.
+    /// Exactly two selected files that [`Self::comparable`] pairs. Asked so that the header can label
+    /// its button for what pressing it will actually do, and so that
+    /// [`crate::ui::preview::Preview::compare`] is dropped the moment the selection stops being the
+    /// one it was about — a latch that outlived its two files would compare the next two the moment
+    /// they were picked.
     pub(super) fn can_compare(tab: &Tab) -> bool {
         if tab.selected_count != 2 {
             return false;
         }
         let rows: Vec<usize> = (0..tab.order.len()).filter(|&row| tab.is_selected(row)).collect();
-        rows.len() == 2
-            && rows.iter().all(|&row| {
-                Self::preview_kind_at(tab, row) == Some(crate::preview::Kind::Picture)
-            })
+        let [a, b] = rows[..] else {
+            return false;
+        };
+        Self::comparable(Self::preview_kind_at(tab, a), Self::preview_kind_at(tab, b)).is_some()
+    }
+
+    /// How two files of these kinds are compared, if they can be: as two pictures, blended, or as two
+    /// text files, diffed line by line — see [`crate::preview::diff`].
+    ///
+    /// **A name with nothing to go on counts as text**, because `README`, `LICENSE` and `Makefile`
+    /// are what two of those usually are; one that turns out not to be says so in the panel. An
+    /// extension only the shell knows does not: two `.pdf`s are not two texts, and a compare button
+    /// over them would be a button that only ever said so.
+    fn comparable(
+        a: Option<crate::preview::Kind>,
+        b: Option<crate::preview::Kind>,
+    ) -> Option<crate::preview::Kind> {
+        use crate::preview::Kind;
+        let text = |kind| matches!(kind, Some(Kind::Text | Kind::Unknown));
+        if a == Some(Kind::Picture) && b == Some(Kind::Picture) {
+            Some(Kind::Picture)
+        } else {
+            (text(a) && text(b)).then_some(Kind::Text)
+        }
     }
 
     /// Fill the monitor with this window, or put it back exactly as it was.

@@ -72,6 +72,81 @@ fn a_diff_view_puts_the_removed_lines_back_where_they_were() {
     );
 }
 
+/// The changed words of a diff view, as the text they cover — a highlight is a range of characters,
+/// and what it is *for* is the text under it.
+fn changed_words(before: &str, after: &str, collapse: bool) -> Vec<String> {
+    let changes = crate::preview::diff::lines(before, after);
+    let view = Diffed::build(after, &changes, collapse, syntax::Lang::None);
+    let chars: Vec<char> = view.body.chars().collect();
+    for pair in view.words.windows(2) {
+        assert!(pair[0].end <= pair[1].start, "the highlights overlap or are out of order");
+    }
+    view.words
+        .iter()
+        .map(|range| {
+            let text: String = chars[range.clone()].iter().collect();
+            assert!(!text.contains('\n'), "a highlight crosses a line: {text:?}");
+            text
+        })
+        .collect()
+}
+
+/// **Inside a changed line, only what changed is marked** — down to the letter, on both sides of it,
+/// and in characters rather than bytes, so an accent in front of the change does not push it a glyph
+/// late.
+#[test]
+fn a_changed_line_marks_the_words_that_changed() {
+    // Two letters added to a word are those two letters, and the removed side has nothing to mark.
+    assert_eq!(
+        changed_words("let total = count + 1;\n", "let total = counter + 1;\n", false),
+        ["er"]
+    );
+    assert_eq!(changed_words("println!(x);\n", "eprintln!(x);\n", false), ["e"]);
+    // One letter swapped is that letter, on each side.
+    assert_eq!(changed_words("let weight = 1;\n", "let height = 1;\n", false), ["w", "h"]);
+    // But two different words are marked whole, rather than around the `a` they happen to share.
+    assert_eq!(
+        changed_words("let alpha = 1;\n", "let gamma = 1;\n", false),
+        ["alpha", "gamma"]
+    );
+    // A symbol is a word of its own: `, b` was added, and `a)` was not changed.
+    assert_eq!(changed_words("f(a)\n", "f(a, b)\n", false), [", b"]);
+    // The blank between two changed words belongs to the change.
+    assert_eq!(
+        changed_words("é: one two end of line\n", "é: uno dos end of line\n", false),
+        ["one two", "uno dos"]
+    );
+    // Found through a collapsed view too, where the lines have moved in the body.
+    let before: String = (0..40).map(|n| format!("line {n}\n")).collect();
+    let after = before.replace("line 30\n", "line thirty\n");
+    assert_eq!(changed_words(&before, &after, true), ["30", "thirty"]);
+}
+
+/// And nothing is marked where the line band already says it all: a line added or removed outright,
+/// and a block rewritten rather than edited.
+#[test]
+fn a_rewritten_line_has_no_words_marked() {
+    assert!(changed_words("a\n", "a\nb c\n", false).is_empty(), "an added line");
+    assert!(changed_words("a\nb c\n", "a\n", false).is_empty(), "a removed line");
+    assert!(changed_words("alpha beta\n", "gamma delta\n", false).is_empty(), "every word");
+    assert!(
+        changed_words("let a = compute(x);\n", "return result_of_everything;\n", false).is_empty(),
+        "a rewrite sharing only a semicolon"
+    );
+    // But a line whose only change is its indentation is marked there.
+    assert_eq!(changed_words("x = 1\n", "    x = 1\n", false), ["    "]);
+    // And inside a hunk that was edited, a line of one word is marked like any other: the same
+    // rename on a line of its own is still the rename.
+    assert_eq!(
+        changed_words("let total = count + 1;\ncount\n", "let total = counter + 1;\ncounter\n", false),
+        ["er", "er"]
+    );
+    assert_eq!(
+        changed_words("let total = a + 1;\nalpha\n", "let total = b + 1;\ngamma\n", false),
+        ["a", "alpha", "b", "gamma"]
+    );
+}
+
 /// Collapsed, the same file keeps every change and [`CONTEXT`] lines around it, and says how much
 /// it left out.
 #[test]
@@ -145,6 +220,7 @@ fn a_hit_in_a_diff_is_an_offset_into_the_diff() {
         changes: Some(changes),
         view: None,
         view_for: None,
+        pair: false,
     };
     assert!(text.follow(true, false), "no diff view to search over");
     let shown = text.shown(false);
@@ -239,6 +315,7 @@ fn nothing_changed_means_nothing_to_show() {
         changes: None,
         view: None,
         view_for: None,
+        pair: false,
     };
     assert!(!text.follow(true, false), "nothing to build");
     assert!(text.view.is_none());
@@ -471,6 +548,7 @@ fn the_panel_waits_for_the_selection_to_stop_moving() {
     let pair = Ask::Pair(
         PathBuf::from(r"C:\pics\one.png"),
         PathBuf::from(r"C:\pics\two.png"),
+        preview::Kind::Picture,
     );
     it.follow(Some(pair.clone()), 50.0);
     assert_eq!(it.settle(50.0 + FOLLOW_DELAY * 2.0).0.as_ref(), Some(&pair));
@@ -586,6 +664,7 @@ fn a_view_that_worked_is_remembered_for_the_extension() {
             changes: None,
             view: None,
             view_for: None,
+            pair: false,
         })
     };
     // What [`Slot::arrived`] does with an answer, minus the answer having to be a real one.
@@ -682,6 +761,7 @@ fn a_view_that_worked_can_be_changed_from_the_header() {
             changes: None,
             view: None,
             view_for: None,
+            pair: false,
         })
     };
 
@@ -756,6 +836,7 @@ fn a_comparison_is_titled_with_both_names() {
     let pair = Ask::Pair(
         PathBuf::from(r"C:\pics\a.png"),
         PathBuf::from(r"D:\other\b.png"),
+        preview::Kind::Picture,
     );
     assert_eq!(pair.title(), "a.png ↔ b.png");
     // The first is what anything needing one path uses — the folder for the tooltip, the

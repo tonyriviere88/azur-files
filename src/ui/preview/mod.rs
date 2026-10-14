@@ -933,7 +933,7 @@ impl Slot {
         // own names; a file against the version in the last commit is one file, so the captions have
         // to say which *version* each view is — the file's name twice would say nothing at all.
         let (first, second) = match &self.of {
-            Some(Ask::Pair(a, b)) => (leaf(a), leaf(b)),
+            Some(Ask::Pair(a, b, _)) => (leaf(a), leaf(b)),
             Some(Ask::AgainstHead(_)) => ("last commit".to_owned(), "working copy".to_owned()),
             _ => (String::new(), String::new()),
         };
@@ -984,6 +984,7 @@ impl Slot {
                 code: text.code,
                 lang: text.lang,
                 changes: text.changes,
+                pair: matches!(self.of, Some(Ask::Pair(..))),
                 // Built on the first frame this is drawn, from the toggles as they are then — the
                 // panel's preference rather than anything this read decided.
                 view: None,
@@ -1495,8 +1496,8 @@ pub fn show(
     // Whether git has a version of this file that is not the one on disk. Only a *picture* needs
     // telling — see [`header`].
     changed: bool,
-    // Whether the selection is two pictures, which turns the header's diff button into the compare
-    // button. See [`crate::app::App::can_compare`].
+    // Whether the selection is two files that can be compared, which turns the header's diff button
+    // into the compare button. See [`crate::app::App::can_compare`].
     can_compare: bool,
     scratch: &mut String,
     out: &mut Vec<Action>,

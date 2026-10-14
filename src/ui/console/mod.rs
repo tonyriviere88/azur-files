@@ -70,7 +70,7 @@ use crate::pane::PaneId;
 use crate::theme::Theme;
 use crate::ui::{control_fills, seam, SEAM};
 
-mod editor;
+pub(crate) mod editor;
 mod log;
 mod prompt;
 mod rows;

@@ -23,6 +23,10 @@ pub(super) struct Text {
     pub(super) doc: Option<markdown::Doc>,
     /// What git says changed in it, or `None` when nothing did — see [`crate::git::Changes`].
     pub(super) changes: Option<crate::git::Changes>,
+    /// It is the second of two files being compared, and `changes` is what the first has instead —
+    /// see [`crate::preview::diff::text_pair`]. The diff is then the whole point of the view, so it
+    /// is shown whatever the git toggle says: that one is a preference about files against `HEAD`.
+    pub(super) pair: bool,
     /// The diff view, when one is being shown: a body of its own, and what each of its lines is.
     pub(super) view: Option<Diffed>,
     /// Which pair of toggles `view` was built for, so it is built again when they move and not on
@@ -61,7 +65,7 @@ impl Text {
     /// the file plus a lex of what comes out of it — the same order of work as arriving does, and for
     /// the same reason it is not done while drawing.
     pub(super) fn follow(&mut self, on: bool, collapse: bool) -> bool {
-        let want = (on && self.diffable()).then_some(collapse);
+        let want = ((on || self.pair) && self.diffable()).then_some(collapse);
         if self.view_for == want {
             return false;
         }
@@ -378,12 +382,23 @@ pub(super) fn text_canvas(
                 // across the continuation rows so a change that wraps is banded to its last row —
                 // banding only the row that starts it left the rest of an added paragraph bare.
                 let mut fact: Option<Line> = None;
+                // The changed words, and the first of them that does not end before this row — see
+                // [`Diffed::words`]. Counted in characters, as the rows are.
+                let words: &[std::ops::Range<usize>] =
+                    text.view.as_ref().map_or(&[], |view| &view.words);
+                let mut word = 0usize;
+                let mut chars = 0usize;
                 for row in &galley.rows {
                     // Whether this row begins a line of the file, and what the *next* row will be.
                     // Both settled before anything is drawn, so no branch below can leave the walk out
                     // of step with the document — which is what a `continue` past the update did.
                     let first = starts;
                     starts = row.ends_with_newline;
+                    // And which characters it holds, for the same reason: counted for every row,
+                    // on screen or not, or every row below the first skipped one is out by its length.
+                    let from = chars;
+                    chars += row.char_count_including_newline().0;
+                    let to = from + row.row.char_count_excluding_newline().0;
 
                     let y = origin.y + row.pos.y;
                     let on_screen = y + row.row.size.y >= clip.top() && y <= clip.bottom();
@@ -412,6 +427,30 @@ pub(super) fn text_canvas(
                     );
                     if let Some(fill) = diff_fill(t, fact.mark) {
                         painted.push(egui::Shape::rect_filled(band, CornerRadius::ZERO, fill));
+                    }
+                    // **The changed words, on top of the band**: the same hue, deeper, so the two read
+                    // as one change at two depths — the way VS Code marks the characters inside a
+                    // changed line. See [`super::diff::words`] for which ones.
+                    if let Some(fill) = super::diff::word_fill(t, fact.mark) {
+                        while words.get(word).is_some_and(|range| range.end <= from) {
+                            word += 1;
+                        }
+                        let on_row = words[word..]
+                            .iter()
+                            .take_while(|range| range.start < to);
+                        for range in on_row {
+                            let (a, b) = (range.start.max(from) - from, range.end.min(to) - from);
+                            if a >= b {
+                                continue;
+                            }
+                            let left = origin.x + row.pos.x;
+                            let x = |column| left + row.row.x_offset(egui::text::CharIndex(column));
+                            let at = Rect::from_min_max(
+                                pos2(x(a), y),
+                                pos2(x(b), y + row.row.size.y),
+                            );
+                            painted.push(egui::Shape::rect_filled(at, CornerRadius::ZERO, fill));
+                        }
                     }
                     // The rest belongs to the *line* rather than to each of its rows, so a wrapped
                     // one is numbered once, at the top, the way an editor's gutter numbers it.

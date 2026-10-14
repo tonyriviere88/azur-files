@@ -672,8 +672,14 @@ impl App {
     /// tiles them now, so a `--compare` that only selected them would photograph two tiles and the
     /// flag would quietly no longer be about a comparison at all. See
     /// [`crate::ui::preview::Preview::set_compare`].
+    ///
+    /// Two pictures if the folder has them, and otherwise two text files, which are compared too —
+    /// see [`App::comparable`].
     pub fn compare_here(&mut self) {
-        self.select_previewable(2, Some(crate::preview::Kind::Picture));
+        use crate::preview::Kind;
+        if !self.select_previewable(2, Some(Kind::Picture)) {
+            self.select_previewable(2, Some(Kind::Text));
+        }
         let pane = self.focused;
         if let Some(p) = self.pane_mut(pane) {
             p.tab_mut().preview.set_compare(true);
@@ -694,9 +700,13 @@ impl App {
     /// What both of the above are: the row-picking rule differs by one predicate and the selecting is
     /// identical, and it was written twice before this. Clamped to [`crate::ui::preview::MOST`],
     /// because that is as many tiles as the panel has shapes for.
-    fn select_previewable(&mut self, how_many: usize, only: Option<crate::preview::Kind>) {
+    ///
+    /// Whether it did: `false` is a folder without that many, and nothing selected.
+    fn select_previewable(&mut self, how_many: usize, only: Option<crate::preview::Kind>) -> bool {
         let pane = self.focused;
-        let Some(p) = self.pane_mut(pane) else { return };
+        let Some(p) = self.pane_mut(pane) else {
+            return false;
+        };
         let tab = p.tab_mut();
         let rows: Vec<usize> = (0..tab.order.len())
             .filter(|&at| match (Self::preview_kind_at(tab, at), only) {
@@ -712,14 +722,15 @@ impl App {
         // asked for is a capture of the wrong thing, and silently narrowing it would look like the
         // feature failing rather than the folder not having two.
         if rows.len() < how_many.min(crate::ui::preview::MOST) {
-            return;
+            return false;
         }
         let Some((&first, rest)) = rows.split_first() else {
-            return;
+            return false;
         };
         tab.select_only(first);
         for &row in rest {
             tab.toggle(row);
         }
+        true
     }
 }
