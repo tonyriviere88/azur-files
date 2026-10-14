@@ -465,7 +465,8 @@ pub(super) fn section(
     // two `&mut` fields beside it free to be written while the rows are drawn.
     let list = marks.list;
     if list.is_empty() {
-        hint(ui, t, width, 0.0, "Ctrl+D, or drag a folder here");
+        let key = crate::app::shortcuts::label(&crate::app::shortcuts::Command::Bookmark);
+        hint(ui, t, width, 0.0, &format!("{key}, or drag a folder here"));
         return;
     }
 

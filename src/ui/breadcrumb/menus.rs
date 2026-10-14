@@ -142,7 +142,7 @@ pub(crate) fn position_menu(
         .show(ui.ctx(), |ui| {
             if ui
                 .add(ticked(
-                    MenuItem::new("Show preview").shortcut("Ctrl+P"),
+                    MenuItem::new("Show preview").shortcut(crate::app::shortcuts::label(&crate::app::shortcuts::Command::Preview)),
                     open,
                 ))
                 .clicked()
@@ -202,7 +202,7 @@ pub(crate) fn flatten_menu(
         .show(ui.ctx(), |ui| {
             if ui
                 .add(ticked(
-                    MenuItem::new("Flatten this folder").shortcut("Ctrl+E"),
+                    MenuItem::new("Flatten this folder").shortcut(crate::app::shortcuts::label(&crate::app::shortcuts::Command::Flatten)),
                     flat,
                 ))
                 .clicked()

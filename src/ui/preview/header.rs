@@ -67,7 +67,7 @@ pub(super) fn header(
         close,
         Id::new(("preview-close", pane)),
         &azur_icons::close,
-        "Close the preview (Ctrl+P)",
+        &crate::app::shortcuts::tip("Close the preview", &crate::app::shortcuts::Command::Preview),
         true,
         false,
         surface,

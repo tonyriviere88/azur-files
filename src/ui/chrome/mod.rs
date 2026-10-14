@@ -567,7 +567,7 @@ pub fn tab_strip(
             // Its key as well as what it does, which is the one thing the menu under the mark said
             // and this button did not — and the two are the same command, so they say it the same
             // way. See `azur_egui_theme::components::shortcut_in` for the bracket going grey.
-            "New tab in this folder (Ctrl+T)",
+            &crate::app::shortcuts::tip("New tab in this folder", &crate::app::shortcuts::Command::NewTab),
             true,
             false,
             // The strip it sits in, whether that is the title bar or a band of its own.
@@ -870,7 +870,7 @@ fn app_menu(
         if ui
             .add(
                 MenuItem::new("Command palette...")
-                    .shortcut("Ctrl+Shift+P")
+                    .shortcut(crate::app::shortcuts::PALETTE.label())
                     .icon(&azur_icons::search),
             )
             .clicked()
@@ -879,7 +879,7 @@ fn app_menu(
         }
         azur_egui_theme::components::menu_divider(ui);
         if ui
-            .add(MenuItem::new("New tab").shortcut("Ctrl+T").icon(&azur_icons::plus))
+            .add(MenuItem::new("New tab").shortcut(crate::app::shortcuts::label(&crate::app::shortcuts::Command::NewTab)).icon(&azur_icons::plus))
             .clicked()
         {
             out.push(Action::NewTabFocused);
@@ -887,7 +887,7 @@ fn app_menu(
         if ui
             .add(
                 MenuItem::new("Split to the right")
-                    .shortcut("Ctrl+\\")
+                    .shortcut(crate::app::shortcuts::label(&crate::app::shortcuts::Command::SplitRight))
                     .icon(&icons::split_side),
             )
             .clicked()
@@ -930,7 +930,7 @@ fn app_menu(
         if ui
             .add(
                 MenuItem::new("Left panel")
-                    .shortcut("Ctrl+B")
+                    .shortcut(crate::app::shortcuts::label(&crate::app::shortcuts::Command::Sidebar))
                     .selected(sidebar)
                     .icon(&icons::split_side),
             )
@@ -941,7 +941,7 @@ fn app_menu(
         if ui
             .add(
                 MenuItem::new("Across every screen")
-                    .shortcut("Ctrl+Win+↑")
+                    .shortcut(crate::app::shortcuts::label(&crate::app::shortcuts::Command::SpanScreens))
                     .icon(&azur_icons::window_maximize),
             )
             .clicked()
@@ -951,7 +951,7 @@ fn app_menu(
         if ui
             .add(
                 MenuItem::new("Reset window size")
-                    .shortcut("Ctrl+Win+↓")
+                    .shortcut(crate::app::shortcuts::label(&crate::app::shortcuts::Command::ResetSize))
                     .icon(&azur_icons::window_restore),
             )
             .clicked()
@@ -1013,7 +1013,7 @@ fn app_menu(
         }
         azur_egui_theme::components::menu_divider(ui);
         if ui
-            .add(MenuItem::new("Close window").shortcut("Alt+F4").danger(true))
+            .add(MenuItem::new("Close window").shortcut(crate::app::shortcuts::label(&crate::app::shortcuts::Command::CloseWindow)).danger(true))
             .clicked()
         {
             out.push(Action::Window(WindowAction::Close));

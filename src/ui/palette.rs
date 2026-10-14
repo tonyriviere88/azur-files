@@ -73,7 +73,7 @@ pub struct Row {
     /// share one have to be next to each other — which is the application half's job.
     pub heading: &'static str,
     /// Its shortcut, printed in the menu's own shortcut column. Empty for none.
-    pub shortcut: &'static str,
+    pub shortcut: String,
     /// A tick, for a switch that is on.
     pub checked: bool,
     /// The danger ink, for the two entries that cannot be undone from here.
@@ -290,7 +290,7 @@ pub fn show(ctx: &egui::Context, t: &Theme, screen: Rect, state: &mut State, row
                             }
                             let slot = ui.painter().add(egui::Shape::Noop);
                             let mut item = MenuItem::new(row.label.as_str())
-                                .shortcut(row.shortcut)
+                                .shortcut(row.shortcut.as_str())
                                 .selected(row.checked)
                                 .danger(row.danger)
                                 .gutter(true);

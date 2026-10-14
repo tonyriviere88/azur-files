@@ -345,12 +345,13 @@ pub(crate) struct Palette {
     narrowed: Option<String>,
 }
 
-/// A row for the catalogue.
-fn row(heading: &'static str, label: impl Into<String>, shortcut: &'static str) -> Row {
+/// A row for the catalogue. Its shortcut is filled in by [`App::catalogue`], from
+/// [`super::shortcuts`] — never typed here.
+fn row(heading: &'static str, label: impl Into<String>) -> Row {
     Row {
         label: label.into(),
         heading,
-        shortcut,
+        shortcut: String::new(),
         checked: false,
         danger: false,
         icon: None,
@@ -358,18 +359,18 @@ fn row(heading: &'static str, label: impl Into<String>, shortcut: &'static str) 
 }
 
 /// The same, ticked when `on`.
-fn switch(heading: &'static str, label: impl Into<String>, shortcut: &'static str, on: bool) -> Row {
+fn switch(heading: &'static str, label: impl Into<String>, on: bool) -> Row {
     Row {
         checked: on,
-        ..row(heading, label, shortcut)
+        ..row(heading, label)
     }
 }
 
 /// The same, in the danger ink.
-fn danger(heading: &'static str, label: impl Into<String>, shortcut: &'static str) -> Row {
+fn danger(heading: &'static str, label: impl Into<String>) -> Row {
     Row {
         danger: true,
-        ..row(heading, label, shortcut)
+        ..row(heading, label)
     }
 }
 
@@ -424,42 +425,47 @@ impl App {
         let virtual_place = crate::archive::is_virtual_location(&tab.path);
         let selected = tab.selected_count;
         let cursor_dir = tab.cursor.is_some_and(|at| tab.is_dir_at(at));
-        let mut add = |command: Command, row: Row| out.push((command, row));
+        // Every row's key comes out of the one table the keyboard reads, so what is printed is what
+        // the key does.
+        let mut add = |command: Command, row: Row| {
+            let shortcut = super::shortcuts::label(&command);
+            out.push((command, Row { shortcut, ..row }));
+        };
 
         // ---- Tabs and panes -------------------------------------------------
-        add(Command::NewTab, row(TABS, "New tab", "Ctrl+T"));
+        add(Command::NewTab, row(TABS, "New tab"));
         if !self.closed.is_empty() {
-            add(Command::ReopenTab, row(TABS, "Reopen closed tab", "Ctrl+Shift+T"));
+            add(Command::ReopenTab, row(TABS, "Reopen closed tab"));
         }
-        add(Command::CloseTab, row(TABS, "Close tab", "Ctrl+W"));
+        add(Command::CloseTab, row(TABS, "Close tab"));
         if pane.tabs.len() > 1 {
-            add(Command::NextTab, row(TABS, "Next tab", "Ctrl+Tab"));
-            add(Command::PreviousTab, row(TABS, "Previous tab", "Ctrl+Shift+Tab"));
+            add(Command::NextTab, row(TABS, "Next tab"));
+            add(Command::PreviousTab, row(TABS, "Previous tab"));
         }
-        add(Command::SplitRight, row(TABS, "Split to the right", "Ctrl+\\"));
-        add(Command::SplitBelow, row(TABS, "Split below", ""));
-        add(Command::FolderDiff, row(TABS, "Folder diff...", ""));
+        add(Command::SplitRight, row(TABS, "Split to the right"));
+        add(Command::SplitBelow, row(TABS, "Split below"));
+        add(Command::FolderDiff, row(TABS, "Folder diff..."));
         if let Some(diff) = &tab.diff {
             for show in crate::diff::Show::ALL {
                 let label = format!("Diff: {}", show.label().to_lowercase());
-                add(Command::DiffShow(show), switch(TABS, label, "", diff.show == show));
+                add(Command::DiffShow(show), switch(TABS, label, diff.show == show));
             }
         }
 
         // ---- Navigation -----------------------------------------------------
         if tab.can_go_back() {
-            add(Command::Back, row(NAVIGATION, "Back", "Alt+←"));
+            add(Command::Back, row(NAVIGATION, "Back"));
         }
         if tab.can_go_forward() {
-            add(Command::Forward, row(NAVIGATION, "Forward", "Alt+→"));
+            add(Command::Forward, row(NAVIGATION, "Forward"));
         }
         if !this_pc {
-            add(Command::Up, row(NAVIGATION, "Up one folder", "Alt+↑"));
+            add(Command::Up, row(NAVIGATION, "Up one folder"));
         }
-        add(Command::Refresh, row(NAVIGATION, "Refresh", "F5"));
-        add(Command::EditPath, row(NAVIGATION, "Edit path", "Ctrl+L"));
+        add(Command::Refresh, row(NAVIGATION, "Refresh"));
+        add(Command::EditPath, row(NAVIGATION, "Edit path"));
         if tab.diff.is_none() {
-            add(Command::Filter, row(NAVIGATION, "Filter this folder", "Ctrl+F"));
+            add(Command::Filter, row(NAVIGATION, "Filter this folder"));
         }
         if !synthetic {
             let label = if self.is_bookmarked(&tab.path) {
@@ -467,13 +473,13 @@ impl App {
             } else {
                 "Bookmark this folder"
             };
-            add(Command::Bookmark, row(NAVIGATION, label, "Ctrl+D"));
+            add(Command::Bookmark, row(NAVIGATION, label));
         }
         // The group appears in the left panel with its name open for typing, so not without one.
         if self.sidebar_shown {
-            add(Command::BookmarkGroup, row(NAVIGATION, "New bookmark group", ""));
+            add(Command::BookmarkGroup, row(NAVIGATION, "New bookmark group"));
         }
-        add(Command::DiscoverNetwork, row(NAVIGATION, "Look for computers on the network", ""));
+        add(Command::DiscoverNetwork, row(NAVIGATION, "Look for computers on the network"));
 
         // ---- View: this pane ------------------------------------------------
         if tab.diff.is_none() {
@@ -482,149 +488,149 @@ impl App {
             } else {
                 "Show as tiles"
             };
-            add(Command::Tiles, row(VIEW, label, "Ctrl+1"));
+            add(Command::Tiles, row(VIEW, label));
             if !this_pc {
-                add(Command::Sizes, switch(VIEW, "Folder sizes", "Ctrl+2", tab.sizes.on));
+                add(Command::Sizes, switch(VIEW, "Folder sizes", tab.sizes.on));
             }
-            add(Command::Console, switch(VIEW, "Console", "Ctrl+`", pane.console_open));
-            add(Command::Preview, switch(VIEW, "Preview panel", "Ctrl+P", tab.preview.open));
-            add(Command::Flatten, switch(VIEW, "Flatten subfolders", "Ctrl+E", tab.flat));
+            add(Command::Console, switch(VIEW, "Console", pane.console_open));
+            add(Command::Preview, switch(VIEW, "Preview panel", tab.preview.open));
+            add(Command::Flatten, switch(VIEW, "Flatten subfolders", tab.flat));
             for lens in crate::pane::Lens::ALL {
                 let on = tab.lens == Some(lens);
-                add(Command::Lens(Some(lens)), switch(VIEW, lens.label(), "", on));
+                add(Command::Lens(Some(lens)), switch(VIEW, lens.label(), on));
             }
             if tab.lens.is_some() {
-                add(Command::Lens(None), row(VIEW, "Show the whole folder", ""));
+                add(Command::Lens(None), row(VIEW, "Show the whole folder"));
             }
             for column in Column::ALL {
                 if column == Column::Name || self.columns.shown(column) {
                     let label = format!("Sort by {}", column.header().to_lowercase());
-                    add(Command::Sort(column), switch(VIEW, label, "", tab.sort_by == column));
+                    add(Command::Sort(column), switch(VIEW, label, tab.sort_by == column));
                 }
             }
         }
 
         // ---- View: the window's ---------------------------------------------
         let prefs = [
-            (Command::Hidden, "Show hidden files", "Ctrl+H", self.show_hidden),
-            (Command::Sidebar, "Left panel", "Ctrl+B", self.sidebar_shown),
-            (Command::Regroup, "Merge chains of single folders", "", self.regroup),
-            (Command::AutoTiles, "Open picture folders as tiles", "", self.auto_tiles.on),
-            (Command::SearchSubfolders, "Filter searches subfolders", "", self.search_subfolders),
-            (Command::ForwardSlashes, "Write paths with forward slashes", "", self.forward_slashes),
-            (Command::SuggestBookmarks, "Path suggestions from bookmarks", "", self.suggest_bookmarks),
-            (Command::SuggestHistory, "Path suggestions from history", "", !self.visits.paused()),
+            (Command::Hidden, "Show hidden files", self.show_hidden),
+            (Command::Sidebar, "Left panel", self.sidebar_shown),
+            (Command::Regroup, "Merge chains of single folders", self.regroup),
+            (Command::AutoTiles, "Open picture folders as tiles", self.auto_tiles.on),
+            (Command::SearchSubfolders, "Filter searches subfolders", self.search_subfolders),
+            (Command::ForwardSlashes, "Write paths with forward slashes", self.forward_slashes),
+            (Command::SuggestBookmarks, "Path suggestions from bookmarks", self.suggest_bookmarks),
+            (Command::SuggestHistory, "Path suggestions from history", !self.visits.paused()),
         ];
-        for (command, label, shortcut, on) in prefs {
-            add(command, switch(PREFERENCES, label, shortcut, on));
+        for (command, label, on) in prefs {
+            add(command, switch(PREFERENCES, label, on));
         }
         for mode in crate::pane::FlatMode::ALL {
             let label = format!("Flattened as a {}", mode.label().to_lowercase());
-            add(Command::FlatMode(mode), switch(PREFERENCES, label, "", self.flat_mode == mode));
+            add(Command::FlatMode(mode), switch(PREFERENCES, label, self.flat_mode == mode));
         }
         // Name is refused at the other end, and a switch that does nothing is not offered.
         for column in Column::ALL.into_iter().filter(|&column| column != Column::Name) {
             let label = format!("Column: {}", column.header().to_lowercase());
             let on = self.columns.shown(column);
-            add(Command::ShowColumn(column), switch(PREFERENCES, label, "", on));
+            add(Command::ShowColumn(column), switch(PREFERENCES, label, on));
         }
-        add(Command::ResetColumns, row(PREFERENCES, "Reset columns", ""));
+        add(Command::ResetColumns, row(PREFERENCES, "Reset columns"));
         for section in crate::ui::sidebar::Section::ALL {
             let label = format!("Left panel: {}", section.label());
             let on = self.sections.shown(section);
-            add(Command::ShowSection(section), switch(PREFERENCES, label, "", on));
+            add(Command::ShowSection(section), switch(PREFERENCES, label, on));
         }
-        add(Command::ResetSections, row(PREFERENCES, "Reset left panel order", ""));
-        add(Command::ZoomIn, row(PREFERENCES, "Zoom in", "Ctrl++"));
-        add(Command::ZoomOut, row(PREFERENCES, "Zoom out", "Ctrl+-"));
-        add(Command::ZoomReset, row(PREFERENCES, "Reset zoom", "Ctrl+0"));
+        add(Command::ResetSections, row(PREFERENCES, "Reset left panel order"));
+        add(Command::ZoomIn, row(PREFERENCES, "Zoom in"));
+        add(Command::ZoomOut, row(PREFERENCES, "Zoom out"));
+        add(Command::ZoomReset, row(PREFERENCES, "Reset zoom"));
 
         // ---- Files ----------------------------------------------------------
         if tab.cursor.is_some() {
-            add(Command::Open, row(FILES, "Open", "Enter"));
+            add(Command::Open, row(FILES, "Open"));
         }
         if cursor_dir {
-            add(Command::OpenNewTab, row(FILES, "Open in new tab", ""));
-            add(Command::OpenRight, row(FILES, "Open in a pane to the right", ""));
-            add(Command::OpenBelow, row(FILES, "Open in a pane below", ""));
+            add(Command::OpenNewTab, row(FILES, "Open in new tab"));
+            add(Command::OpenRight, row(FILES, "Open in a pane to the right"));
+            add(Command::OpenBelow, row(FILES, "Open in a pane below"));
         }
         if selected > 0 {
-            add(Command::Cut, row(FILES, "Cut", "Ctrl+X"));
-            add(Command::Copy, row(FILES, "Copy", "Ctrl+C"));
+            add(Command::Cut, row(FILES, "Cut"));
+            add(Command::Copy, row(FILES, "Copy"));
         }
         if self.clipboard_has_files && !synthetic && !virtual_place {
             use crate::shell::links::Make;
-            add(Command::Paste, row(FILES, "Paste", "Ctrl+V"));
+            add(Command::Paste, row(FILES, "Paste"));
             for kind in [Make::Shortcut, Make::Symbolic, Make::Hard, Make::Junction] {
                 let label = crate::shell::menu::Own::PasteLinks(kind).label();
-                add(Command::PasteLinks(kind), row(FILES, label, ""));
+                add(Command::PasteLinks(kind), row(FILES, label));
             }
         }
-        add(Command::CopyPaths, row(FILES, "Copy path(s)", "Ctrl+Shift+C"));
+        add(Command::CopyPaths, row(FILES, "Copy path(s)"));
         if selected == 1 {
-            add(Command::Rename, row(FILES, "Rename", "F2"));
+            add(Command::Rename, row(FILES, "Rename"));
         }
         if selected > 1 {
             for mode in crate::pane::batch::Mode::ALL {
                 let label = format!("Batch rename: {}", mode.label().to_lowercase());
-                add(Command::Batch(mode), row(FILES, label, "F2"));
+                add(Command::Batch(mode), row(FILES, label));
             }
         }
         if !synthetic && !virtual_place {
-            add(Command::NewFolder, row(FILES, "New folder", "Ctrl+Shift+N"));
+            add(Command::NewFolder, row(FILES, "New folder"));
         }
         if selected > 0 {
-            add(Command::Delete, row(FILES, "Delete", "Del"));
-            add(Command::DeletePermanently, danger(FILES, "Delete permanently", "Shift+Del"));
+            add(Command::Delete, row(FILES, "Delete"));
+            add(Command::DeletePermanently, danger(FILES, "Delete permanently"));
         }
         if self.history.can_undo() {
-            add(Command::Undo, row(FILES, "Undo", "Ctrl+Z"));
+            add(Command::Undo, row(FILES, "Undo"));
         }
         if self.history.can_redo() {
-            add(Command::Redo, row(FILES, "Redo", "Ctrl+Y"));
+            add(Command::Redo, row(FILES, "Redo"));
         }
-        add(Command::SelectAll, row(FILES, "Select all", "Ctrl+A"));
+        add(Command::SelectAll, row(FILES, "Select all"));
         if selected > 0 {
-            add(Command::ClearSelection, row(FILES, "Clear selection", "Esc"));
+            add(Command::ClearSelection, row(FILES, "Clear selection"));
         }
         if self.two_folders_selected().is_some() {
-            add(Command::Compare, row(FILES, "Compare the two selected folders", ""));
+            add(Command::Compare, row(FILES, "Compare the two selected folders"));
         }
         if !synthetic {
-            add(Command::OpenTerminal, row(FILES, "Open terminal here", ""));
+            add(Command::OpenTerminal, row(FILES, "Open terminal here"));
         }
-        add(Command::Reveal, row(FILES, "Show in Explorer", ""));
+        add(Command::Reveal, row(FILES, "Show in Explorer"));
         if !(this_pc && selected == 0) && !virtual_place {
-            add(Command::ContextMenu, row(FILES, "Show context menu", ""));
+            add(Command::ContextMenu, row(FILES, "Show context menu"));
         }
 
         // ---- Window ---------------------------------------------------------
-        add(Command::SpanScreens, row(WINDOW, "Across every screen", "Ctrl+Win+↑"));
-        add(Command::ResetSize, row(WINDOW, "Reset window size", "Ctrl+Win+↓"));
-        add(Command::Minimize, row(WINDOW, "Minimize", ""));
+        add(Command::SpanScreens, row(WINDOW, "Across every screen"));
+        add(Command::ResetSize, row(WINDOW, "Reset window size"));
+        add(Command::Minimize, row(WINDOW, "Minimize"));
         let label = if self.maximized { "Restore" } else { "Maximize" };
-        add(Command::Maximize, row(WINDOW, label, ""));
+        add(Command::Maximize, row(WINDOW, label));
         for palette in crate::theme::Palette::ALL {
             let label = format!("Theme: {}", palette.label());
             let on = self.theme.palette == palette;
-            add(Command::Theme(palette), switch(WINDOW, label, "", on));
+            add(Command::Theme(palette), switch(WINDOW, label, on));
         }
-        add(Command::CheckForUpdate, row(WINDOW, "Check for updates", ""));
+        add(Command::CheckForUpdate, row(WINDOW, "Check for updates"));
         for every in crate::update::Every::ALL {
             let label = format!("Auto update: {}", every.label().to_lowercase());
             let on = self.update_every == every;
-            add(Command::UpdateEvery(every), switch(WINDOW, label, "", on));
+            add(Command::UpdateEvery(every), switch(WINDOW, label, on));
         }
         if let Some(crate::update::Badge::Available { version }) =
             self.updater.badge(&self.update_skip)
         {
-            add(Command::InstallUpdate, row(WINDOW, format!("Update to {version} and restart"), ""));
-            add(Command::ReleasePage, row(WINDOW, format!("What's new in {version}"), ""));
-            add(Command::SkipUpdate, row(WINDOW, format!("Skip version {version}"), ""));
+            add(Command::InstallUpdate, row(WINDOW, format!("Update to {version} and restart")));
+            add(Command::ReleasePage, row(WINDOW, format!("What's new in {version}")));
+            add(Command::SkipUpdate, row(WINDOW, format!("Skip version {version}")));
         }
         let label = "Set as default explorer (changes the registry)";
-        add(Command::WinKey, switch(WINDOW, label, "", self.win_key.ours()));
-        add(Command::CloseWindow, danger(WINDOW, "Close window", "Alt+F4"));
+        add(Command::WinKey, switch(WINDOW, label, self.win_key.ours()));
+        add(Command::CloseWindow, danger(WINDOW, "Close window"));
         out
     }
 
@@ -703,7 +709,7 @@ impl App {
         let mut push = |command: Command, label: String, icon: Icon<'static>| {
             rows.push(Row {
                 icon: Some(icon),
-                ..row(GO_TO, label, "")
+                ..row(GO_TO, label)
             });
             commands.push(command);
         };

@@ -305,41 +305,50 @@ pub fn show(
     // It is part of the group that is never dropped now, which is the point of moving it.
     //
     // A right click on Back or Forward lists the history either side — see [`history_menu`].
+    //
+    // Each is known by its name, and its tooltip adds the key from `app::shortcuts` — so the id a
+    // button answers to does not move when its key does.
+    use crate::app::shortcuts::{self, Command};
     let mut x = rect.left() + space::S2;
-    for (glyph, tip, enabled, action) in [
+    for (glyph, name, command, enabled, action) in [
         (
             &icons::arrow_left as azur_icons::Icon<'_>,
-            "Back (Alt+Left)",
+            "Back",
+            Command::Back,
             tab.can_go_back(),
             Action::Back(pane),
         ),
         (
             &icons::arrow_right,
-            "Forward (Alt+Right)",
+            "Forward",
+            Command::Forward,
             tab.can_go_forward(),
             Action::Forward(pane),
         ),
         (
             &icons::arrow_up,
-            "Up (Alt+Up)",
+            "Up",
+            Command::Up,
             fs::parent_of(&tab.path).is_some(),
             Action::Up(pane),
         ),
         (
             &icons::refresh,
-            "Refresh (F5)",
+            "Refresh",
+            Command::Refresh,
             true,
             Action::Refresh(pane),
         ),
     ] {
+        let tip = shortcuts::tip(name, &command);
         let history = matches!(action, Action::Back(_) | Action::Forward(_));
         let response = tool_button(
             ui,
             t,
             button(x),
-            Id::new(("nav", pane, tip)),
+            Id::new(("nav", pane, name)),
             glyph,
-            tip,
+            &tip,
             enabled,
             false,
             surface,
@@ -554,17 +563,16 @@ pub fn show(
             .memory(|m| m.focused())
             .is_some_and(|id| id != response.id);
         // And the palette's `Filter this folder`, which is the same request arriving as a flag.
+        // Both keys are `Filter`'s in `app::shortcuts`, and the rule above is the bare one's.
         let wanted = std::mem::take(&mut tab.find_wanted);
-        if wanted || ui.input_mut(|i| {
-            i.consume_shortcut(&egui::KeyboardShortcut::new(
-                egui::Modifiers::COMMAND,
-                egui::Key::F,
-            )) || (!elsewhere
-                && i.consume_shortcut(&egui::KeyboardShortcut::new(
-                    egui::Modifiers::NONE,
-                    egui::Key::F3,
-                )))
-        }) {
+        let chords = crate::app::shortcuts::chords(&crate::app::shortcuts::Command::Filter);
+        if wanted
+            || ui.input_mut(|i| {
+                chords
+                    .iter()
+                    .any(|chord| (!elsewhere || !chord.is_bare()) && chord.consume(i))
+            })
+        {
             response.request_focus();
         }
 
@@ -667,7 +675,7 @@ pub fn show(
             // What the button *does* rather than which mode it will do it in: the mode is a
             // setting one right click away, and a tooltip that changed its wording underneath a
             // button that behaves the same either way would read as two different buttons.
-            "Flatten this folder's whole tree (Ctrl+E)",
+            &crate::app::shortcuts::tip("Flatten this folder's whole tree", &crate::app::shortcuts::Command::Flatten),
             // Nothing to flatten on This PC, whose rows are drives, or in the Recycle Bin, whose
             // rows already carry the whole path they came from — see `Tab::toggle_flat`.
             !crate::fs::is_synthetic(&tab.path),
@@ -702,7 +710,7 @@ pub fn show(
             rect,
             Id::new(("preview", pane)),
             &icons::eye,
-            "Preview the selected file (Ctrl+P)",
+            &crate::app::shortcuts::tip("Preview the selected file", &crate::app::shortcuts::Command::Preview),
             true,
             tab.preview.open,
             surface,

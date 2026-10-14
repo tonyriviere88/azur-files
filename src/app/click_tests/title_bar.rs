@@ -558,8 +558,8 @@ fn every_hover_in_the_window_is_the_same_grey() {
     // `Back` and `Forward` are disabled in a tab that has been nowhere, and a disabled button
     // paints no fill at all — so the two of the four that are always live stand for them.
     let widgets: [(Id, f32, &str); 4] = [
-        (Id::new(("nav", pane, "Up (Alt+Up)")), bar, "Up"),
-        (Id::new(("nav", pane, "Refresh (F5)")), bar, "Refresh"),
+        (Id::new(("nav", pane, "Up")), bar, "Up"),
+        (Id::new(("nav", pane, "Refresh")), bar, "Refresh"),
         (Id::new(("th", pane, 0usize)), h.header_y(0), "a column header"),
         (Id::new(("new-tab", pane)), strip, "the new-tab button"),
     ];

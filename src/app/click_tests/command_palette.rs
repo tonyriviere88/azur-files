@@ -292,3 +292,108 @@ fn every_listed_action_is_on_the_palette() {
         "`listed` promises these and no palette entry comes to them: {missing:?}"
     );
 }
+
+/// One press and its release, through [`App::keyboard`] alone — no frame drawn and nothing
+/// performed — and the actions it queued, taken.
+fn keyboard_alone(h: &mut Harness, key: egui::Key, modifiers: Modifiers) -> Vec<Action> {
+    let release = Event::Key {
+        key,
+        physical_key: None,
+        pressed: false,
+        repeat: false,
+        modifiers,
+    };
+    for (events, held) in [(held(key, modifiers), modifiers), (vec![release], Modifiers::NONE)] {
+        h.time += 1.0 / 60.0;
+        let input = RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, h.size)),
+            time: Some(h.time),
+            modifiers: held,
+            focused: true,
+            events,
+            ..Default::default()
+        };
+        let app = &mut h.app;
+        // Nothing is drawn, so there is nothing in the output to keep.
+        let _ = h.ctx.run_ui(input, |ui| app.keyboard(ui.ctx()));
+    }
+    std::mem::take(&mut h.app.actions)
+}
+
+/// The same request: one variant, and the field that tells two commands on it apart.
+fn same(a: &Action, b: &Action) -> bool {
+    a.name() == b.name()
+        && match (a, b) {
+            (Action::Undo { redo: x }, Action::Undo { redo: y }) => x == y,
+            (Action::Delete { permanent: x, .. }, Action::Delete { permanent: y, .. }) => x == y,
+            (Action::NextTab { delta: x, .. }, Action::NextTab { delta: y, .. }) => x == y,
+            _ => true,
+        }
+}
+
+/// **What the palette prints beside a command is what that key does.** Both are read from
+/// [`crate::app::shortcuts::BINDINGS`], and this is the check that the keyboard reads it for the
+/// command it says: every chord the keyboard matches is pressed, and what it queues has to be what
+/// the palette's own entry comes to.
+///
+/// Through [`App::keyboard`] alone, so nothing is performed: the copy key does not reach the real
+/// clipboard, Delete deletes nothing, and one window serves every chord without drifting into a
+/// rename or a confirmation that would take the next key.
+///
+/// `Filter`'s are the filter box's to read — see the test below.
+#[test]
+fn every_printed_shortcut_does_what_its_entry_does() {
+    use crate::app::shortcuts::{Chord, BINDINGS};
+    let mut h = on_three_files("palette-keys");
+    let mut pressed = 0;
+    for (command, chords) in BINDINGS {
+        if *command == Command::Filter {
+            continue;
+        }
+        for chord in *chords {
+            let Chord::Key(modifiers, key) = *chord else { continue };
+            pressed += 1;
+            let label = chord.label();
+            let done = keyboard_alone(&mut h, key, modifiers);
+
+            // The one the keyboard does in place rather than as an action: it is the listing's own
+            // key, beside the cursor it leaves where it was.
+            if *command == Command::ClearSelection {
+                assert!(done.is_empty(), "{label} queued {} actions", done.len());
+                assert_eq!(h.tab(0).selected_count, 0, "{label} left the selection");
+                let pane = h.app.panes[0].id;
+                h.app.perform(&h.ctx.clone(), Action::SelectAll(pane));
+                continue;
+            }
+
+            let expected = h
+                .app
+                .palette_action(&h.ctx, command.clone(), false)
+                .unwrap_or_else(|| panic!("{command:?} comes to nothing on the palette"));
+            let names: Vec<_> = done.iter().map(Action::name).collect();
+            assert!(
+                done.len() == 1 && same(&done[0], &expected),
+                "{label} is printed beside {command:?}, which is {}, and the key queued {names:?}",
+                expected.name(),
+            );
+        }
+    }
+    assert!(pressed > 30, "only {pressed} chords were pressed: is the table being read?");
+}
+
+/// **Both of `Filter`'s keys put the caret in the filter box**, which reads them itself.
+#[test]
+fn both_filter_keys_put_the_caret_in_the_box() {
+    use crate::app::shortcuts::{chords, Chord};
+    for (at, chord) in chords(&Command::Filter).iter().enumerate() {
+        let Chord::Key(modifiers, key) = *chord else { continue };
+        let mut h = on_three_files(&format!("palette-filter-key-{at}"));
+        h.chord(key, modifiers);
+        h.frame(Vec::new());
+        assert!(
+            h.ctx.memory(|m| m.focused()).is_some(),
+            "{} did not put the caret in the filter box",
+            chord.label()
+        );
+    }
+}

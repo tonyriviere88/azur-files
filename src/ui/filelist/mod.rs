@@ -269,7 +269,11 @@ pub fn show(
         {
             show.nothing_found()
         } else {
-            "Everything here is hidden — Ctrl+H shows it"
+            searched = format!(
+                "Everything here is hidden — {} shows it",
+                crate::app::shortcuts::label(&crate::app::shortcuts::Command::Hidden)
+            );
+            searched.as_str()
         };
         text_center(
             ui.painter(),

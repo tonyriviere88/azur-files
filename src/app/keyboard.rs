@@ -3,6 +3,7 @@
 //! Read after the frame is drawn, so a field that took a keystroke has already said so and the
 //! same key does not do two things at once.
 
+use super::shortcuts::{self, Command};
 use super::*;
 use crate::pane::Carry;
 
@@ -229,11 +230,12 @@ impl App {
         // since the filter box is where the caret usually is — and the same key takes it down again.
         // Not over a rename or a menu, which own the keyboard outright.
         //
-        // **Read before `Ctrl+P`, and consumed**, because `consume_key` and `key_pressed` both match
-        // `Ctrl+P` with Shift held as well: left in the queue it would open the preview panel too.
+        // **Consumed**, so nothing read after it sees the press. Every chord is matched exactly now
+        // (see [`shortcuts`]), so `Ctrl+P` would not take it for itself; it is consumed for whatever
+        // field or menu is drawn next.
         if !renaming
             && self.menu.is_none()
-            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT, K::P))
+            && ctx.input_mut(|i| shortcuts::PALETTE.consume(i))
         {
             self.actions.push(Action::TogglePalette);
             return;
@@ -253,15 +255,16 @@ impl App {
             // also see it.
             let allowed = !renaming && self.menu.is_none() && self.palette.is_none();
             if allowed {
-                for (key, action) in [
-                    (K::E, Action::ToggleFlat(self.focused)),
-                    (K::P, Action::TogglePreview(self.focused)),
+                for (command, action) in [
+                    (Command::Flatten, Action::ToggleFlat(self.focused)),
+                    (Command::Preview, Action::TogglePreview(self.focused)),
                     // And the console's own key, which is the one that has to get through: the
                     // panel holds the keyboard while you are in it, so without this the only way
                     // out of it is the mouse.
-                    (K::Backtick, Action::ToggleConsole(self.focused)),
+                    (Command::Console, Action::ToggleConsole(self.focused)),
                 ] {
-                    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, key)) {
+                    let chords = shortcuts::chords(&command);
+                    if ctx.input_mut(|i| chords.iter().any(|chord| chord.consume(i))) {
                         self.actions.push(action);
                     }
                 }
@@ -277,18 +280,19 @@ impl App {
 
         ctx.input(|i| {
             let m = i.modifiers;
+            // Which key is which command is [`shortcuts::BINDINGS`]'s to say, and it matches the
+            // modifiers exactly — so `Ctrl+Shift+T` is not also `Ctrl+T`, and the order of the checks
+            // below no longer matters.
+            let on = |command: Command| shortcuts::pressed(i, &command);
 
             // ---- Tabs and panes ------------------------------------------
-            // `Shift` is checked here rather than left out, because `m.command` alone would
-            // fire both of these on `Ctrl+Shift+T` — a new tab *and* the reopened one.
-            if m.command && i.key_pressed(K::T) {
-                if m.shift {
-                    push(Action::ReopenTab);
-                } else {
-                    push(Action::NewTab { pane });
-                }
+            if on(Command::NewTab) {
+                push(Action::NewTab { pane });
             }
-            if m.command && i.key_pressed(K::W) {
+            if on(Command::ReopenTab) {
+                push(Action::ReopenTab);
+            }
+            if on(Command::CloseTab) {
                 if let Some(p) = self.panes.iter().find(|p| p.id == pane) {
                     push(Action::CloseTab {
                         pane,
@@ -296,11 +300,11 @@ impl App {
                     });
                 }
             }
-            if m.command && i.key_pressed(K::Tab) {
-                push(Action::NextTab {
-                    pane,
-                    delta: if m.shift { -1 } else { 1 },
-                });
+            if on(Command::NextTab) {
+                push(Action::NextTab { pane, delta: 1 });
+            }
+            if on(Command::PreviousTab) {
+                push(Action::NextTab { pane, delta: -1 });
             }
             // **`Ctrl+1`…`9` no longer pick a tab by number**, and that was a trade rather than a
             // tidy-up: the number row's first two keys went to the pane's own switches further down,
@@ -310,55 +314,45 @@ impl App {
             // every tab is on screen and named. [`Action::ActivateTab`] is still what a click pushes.
             //
             // A split of the current folder, so the feature is reachable without
-            // knowing that tabs can be dragged.
-            if m.command && i.key_pressed(K::Backslash) {
-                if let Some(p) = self.panes.iter().find(|p| p.id == pane) {
-                    push(Action::OpenInSplit {
-                        pane,
-                        path: p.tab().path.clone(),
-                        side: Side::Right,
-                    });
-                }
+            // knowing that tabs can be dragged. The same action the menu and the palette push.
+            if on(Command::SplitRight) {
+                push(Action::SplitFocused { side: Side::Right });
             }
 
             // ---- Navigation ----------------------------------------------
-            if (m.alt && i.key_pressed(K::ArrowLeft)) || i.key_pressed(K::Backspace) && !m.alt {
-                push(if m.alt {
-                    Action::Back(pane)
-                } else {
-                    Action::Up(pane)
-                });
+            if on(Command::Back) {
+                push(Action::Back(pane));
             }
-            if m.alt && i.key_pressed(K::ArrowRight) {
+            if on(Command::Forward) {
                 push(Action::Forward(pane));
             }
-            if m.alt && i.key_pressed(K::ArrowUp) {
+            if on(Command::Up) {
                 push(Action::Up(pane));
             }
-            if i.key_pressed(K::F5) || (m.command && i.key_pressed(K::R)) {
+            if on(Command::Refresh) {
                 push(Action::Refresh(pane));
             }
-            if (m.command && i.key_pressed(K::L)) || (m.alt && i.key_pressed(K::D)) {
+            if on(Command::EditPath) {
                 push(Action::EditPath(pane));
             }
-            if m.command && i.key_pressed(K::A) {
+            if on(Command::SelectAll) {
                 push(Action::SelectAll(pane));
             }
             // No pane, unlike its neighbours: the window's preference, and every pane follows.
-            if m.command && i.key_pressed(K::H) {
+            if on(Command::Hidden) {
                 push(Action::ToggleHidden);
             }
             // The panel down the left, which is the window's preference for the same reason. **The one
             // that works**: `Ctrl+Win+Left` is what was asked for and the shell takes it for switching
             // virtual desktop, so this is the binding beside it — `Ctrl+B` is the sidebar key in every
             // editor on the machine, and nothing here wanted `B`. See [`App::window_keys`].
-            if m.command && i.key_pressed(K::B) {
+            if on(Command::Sidebar) {
                 push(Action::ToggleSidebar);
             }
-            if m.command && i.key_pressed(K::E) {
+            if on(Command::Flatten) {
                 push(Action::ToggleFlat(pane));
             }
-            if m.command && i.key_pressed(K::D) && !m.alt {
+            if on(Command::Bookmark) {
                 if let Some(p) = self.panes.iter().find(|p| p.id == pane) {
                     push(Action::ToggleBookmark(p.tab().path.clone()));
                 }
@@ -368,7 +362,7 @@ impl App {
             //
             // `Space` is the other way in, read further down with the type-ahead because that is
             // where the two things a space can mean are told apart.
-            if m.command && i.key_pressed(K::P) {
+            if on(Command::Preview) {
                 push(Action::TogglePreview(pane));
             }
             // **The leftmost key of the number row**, whatever is printed on it: `²` on an AZERTY
@@ -376,7 +370,7 @@ impl App {
             // resolves a key rather than from anything asked for here — it takes the logical key
             // when it recognises the character and the physical code when it does not, and `²` is
             // not a character it names, so the physical `Backquote` arrives.
-            if m.command && i.key_pressed(K::Backtick) {
+            if on(Command::Console) {
                 push(Action::ToggleConsole(pane));
             }
             // **And the two keys beside it, for the two switches beside the console's.** `Ctrl+1` is
@@ -391,7 +385,7 @@ impl App {
             // tiles on is the key that turns them off — a second binding for the way back would be a
             // second thing to remember. The mode comes off the pane the keyboard is in, since that is
             // the listing being switched.
-            if m.command && i.key_pressed(K::Num1) {
+            if on(Command::Tiles) {
                 if let Some(p) = self.panes.iter().find(|p| p.id == pane) {
                     push(Action::SetView {
                         pane,
@@ -402,7 +396,7 @@ impl App {
             // No guard for This PC here, unlike the button that is drawn disabled there:
             // [`Action::ToggleSizes`] refuses it at the other end, which is the one place the answer
             // cannot be got wrong twice.
-            if m.command && i.key_pressed(K::Num2) {
+            if on(Command::Sizes) {
                 push(Action::ToggleSizes(pane));
             }
             // ---- Files ---------------------------------------------------
@@ -437,14 +431,20 @@ impl App {
                     _ => {}
                 }
             }
-            if i.key_pressed(K::Delete) {
-                // Shift is the difference between the Recycle Bin and gone.
+            // Shift is the difference between the Recycle Bin and gone.
+            if on(Command::Delete) {
                 push(Action::Delete {
                     pane,
-                    permanent: m.shift,
+                    permanent: false,
                 });
             }
-            if i.key_pressed(K::F2) {
+            if on(Command::DeletePermanently) {
+                push(Action::Delete {
+                    pane,
+                    permanent: true,
+                });
+            }
+            if on(Command::Rename) {
                 push(Action::BeginRename(pane));
             }
             // **Undo and redo, of file operations** — the copy, move, rename, delete and new
@@ -456,21 +456,20 @@ impl App {
             // else reaches for, it collides with nothing here, and a redo that answers only one
             // of the two is a redo half its users conclude is missing.
             //
-            // `Shift` is tested on the undo half rather than left out, for the same reason
-            // `Ctrl+Shift+T` is up at the top of this function: without it `Ctrl+Shift+Z` fires
-            // both, and undo-then-redo in one keystroke is a keystroke that appears to do
-            // nothing at all.
-            if m.command && i.key_pressed(K::Z) {
-                push(Action::Undo { redo: m.shift });
+            // The two are kept apart by exact matching: were `Ctrl+Z` to match with Shift held as
+            // well, `Ctrl+Shift+Z` would fire both, and undo-then-redo in one keystroke is a
+            // keystroke that appears to do nothing at all.
+            if on(Command::Undo) {
+                push(Action::Undo { redo: false });
             }
-            if m.command && i.key_pressed(K::Y) {
+            if on(Command::Redo) {
                 push(Action::Undo { redo: true });
             }
-            if m.command && m.shift && i.key_pressed(K::N) {
+            if on(Command::NewFolder) {
                 push(Action::NewFolder(pane));
             }
 
-            if m.command && m.shift && i.key_pressed(K::C) {
+            if on(Command::CopyPaths) {
                 if let Some(p) = self.panes.iter().find(|p| p.id == pane) {
                     let mut paths = p.tab().selection_paths();
                     if paths.is_empty() {
@@ -640,7 +639,7 @@ impl App {
                         }
                     }
                 }
-                if i.key_pressed(K::Escape) {
+                if shortcuts::pressed(i, &Command::ClearSelection) {
                     tab.clear_selection();
                 }
                 // **`Ctrl+Space` flips the row under the cursor**, and is why `Ctrl` with the arrows

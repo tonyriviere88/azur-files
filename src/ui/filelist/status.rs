@@ -289,11 +289,14 @@ pub(crate) fn status_line(
             next(),
             Id::new(("console-switch", pane)),
             &icons::terminal,
-            if console_open {
-                "Hide the console (Ctrl+²)"
-            } else {
-                "Show the console (Ctrl+²)"
-            },
+            &crate::app::shortcuts::tip(
+                if console_open {
+                    "Hide the console"
+                } else {
+                    "Show the console"
+                },
+                &crate::app::shortcuts::Command::Console,
+            ),
             true,
             console_open,
             t.surfaces.status,
@@ -311,11 +314,14 @@ pub(crate) fn status_line(
             next(),
             Id::new(("view-switch", pane)),
             &icons::grid_view,
-            if tiles {
-                "Show details instead (Ctrl+1)"
-            } else {
-                "Show large icons, with a thumbnail on anything that has one (Ctrl+1)"
-            },
+            &crate::app::shortcuts::tip(
+                if tiles {
+                    "Show details instead"
+                } else {
+                    "Show large icons, with a thumbnail on anything that has one"
+                },
+                &crate::app::shortcuts::Command::Tiles,
+            ),
             true,
             tiles,
             t.surfaces.status,
@@ -355,7 +361,10 @@ pub(crate) fn status_line(
         // column was not saying, and the bar second because it is what the number is for. Neither half
         // is worth a tooltip on its own — a folder's byte count with nothing to compare it against is
         // a figure to do arithmetic on.
-        "Measure each folder, and bar the share of what is on show (Ctrl+2)",
+        &crate::app::shortcuts::tip(
+            "Measure each folder, and bar the share of what is on show",
+            &crate::app::shortcuts::Command::Sizes,
+        ),
         !crate::fs::is_synthetic(&tab.path),
         tab.sizes.on,
         t.surfaces.status,
@@ -660,7 +669,8 @@ pub(crate) fn status_line(
             hit,
             &format!(
                 "Inside {name}, which this program only reads\n\
-                 Copy files out with Ctrl+C, or drag them"
+                 Copy files out with {}, or drag them",
+                crate::app::shortcuts::label(&crate::app::shortcuts::Command::Copy)
             ),
         );
     }

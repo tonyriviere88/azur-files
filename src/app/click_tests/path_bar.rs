@@ -7,7 +7,7 @@ fn the_history_buttons_respond() {
     let mut h = Harness::new();
     let y = h.path_bar_y(0);
     let pane = h.app.panes[0].id;
-    let id = Id::new(("nav", pane, "Up (Alt+Up)"));
+    let id = Id::new(("nav", pane, "Up"));
     let left = h.pane_rect(0).left();
     let at = (0..120)
         .step_by(2)
@@ -36,7 +36,7 @@ fn the_back_buttons_menu_lists_the_history_both_ways() {
 
     let button = h
         .ctx
-        .read_response(Id::new(("nav", pane, "Back (Alt+Left)")))
+        .read_response(Id::new(("nav", pane, "Back")))
         .map(|r| r.rect)
         .expect("the Back button was not laid out");
     h.click_with(button.center(), PointerButton::Secondary, Modifiers::NONE);
@@ -105,7 +105,7 @@ fn refresh_is_beside_up_and_the_bookmark_star_is_gone() {
     let pane = h.app.panes[0].id;
     let left = h.pane_rect(0).left();
 
-    let id = Id::new(("nav", pane, "Refresh (F5)"));
+    let id = Id::new(("nav", pane, "Refresh"));
     let at = (0..140)
         .step_by(2)
         .map(|dx| pos2(left + dx as f32, y))
@@ -122,8 +122,8 @@ fn refresh_is_beside_up_and_the_bookmark_star_is_gone() {
             .map(|r| r.rect)
             .unwrap_or_else(|| panic!("the {tip} button was not laid out"))
     };
-    let up = rect_of(&h, "Up (Alt+Up)");
-    let refresh = rect_of(&h, "Refresh (F5)");
+    let up = rect_of(&h, "Up");
+    let refresh = rect_of(&h, "Refresh");
     assert_eq!(
         refresh.left(),
         up.right(),

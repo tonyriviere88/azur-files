@@ -44,6 +44,7 @@ mod menu;
 mod palette;
 mod perform;
 mod preview;
+pub(crate) mod shortcuts;
 mod transfer;
 
 #[cfg(test)]
