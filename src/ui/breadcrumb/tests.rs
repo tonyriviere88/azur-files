@@ -292,6 +292,49 @@ fn appending_keeps_the_separator_that_was_being_used() {
     }
 }
 
+/// `%` offers the variables that name a folder, by prefix and in any case, and none that are a
+/// file, a list or not a path at all.
+#[test]
+fn a_percent_offers_the_variables_that_name_a_folder() {
+    let vars = [
+        ("APPDATA", r"C:\Users\me\AppData\Roaming"),
+        ("LOCALAPPDATA", r"C:\Users\me\AppData\Local"),
+        ("JAVA_HOME", r"C:\Program Files\Java\jdk-17.0.2"),
+        ("SHARE", r"\\nas\music"),
+        ("ComSpec", r"C:\Windows\system32\cmd.exe"),
+        ("Path", r"C:\Windows;C:\Windows\System32"),
+        ("USERNAME", "me"),
+        ("=C:", r"C:\Users\me"),
+    ]
+    .map(|(name, value)| (name.into(), value.into()));
+    let names = |typed: &str| -> Vec<String> {
+        variables(typed, vars.clone().into_iter())
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect()
+    };
+
+    assert_eq!(
+        names("%"),
+        ["%APPDATA%", "%JAVA_HOME%", "%LOCALAPPDATA%", "%SHARE%"]
+    );
+    assert_eq!(names("%app"), ["%APPDATA%"]);
+    assert_eq!(names("%LocalAppData%"), ["%LOCALAPPDATA%"]);
+    assert!(names("%com").is_empty());
+    assert_eq!(
+        variables("%app", vars.into_iter())[0].1,
+        PathBuf::from(r"C:\Users\me\AppData\Roaming")
+    );
+
+    // Accepted, it is the variable that goes in the field, ready for what is inside it.
+    let mut complete = sample();
+    complete.offers = vec![("%APPDATA%".to_owned(), PathBuf::from(r"C:\Users\me\AppData\Roaming"))];
+    complete.hot = Some(0);
+    let mut text = "%app".to_owned();
+    complete.accept(&mut text, false);
+    assert_eq!(text, r"%APPDATA%\");
+}
+
 /// With no separator typed yet the setting decides, which is a path typed from nothing: the
 /// first offer is a *drive*, and the separator after it is the first one the field will hold.
 ///

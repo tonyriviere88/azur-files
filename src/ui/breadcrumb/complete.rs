@@ -209,6 +209,11 @@ impl PathComplete {
                         self.offers.push((drive.letter, drive.path));
                     }
                 }
+                // And so is a variable: `%app` offers `%APPDATA%`, which the field already
+                // expands. Only once a `%` is typed, so an empty field is still the drives.
+                if leaf.starts_with('%') {
+                    self.offers.extend(variables(leaf, std::env::vars_os()));
+                }
             }
             Some(folder) => {
                 // Whatever the loader already has. A miss leaves the offers empty and `ready`
@@ -420,6 +425,44 @@ pub(crate) fn split_typed(text: &str) -> (&str, &str) {
         Some(at) => text.split_at(at + 1),
         None => ("", text),
     }
+}
+
+/// The environment variables that name a folder, written `%NAME%`, whose name starts with `typed`
+/// — which carries its opening `%`, and may carry the closing one too.
+///
+/// **Decided from the value's spelling alone**, because this runs on a keystroke and a variable
+/// can point at a share that has gone away: see [`fs::typed_folder`]. So a folder is a value that
+/// is an absolute path, is not a list (`PATH`, `PSModulePath`), and does not end in an extension
+/// [`fs::fmt::file_type`] knows — which is what keeps `%ComSpec%`, `cmd.exe`, off the list while
+/// `%JAVA_HOME%`, ending `jdk-17.0.2`, stays on it.
+///
+/// Accepting one puts the variable in the field and not its value, as [`PathComplete::accept`]
+/// keeps every prefix as it was typed; the path is what Enter and a click go to.
+pub(crate) fn variables(
+    typed: &str,
+    vars: impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> Vec<(String, PathBuf)> {
+    let mut out: Vec<(String, PathBuf)> = vars
+        .filter_map(|(name, value)| {
+            let (name, value) = (name.into_string().ok()?, value.into_string().ok()?);
+            // Windows keeps a few `=C:`-style entries for each drive's current directory.
+            if name.is_empty() || name.starts_with('=') || value.contains(';') {
+                return None;
+            }
+            let path = PathBuf::from(value.trim());
+            if !path.is_absolute() {
+                return None;
+            }
+            let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+            if fs::fmt::file_type(ext).is_some() {
+                return None;
+            }
+            let label = format!("%{name}%");
+            starts_with_folded(&label, typed).then_some((label, path))
+        })
+        .collect();
+    out.sort_by(|a, b| fs::sort::natural_cmp(&a.0, &b.0));
+    out
 }
 
 /// Whether `name` begins with `typed`, whatever case either of them is in.
@@ -850,10 +893,15 @@ pub(crate) fn offers(
     let mut rows: Vec<(egui::layers::ShapeIdx, Rect)> = Vec::with_capacity(complete.len());
     // One row of either kind. Its index in the dropdown is how many came before it, which is what
     // `hot` and `hovered` count in — the places recalled first, then the folder's own offers.
-    let mut add = |ui: &mut Ui, label: String, icon: azur_icons::Icon<'_>, path: &Path| {
+    // `aside` is drawn at the row's right, where a menu entry puts its shortcut; empty is nothing.
+    let mut add = |ui: &mut Ui,
+                   label: String,
+                   aside: String,
+                   icon: azur_icons::Icon<'_>,
+                   path: &Path| {
         let index = rows.len();
         let slot = ui.painter().add(egui::Shape::Noop);
-        let row = ui.add(MenuItem::new(label).icon(icon));
+        let row = ui.add(MenuItem::new(label).shortcut(aside).icon(icon));
         // Into view on the frame the highlight moved — **and only if it is not already in view.** A
         // scroll to a row that is already showing is not nothing: it is an animation, the list moves
         // for a few frames while it settles, and with the key held it never settles at all.
@@ -883,7 +931,7 @@ pub(crate) fn offers(
         } else {
             &icons::history
         };
-        add(ui, label, glyph, &offer.path);
+        add(ui, label, String::new(), glyph, &offer.path);
     }
     if !complete.recalled.is_empty() && !complete.offers.is_empty() {
         azur_egui_theme::components::menu_divider(ui);
@@ -906,7 +954,15 @@ pub(crate) fn offers(
                 None => icons::folder(painter, rect, color),
             }
         };
-        add(ui, name.clone(), &paint, path);
+        // A variable says where it leads, in the separator the field is showing: `%TEMP%` alone
+        // does not tell you which of two temp folders it is. Only a variable can start with `%`
+        // where nothing names a folder yet — see [`variables`].
+        let aside = if complete.folder.is_none() && name.starts_with('%') {
+            with_separator(&path.display().to_string(), slashes)
+        } else {
+            String::new()
+        };
+        add(ui, name.clone(), aside, &paint, path);
     }
     highlight(ui, t, &rows, hot, *hovered, quiet);
     if complete.truncated {
