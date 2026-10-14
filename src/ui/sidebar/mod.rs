@@ -321,6 +321,15 @@ pub fn show(
     let wsl = !distros.is_empty();
     sections_menu(&back, sections, wsl, out);
 
+    // **A subtle scrollbar: shown only while the pointer is over the panel.** egui calls a bar
+    // "dormant" when the pointer is outside its scroll area, and this one fills the panel, so a
+    // dormant handle at zero opacity is a bar that appears on hovering the sidebar. Floating, too:
+    // a solid bar allocates its gutter whether or not it is showing, and an invisible bar that
+    // still narrows every row is not subtle. Nothing is drawn into `ui` after this.
+    let scroll = &mut ui.style_mut().spacing.scroll;
+    scroll.floating = true;
+    scroll.dormant_handle_opacity = 0.0;
+
     egui::ScrollArea::vertical()
         .id_salt("sidebar")
         .auto_shrink([false, false])
