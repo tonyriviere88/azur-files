@@ -762,7 +762,7 @@ mod tests {
     /// The headline claim: a drag offers a name and a size for every file under what was picked up,
     /// and building that offer decompresses nothing.
     #[test]
-    #[ignore = "fails on the GitHub Actions runner, passes on a desktop: counts entries in the shared extraction folder, which tests running alongside write into"]
+    #[cfg_attr(ci, ignore = "fails on the GitHub Actions runner, passes on a desktop: counts entries in the shared extraction folder, which tests running alongside write into")]
     fn the_descriptors_name_every_file_without_extracting_anything() {
         let pkg = a_zip(
             "descriptors",
@@ -863,7 +863,7 @@ mod tests {
 
     /// A hovering target asks `QueryGetData` many times a second. It must answer from memory.
     #[test]
-    #[ignore = "fails on the GitHub Actions runner, passes on a desktop: counts the shared extraction folder, which other tests write to at the same time"]
+    #[cfg_attr(ci, ignore = "fails on the GitHub Actions runner, passes on a desktop: counts the shared extraction folder, which other tests write to at the same time")]
     fn querying_a_format_extracts_nothing() {
         let pkg = a_zip("query", &[("a.txt", "first")]);
         let untouched = extractions();

@@ -753,7 +753,8 @@ fn probe_invoking() {
         None
     }
 
-    let cases: [(&str, Vec<PathBuf>, Box<dyn Fn(&str, &Command) -> bool>); 3] = [
+    type Pick = Box<dyn Fn(&str, &Command) -> bool>;
+    let cases: [(&str, Vec<PathBuf>, Pick); 3] = [
         (
             "a plain verb on the folder's background",
             Vec::new(),
@@ -1122,7 +1123,7 @@ fn probe_invokable() {
     let dir = match std::env::var_os("YAFE_PROBE") {
         Some(given) => {
             let given = PathBuf::from(given);
-            crate::sandbox::guard("YAFE_PROBE", &[given.clone()]);
+            crate::sandbox::guard("YAFE_PROBE", std::slice::from_ref(&given));
             given
         }
         None => dir,

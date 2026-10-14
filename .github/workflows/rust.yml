@@ -2,12 +2,25 @@ name: Rust
 
 on:
   push:
-    branches: [ "master" ]
+    branches: [ "master", "ci/**" ]
   pull_request:
     branches: [ "master" ]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
+
+# A test that passes on a desktop and cannot pass here is `#[cfg_attr(ci, ignore = "why")]`.
+# `build.rs` sets `cfg(ci)` when it sees `GITHUB_ACTIONS`, which the runner sets by itself, so such
+# a test is listed below as ignored, with its reason, and still runs in a local `cargo test`.
+#
+# The tests run in two steps because two threads asking the shell for an icon, a thumbnail or a
+# file operation get one answer between them. Everything that reaches the shell — `shell::`, and
+# the Win32 halves, which are mounted as `win::` under their portable module (`src/windows/` is
+# not a module path of its own) — runs one test at a time; the rest runs in parallel.
+#
+# A failed test is reported as an annotation on the run, with its panic message. Annotations can
+# be read without signing in; the logs cannot.
 
 jobs:
   build:
@@ -15,8 +28,53 @@ jobs:
     runs-on: windows-latest
 
     steps:
-    - uses: actions/checkout@v4
-    - name: Build
-      run: cargo build --verbose
-    - name: Run tests
-      run: cargo test --verbose
+    - uses: actions/checkout@v5
+
+    - uses: Swatinem/rust-cache@v2
+
+    - name: Clippy
+      run: cargo clippy --all-targets --locked -- -D warnings
+
+    - name: Build tests
+      id: build
+      run: cargo test --locked --no-run
+
+    - name: Tests
+      shell: bash
+      timeout-minutes: 30
+      run: |
+        set -o pipefail
+        cargo test --locked -- --skip shell:: --skip win:: 2>&1 | tee parallel.log
+
+    - name: Tests that reach the shell, one at a time
+      if: ${{ !cancelled() && steps.build.outcome == 'success' }}
+      shell: bash
+      timeout-minutes: 30
+      run: |
+        set -o pipefail
+        cargo test --locked -- shell:: win:: --test-threads=1 2>&1 | tee serial.log
+
+    - name: Report failed tests
+      if: ${{ failure() && steps.build.outcome == 'success' }}
+      shell: bash
+      # libtest prints `thread '<test>' panicked at <file>:<line>:<col>:` and the message on the
+      # line after. Each becomes one error annotation, on the line that panicked.
+      run: |
+        for log in parallel.log serial.log; do
+          [ -f "$log" ] || continue
+          awk '
+            /^thread .* panicked at / {
+              name = $0; sub(/^thread \047/, "", name); sub(/\047 .*/, "", name)
+              gsub(/:/, "%3A", name); gsub(/,/, "%2C", name)
+              where = $0; sub(/.* panicked at /, "", where); sub(/:$/, "", where)
+              n = split(where, part, ":")
+              file = part[1]; for (i = 2; i <= n - 2; i++) file = file ":" part[i]
+              gsub(/\\/, "/", file)
+              getline message
+              gsub(/%/, "%25", message)
+              printf "::error file=%s,line=%s,title=%s::%s\n", file, part[n - 1], name, message
+            }
+          ' "$log"
+          grep -E '^test .* \.\.\. FAILED$' "$log" | sed -E 's/^test (.*) \.\.\. FAILED$/::error title=Failed::\1/' || true
+          grep -E 'has been running for over' "$log" | sed -E 's/^(.*)$/::warning title=Slow::\1/' || true
+        done

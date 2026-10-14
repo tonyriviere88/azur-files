@@ -28,6 +28,17 @@ fn main() {
     println!("cargo:rerun-if-changed={ICON}");
     println!("cargo:rerun-if-changed=build.rs");
 
+    // `cfg(ci)`, on a GitHub Actions runner and nowhere else. A test that passes on a desktop and
+    // cannot pass on the runner says so with `#[cfg_attr(ci, ignore = "why")]`: the runner lists it
+    // as ignored, with the reason, and a local `cargo test` runs it like any other. Read from the
+    // build script rather than handed over in `RUSTFLAGS`, so that it reaches this crate alone and
+    // does not rebuild every dependency under a second set of flags.
+    println!("cargo:rustc-check-cfg=cfg(ci)");
+    println!("cargo:rerun-if-env-changed=GITHUB_ACTIONS");
+    if std::env::var_os("GITHUB_ACTIONS").is_some_and(|v| v == "true") {
+        println!("cargo:rustc-cfg=ci");
+    }
+
     if std::env::var_os("CARGO_CFG_WINDOWS").is_none() {
         return;
     }

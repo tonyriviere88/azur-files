@@ -90,6 +90,11 @@ cargo claude-test <filter> -- --ignored --nocapture --test-threads=1
 - `cargo claude-test` stalls when a test fails and a backgrounded run looks hung while it
   waits on the cargo lock. Build with `--no-run` and run the test exe directly, output to
   a file.
+- **A test that cannot pass on the GitHub runner is `#[cfg_attr(ci, ignore = "why")]`,
+  never a plain `#[ignore]`.** `build.rs` sets `cfg(ci)` only when `GITHUB_ACTIONS=true`, so
+  the runner lists it as ignored and a local run still executes it. CI runs `shell::` and
+  `win::` (where `src/windows/` is mounted) with `--test-threads=1`, the rest in parallel, and
+  reports each failed test as a run annotation (readable without signing in; logs are not).
 - **Click tests paint once per palette.** A test that loops `Palette::ALL` builds a whole
   `Harness` per entry and blows a 10-minute timeout. Assert against one palette unless the
   palette *is* what is under test.

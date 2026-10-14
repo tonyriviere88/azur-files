@@ -91,7 +91,7 @@ fn a_folder_waiting_for_a_new_file_hears_about_it_through_the_git_filter() {
 /// folder would flash the pane on every file. So the old rows stay up until the new ones
 /// land, and the selection comes across with them.
 #[test]
-#[ignore = "fails on the GitHub Actions runner, passes on a desktop: races the loader's worker refilling the cache it asserts was dropped"]
+#[cfg_attr(ci, ignore = "fails on the GitHub Actions runner, passes on a desktop: races the loader's worker refilling the cache it asserts was dropped")]
 fn a_changed_folder_is_re_read_without_blanking_it() {
     let mut h = Harness::new();
     h.settle();
@@ -395,7 +395,7 @@ fn a_quick_folder_never_says_it_is_reading() {
 /// branch never changed at all — this is a wrong answer that stays, not a slow one.
 #[test]
 #[cfg(windows)]
-#[ignore = "fails on the GitHub Actions runner, passes on a desktop: runs real git and waits for the folder watcher to see a branch switch"]
+#[cfg_attr(ci, ignore = "fails on the GitHub Actions runner, passes on a desktop: runs real git and waits for the folder watcher to see a branch switch")]
 fn a_branch_switched_outside_reaches_the_status_line() {
     let root = crate::sandbox::dir("git-branch-switch");
     crate::sandbox::remove(&root);
