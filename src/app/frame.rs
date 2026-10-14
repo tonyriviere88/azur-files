@@ -110,7 +110,11 @@ impl App {
         // Keep painting while the window is being restored, resized or rescaled, so the
         // compositor never has to stretch a frame that was drawn for a different shape.
         let now = ctx.input(|i| i.time);
-        if self.settling.observe(Shape::of(&ctx), now) {
+        let shape = Shape::of(&ctx);
+        // `--walk`, `--scroll` and `--trace`, which see the shape before it is settled against.
+        #[cfg(any(test, feature = "devtools"))]
+        self.drive_devtools(&ctx, shape, now);
+        if self.settling.observe(shape, now) {
             ctx.request_repaint();
         }
         // **How far an archive extraction has got**, refreshed here and drawn by the pane's status
@@ -118,69 +122,6 @@ impl App {
         // is also where the interval comes from.
         if self.watch_extraction() {
             ctx.request_repaint_after(EXTRACTION_STEP);
-        }
-        // `--walk`: step to the next folder by itself, so a real window can be measured
-        // browsing rather than sitting still.
-        if let Some(next) = self.walk.as_mut().and_then(|walk| walk.step(now)) {
-            let pane = self.focused;
-            self.perform(&ctx, Action::Navigate { pane, path: next });
-            ctx.request_repaint_after(std::time::Duration::from_secs_f64(Walk::STEP));
-        }
-        // `--scroll`: keep the listing moving, so the painting is measured and not just the
-        // reading.
-        if self.scrolling.on {
-            let span = self
-                .panes
-                .iter()
-                .find(|p| p.id == self.focused)
-                .map_or(0.0, |p| {
-                    let tab = p.tab();
-                    if tab.view_mode.is_icons() {
-                        tab.grid.height()
-                    } else {
-                        tab.order.len() as f32 * crate::pane::ROW_HEIGHT
-                    }
-                });
-            if let Some(to) = self.scrolling.step(span) {
-                if let Some(pane) = self.panes.iter_mut().find(|p| p.id == self.focused) {
-                    pane.tab_mut().scroll_to = Some(to);
-                }
-                ctx.request_repaint();
-            }
-        }
-        // `--trace`: the memory figures, every few seconds, beside what the cache is holding.
-        // Together they say whether growth is the cache filling up or something being kept.
-        //
-        // A repaint has to be booked for it, because this program is idle between events and
-        // a report that only fires when something else asks for a frame is a report that
-        // never fires while you sit and watch the number climb.
-        if self.settling.trace {
-            ctx.request_repaint_after(std::time::Duration::from_secs_f64(Settling::REPORT));
-            if now - self.settling.reported_at > Settling::REPORT {
-                self.settling.reported_at = now;
-                let (private, gdi, user) = process_memory();
-                let (dirs, entries) = self.loader.held();
-                // Beside the folder cache and separate from it, because they answer the two halves
-                // of "memory grows as I browse" that look identical from the outside: a session that
-                // walked through a few tarballs is holding their indexes, which are not folders.
-                let (archives, in_archives) = crate::archive::held();
-                let (kinds, paths, textures) = self.icons.held();
-                let (known, pictures, pages, spare) = self.thumbs.held();
-                let (gaveup, queued) = self.thumbs.stuck();
-                println!(
-                    "{now:8.1}  private {:>7} KB   gdi {gdi:>5}   user {user:>4}   \
-                     cache {dirs:>3} folders / {entries:>8} entries   \
-                     archives {archives:>2} / {in_archives:>7} entries   \
-                     icons {kinds:>4} kinds / {paths:>5} paths / {textures:>4} textures /                      {} bitmaps / {} uploads   \
-                     thumbs {known:>4} known / {pictures:>4} drawn / {gaveup:>4} gaveup / {queued:>3} queued / {:>4} asks / {pages} pages / {spare:>4} spare / {} fetched / {} uploads",
-                    private / 1024,
-                    self.icons.bitmaps,
-                    self.icons.uploads,
-                    self.thumbs.asks,
-                    self.thumbs.fetched,
-                    self.thumbs.uploads,
-                );
-            }
         }
         // A drive may have been plugged in or ejected while the window was in the
         // background, and regaining focus is the one moment it is worth re-probing.
@@ -193,15 +134,10 @@ impl App {
             self.wsl = crate::fs::wsl::distros();
         }
         self.volumes.poll();
-        self.icons.poll(&ctx);
+        self.icons.poll();
         // Which listings are on screen, so the icon worker can drop the questions it still has
         // about folders nobody is looking at any more.
-        let views: Vec<u64> = self
-            .panes
-            .iter()
-            .flat_map(|pane| pane.tabs.iter())
-            .map(|tab| tab.view)
-            .collect();
+        let views: Vec<u64> = self.tabs().map(|tab| tab.view).collect();
         self.icons.only(&views);
         // Which folders the tiles' pictures may still be wanted for, for the same reason: one that has
         // been scrolled away from must not hold up the one in front of it.
@@ -566,12 +502,7 @@ impl App {
                         .layout(egui::Layout::top_down(egui::Align::Min)),
                 );
                 child.set_clip_rect(sidebar.intersect(ui.clip_rect()));
-                let current = self
-                    .panes
-                    .iter()
-                    .find(|p| p.id == self.focused)
-                    .map(|p| p.tab().path.clone())
-                    .unwrap_or_default();
+                let current = self.path_of(self.focused).unwrap_or_default();
                 let mut marks = sidebar::Marks {
                     list: &self.bookmarks,
                     editing: &mut self.bookmark_edit,
@@ -1033,7 +964,7 @@ impl App {
                 }
                 Err(what) => {
                     self.panes[index].console_failed = Some(want);
-                    self.notice = Some(what);
+                    self.report(what);
                 }
             }
         }
@@ -1068,7 +999,7 @@ impl App {
         if let Some(command) = &out.terminal {
             let kind = self.panes[index].console_state.kind();
             if let Err(why) = crate::console::in_terminal(kind, &here, command) {
-                self.notice = Some(why);
+                self.report(why);
             }
         }
 
@@ -1091,7 +1022,7 @@ impl App {
             orphan = out.send.clone();
         }
         if let Some(command) = orphan {
-            self.notice = Some(format!("no {} to run `{command}` in", want.label()));
+            self.report(format!("no {} to run `{command}` in", want.label()));
         }
         if out.claimed {
             self.actions.push(Action::Focus(id));

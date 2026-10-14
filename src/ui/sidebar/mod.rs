@@ -108,17 +108,22 @@ const HEADER: f32 = 20.0;
 const GLYPH: f32 = 14.0;
 /// Left inset for a row's glyph. The 2px selection bar lands inside it.
 const INDENT: f32 = space::S3;
-/// Left edge to where a row's label starts: the indent, the space a group's chevron
-/// occupies, and the glyph. Known without a rect, which is what lets a drive row decide
-/// how tall it is before it is allocated.
-const TEXT_INSET: f32 = INDENT + 12.0 + space::S2 + GLYPH + space::S3;
+/// The fold chevron's box, on a group's heading and on a bookmark group's row — see
+/// [`fold_chevron`]. Every row leaves the room for one, so the glyphs make one column.
+const CHEVRON: f32 = 12.0;
+/// Left edge to where a row's glyph starts: the indent, the room a group's chevron occupies, and
+/// the gap after it.
+const GLYPH_X: f32 = INDENT + CHEVRON + space::S2;
+/// Left edge to where a row's label starts: [`GLYPH_X`], and the glyph. Known without a rect,
+/// which is what lets a drive row decide how tall it is before it is allocated.
+const TEXT_INSET: f32 = GLYPH_X + GLYPH + space::S3;
 /// How far a bookmark inside a group is set in from one that is not.
 ///
 /// A chevron's width, which is what the group's own chevron occupies on the row above — so a
 /// child's glyph starts where its group's name does, and the nesting is legible without a
 /// guide line. One indent is all there is: a group holds folders and not groups, so no row is
 /// ever further in than this. See [`bookmarks`].
-const CHILD: f32 = 12.0;
+const CHILD: f32 = CHEVRON;
 
 /// One group of rows in the panel.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -232,38 +237,12 @@ impl Sections {
     /// edited by hand. Such a group goes back in beside the one it follows in [`Section::ALL`], so
     /// an arrangement written before WSL existed gains WSL after Places, wherever Places was put.
     pub fn set_order(&mut self, order: impl IntoIterator<Item = Section>) {
-        let mut list: Vec<Section> = Vec::with_capacity(Section::ALL.len());
-        for section in order {
-            if !list.contains(&section) {
-                list.push(section);
-            }
-        }
-        for (at, section) in Section::ALL.into_iter().enumerate() {
-            if list.contains(&section) {
-                continue;
-            }
-            let after = Section::ALL[..at]
-                .iter()
-                .rev()
-                .find_map(|before| list.iter().position(|had| had == before));
-            list.insert(after.map_or(0, |index| index + 1), section);
-        }
-        self.order.copy_from_slice(&list);
+        crate::pane::arrange(&mut self.order, Section::ALL, order);
     }
 
     /// Take `from` out and put it on one side of `to`. Whether anything moved.
     pub fn move_beside(&mut self, from: Section, to: Section, after: bool) -> bool {
-        if from == to {
-            return false;
-        }
-        let before = self.order;
-        let mut list: Vec<Section> = self.order.into_iter().filter(|s| *s != from).collect();
-        let Some(at) = list.iter().position(|s| *s == to) else {
-            return false;
-        };
-        list.insert(at + usize::from(after), from);
-        self.order.copy_from_slice(&list);
-        self.order != before
+        crate::pane::move_beside(&mut self.order, from, to, after)
     }
 
     /// Put the groups back in the order a first run shows them. Whether anything moved.
@@ -387,7 +366,7 @@ pub fn show(
                             let shell = if drive.disconnected {
                                 None
                             } else {
-                                shell_icon(ui, icons_cache, &drive.path)
+                                shell_icon(icons_cache, &drive.path)
                             };
                             drive_row(
                                 ui, t, width, drive, shell, &mut queue, current, focused,
@@ -429,28 +408,22 @@ pub fn show(
                                 fmt::Kind::Folder => t.folder,
                                 _ => t.text.secondary,
                             };
-                            let shell = shell_icon(ui, icons_cache, &place.path);
-                            let response = row(
+                            let shell = shell_icon(icons_cache, &place.path);
+                            // The Recycle Bin too, which used to be handed to Explorer — see
+                            // [`crate::fs::recycle`] for how it is listed here now.
+                            place_row(
                                 ui,
                                 t,
                                 width,
-                                0.0,
-                                ROW,
-                                glyph,
-                                color,
-                                shell,
+                                (glyph, color, shell),
                                 &mut queue,
                                 &place.label,
-                                place.path == current,
+                                &place.path,
+                                current,
                                 Id::new(("place", &place.label)),
-                                Sense::click(),
-                                false,
-                                false,
+                                focused,
+                                out,
                             );
-                            // The Recycle Bin too, which used to be handed to Explorer — see
-                            // [`crate::fs::recycle`] for how it is listed here now.
-                            navigate_on(&response, focused, &place.path, out);
-                            place_menu(ui, &response, focused, &place.path, out);
                         }
                     }
 
@@ -465,26 +438,20 @@ pub fn show(
                             let shell = distro
                                 .icon
                                 .as_deref()
-                                .and_then(|icon| shell_icon(ui, icons_cache, icon));
-                            let response = row(
+                                .and_then(|icon| shell_icon(icons_cache, icon));
+                            place_row(
                                 ui,
                                 t,
                                 width,
-                                0.0,
-                                ROW,
-                                &icons::terminal,
-                                t.text.secondary,
-                                shell,
+                                (&icons::terminal, t.text.secondary, shell),
                                 &mut queue,
                                 &distro.name,
-                                distro.path == current,
+                                &distro.path,
+                                current,
                                 Id::new(("wsl", &distro.name)),
-                                Sense::click(),
-                                false,
-                                false,
+                                focused,
+                                out,
                             );
-                            navigate_on(&response, focused, &distro.path, out);
-                            place_menu(ui, &response, focused, &distro.path, out);
                         }
                     }
 
@@ -542,7 +509,7 @@ pub fn show(
                                 );
                             }
                             for share in shares {
-                                let shell = shell_icon(ui, icons_cache, &share.path);
+                                let shell = shell_icon(icons_cache, &share.path);
                                 drive_row(
                                     ui, t, width, share, shell, &mut queue, current, focused,
                                     scratch, out,
@@ -579,6 +546,46 @@ pub fn show(
 /// rows.
 fn down_to_cursor(ui: &Ui, top: egui::Pos2, width: f32) -> Rect {
     Rect::from_min_max(top, pos2(top.x + width, ui.cursor().min.y))
+}
+
+/// A row for a place or a distribution: one line, a left click going there and a middle click
+/// opening it in a tab, and [`place_menu`] on the right button.
+///
+/// `icon` is the painted glyph, its ink, and the shell's bitmap once there is one — see [`row`].
+#[allow(clippy::too_many_arguments)]
+fn place_row(
+    ui: &mut Ui,
+    t: &Theme,
+    width: f32,
+    icon: (azur_icons::Icon<'_>, egui::Color32, Option<(egui::TextureId, Rect)>),
+    queue: &mut IconQueue,
+    label: &str,
+    path: &Path,
+    current: &Path,
+    id: Id,
+    focused: PaneId,
+    out: &mut Vec<Action>,
+) {
+    let (glyph, color, shell) = icon;
+    let response = row(
+        ui,
+        t,
+        width,
+        0.0,
+        ROW,
+        glyph,
+        color,
+        shell,
+        queue,
+        label,
+        path == current,
+        id,
+        Sense::click(),
+        false,
+        false,
+    );
+    navigate_on(&response, focused, path, out);
+    place_menu(ui, &response, focused, path, out);
 }
 
 /// The menu a place or a distribution offers: the ways to open it, and pinning it.
@@ -660,15 +667,23 @@ fn moving_section(
         return;
     }
     let y = if after { span.bottom() } else { span.top() };
-    ui.painter().rect_filled(
-        Rect::from_min_max(
-            pos2(span.left() + INDENT, y - 1.0),
-            pos2(span.right() - space::S3, y + 1.0),
-        ),
-        CornerRadius::same(radius::CIRCULAR),
-        t.accent.default,
-    );
+    paint_caret(ui.painter(), t, caret(span, y, 0.0));
     ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+}
+
+/// The two points of accent that say a row — or a whole group — is going between these two:
+/// across `row` at `y`, set in by `indent` more than a row's own glyph column starts.
+fn caret(row: Rect, y: f32, indent: f32) -> Rect {
+    Rect::from_min_max(
+        pos2(row.left() + INDENT + indent, y - 1.0),
+        pos2(row.right() - space::S3, y + 1.0),
+    )
+}
+
+/// Paint a [`caret`]: a pill of the accent, the same for a bookmark between rows and a heading
+/// between groups.
+fn paint_caret(painter: &egui::Painter, t: &Theme, caret: Rect) {
+    painter.rect_filled(caret, CornerRadius::same(radius::CIRCULAR), t.accent.default);
 }
 
 /// Which group a dragged heading is going beside, where that group was drawn, and whether it goes
@@ -710,7 +725,7 @@ fn machine_row(
     let shell = if found {
         None
     } else {
-        shell_icon(ui, icons_cache, machine)
+        shell_icon(icons_cache, machine)
     };
     let response = row(
         ui,
@@ -755,14 +770,10 @@ fn discover_button(
     // Shown while looking even with the pointer away, which is the one place this parts company
     // with the `+`: a control that vanishes mid-answer takes the only sign that anything is
     // happening with it.
-    let pointer = ui.ctx().pointer_interact_pos();
-    if !finding && !pointer.is_some_and(|at| area.contains(at)) {
+    if !finding && !pointer_in(ui, area) {
         return;
     }
-    let rect = Rect::from_center_size(
-        pos2(heading.right() - space::S2 - ADD * 0.5, heading.center().y),
-        vec2(ADD, ADD),
-    );
+    let rect = heading_button(heading);
 
     // **A spinner in the button's place while it is looking**, rather than the refresh glyph in a
     // pressed state. A browse takes 14 seconds on this machine — see
@@ -796,7 +807,6 @@ fn discover_button(
         "Look for machines on the network",
         true,
         false,
-        t.bg.layer_alt,
     );
     if response.clicked() {
         out.push(Action::DiscoverNetwork);
@@ -843,6 +853,23 @@ fn spinner(ui: &Ui, t: &Theme, rect: Rect) {
 /// leaves a point of air above and below the button's own fill.
 const ADD: f32 = 18.0;
 
+/// Where a control on a heading goes — the `+` on Bookmarks, the refresh on Network: [`ADD`] square,
+/// against the heading's right edge, in the room [`group_header`] is told to keep for it.
+fn heading_button(heading: Rect) -> Rect {
+    Rect::from_center_size(
+        pos2(heading.right() - space::S2 - ADD * 0.5, heading.center().y),
+        vec2(ADD, ADD),
+    )
+}
+
+/// Whether the pointer is inside `area` — which for a heading's control is the heading and the rows
+/// under it, the span such a control appears within.
+fn pointer_in(ui: &Ui, area: Rect) -> bool {
+    ui.ctx()
+        .pointer_interact_pos()
+        .is_some_and(|at| area.contains(at))
+}
+
 /// `+` at the right of the Bookmarks heading: a new group.
 ///
 /// **Only while the pointer is in the section**, `area`. A permanent button on a heading is a
@@ -869,14 +896,10 @@ fn new_group_button(
     if marks.dragging || marks.editing.drag.is_some() {
         return;
     }
-    let pointer = ui.ctx().pointer_interact_pos();
-    if !pointer.is_some_and(|at| area.contains(at)) {
+    if !pointer_in(ui, area) {
         return;
     }
-    let rect = Rect::from_center_size(
-        pos2(heading.right() - space::S2 - ADD * 0.5, heading.center().y),
-        vec2(ADD, ADD),
-    );
+    let rect = heading_button(heading);
     let response = crate::ui::tool_button(
         ui,
         t,
@@ -886,7 +909,6 @@ fn new_group_button(
         "New group of bookmarks",
         true,
         false,
-        t.bg.layer_alt,
     );
     if response.clicked() {
         out.push(Action::AddBookmarkGroup);
@@ -939,17 +961,7 @@ fn group_header(
         *open = !*open;
     }
 
-    let chevron = icon_rect(rect, rect.left() + INDENT, 12.0);
-    let color = if response.hovered() {
-        t.text.secondary
-    } else {
-        t.text.tertiary
-    };
-    if *open {
-        azur_icons::chevron_down(ui.painter(), chevron, color);
-    } else {
-        azur_icons::chevron_right(ui.painter(), chevron, color);
-    }
+    let chevron = fold_chevron(ui.painter(), t, rect, *open, response.hovered());
     section_label(
         ui.painter(),
         Rect::from_min_max(
@@ -964,6 +976,30 @@ fn group_header(
         open: *open,
         response,
     }
+}
+
+/// The chevron that folds a group — a section's under its heading, or a bookmark group's — down
+/// while it is open and right while it is not, at [`INDENT`] in the slot every row leaves for it.
+/// `text-secondary` under the pointer and `text-tertiary` otherwise. Returns where it was drawn.
+fn fold_chevron(
+    painter: &egui::Painter,
+    t: &Theme,
+    row: Rect,
+    open: bool,
+    hovered: bool,
+) -> Rect {
+    let chevron = icon_rect(row, row.left() + INDENT, CHEVRON);
+    let ink = if hovered {
+        t.text.secondary
+    } else {
+        t.text.tertiary
+    };
+    if open {
+        azur_icons::chevron_down(painter, chevron, ink);
+    } else {
+        azur_icons::chevron_right(painter, chevron, ink);
+    }
+    chevron
 }
 
 /// One row. Returns its response so the caller can wire clicks and a menu.
@@ -1009,7 +1045,7 @@ fn row(
         ui.painter().rect_filled(rect, CornerRadius::ZERO, t.bg.control_active);
     }
 
-    let glyph_rect = icon_rect(rect, rect.left() + indent + INDENT + 12.0 + space::S2, GLYPH);
+    let glyph_rect = icon_rect(rect, rect.left() + indent + GLYPH_X, GLYPH);
     draw_icon(ui, glyph_rect, glyph, glyph_color, shell, queue);
 
     let text_left_x = glyph_rect.right() + space::S3;
@@ -1050,12 +1086,11 @@ fn row(
 /// again for the rest of the session; the painted glyph stands in until then. See
 /// [`crate::shell::icons::Icons::place`].
 fn shell_icon(
-    ui: &Ui,
     icons_cache: &mut crate::shell::icons::Icons,
     path: &Path,
 ) -> Option<(egui::TextureId, Rect)> {
     let icon = icons_cache.place(path)?;
-    icons_cache.uv(ui.ctx(), icon)
+    icons_cache.uv(icon)
 }
 
 /// A row's icon: the shell's bitmap if there is one, and the painted glyph if not.
@@ -1148,7 +1183,7 @@ fn drive_row(
         ui.painter().rect_filled(rect, CornerRadius::ZERO, fill);
     }
 
-    let glyph = icon_rect(rect, rect.left() + INDENT + 12.0 + space::S2, GLYPH);
+    let glyph = icon_rect(rect, rect.left() + GLYPH_X, GLYPH);
     draw_icon(
         ui,
         glyph,
@@ -1186,13 +1221,7 @@ fn drive_row(
     if let Some(used) = drive.used_fraction() {
         let bar = Rect::from_min_size(pos2(left, y.round()), vec2((right - left).max(0.0), GAUGE_HEIGHT));
         if bar.width() > 8.0 {
-            let corner = CornerRadius::same(radius::CIRCULAR);
-            ui.painter().rect_filled(bar, corner, t.gauge_track);
-            ui.painter().rect_filled(
-                Rect::from_min_size(bar.min, vec2((bar.width() * used).max(2.0), bar.height())),
-                corner,
-                t.gauge(used),
-            );
+            crate::ui::gauge(ui.painter(), t, bar, used, 2.0, t.gauge(used));
         }
     }
 
@@ -1214,11 +1243,10 @@ fn drive_row(
         let at = response
             .interact_pointer_pos()
             .unwrap_or(response.rect.center());
-        let scale = ui.ctx().pixels_per_point();
         out.push(Action::DriveMenu {
             pane: focused,
             drive: drive.path.clone(),
-            at: ((at.x * scale) as i32, (at.y * scale) as i32),
+            at: crate::ui::physical(ui.ctx(), at),
         });
     }
 }
@@ -1280,7 +1308,7 @@ fn menu_targets(ui: &mut Ui, focused: PaneId, path: &Path, out: &mut Vec<Action>
 fn hint(ui: &mut Ui, t: &Theme, width: f32, indent: f32, text: &str) -> Rect {
     let (rect, _) = ui.allocate_exact_size(vec2(width, ROW), Sense::hover());
     let inner = Rect::from_min_max(
-        pos2(rect.left() + indent + INDENT + 12.0 + space::S2, rect.top()),
+        pos2(rect.left() + indent + GLYPH_X, rect.top()),
         pos2(rect.right() - space::S3, rect.bottom()),
     );
     let galley = truncated(

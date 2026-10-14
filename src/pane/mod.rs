@@ -16,6 +16,7 @@ use std::sync::Arc;
 use crate::fs::{display_name, sort, Column, Dir};
 
 pub use columns::Columns;
+pub(crate) use columns::{arrange, move_beside};
 
 /// Identifies a pane for the lifetime of the window. Never reused, so a stale
 /// reference resolves to nothing rather than to the wrong pane.
@@ -158,6 +159,7 @@ impl Lens {
     /// behind a menu, and a capture run has no pointer. **Not** for the settings file, unlike
     /// [`FlatMode::as_str`]: a lens is a question about the folder in front of you and is not
     /// remembered anywhere.
+    #[cfg(any(test, feature = "devtools"))]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Git => "git",
@@ -165,6 +167,7 @@ impl Lens {
         }
     }
 
+    #[cfg(any(test, feature = "devtools"))]
     pub fn parse(text: &str) -> Option<Self> {
         Self::ALL
             .into_iter()
@@ -1050,13 +1053,6 @@ impl Tab {
         }
         tab
     }
-
-    // ---- Navigation ----------------------------------------------------
-
-    // ---- The listing ---------------------------------------------------
-
-    // ---- Selection -----------------------------------------------------
-
 }
 
 /// A stack of tabs, one of them showing.
@@ -1138,6 +1134,12 @@ impl Pane {
         self.active = index.min(self.tabs.len().saturating_sub(1));
         let tab = self.tab_mut();
         tab.scroll_to = Some(tab.scroll_y);
+    }
+
+    /// Add a tab at the end of the strip and bring it to the front — what every new tab is.
+    pub fn push_tab(&mut self, tab: Tab) {
+        self.tabs.push(tab);
+        self.show_tab(self.tabs.len() - 1);
     }
 
     pub fn tab(&self) -> &Tab {

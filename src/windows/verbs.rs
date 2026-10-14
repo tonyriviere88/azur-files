@@ -19,18 +19,14 @@ pub(super) fn run_ok(
     args: Option<&std::ffi::OsString>,
     dir: Option<&Path>,
 ) -> bool {
-    use std::os::windows::ffi::OsStrExt as _;
+    use crate::shell::nul_terminated;
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
 
-    fn wide(text: &std::ffi::OsStr) -> Vec<u16> {
-        text.encode_wide().chain(std::iter::once(0)).collect()
-    }
-
-    let verb = verb.map(|v| wide(std::ffi::OsStr::new(v)));
-    let file = wide(file);
-    let args = args.map(|a| wide(a));
-    let dir = dir.map(|d| wide(d.as_os_str()));
+    let verb = verb.map(nul_terminated);
+    let file = nul_terminated(file);
+    let args = args.map(nul_terminated);
+    let dir = dir.map(nul_terminated);
 
     let ptr = |v: &Option<Vec<u16>>| v.as_ref().map_or(std::ptr::null(), |v| v.as_ptr());
 

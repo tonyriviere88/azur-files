@@ -83,23 +83,33 @@ mod app;
 /// Reading an archive as though it were a folder.
 mod archive;
 mod brand;
+/// Little-endian integers out of a byte slice.
+mod bytes;
 mod config;
 mod console;
 mod diff;
+/// The developer flags, which a shipped build does not carry.
+#[cfg(any(test, feature = "devtools"))]
+mod devtools;
 mod dock;
 mod fs;
 mod git;
 mod hardlinks;
 mod history;
 mod icons;
+mod inflight;
 mod loader;
 mod markdown;
 mod pane;
 mod pe;
+/// The worker queue behind the loader, the size counter and git.
+mod pool;
 mod preview;
 /// Where a test may touch the disk, and the guard that holds it there.
 #[cfg(test)]
 mod sandbox;
+/// The worker, live-view set and answer channel a per-view background service is built from.
+mod service;
 mod shell;
 mod sizes;
 mod syntax;
@@ -178,178 +188,20 @@ fn main() -> eframe::Result {
     // for good.
     shell::dnd::sweep();
 
-    let mut config = Config::load();
-    let mut shot: Option<Shot> = None;
+    let config = Config::load();
+    // Every other word on the command line is a developer flag, and only a `devtools` build reads
+    // them: see `devtools`.
+    #[cfg(any(test, feature = "devtools"))]
+    let (config, mut devtools) = devtools::Devtools::from_args(config);
     let mut open: Vec<std::path::PathBuf> = Vec::new();
-    let mut reveal: Option<String> = None;
-    let mut filter: Option<String> = None;
-    let mut lens: Option<pane::Lens> = None;
-    let mut menu = false;
-    let mut rename = false;
-    let mut batch: Option<Option<String>> = None;
-    let mut palette: Option<String> = None;
-    let mut path: Option<String> = None;
-    let mut stack = false;
-    let mut tiles = false;
-    let mut diff: Option<Option<crate::diff::Show>> = None;
-    let mut against: Option<std::path::PathBuf> = None;
-    let mut preview = false;
-    let mut find: Option<String> = None;
-    let mut deps: Option<String> = None;
-    let mut compare = false;
-    let mut previews = 0usize;
-    let mut trace = false;
-    let mut walk: Option<std::path::PathBuf> = None;
-    let mut scroll = false;
-    let mut flat = false;
-    let mut sizes = false;
-    let mut console: Option<Vec<String>> = None;
-    let mut copy: Vec<std::path::PathBuf> = Vec::new();
 
     // `--open=<path>`, repeatable: one pane per path, so `--open=A --open=B` comes up
-    // side by side. `--reveal=<name>` selects and scrolls to an entry once the listing
-    // lands, which is what a shell "show this file" integration needs. `--shot=<file>`,
-    // `--size=WxH` and `--menu` are for checking the interface and regenerating its
-    // screenshots rather than capturing them by hand.
+    // side by side. The one flag a shipped build reads, for a shortcut that opens a folder.
     for arg in std::env::args().skip(1) {
         if let Some(path) = arg.strip_prefix("--open=") {
             // Resolved as the path bar resolves one — `%AppData%`, `shell:Downloads`, the Recycle
             // Bin — since a shortcut or a Git Bash prompt hands the text over unexpanded.
             open.push(fs::from_outside(path));
-        } else if let Some(path) = arg.strip_prefix("--shot=") {
-            shot = Some(Shot {
-                path: std::path::PathBuf::from(path),
-                frame: 0,
-            });
-        } else if arg == "--light" {
-            config.palette = crate::theme::Palette::Light;
-        } else if arg == "--dark" {
-            config.palette = crate::theme::Palette::Dark;
-        } else if let Some(name) = arg.strip_prefix("--theme=") {
-            // Every palette by name, which `--light` and `--dark` above are shorthands for. An
-            // unrecognised word leaves the run as it was for the reason `--flat=` does: a capture
-            // flag should not be the thing that refuses to start. `Palette::key` is the spelling.
-            if let Some(palette) = crate::theme::Palette::parse(name) {
-                config.palette = palette;
-            }
-        } else if let Some(name) = arg.strip_prefix("--reveal=") {
-            reveal = Some(name.to_owned());
-        } else if let Some(text) = arg.strip_prefix("--filter=") {
-            filter = Some(text.to_owned());
-        } else if let Some(name) = arg.strip_prefix("--lens=") {
-            // `--lens=git`, `--lens=images`: open showing one of the filter funnel's listings, which
-            // are behind a menu and so out of reach of a run with no pointer. **What the menu entry
-            // sets alongside the lens is set here too** — the flatten either way, and the tiles for
-            // pictures — because those are part of the listing rather than side effects of it; see
-            // `app::Action::SetLens`. An unrecognised word leaves the run as it was, for the reason
-            // `--flat=` does: a capture flag should not be the thing that refuses to start.
-            if let Some(picked) = pane::Lens::parse(name) {
-                lens = Some(picked);
-                flat = true;
-                tiles |= picked.wants_tiles();
-            }
-        } else if arg == "--menu" {
-            menu = true;
-        } else if arg == "--rename" {
-            rename = true;
-        } else if arg == "--batch" {
-            batch = Some(None);
-        } else if let Some(pattern) = arg.strip_prefix("--batch=") {
-            batch = Some(Some(pattern.to_owned()));
-        } else if arg == "--palette" {
-            palette = Some(String::new());
-        } else if let Some(text) = arg.strip_prefix("--palette=") {
-            palette = Some(text.to_owned());
-        } else if let Some(text) = arg.strip_prefix("--path=") {
-            path = Some(text.to_owned());
-        } else if arg == "--tiles" {
-            tiles = true;
-        } else if arg == "--diff" {
-            diff = Some(None);
-        } else if let Some(text) = arg.strip_prefix("--diff=") {
-            diff = Some(crate::diff::Show::parse(text));
-        } else if let Some(text) = arg.strip_prefix("--against=") {
-            // Either slash, as `--open=` takes it, and for the same reason: the shell cannot parse
-            // `D:/x`, and a right half the shell cannot parse has no context menu.
-            against = Some(std::path::PathBuf::from(text.replace('/', "\\")));
-        } else if arg == "--preview" {
-            preview = true;
-        } else if arg == "--compare" {
-            preview = true;
-            compare = true;
-        } else if let Some(text) = arg.strip_prefix("--previews=") {
-            // `--previews=3`: select that many previewable files, so a capture can show the panel
-            // tiled. `--compare` is the two-picture *blend*; this is the general case of the
-            // gesture, and the two are different pictures of the same panel.
-            preview = true;
-            previews = text.parse().unwrap_or(0);
-        } else if let Some(name) = arg.strip_prefix("--deps=") {
-            // `--deps=shell32.dll`: open the panel on a binary and pick that row of its dependency
-            // tree, so a capture shows the two symbol panels rather than the tree on its own. The
-            // panel itself comes with it, the same way `--find=` brings it.
-            preview = true;
-            deps = Some(name.to_owned());
-        } else if let Some(text) = arg.strip_prefix("--find=") {
-            preview = true;
-            find = Some(text.to_owned());
-        } else if let Some(path) = arg.strip_prefix("--copy=") {
-            // `--copy=<path>`, repeatable: copy each into the first pane's folder with the fast
-            // engine, one job apiece, so a capture can show the transfer panel — and several of
-            // them stacked. Either slash, as `--open=` takes it.
-            copy.push(fs::from_outside(path));
-        } else if arg == "--stack" {
-            stack = true;
-        } else if arg == "--trace" {
-            trace = true;
-        } else if arg == "--scroll" {
-            scroll = true;
-        } else if arg == "--console" {
-            console = Some(Vec::new());
-        } else if let Some(commands) = arg.strip_prefix("--console=") {
-            // `--console=pwd;git status`: open the panel and run these, which is the only way a
-            // capture can show a log with anything in it. Semicolons, because a comma is a
-            // character shells use and this list is not one a person types twice.
-            console = Some(
-                commands
-                    .split(';')
-                    .map(str::trim)
-                    .filter(|command| !command.is_empty())
-                    .map(str::to_owned)
-                    .collect(),
-            );
-        } else if arg == "--sizes" {
-            // `--sizes`: count every folder on show and bar each row's share of the total, which is
-            // behind the measure button on the status line and behind nothing else — there is no config
-            // key for it, since it is a question about the folder in front of you. See
-            // `App::measuring`, and `App::sizes_pending` for why a capture then has to wait.
-            sizes = true;
-        } else if arg == "--flat" {
-            flat = true;
-        } else if let Some(mode) = arg.strip_prefix("--flat=") {
-            // `--flat=tree`, `--flat=list`: the flatten mode this run uses, whatever the settings
-            // say. The mode is a saved preference — see `pane::FlatMode` — so without this the only
-            // way to photograph the other one is to change the settings first and remember to
-            // change them back. An unrecognised word is still a flatten, in whichever mode was
-            // saved: a capture flag should not be the thing that refuses to start.
-            flat = true;
-            if let Some(mode) = pane::FlatMode::parse(mode) {
-                config.flat_mode = mode;
-            }
-        } else if let Some(dir) = arg.strip_prefix("--walk=") {
-            walk = Some(fs::normalize(std::path::Path::new(dir)));
-        } else if let Some(size) = arg.strip_prefix("--size=") {
-            if let Some((w, h)) = size.split_once('x') {
-                if let (Ok(w), Ok(h)) = (w.parse(), h.parse()) {
-                    config.window = Some([w, h]);
-                    config.maximized = false;
-                    // A capture is a window of a stated size and nothing else about the last
-                    // session: where it was left is not part of what is being photographed,
-                    // and a screenshot run that moves the window about is a nuisance.
-                    config.position = None;
-                    // Nor how far it was zoomed: a stated size is a statement about the picture.
-                    config.zoom = 1.0;
-                }
-            }
         }
     }
 
@@ -429,41 +281,18 @@ fn main() -> eframe::Result {
                 open_maximized(cc, placed);
             }
             Ok(Box::new(Window {
-                app: App::opening(
-                    &cc.egui_ctx,
-                    config,
-                    open,
-                    if stack {
-                        pane::Side::Bottom
-                    } else {
-                        pane::Side::Right
-                    },
-                )
-                .revealing(reveal)
-                .filtering(filter)
-                .with_lens(lens)
-                .tracing(trace)
-                .walking(walk)
-                .scrolling(scroll)
-                .flattened(flat)
-                .measuring(sizes),
-                shot,
-                menu,
-                rename,
-                batch,
-                palette,
-                path,
-                tiles,
-                diff,
-                against,
-                preview,
-                console,
-                copy,
-                find,
-                deps,
-                compare,
-                previews,
-                waited: 0,
+                app: {
+                    #[cfg(any(test, feature = "devtools"))]
+                    let side = devtools.side();
+                    #[cfg(not(any(test, feature = "devtools")))]
+                    let side = pane::Side::Right;
+                    let app = App::opening(&cc.egui_ctx, config, open, side);
+                    #[cfg(any(test, feature = "devtools"))]
+                    let app = devtools.configure(app);
+                    app
+                },
+                #[cfg(any(test, feature = "devtools"))]
+                devtools,
                 frames: 0,
                 owned: false,
                 cloaked: true,
@@ -583,81 +412,16 @@ fn gpu_trouble(what: String) {
     }
 }
 
-/// A pending `--shot=` capture: where to write it, and how many frames have gone
-/// past. Fonts, the first directory scan and the scroll area all settle over the
-/// first few, so the capture waits for them.
-struct Shot {
-    path: std::path::PathBuf,
-    frame: u32,
-}
-
 /// The eframe shell around [`App`].
 struct Window {
     app: App,
-    shot: Option<Shot>,
-    /// `--menu`: raise the folder's context menu, so a capture can show one.
-    menu: bool,
-    /// `--rename`: open the selected row's name for editing. The one part of this interface a
-    /// screenshot cannot otherwise reach, since it needs a keystroke on a focused row — and
-    /// where the caret lands is the whole thing worth looking at.
-    rename: bool,
-    /// `--batch[=pattern]`: select the first pane's files and open the batch rename panel over them,
-    /// in Pattern mode with that pattern when one is given. Behind a selection and F2, which a
-    /// capture run has no keyboard for — the same reason `--rename` exists.
-    batch: Option<Option<String>>,
-    /// `--palette[=text]`: put the command palette up, with that typed into it. Behind a chord, which
-    /// a capture run has no keyboard for.
-    palette: Option<String>,
-    /// `--path=<text>`: open the path field with that text half-typed in it, so a capture can show
-    /// the completion dropdown. Behind `Ctrl+L` and then a keystroke, which a capture run has no
-    /// keyboard for — the same reason `--rename` exists.
-    path: Option<String>,
-    /// `--tiles`: show the listing as large icons rather than as rows.
+    /// The developer flags this run was given; see `devtools`.
+    #[cfg(any(test, feature = "devtools"))]
+    devtools: devtools::Devtools,
+    /// Frames drawn: the cloak comes off after two, and the developer flags wait on it for the
+    /// window to settle.
     ///
-    /// Behind a click on the switch at the left of the status line, and behind nothing else at all —
-    /// the view is deliberately not a setting, so unlike `--flat` there is no config key a capture run
-    /// could reach it through. See `App::show_tiles_here`.
-    tiles: bool,
-    /// `--diff[=all|changes|names]`: open a folder diff of the first pane's folder against the
-    /// second's, as `Folder diff...` in the application menu would — showing the rows the word says,
-    /// or without one the rows the settings say. See [`crate::diff`].
-    diff: Option<Option<crate::diff::Show>>,
-    /// `--against=<path>`: the right half of `--diff`, rather than the next pane's folder — so a
-    /// capture of a diff can be one pane wide.
-    against: Option<std::path::PathBuf>,
-    /// `--preview`: put the keyboard on the first previewable file in the listing and open the
-    /// preview panel on it, for the same reason — it is behind `Ctrl+P` and a focused row.
-    preview: bool,
-    /// `--console[=<commands>]`: open the console panel, and run these in it.
-    ///
-    /// The panel is behind `Ctrl+²` and its log is behind a shell having answered, so a capture run
-    /// is the only way to look at the thing at all. It waits for the commands to finish — see
-    /// `App::console_busy` — because a screenshot of a log that has not printed yet says nothing
-    /// about the log.
-    console: Option<Vec<String>>,
-    /// `--copy=<path>`, repeatable: copy each into the first pane's folder with the fast engine, one
-    /// job apiece, so a capture can show the transfer panel — which is only up while a copy is. See
-    /// `App::copy_here`.
-    copy: Vec<std::path::PathBuf>,
-    /// `--find=<text>`: and then open the find bar on that text, for a capture of the text viewer
-    /// with something found in it.
-    find: Option<String>,
-    /// `--deps=<module>`: and then pick that row of a binary's dependency tree, for a capture of the
-    /// two symbol panels — which are behind a click on a row.
-    ///
-    /// Applied later than the rest and not at a frame number: the walk arrives on a worker thread, so
-    /// a pick made before the graph is here has no row to land on. See where it is driven.
-    deps: Option<String>,
-    /// `--compare`: select the first *two* pictures instead, so a capture can show the comparison.
-    compare: bool,
-    /// `--previews=<n>`: select that many previewable files, so a capture can show the panel tiled.
-    /// Zero is "leave the selection alone", which is what every run without the flag is.
-    previews: usize,
-    /// Frames a `--menu` capture has spent waiting for the shell's half of that menu.
-    waited: u32,
-    /// Frames drawn, for the developer flags that have to wait for the window to settle.
-    ///
-    /// Its own counter rather than `Shot::frame`, which only advances when there is a capture
+    /// Its own counter rather than the capture's, which only advances when there is a capture
     /// pending — so a flag gated on that one silently does nothing without `--shot`. Which is how
     /// `--console` came to open no console at all when it was driven by hand.
     frames: u32,
@@ -704,144 +468,12 @@ impl eframe::App for Window {
         if let Some(what) = GPU_TROUBLE.lock().ok().and_then(|mut slot| slot.take()) {
             self.app.report(what);
         }
-        // Before the frame, and only once: the listing has landed by now, and the menu
-        // then has the four frames before `SETTLE` to lay itself out.
-        if self.menu && self.shot.as_ref().is_some_and(|s| s.frame == 8) {
-            self.menu = false;
-            self.app.open_folder_menu(ui.ctx());
-        }
-        // Once the listing has landed and not before: a scan arriving afterwards resets the
-        // cursor and takes the rename with it, which is what happened to the first version of
-        // this and produced a screenshot of an ordinary listing.
-        if self.rename && self.shot.as_ref().is_some_and(|s| s.frame >= 8) && self.app.has_rows() {
-            self.rename = false;
-            self.app.begin_rename_here();
-        }
-        // The same moment, for the same reason: a scan landing afterwards would take the selection.
-        if self.batch.is_some() && self.shot.as_ref().is_some_and(|s| s.frame >= 8) && self.app.has_rows() {
-            let pattern = self.batch.take().flatten();
-            self.app.begin_batch_here(pattern);
-        }
-        // Once the listing is in, since what the palette lists depends on it.
-        if self.palette.is_some() && self.shot.as_ref().is_some_and(|s| s.frame >= 8) && self.app.has_rows() {
-            let text = self.palette.take().unwrap_or_default();
-            self.app.open_palette_with(&text);
-        }
-        // The same window, for the same reason: the panel follows the keyboard, and a scan
-        // landing afterwards would move the keyboard off the row that was chosen for it.
-        // Before the preview flag and before the frame, so the tiles are what the pane draws from its
-        // very first pass rather than a listing that turns into a grid three frames in.
-        if self.tiles {
-            self.tiles = false;
-            self.app.show_tiles_here();
-        }
-        if let Some(show) = self.diff.take() {
-            self.app.folder_diff_here(show, self.against.take());
-        }
-        if self.preview && self.shot.as_ref().is_some_and(|s| s.frame >= 8) && self.app.has_rows() {
-            self.preview = false;
-            if self.compare {
-                self.app.compare_here();
-            }
-            if self.previews > 1 {
-                self.app.preview_here(self.previews);
-            }
-            self.app.open_preview_here();
-            if let Some(text) = self.find.take() {
-                self.app.find_here(&text);
-            }
-        }
         self.frames += 1;
-        // **Early**, and this is the one capture flag where that matters: a popup fades in over
-        // `animation_time`, and a dropdown photographed three frames after it opened comes out
-        // half transparent with the listing showing through it. `SETTLE` is twelve frames, so this
-        // goes as soon as there is a listing — the folder the field completes against is the one
-        // the pane is showing, and `has_rows` is how we know the loader has it.
-        //
-        // Off `self.frames` rather than off `Shot::frame`, so it works when a capture is not what
-        // this run is for: a flag that silently does nothing without `--shot` is how `--console`
-        // came to open no console at all.
-        if self.frames >= 4 && self.app.has_rows() {
-            if let Some(text) = self.path.take() {
-                self.app.type_path_here(&text);
-            }
-        }
-        // Once the listing has landed, so the shell starts in the folder that was asked for rather
-        // than in whatever the pane was showing before its scan came back.
-        if self.console.is_some() && self.frames >= 8 && self.app.has_rows() {
-            let commands = self.console.take().unwrap_or_default();
-            self.app.open_console_here(&commands);
-        }
-        // Once the listing has landed, for the same reason: the copy goes into the folder the pane
-        // is showing, and that is only known once the scan is back.
-        if !self.copy.is_empty() && self.frames >= 8 && self.app.has_rows() {
-            let ctx = ui.ctx().clone();
-            for from in std::mem::take(&mut self.copy) {
-                self.app.copy_here(from, &ctx);
-            }
-        }
-        // **Once the walk has landed**, which is not a frame number: the graph is read on a worker
-        // thread, so a pick made before it is here finds no row. Tried every frame until it takes, and
-        // *not* consumed on the first attempt — opening the panel does not itself start the read, so at
-        // the frame the panel opens there is no content and nothing pending either, and a flag consumed
-        // there photographed the tree on its own.
-        //
-        // Off `self.frames` and `preview_pending`, like `--console` and `--path` above and for the
-        // reason the paragraph over them gives: it read `!self.preview` — another flag's
-        // *consumed*-ness — which is only cleared under `Shot::frame`, so it was the kind of flag that
-        // silently does nothing without `--shot`. The wait below is what gives it its frames.
-        if self.frames >= 8
-            && !self.app.preview_pending()
-            && self
-                .deps
-                .as_deref()
-                .is_some_and(|name| self.app.pick_dependency(name))
-        {
-            self.deps = None;
-        }
+        #[cfg(any(test, feature = "devtools"))]
+        self.devtools.before_frame(&mut self.app, ui, self.frames);
         self.app.frame(ui);
-        // A menu waiting on the shell is a menu with `Loading...` in it, and the four frames
-        // before `SETTLE` are nowhere near long enough for `QueryContextMenu` — so the
-        // capture waits, or it would photograph the placeholder. Bounded, because the thing
-        // being waited for is other people's code: ten seconds of not answering is an
-        // answer, and a screenshot of the placeholder beats a run that never ends.
-        const PATIENCE: u32 = 600;
-        if (self.app.menu_pending()
-            || self.app.preview_pending()
-            || self.app.console_busy()
-            || self.app.git_pending()
-            || self.app.sizes_pending()
-            || self.app.thumbs_pending()
-            || self.app.cloud_pending()
-            || self.app.hard_links_pending()
-            || self.app.diff_pending()
-            // The copy, until its panel is on screen to be photographed.
-            || !self.copy.is_empty()
-            || self.app.copy_pending()
-            // The pick above, once it has had the frames to be attempted in. Waiting on it any earlier
-            // would be waiting on the capture counter that opens the panel, and that counter only
-            // advances when a capture is attempted — a deadlock that complained below about a name
-            // which was there all along.
-            || (self.frames >= 8 && self.deps.is_some()))
-            && self.waited < PATIENCE
-        {
-            self.waited += 1;
-            ui.ctx().request_repaint();
-        } else {
-            // Still set once everything has settled: nothing on show is called that. Which is worth
-            // saying rather than handing back a screenshot that quietly shows the tree on its own —
-            // and the likelier of the two reasons is the second half of it, since the panel only
-            // opens for a capture run at all.
-            if self.frames >= 8 {
-                if let Some(name) = self.deps.take() {
-                    eprintln!(
-                        "--deps: nothing called `{name}` is on show in the dependency tree \
-                         (is the preview open on a binary?)"
-                    );
-                }
-            }
-            self.capture(&ui.ctx().clone());
-        }
+        #[cfg(any(test, feature = "devtools"))]
+        self.devtools.after_frame(&mut self.app, ui, self.frames);
     }
 
     /// Called before each pass, with the input as the platform handed it over.
@@ -865,7 +497,11 @@ impl eframe::App for Window {
         // And skipped when this window has not changed any of them, which is what
         // `App::save_settings` decides: an unconditional save here is how a window left open all
         // day overwrote a bookmark added in another one.
-        if self.shot.is_none() {
+        #[cfg(any(test, feature = "devtools"))]
+        let capturing = self.devtools.capturing();
+        #[cfg(not(any(test, feature = "devtools")))]
+        let capturing = false;
+        if !capturing {
             self.app.save_settings();
             self.app.save_visits();
         }
@@ -878,59 +514,6 @@ impl eframe::App for Window {
         // why this cannot remove another window's files and why a file still open in the application
         // that opened it is simply left for `%TEMP%` to deal with.
         archive::extract::cleanup();
-    }
-}
-
-impl Window {
-    /// Ask egui for the frame once things have settled, write it out, and quit.
-    ///
-    /// A PNG, so the file in `docs/` is the file this wrote. It used to be raw RGBA with the
-    /// dimensions in the name, on the grounds that a PNG encoder was too much to carry for a
-    /// developer-only flag — and then every screenshot needed converting by hand. The
-    /// encoder arrived anyway, for the application icon.
-    fn capture(&mut self, ctx: &egui::Context) {
-        const SETTLE: u32 = 12;
-        let Some(shot) = &mut self.shot else { return };
-
-        shot.frame += 1;
-        ctx.request_repaint();
-        if shot.frame < SETTLE {
-            return;
-        }
-        if shot.frame == SETTLE {
-            ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
-            return;
-        }
-
-        let image = ctx.input(|i| {
-            i.events.iter().find_map(|e| match e {
-                egui::Event::Screenshot { image, .. } => Some(image.clone()),
-                _ => None,
-            })
-        });
-        let Some(image) = image else { return };
-
-        let [w, h] = image.size;
-        let bytes: Vec<u8> = image
-            .pixels
-            .iter()
-            .flat_map(|p| p.to_srgba_unmultiplied())
-            .collect();
-        let path = shot.path.with_extension("png");
-        match image::save_buffer(
-            &path,
-            &bytes,
-            w as u32,
-            h as u32,
-            image::ExtendedColorType::Rgba8,
-        ) {
-            Ok(()) => println!("wrote {} ({w}x{h})", path.display()),
-            Err(e) => eprintln!("could not write {}: {e}", path.display()),
-        }
-        // A `--copy` still running holds the window open and asks; a capture run's own copy is
-        // nobody's to keep, so it is stopped first and the window closes once it has.
-        self.app.cancel_copies();
-        ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 }
 

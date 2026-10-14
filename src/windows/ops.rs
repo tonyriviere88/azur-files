@@ -25,18 +25,12 @@ use crate::shell::ops::{Outcome, Ran, Recycled};
 /// Do the work. Runs on its own thread, with its own apartment.
 #[cfg(windows)]
 pub(crate) fn run(job: &Job, owner: Owner) -> Ran {
-    use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
-
-    // SAFETY: this thread exists for this call, initialises its own apartment, and
-    // uninitialises it before returning. Nothing else here touches COM.
+    // SAFETY: this thread exists for this call, joins its own apartment, and leaves it before
+    // returning. Nothing else here touches COM.
     unsafe {
-        if CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_err() {
-            return Ran {
-                error: Some("Could not talk to the shell".to_owned()),
-                outcome: Outcome::default(),
-                aborted: false,
-            };
-        }
+        let Some(apartment) = crate::shell::Apartment::enter_sta() else {
+            return Ran::refused("Could not talk to the shell".to_owned());
+        };
         let mut aborted = false;
         let recorded = Recorder::default();
         // Two jobs are not `IFileOperation` at all, and each says so where it is implemented:
@@ -68,7 +62,8 @@ pub(crate) fn run(job: &Job, owner: Owner) -> Ran {
             }
             _ => perform(job, owner, &recorded, &mut aborted),
         };
-        CoUninitialize();
+        // Left here, before the outcome is read, and not at the end of the scope.
+        drop(apartment);
         Ran {
             error,
             outcome: recorded.take(),
@@ -364,21 +359,12 @@ pub(crate) fn landed(
 #[cfg(windows)]
 fn path_of(item: Option<&windows::Win32::UI::Shell::IShellItem>) -> Option<PathBuf> {
     let item = item?;
-    // SAFETY: an item the shell has just handed over, and the string it returns is
-    // freed here — `GetDisplayName` allocates with the task allocator.
+    // SAFETY: an item the shell has just handed over. `display_name` frees the string, and
+    // checks it for null first — not seen from this call, but the alternative, measured in
+    // `landed`, is `wcslen` walking address zero and taking the process with it.
     unsafe {
-        let wide = item
-            .GetDisplayName(windows::Win32::UI::Shell::SIGDN_FILESYSPATH)
-            .ok()?;
-        // An `S_OK` with nothing at the pointer, which `shell::clipboard` guards the same way.
-        // Not seen from this call; the reason it is checked anyway is that the alternative,
-        // measured in `landed`, is `wcslen` walking address zero and taking the process with it.
-        if wide.is_null() {
-            return None;
-        }
-        let text = wide.to_string().ok();
-        windows::Win32::System::Com::CoTaskMemFree(Some(wide.0 as *const std::ffi::c_void));
-        text.map(PathBuf::from)
+        crate::shell::display_name(item, windows::Win32::UI::Shell::SIGDN_FILESYSPATH)
+            .map(PathBuf::from)
     }
 }
 
@@ -620,14 +606,13 @@ unsafe fn queue(
     queued
 }
 
-/// A path as an `IShellItem`.
+/// A path as an `IShellItem`: [`crate::shell::parse_item`], at the one interface every call here
+/// wants, so the callers need not name it.
 #[cfg(windows)]
 pub(crate) unsafe fn item(
     path: &Path,
 ) -> windows::core::Result<windows::Win32::UI::Shell::IShellItem> {
-    use windows::Win32::UI::Shell::SHCreateItemFromParsingName;
-    let wide = crate::shell::wide(path);
-    SHCreateItemFromParsingName(windows::core::PCWSTR(wide.as_ptr()), None)
+    crate::shell::parse_item(path)
 }
 
 /// Turn an `HRESULT` into something worth showing, or `None` when it is not worth

@@ -58,22 +58,18 @@ pub(super) fn known_folders() -> Vec<(Option<PathBuf>, &'static str, PlaceIcon)>
 /// a path starting `shell:` names nothing, so it is then reported as not found.
 #[cfg(windows)]
 pub fn shell_place(name: &str) -> Option<ShellPlace> {
-    use windows::core::PCWSTR;
-    use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
     use windows::Win32::UI::Shell::{
-        IShellItem, SHCreateItemFromParsingName, SHGetKnownFolderItem, FOLDERID_ComputerFolder,
-        FOLDERID_RecycleBinFolder, KF_FLAG_DEFAULT, SICHINT_CANONICAL, SIGDN_FILESYSPATH,
+        IShellItem, SHGetKnownFolderItem, FOLDERID_ComputerFolder, FOLDERID_RecycleBinFolder,
+        KF_FLAG_DEFAULT, SICHINT_CANONICAL, SIGDN_FILESYSPATH,
     };
 
-    let wide = crate::shell::wide(std::path::Path::new(name));
-    // SAFETY: `wide` is null-terminated and outlives every call that reads it; the display name is
-    // read through `name_of`, which frees it. The apartment is joined for the length of this call
-    // and left again — `S_FALSE` on a thread already in one, which is the UI thread's case, still
-    // counts and is still balanced.
+    // SAFETY: the display name is read through `name_of`, which frees it. The apartment is joined
+    // for the length of this call and left again — `S_FALSE` on a thread already in one, which is
+    // the UI thread's case, still counts and is still balanced.
     unsafe {
-        let joined = CoInitializeEx(None, COINIT_APARTMENTTHREADED).is_ok();
+        let apartment = crate::shell::Apartment::enter_sta();
         let answer = (|| {
-            let item: IShellItem = SHCreateItemFromParsingName(PCWSTR(wide.as_ptr()), None).ok()?;
+            let item: IShellItem = crate::shell::parse_item(std::path::Path::new(name)).ok()?;
             let is = |folder: &windows::core::GUID| {
                 SHGetKnownFolderItem::<IShellItem>(folder, KF_FLAG_DEFAULT, None)
                     .ok()
@@ -93,9 +89,7 @@ pub fn shell_place(name: &str) -> Option<ShellPlace> {
                 },
             )
         })();
-        if joined {
-            CoUninitialize();
-        }
+        drop(apartment);
         answer
     }
 }
@@ -114,14 +108,9 @@ pub(super) fn known_folder(id: &windows_sys::core::GUID) -> Option<PathBuf> {
         return None;
     }
 
-    let mut len = 0;
+    let text = windows::core::PCWSTR(raw.cast_const());
     // SAFETY: the shell returns a null-terminated string it owns until we free it.
-    unsafe {
-        while *raw.add(len) != 0 {
-            len += 1;
-        }
-    }
-    let wide = unsafe { std::slice::from_raw_parts(raw, len) };
+    let wide = unsafe { text.as_wide() };
     let path = PathBuf::from(std::ffi::OsString::from_wide(wide));
     unsafe { CoTaskMemFree(raw.cast()) };
 

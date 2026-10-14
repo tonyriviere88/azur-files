@@ -68,6 +68,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
 
+use crate::history::now;
+
 mod json;
 
 #[cfg(windows)]
@@ -115,7 +117,7 @@ impl Every {
     }
 
     pub fn parse(text: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|every| every.as_str() == text)
+        Self::ALL.into_iter().find(|every| every.as_str().eq_ignore_ascii_case(text))
     }
 
     /// How long an answer stands. `None` is never asking.
@@ -329,12 +331,6 @@ impl Cache {
     }
 }
 
-fn now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |since| since.as_secs())
-}
-
 // ---------------------------------------------------------------------------
 // The updater
 // ---------------------------------------------------------------------------
@@ -399,10 +395,15 @@ impl Updater {
                 tidy(&exe);
             }
         }
+        // `YAFE_UPDATE_AS` pretends to be an older build, so the updater can be watched finding a
+        // release. A `devtools` build's hook, and not a shipped one's.
+        #[cfg(any(test, feature = "devtools"))]
         let current = std::env::var("YAFE_UPDATE_AS")
             .ok()
             .filter(|version| numbers(version).is_some())
             .unwrap_or_else(|| CURRENT.to_owned());
+        #[cfg(not(any(test, feature = "devtools")))]
+        let current = CURRENT.to_owned();
         let (tx, rx) = channel();
         Self {
             ctx: ctx.clone(),

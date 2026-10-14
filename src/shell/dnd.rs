@@ -1166,16 +1166,14 @@ pub(crate) fn is_staging(dir: &std::path::Path) -> bool {
     if dir.parent() != Some(temp_root().as_path()) {
         return false;
     }
-    let Some(name) = dir.file_name().and_then(|name| name.to_str()) else {
-        return false;
-    };
-    let Some(rest) = name.strip_prefix(STAGING) else {
-        return false;
-    };
-    let Some((pid, _)) = rest.split_once('-') else {
-        return false;
-    };
-    pid.parse::<u32>().is_ok_and(|pid| pid == std::process::id())
+    staging_pid(dir) == Some(std::process::id())
+}
+
+/// The process a staging directory was made by, read off its name — `None` for anything not named
+/// like one. Only the name: where it is, which [`is_staging`] also asks, is the caller's business.
+fn staging_pid(dir: &std::path::Path) -> Option<u32> {
+    let rest = dir.file_name()?.to_str()?.strip_prefix(STAGING)?;
+    rest.split_once('-')?.0.parse().ok()
 }
 
 /// Remove staging directories left behind by a run that is over.
@@ -1191,14 +1189,7 @@ pub fn sweep() {
         return;
     };
     for path in entries.flatten().map(|entry| entry.path()) {
-        let Some(rest) = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .and_then(|name| name.strip_prefix(STAGING))
-        else {
-            continue;
-        };
-        let Some(pid) = rest.split_once('-').and_then(|(pid, _)| pid.parse::<u32>().ok()) else {
+        let Some(pid) = staging_pid(&path) else {
             continue;
         };
         if pid == std::process::id() || running(pid) {

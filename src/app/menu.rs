@@ -21,7 +21,7 @@ impl App {
         at: (i32, i32),
         ctx: &egui::Context,
     ) {
-        let Some(p) = self.panes.iter().find(|p| p.id == pane) else {
+        let Some(p) = self.pane_ref(pane) else {
             return;
         };
         let folder = p.tab().path.clone();
@@ -51,17 +51,8 @@ impl App {
         // of the disk: the selection is rows of it, and each row already says whether it is a folder.
         // Not in the bin, whose folders are held as `$R…` and would be compared under those names.
         let diffable = items.len() == 2 && !fs::is_synthetic(&folder) && {
-            let tab = p.tab();
-            tab.dir.as_ref().is_some_and(|dir| {
-                let folders: Vec<PathBuf> = tab
-                    .selected
-                    .iter()
-                    .enumerate()
-                    .filter(|&(entry, &on)| on && dir.entries.get(entry).is_some_and(|e| e.is_dir()))
-                    .map(|(entry, _)| dir.target(entry))
-                    .collect();
-                folders.len() == 2 && items.iter().all(|item| folders.contains(item))
-            })
+            let folders = p.tab().selected_folders();
+            folders.len() == 2 && items.iter().all(|item| folders.contains(item))
         };
         self.ask_menu(pane, folder, items, at, diffable, ctx);
     }
@@ -298,6 +289,7 @@ impl App {
     /// Whether a menu has been asked for and has not appeared yet.
     ///
     /// For `--shot --menu`, which would otherwise photograph the window without one.
+    #[cfg(any(test, feature = "devtools"))]
     pub fn menu_pending(&self) -> bool {
         self.asking.is_some()
     }
@@ -360,6 +352,7 @@ impl App {
     /// `--reveal=<name> --menu` photographs the banded menu with its tile row, and `--menu` alone
     /// photographs the background one. Before this it was always the second, and the tile row could
     /// not be captured at all.
+    #[cfg(any(test, feature = "devtools"))]
     pub fn open_folder_menu(&mut self, ctx: &egui::Context) {
         if let Some(action) = self.folder_menu_action(ctx) {
             self.actions.push(action);
@@ -369,14 +362,13 @@ impl App {
     /// The action [`App::open_folder_menu`] pushes: the focused pane's menu, over its listing. Also
     /// the command palette's `Show context menu`, which has no pointer to put it at either.
     pub(super) fn folder_menu_action(&self, ctx: &egui::Context) -> Option<Action> {
-        let pane = self.panes.iter().find(|p| p.id == self.focused)?;
+        let pane = self.focused_pane()?;
         let rect = pane.rect;
-        let scale = ctx.pixels_per_point();
         let at = rect.min + egui::vec2(rect.width() * 0.22, rect.height() * 0.30);
         Some(Action::ShellMenu {
             pane: pane.id,
             items: pane.tab().selection_paths(),
-            at: ((at.x * scale) as i32, (at.y * scale) as i32),
+            at: crate::ui::physical(ctx, at),
         })
     }
 
@@ -640,11 +632,7 @@ impl App {
         };
         // A selection is what is selected; an empty one is the folder the menu was raised in,
         // which is the background menu's answer to "pin what?".
-        let mut targets: Vec<PathBuf> = if menu.items.is_empty() {
-            vec![menu.folder.clone()]
-        } else {
-            menu.items.clone()
-        };
+        let mut targets = menu.items_or_folder();
         // Only folders. The shell offers this on nothing else, but the selection is this
         // program's and a rule that depends on the shell having filtered it is not a rule.
         targets.retain(|path| path.is_dir());
@@ -766,11 +754,7 @@ impl App {
             // background menu asking "the path of what?" is asking about the folder you are in.
             // Which slash they are written with is [`Action::CopyPaths`]', so the entry and the
             // shortcut cannot disagree about it.
-            Own::CopyPaths => Action::CopyPaths(if menu.items.is_empty() {
-                vec![menu.folder.clone()]
-            } else {
-                menu.items.clone()
-            }),
+            Own::CopyPaths => Action::CopyPaths(menu.items_or_folder()),
         })
     }
 }

@@ -12,7 +12,6 @@ use super::*;
 /// things, which is exactly the case a row showing only the target cannot tell apart.
 #[cfg(windows)]
 pub(super) fn read_shortcut(path: &Path) -> Option<Shortcut> {
-    use std::os::windows::ffi::OsStrExt;
     use windows::core::{Interface, PCWSTR};
     use windows::Win32::Storage::FileSystem::{
         WIN32_FIND_DATAW, FILE_ATTRIBUTE_DIRECTORY,
@@ -22,7 +21,7 @@ pub(super) fn read_shortcut(path: &Path) -> Option<Shortcut> {
     };
     use windows::Win32::UI::Shell::{IShellLinkW, ShellLink, SLGP_RAWPATH};
 
-    let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    let wide = crate::shell::nul_terminated(path);
     // A target longer than `MAX_PATH` is what `SLGP_RAWPATH` can hand back — it is the string
     // the file holds, not a path the API has parsed — so the buffer is not `MAX_PATH`.
     let mut buffer = [0u16; 1024];
@@ -79,7 +78,7 @@ pub(super) fn write_shortcut(at: &Path, target: &Path, arguments: &str) -> bool 
 
     let at = crate::shell::wide(at);
     let target = crate::shell::wide(target);
-    let arguments: Vec<u16> = arguments.encode_utf16().chain(Some(0)).collect();
+    let arguments = crate::shell::nul_terminated(arguments);
     // SAFETY: every string is a NUL-terminated local that outlives the calls, and each result is
     // checked before the next call depends on it.
     unsafe {
@@ -114,44 +113,19 @@ pub(super) fn may_symlink() -> bool {
 
 #[cfg(windows)]
 fn holds_symlink_privilege() -> bool {
-    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, LUID};
-    use windows_sys::Win32::Security::{
-        GetTokenInformation, LookupPrivilegeValueW, TokenPrivileges,
-        TOKEN_PRIVILEGES, TOKEN_QUERY,
-    };
-    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+    use windows_sys::Win32::Foundation::LUID;
+    use windows_sys::Win32::Security::{LookupPrivilegeValueW, TokenPrivileges, TOKEN_PRIVILEGES};
 
-    let name: Vec<u16> = "SeCreateSymbolicLinkPrivilege".encode_utf16().chain(Some(0)).collect();
+    let name = windows_sys::w!("SeCreateSymbolicLinkPrivilege");
     let mut wanted = LUID { LowPart: 0, HighPart: 0 };
-    // SAFETY: a NUL-terminated name and a local to write the LUID into.
-    if unsafe { LookupPrivilegeValueW(std::ptr::null(), name.as_ptr(), &mut wanted) } == 0 {
+    // SAFETY: a static NUL-terminated name and a local to write the LUID into.
+    if unsafe { LookupPrivilegeValueW(std::ptr::null(), name, &mut wanted) } == 0 {
         return false;
     }
-    let mut token: HANDLE = std::ptr::null_mut();
-    // SAFETY: the pseudo-handle needs no closing; the token does, below.
-    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) } == 0 {
-        return false;
-    }
-    let mut needed = 0u32;
-    // SAFETY: asking for the size first, with no buffer.
-    unsafe { GetTokenInformation(token, TokenPrivileges, std::ptr::null_mut(), 0, &mut needed) };
     // `u64`s, so the buffer is aligned for the `LUID_AND_ATTRIBUTES` inside it.
-    let mut buffer = vec![0u64; (needed as usize).div_ceil(8).max(1)];
-    // SAFETY: the buffer is at least `needed` bytes.
-    let ok = unsafe {
-        GetTokenInformation(
-            token,
-            TokenPrivileges,
-            buffer.as_mut_ptr().cast(),
-            (buffer.len() * 8) as u32,
-            &mut needed,
-        )
-    } != 0;
-    // SAFETY: opened above, closed once.
-    unsafe { CloseHandle(token) };
-    if !ok {
+    let Some(buffer) = crate::shell::token_information(TokenPrivileges) else {
         return false;
-    }
+    };
     // SAFETY: the call filled the buffer with a `TOKEN_PRIVILEGES` and its trailing array, whose
     // length is the count it starts with.
     let privileges = unsafe {
@@ -169,28 +143,13 @@ fn holds_symlink_privilege() -> bool {
 
 #[cfg(windows)]
 fn developer_mode() -> bool {
-    use windows_sys::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_DWORD};
-    let key: Vec<u16> = r"SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock"
-        .encode_utf16()
-        .chain(Some(0))
-        .collect();
-    let value: Vec<u16> =
-        "AllowDevelopmentWithoutDevLicense".encode_utf16().chain(Some(0)).collect();
-    let mut data = 0u32;
-    let mut size = 4u32;
-    // SAFETY: NUL-terminated names, and a DWORD-sized local for a DWORD value.
-    let status = unsafe {
-        RegGetValueW(
-            HKEY_LOCAL_MACHINE,
-            key.as_ptr(),
-            value.as_ptr(),
-            RRF_RT_REG_DWORD,
-            std::ptr::null_mut(),
-            (&mut data as *mut u32).cast(),
-            &mut size,
-        )
-    };
-    status == 0 && data != 0
+    use windows_sys::Win32::System::Registry::HKEY_LOCAL_MACHINE;
+    crate::shell::registry::dword(
+        HKEY_LOCAL_MACHINE,
+        r"SOFTWARE\Microsoft\Windows\CurrentVersion\AppModelUnlock",
+        "AllowDevelopmentWithoutDevLicense",
+    )
+    .is_some_and(|data| data != 0)
 }
 
 /// The file system's name for the volume at `root` — `NTFS`, `ReFS`, `FAT32` — or `None`.
@@ -228,18 +187,18 @@ pub(super) fn file_system(root: &Path) -> Option<String> {
 /// link should be is worse than nothing.
 #[cfg(windows)]
 pub(super) fn junction(at: &Path, target: &Path) -> Result<(), String> {
+    use crate::shell::FSCTL_SET_REPARSE_POINT;
     use std::ffi::c_void;
-    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, INVALID_HANDLE_VALUE};
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::Foundation::{GetLastError, GENERIC_WRITE, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
         CreateDirectoryW, CreateFileW, RemoveDirectoryW, FILE_FLAG_BACKUP_SEMANTICS,
         FILE_FLAG_OPEN_REPARSE_POINT, OPEN_EXISTING,
     };
     use windows::Win32::System::IO::DeviceIoControl;
 
-    const FSCTL_SET_REPARSE_POINT: u32 = 0x0009_00A4;
     const IO_REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
-    const GENERIC_WRITE: u32 = 0x4000_0000;
-    let words = |code: u32| std::io::Error::from_raw_os_error(code as i32).to_string();
+    let words = crate::shell::win32_message;
 
     // The target as a plain absolute path: no `\\?\`, which is the substitute name's job to add.
     let text = target.to_string_lossy();
@@ -286,10 +245,12 @@ pub(super) fn junction(at: &Path, target: &Path) -> Result<(), String> {
     let written = if folder == INVALID_HANDLE_VALUE {
         Err(words(unsafe { GetLastError() }))
     } else {
+        // SAFETY: a handle just opened, and owned from here on; closed once, when this goes.
+        let folder = unsafe { OwnedHandle::from_raw_handle(folder) };
         // SAFETY: an open handle; the buffer is as long as said and outlives the call.
-        let result = unsafe {
+        unsafe {
             DeviceIoControl(
-                windows::Win32::Foundation::HANDLE(folder),
+                windows::Win32::Foundation::HANDLE(folder.as_raw_handle()),
                 FSCTL_SET_REPARSE_POINT,
                 Some(buffer.as_ptr() as *const c_void),
                 buffer.len() as u32,
@@ -299,10 +260,7 @@ pub(super) fn junction(at: &Path, target: &Path) -> Result<(), String> {
                 None,
             )
         }
-        .map_err(|e| e.message());
-        // SAFETY: opened above, closed once.
-        unsafe { CloseHandle(folder) };
-        result
+        .map_err(|e| e.message())
     };
     if written.is_err() {
         // SAFETY: the folder made above, still empty.

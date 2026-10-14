@@ -202,34 +202,11 @@ mod virtual_files;
 /// selection inside an archive comes back with no PIDLs and therefore no object. [`drag_out`] tries
 /// the virtual-file object first for exactly that reason.
 fn data_object(items: &[PathBuf]) -> Option<IDataObject> {
-    use windows::core::PCWSTR;
     use windows::Win32::UI::Shell::Common::ITEMIDLIST;
-    use windows::Win32::UI::Shell::{
-        SHCreateShellItemArrayFromIDLists, SHParseDisplayName, BHID_DataObject,
-    };
+    use windows::Win32::UI::Shell::{SHCreateShellItemArrayFromIDLists, BHID_DataObject};
 
-    struct Pidl(*mut ITEMIDLIST);
-    impl std::ops::Drop for Pidl {
-        fn drop(&mut self) {
-            if !self.0.is_null() {
-                // SAFETY: allocated by `SHParseDisplayName`, freed once.
-                unsafe { windows::Win32::UI::Shell::ILFree(Some(self.0)) };
-            }
-        }
-    }
-
-    let pidls: Vec<Pidl> = items
-        .iter()
-        .filter_map(|path| {
-            let wide = crate::shell::wide(path);
-            let mut raw: *mut ITEMIDLIST = std::ptr::null_mut();
-            // SAFETY: `wide` is null-terminated and outlives the call.
-            let ok = unsafe {
-                SHParseDisplayName(PCWSTR(wide.as_ptr()), None, &mut raw, 0, None).is_ok()
-            };
-            (ok && !raw.is_null()).then_some(Pidl(raw))
-        })
-        .collect();
+    let pidls: Vec<crate::shell::Pidl> =
+        items.iter().filter_map(|path| crate::shell::pidl_of(path)).collect();
     if pidls.is_empty() {
         return None;
     }
@@ -1023,7 +1000,6 @@ impl IDropTarget_Impl for Target_Impl {
 /// callbacks run on the UI thread, and a drag whose source is a dead share must not stall the
 /// window.
 fn shell_paths_of(data: &IDataObject) -> Option<Vec<PathBuf>> {
-    use windows::Win32::System::Com::{CoTaskMemFree, FORMATETC, TYMED_HGLOBAL};
     use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
     use windows::Win32::UI::Shell::{
         IShellItemArray, SHCreateShellItemArrayFromDataObject, CFSTR_SHELLIDLIST, SIGDN_FILESYSPATH,
@@ -1033,17 +1009,12 @@ fn shell_paths_of(data: &IDataObject) -> Option<Vec<PathBuf>> {
     // `virtual_files::Formats` gives about its own three: it is a syscall, and this is on the path
     // of every drag that so much as touches the window.
     static SHELLIDLIST: std::sync::OnceLock<u16> = std::sync::OnceLock::new();
-    let format = FORMATETC {
+    let format = crate::shell::hglobal_format(
         // SAFETY: a static, null-terminated name from the `windows` crate.
-        cfFormat: *SHELLIDLIST
-            .get_or_init(|| unsafe { RegisterClipboardFormatW(CFSTR_SHELLIDLIST) as u16 }),
-        ptd: std::ptr::null_mut(),
-        dwAspect: 1,
-        lindex: -1,
-        tymed: TYMED_HGLOBAL.0 as u32,
-    };
+        *SHELLIDLIST.get_or_init(|| unsafe { RegisterClipboardFormatW(CFSTR_SHELLIDLIST) as u16 }),
+    );
     // SAFETY: a live object for the length of the call; the `FORMATETC` outlives both uses. Every
-    // string the shell allocates below is freed with `CoTaskMemFree`, once.
+    // string the shell allocates below is freed by `display_name`, once.
     unsafe {
         if data.QueryGetData(&format) != S_OK {
             return None;
@@ -1054,12 +1025,9 @@ fn shell_paths_of(data: &IDataObject) -> Option<Vec<PathBuf>> {
         for at in 0..count {
             let item = items.GetItemAt(at).ok()?;
             // An item with no filesystem path is a virtual one, and that abandons the whole answer
-            // rather than returning the rest of it.
-            let wide = item.GetDisplayName(SIGDN_FILESYSPATH).ok()?;
-            // Read and freed before the `?`, so the one failure left cannot leak the string.
-            let text = wide.to_string().ok();
-            CoTaskMemFree(Some(wide.0 as *const std::ffi::c_void));
-            paths.push(PathBuf::from(text?));
+            // rather than returning the rest of it. So does an `S_OK` with a null name, which this
+            // used to hand straight to `wcslen` — the crash `take_co_string` describes.
+            paths.push(PathBuf::from(crate::shell::display_name(&item, SIGDN_FILESYSPATH)?));
         }
         (!paths.is_empty()).then_some(paths)
     }
@@ -1067,47 +1035,8 @@ fn shell_paths_of(data: &IDataObject) -> Option<Vec<PathBuf>> {
 
 /// Every path a data object is offering, via `CF_HDROP`.
 fn paths_of(data: &IDataObject) -> Option<Vec<PathBuf>> {
-    use windows::Win32::System::Com::{FORMATETC, TYMED_HGLOBAL};
-    use windows::Win32::System::Ole::ReleaseStgMedium;
-    use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
-
-    const CF_HDROP: u16 = 15;
-    let format = FORMATETC {
-        cfFormat: CF_HDROP,
-        ptd: std::ptr::null_mut(),
-        dwAspect: 1,
-        lindex: -1,
-        tymed: TYMED_HGLOBAL.0 as u32,
-    };
-    // SAFETY: the medium is released on every path out, and the handle is only read
-    // while it is held.
-    unsafe {
-        let medium = data.GetData(&format).ok()?;
-        let handle = medium.u.hGlobal;
-        if handle.is_invalid() {
-            return None;
-        }
-        let drop = HDROP(handle.0);
-        let count = DragQueryFileW(drop, u32::MAX, None);
-        let mut items = Vec::with_capacity(count as usize);
-        for index in 0..count {
-            // The length first: a path can be longer than `MAX_PATH`, and a fixed
-            // buffer would silently truncate one.
-            let len = DragQueryFileW(drop, index, None);
-            if len == 0 {
-                continue;
-            }
-            let mut buffer = vec![0u16; len as usize + 1];
-            let written = DragQueryFileW(drop, index, Some(&mut buffer));
-            if written > 0 {
-                buffer.truncate(written as usize);
-                items.push(PathBuf::from(String::from_utf16_lossy(&buffer)));
-            }
-        }
-        let mut medium = medium;
-        ReleaseStgMedium(&mut medium);
-        Some(items)
-    }
+    // SAFETY: a live object for the length of the call; the medium is released inside.
+    unsafe { crate::shell::hdrop_paths(data) }
 }
 
 /// Hand `into`'s own `IDropTarget` a `DROPEFFECT_LINK` drop of `items` — the call Explorer makes
@@ -1119,7 +1048,7 @@ fn paths_of(data: &IDataObject) -> Option<Vec<PathBuf>> {
 /// to be, which is `the_names_match_the_shell_s_own_link_drop`.
 #[cfg(all(test, windows))]
 pub(crate) fn link_drop_through_the_shell(items: &[PathBuf], into: &std::path::Path) -> bool {
-    use windows::Win32::UI::Shell::{IShellItem, SHCreateItemFromParsingName, BHID_SFUIObject};
+    use windows::Win32::UI::Shell::{IShellItem, BHID_SFUIObject};
 
     // SAFETY: the data object and the drop target are the shell's own, released when they go out
     // of scope here; the three callbacks are the documented sequence and nothing is retained.
@@ -1127,12 +1056,10 @@ pub(crate) fn link_drop_through_the_shell(items: &[PathBuf], into: &std::path::P
         let Some(data) = data_object(items) else {
             return false;
         };
-        let wide = crate::shell::wide(into);
-        let folder: IShellItem =
-            match SHCreateItemFromParsingName(windows::core::PCWSTR(wide.as_ptr()), None) {
-                Ok(folder) => folder,
-                Err(_) => return false,
-            };
+        let folder: IShellItem = match crate::shell::parse_item(into) {
+            Ok(folder) => folder,
+            Err(_) => return false,
+        };
         let Ok(target) = folder.BindToHandler::<_, IDropTarget>(None, &BHID_SFUIObject) else {
             return false;
         };

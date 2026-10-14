@@ -784,8 +784,7 @@ pub(crate) fn plain(path: &Path) -> bool {
     let text = path.as_os_str().to_string_lossy();
     let bytes = text.as_bytes();
     let drive = bytes.len() >= 3 && bytes[1] == b':' && matches!(bytes[2], b'\\' | b'/');
-    let unc = text.starts_with(r"\\") && !text.starts_with(r"\\?\") && !text.starts_with(r"\\.\");
-    (drive || unc) && !crate::fs::is_synthetic(path)
+    (drive || crate::fs::is_network_unc(path)) && !crate::fs::is_synthetic(path)
 }
 
 /// Whether these items are ones a permanent delete here may take: plain paths, every one of them
@@ -804,14 +803,7 @@ pub(crate) fn erasable(items: &[PathBuf]) -> bool {
 /// `- Copy`, which is what a copy into its own folder is called and is never asked here.
 pub(crate) fn free_name(path: &Path, taken: impl Fn(&Path) -> bool) -> PathBuf {
     let parent = path.parent().unwrap_or(Path::new(""));
-    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    // A dot at the very start is a name, not an extension: `.gitignore (2)`.
-    let (stem, ext) = match name.rfind('.') {
-        Some(dot) if dot > 0 => (&name[..dot], &name[dot..]),
-        _ => (name.as_str(), ""),
-    };
-    (2u32..)
-        .map(|n| parent.join(format!("{stem} ({n}){ext}")))
+    crate::shell::numbered(parent, path.file_name().unwrap_or_default())
         .find(|candidate| !taken(candidate))
         .expect("an unbounded range finds a free name")
 }

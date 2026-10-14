@@ -187,12 +187,7 @@ impl PathComplete {
         let (_, leaf) = split_typed(text);
         let folder = self.folder.clone();
         // Asked once per folder, and once only for one that cannot be read. See `asked`.
-        if self.asked != folder {
-            self.asked = folder.clone();
-            if let Some(folder) = &folder {
-                loader.prefetch(folder);
-            }
-        }
+        ask_once(&mut self.asked, folder.as_deref(), loader);
         if self.ready {
             return;
         }
@@ -257,8 +252,7 @@ impl PathComplete {
                 }
                 self.offers.sort_by(|a, b| fs::sort::natural_cmp(&a.0, &b.0));
                 // A menu is for picking one of a few, exactly as it is for a chevron.
-                self.truncated = self.offers.len() > MENU_LIMIT;
-                self.offers.truncate(MENU_LIMIT);
+                self.truncated = cap(&mut self.offers);
             }
         }
         self.ready = true;
@@ -364,6 +358,7 @@ impl PathComplete {
     /// freshly opened one has: down, because a path that has only been *shown* has nothing to say.
     /// Claiming the pane here is what makes [`Self::refresh`] read the text as a change rather than
     /// as an opening — the same distinction, approached from the other side.
+    #[cfg(any(test, feature = "devtools"))]
     pub fn type_ahead(&mut self, pane: PaneId) {
         self.pane = Some(pane);
         self.typed.clear();
@@ -710,10 +705,9 @@ pub(crate) fn edit_field(
     // [`offers_height`], which is the bug this is written around.
     let showing = !complete.hidden && complete.len() > 0;
     let mut open = showing;
-    // The pointer has moved, or pressed — so the rows answer to it again. A press counts on its
-    // own because a click need not move the pointer at all, and the press has to find the row
-    // rather than the cover below. See [`PathComplete::quiet`].
-    if ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO || i.pointer.any_pressed()) {
+    // The pointer has moved, or pressed — so the rows answer to it again. See
+    // [`PathComplete::quiet`], and [`crate::ui::pointer_woke`] for why a press counts on its own.
+    if crate::ui::pointer_woke(ui.ctx()) {
         complete.quiet = false;
     }
     let quiet = complete.quiet;
@@ -737,57 +731,26 @@ pub(crate) fn edit_field(
         // to have opened nearby.
         .width(width)
         .show(|ui| {
-            // **The room the rows need, taken rather than asked for.**
-            //
-            // An `Area` hands its content *last frame's size* as this frame's `max_rect` — see
-            // `egui::Area::content_ui` — and a `ScrollArea` fits itself into whatever room it is
-            // given without ever asking for more. Put those two together and a dropdown gets stuck
-            // at the size of the first list it ever showed: typing `d` offers one drive, so the
-            // popup is one row tall, and when `d:/` turns that into fifteen folders the scroll area
-            // shrinks to the one row of room, so the area never grows, so the room never grows.
-            // Two rows and a scrollbar, for ever. That was the bug.
-            //
-            // So the height is claimed instead: a child `Ui` of exactly the size the rows want, and
-            // the cursor advanced past it afterwards so the area sizes itself to what was taken.
-            // Right on the first frame, which matters — the list changes on a keystroke, and there
-            // is no second frame coming until the next one.
-            let taken = Rect::from_min_size(ui.max_rect().min, vec2(width, wanted));
-            let mut list = ui.new_child(
-                egui::UiBuilder::new()
-                    .max_rect(taken)
-                    .layout(egui::Layout::top_down_justified(egui::Align::Min)),
-            );
-            // `gap: space-1` between entries, as `Menu` sets it — a menu's rows are flush.
-            list.spacing_mut().item_spacing.y = 0.0;
-            // A non-floating scrollbar allocates its width whether or not it is showing, which
-            // would put a 14-point gutter of nothing down the right edge of every dropdown and
-            // ellipsize the widest name into it.
-            list.style_mut().spacing.scroll.floating = true;
-            // **No edge fade.** egui paints a gradient of the menu's surface over the bottom of a
-            // scroll area whose content runs past it, and a scroll to a row is animated — so every
-            // press of Down, which scrolls the highlighted row into view, put the content briefly
-            // past the edge and the gradient over the lower half of the row. Holding the key made
-            // it blink. This list ends on a whole row and has a scrollbar to say there is more; a
-            // fade on top only darkens the row being read.
-            list.style_mut().spacing.scroll.fade.strength = 0.0;
-            egui::ScrollArea::vertical()
-                .id_salt(("crumb-complete", pane))
-                .max_height(wanted)
-                .show(&mut list, |ui| {
+            // **The room the rows need, taken rather than asked for**, and covered while the
+            // keyboard has them. See [`crate::ui::claimed_list`] for the `Area` and `ScrollArea`
+            // behaviour that made a dropdown asking for its height stay at the size of the first
+            // list it ever showed — which is the bug this is written around.
+            let origin = ui.max_rect().min;
+            crate::ui::claimed_list(
+                ui,
+                origin,
+                width,
+                wanted,
+                ("crumb-complete", pane),
+                quiet,
+                Id::new(("crumb-complete-quiet", pane)),
+                |ui| {
                     offers(
                         ui, t, complete, hot, follow, icons_cache, slashes, quiet,
                         &mut hovered, &mut clicked,
                     );
-                });
-            // **Over the rows, while the keyboard has them.** Interacted after them, which puts it
-            // on top — egui hands the pointer to the last widget that claimed its position — so a
-            // pointer resting where the dropdown happened to open lights nothing up. It senses a
-            // click because that is what it takes: egui gives the hover to the topmost widget that
-            // can be *clicked*, and one that only sensed hover would lie on top and hide nothing.
-            if quiet {
-                ui.interact(taken, Id::new(("crumb-complete-quiet", pane)), Sense::click());
-            }
-            ui.advance_cursor_after_rect(taken);
+                },
+            );
         });
     // The popup has put itself away — `Escape`, or a click outside it. Recorded, or it would come
     // straight back up on the next frame; the next keystroke brings it back, and so does Down.
@@ -889,7 +852,8 @@ pub(crate) fn offers(
     clicked: &mut Option<PathBuf>,
 ) {
     // Every row as drawn, with the slot reserved behind it for the highlight — painted once they
-    // are all down, because which row it goes on depends on the pointer. See [`highlight`].
+    // are all down, because which row it goes on depends on the pointer. See
+    // [`crate::ui::paint_lit`].
     let mut rows: Vec<(egui::layers::ShapeIdx, Rect)> = Vec::with_capacity(complete.len());
     // One row of either kind. Its index in the dropdown is how many came before it, which is what
     // `hot` and `hovered` count in — the places recalled first, then the folder's own offers.
@@ -900,14 +864,14 @@ pub(crate) fn offers(
                    icon: azur_icons::Icon<'_>,
                    path: &Path| {
         let index = rows.len();
-        let slot = ui.painter().add(egui::Shape::Noop);
-        let row = ui.add(MenuItem::new(label).shortcut(aside).icon(icon));
-        // Into view on the frame the highlight moved — **and only if it is not already in view.** A
-        // scroll to a row that is already showing is not nothing: it is an animation, the list moves
-        // for a few frames while it settles, and with the key held it never settles at all.
-        if follow && hot == Some(index) && !ui.clip_rect().contains_rect(row.rect) {
-            row.scroll_to_me(Some(egui::Align::Center));
-        }
+        // Into view on the frame the highlight moved, to the middle of the list, and only if it is
+        // not already in view — see [`crate::ui::list_row`].
+        let (slot, row) = crate::ui::list_row(
+            ui,
+            MenuItem::new(label).shortcut(aside).icon(icon),
+            follow && hot == Some(index),
+            Some(egui::Align::Center),
+        );
         rows.push((slot, row.rect));
         if row.hovered() {
             *hovered = Some(index);
@@ -940,20 +904,7 @@ pub(crate) fn offers(
         // Windows' own icon, exactly as a chevron dropdown gets it: by path for a volume,
         // because that is the only way to a drive's own glyph, and by kind for a folder,
         // which is one lookup shared by every row here and for the rest of the session.
-        let icon = if path.parent().is_none() {
-            icons_cache.place(path)
-        } else {
-            icons_cache.kind("", true)
-        };
-        let texture = icon.and_then(|icon| icons_cache.uv(ui.ctx(), icon));
-        let paint = |painter: &egui::Painter, rect: Rect, color: egui::Color32| {
-            match texture {
-                Some((texture, uv)) => {
-                    painter.image(texture, rect, uv, egui::Color32::WHITE);
-                }
-                None => icons::folder(painter, rect, color),
-            }
-        };
+        let paint = texture_or_folder(crumb_icon(icons_cache, path));
         // A variable says where it leads, in the separator the field is showing: `%TEMP%` alone
         // does not tell you which of two temp folders it is. Only a variable can start with `%`
         // where nothing names a folder yet — see [`variables`].
@@ -964,41 +915,10 @@ pub(crate) fn offers(
         };
         add(ui, name.clone(), aside, &paint, path);
     }
-    highlight(ui, t, &rows, hot, *hovered, quiet);
+    // The keyboard's highlight moves to the hovered row in [`edit_field`] only after this frame;
+    // this is where the frame itself agrees. See [`PathComplete::quiet`].
+    crate::ui::paint_lit(ui, t, &rows, hot, *hovered, quiet);
     if complete.truncated {
-        azur_egui_theme::components::menu_divider(ui);
-        ui.add(
-            azur_egui_theme::components::Text::new(format!("First {MENU_LIMIT} shown"))
-                .color(azur_egui_theme::components::TextColor::Tertiary),
-        );
-    }
-}
-
-/// The highlight, painted into the slot reserved *behind* its row — by the time a row has been
-/// added its label is already down, and a fill over the top of it is a fill over the top of the
-/// name. The same trick the open chevron's pair uses in `segments`.
-///
-/// **On the row under a moving pointer when there is one, and on the keyboard's otherwise**, so that
-/// the frame the pointer arrives on a row is not a frame with two rows lit: the keyboard's highlight
-/// moves to it in [`edit_field`] only after this frame, and this is where the frame itself agrees.
-/// See [`PathComplete::quiet`].
-///
-/// `control-hover`, which is the fill `MenuItem` gives a row under the pointer: the keyboard is
-/// doing the pointer's job here, and two different greys for one meaning would read as two
-/// different things.
-fn highlight(
-    ui: &Ui,
-    t: &Theme,
-    rows: &[(egui::layers::ShapeIdx, Rect)],
-    hot: Option<usize>,
-    hovered: Option<usize>,
-    quiet: bool,
-) {
-    let lit = if quiet { hot } else { hovered.or(hot) };
-    if let Some(&(slot, rect)) = lit.and_then(|at| rows.get(at)) {
-        ui.painter().set(
-            slot,
-            egui::epaint::RectShape::filled(rect, CornerRadius::ZERO, t.bg.control_hover),
-        );
+        truncated_note(ui);
     }
 }

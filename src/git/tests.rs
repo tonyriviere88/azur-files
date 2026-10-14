@@ -155,25 +155,11 @@ fn a_real_repository_answers_for_its_own_files() {
     crate::sandbox::remove(&root);
     std::fs::create_dir_all(root.join("sub")).expect("a temp folder");
 
-    let run = |args: &[&str]| {
-        let mut command = Command::new("git");
-        command.args(args).current_dir(&root);
-        crate::shell::no_window(&mut command);
-        command
-            .output()
-            .map(|out| out.status.success())
-            .unwrap_or(false)
-    };
-    // No git on this machine is not a test failure; there is nothing to test.
-    if !run(&["init", "--quiet"]) {
+    let run = |args: &[&str]| super::git_in(&root, args);
+    if !super::fresh_repo(&root) {
         eprintln!("no git: skipping");
         return;
     }
-    // A repository of this program's own making, so nothing here depends on the developer's
-    // name, editor or signing key.
-    assert!(run(&["config", "user.email", "test@example.invalid"]));
-    assert!(run(&["config", "user.name", "Test"]));
-    assert!(run(&["config", "commit.gpgsign", "false"]));
 
     std::fs::write(root.join("clean.txt"), b"one\n").unwrap();
     std::fs::write(root.join("changed.txt"), b"two\n").unwrap();
@@ -292,22 +278,11 @@ fn what_head_has_of_a_file() {
     crate::sandbox::remove(&root);
     std::fs::create_dir_all(&root).expect("a temp folder");
 
-    let run = |args: &[&str]| {
-        let mut command = Command::new("git");
-        command.args(args).current_dir(&root);
-        crate::shell::no_window(&mut command);
-        command
-            .output()
-            .map(|out| out.status.success())
-            .unwrap_or(false)
-    };
-    if !run(&["init", "--quiet"]) {
+    let run = |args: &[&str]| super::git_in(&root, args);
+    if !super::fresh_repo(&root) {
         eprintln!("no git: skipping");
         return;
     }
-    assert!(run(&["config", "user.email", "test@example.invalid"]));
-    assert!(run(&["config", "user.name", "Test"]));
-    assert!(run(&["config", "commit.gpgsign", "false"]));
 
     // Bytes rather than text, because that is what this is for: a picture is not lines.
     std::fs::write(root.join("kept.bin"), [0u8, 1, 2, 3]).unwrap();
@@ -438,22 +413,11 @@ fn a_diff_is_read_with_a_ceiling_and_still_answers() {
     crate::sandbox::remove(&root);
     std::fs::create_dir_all(&root).expect("a temp folder");
 
-    let run = |args: &[&str]| {
-        let mut command = Command::new("git");
-        command.args(args).current_dir(&root);
-        crate::shell::no_window(&mut command);
-        command
-            .output()
-            .map(|out| out.status.success())
-            .unwrap_or(false)
-    };
-    if !run(&["init", "--quiet"]) {
+    let run = |args: &[&str]| super::git_in(&root, args);
+    if !super::fresh_repo(&root) {
         eprintln!("no git: skipping");
         return;
     }
-    assert!(run(&["config", "user.email", "test@example.invalid"]));
-    assert!(run(&["config", "user.name", "Test"]));
-    assert!(run(&["config", "commit.gpgsign", "false"]));
 
     // The fixture [`DIFFED`] was captured from: `a b c d e f g h` becoming `a B c NEW1 NEW2 d e h`.
     let file = root.join("lines.txt");
@@ -566,22 +530,11 @@ fn a_stamp_moves_when_git_does_and_not_otherwise() {
     crate::sandbox::remove(&root);
     std::fs::create_dir_all(&root).expect("a temp folder");
 
-    let run = |args: &[&str]| {
-        let mut command = Command::new("git");
-        command.args(args).current_dir(&root);
-        crate::shell::no_window(&mut command);
-        command
-            .output()
-            .map(|out| out.status.success())
-            .unwrap_or(false)
-    };
-    if !run(&["init", "--quiet"]) {
+    let run = |args: &[&str]| super::git_in(&root, args);
+    if !super::fresh_repo(&root) {
         eprintln!("no git: skipping");
         return;
     }
-    assert!(run(&["config", "user.email", "test@example.invalid"]));
-    assert!(run(&["config", "user.name", "Test"]));
-    assert!(run(&["config", "commit.gpgsign", "false"]));
     std::fs::write(root.join("one.txt"), b"one
 ").unwrap();
     assert!(run(&["add", "-A"]));
@@ -626,24 +579,13 @@ fn a_worktree_is_watched_where_its_head_actually_lives() {
     crate::sandbox::remove(&root);
     std::fs::create_dir_all(&root).expect("a temp folder");
 
-    let git = |dir: &std::path::Path, args: &[&str]| {
-        let mut command = Command::new("git");
-        command.args(args).current_dir(dir);
-        crate::shell::no_window(&mut command);
-        command
-            .output()
-            .map(|out| out.status.success())
-            .unwrap_or(false)
-    };
+    let git = super::git_in;
     let main = root.join("main");
     std::fs::create_dir_all(&main).expect("a temp folder");
-    if !git(&main, &["init", "--quiet"]) {
+    if !super::fresh_repo(&main) {
         eprintln!("no git: skipping");
         return;
     }
-    assert!(git(&main, &["config", "user.email", "test@example.invalid"]));
-    assert!(git(&main, &["config", "user.name", "Test"]));
-    assert!(git(&main, &["config", "commit.gpgsign", "false"]));
     std::fs::write(main.join("one.txt"), b"one\n").unwrap();
     assert!(git(&main, &["add", "-A"]));
     assert!(git(&main, &["commit", "--quiet", "-m", "base"]));

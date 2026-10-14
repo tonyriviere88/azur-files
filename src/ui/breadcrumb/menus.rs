@@ -12,17 +12,80 @@ pub(crate) const OVERFLOW_MENU: usize = usize::MAX;
 
 pub(crate) const MENU_LIMIT: usize = 200;
 
-/// A menu entry with a tick in its icon slot when it is on.
+/// Cut a menu's rows to [`MENU_LIMIT`], and say whether any were cut — which is whether it ends in
+/// [`truncated_note`]. A menu is for picking one of a few; past this it is a listing, and the
+/// listing is what the pane behind it is for.
+pub(crate) fn cap<T>(items: &mut Vec<T>) -> bool {
+    let over = items.len() > MENU_LIMIT;
+    items.truncate(MENU_LIMIT);
+    over
+}
+
+/// Ask the loader for `path` unless it is the folder last asked for, and note that it was.
 ///
-/// The icon slot rather than a checkbox, which is what every desktop menu does with a toggle —
-/// and `MenuItem` reserves the slot for every entry, so the labels line up whether or not
-/// anything is ticked.
-pub(crate) fn ticked<'a>(item: MenuItem<'a>, on: bool) -> MenuItem<'a> {
-    if on {
-        item.icon(&azur_egui_theme::icons::check)
-    } else {
-        item
+/// Once per folder, and once only for one that cannot be read. A failed read is deliberately not
+/// cached — see [`crate::loader::Loader`] — so a menu that asked whenever the cache said no would
+/// queue a fresh scan of a dead path on every frame it was up. Both of this bar's dropdowns keep an
+/// `asked` for that reason, and this is the one rule they both keep with it.
+pub(crate) fn ask_once(
+    asked: &mut Option<PathBuf>,
+    path: Option<&Path>,
+    loader: &mut crate::loader::Loader,
+) {
+    if asked.as_deref() != path {
+        *asked = path.map(Path::to_path_buf);
+        if let Some(path) = path {
+            loader.prefetch(path);
+        }
     }
+}
+
+/// Windows' own icon for a folder row in one of the bar's dropdowns, once the shell has it.
+///
+/// **By path for a volume**, because that is the only way to a drive's own glyph and there are at
+/// most twenty-six of them, and **by kind for a folder**, which is one lookup shared by every
+/// folder row for the rest of the session: a menu can hold two hundred rows, and a per-path lookup
+/// each would be two hundred questions for the generic folder icon two hundred times over.
+pub(crate) fn crumb_icon(
+    icons_cache: &mut crate::shell::icons::Icons,
+    path: &Path,
+) -> Option<(egui::TextureId, Rect)> {
+    let icon = if path.parent().is_none() {
+        icons_cache.place(path)
+    } else {
+        icons_cache.kind("", true)
+    };
+    icon.and_then(|icon| icons_cache.uv(icon))
+}
+
+/// A menu row's icon: the shell's bitmap from [`crumb_icon`] if there is one, and the painted folder
+/// in the row's own ink until there is.
+pub(crate) fn texture_or_folder(
+    texture: Option<(egui::TextureId, Rect)>,
+) -> impl Fn(&egui::Painter, Rect, egui::Color32) {
+    move |painter: &egui::Painter, rect: Rect, color: egui::Color32| match texture {
+        Some((texture, uv)) => {
+            painter.image(texture, rect, uv, egui::Color32::WHITE);
+        }
+        None => icons::folder(painter, rect, color),
+    }
+}
+
+/// The foot of a menu [`cap`] cut short: a rule, and how many of the rows it is showing, in a
+/// [`menu_note`].
+pub(crate) fn truncated_note(ui: &mut Ui) {
+    azur_egui_theme::components::menu_divider(ui);
+    menu_note(ui, format!("First {MENU_LIMIT} shown"));
+}
+
+/// A menu entry with a tick in its leading slot when it is on.
+///
+/// The leading slot rather than a checkbox, which is what every desktop menu does with a toggle —
+/// and `MenuItem` reserves the slot for every entry, so the labels line up whether or not
+/// anything is ticked. `MenuItem`'s own tick, so these menus wear the same 14px `accent.mark` one
+/// as every other menu in the window rather than a 16px glyph of their own in the icon colour.
+pub(crate) fn ticked(item: MenuItem<'_>, on: bool) -> MenuItem<'_> {
+    item.selected(on)
 }
 
 /// How many places the history menu lists on each side of where you are. The history holds up to

@@ -21,9 +21,10 @@ pub(crate) const GRIP: f32 = 4.0;
 /// preview's in-field toggles take, for the same reason.
 pub(crate) const SWITCH: f32 = 18.0;
 
-/// `"s"` unless there is exactly one.
-pub(crate) fn plural(count: u32) -> &'static str {
-    if count == 1 {
+/// `"s"` unless there is exactly one — of anything that counts: a `u32` off a listing, a `usize`
+/// off a `Vec`.
+pub(crate) fn plural<N: PartialEq + From<u8>>(count: N) -> &'static str {
+    if count == N::from(1) {
         ""
     } else {
         "s"
@@ -299,7 +300,6 @@ pub(crate) fn status_line(
             ),
             true,
             console_open,
-            t.surfaces.status,
         )
         .clicked()
     {
@@ -324,7 +324,6 @@ pub(crate) fn status_line(
             ),
             true,
             tiles,
-            t.surfaces.status,
         );
         if switched.clicked() {
             out.push(Action::SetView {
@@ -367,7 +366,6 @@ pub(crate) fn status_line(
         ),
         !crate::fs::is_synthetic(&tab.path),
         tab.sizes.on,
-        t.surfaces.status,
     )
     .clicked()
     {
@@ -1030,15 +1028,7 @@ pub(crate) fn git_summary(
     // click does would never appear. It is the same ordering the filter box's ✕ relies on.
     if let Some((hit, slot)) = button {
         let response = ui.interact(hit, Id::new(("status-changed", pane)), Sense::click());
-        let (hover, pressed) = crate::ui::control_fills(t, t.surfaces.status);
-        let fill = if response.is_pointer_button_down_on() {
-            Some(pressed)
-        } else if response.hovered() {
-            Some(hover)
-        } else {
-            None
-        };
-        if let Some(fill) = fill {
+        if let Some(fill) = crate::ui::control_look(t, &response, true, false).0 {
             painter.set(
                 slot,
                 egui::Shape::rect_filled(hit, CornerRadius::same(radius::SMALL), fill),

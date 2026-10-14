@@ -19,6 +19,24 @@ fn super_down() -> bool {
     false
 }
 
+/// Whether `Space` went down this frame — **the press, and not the repeat.** `key_pressed` counts
+/// key-repeat events among its presses, so a thumb resting on the bar would read as one press per
+/// repeat; `repeat: false` on the event is the only thing that tells the two apart. Which modifiers
+/// may be held is each caller's own question.
+fn space_pressed(i: &egui::InputState) -> bool {
+    i.events.iter().any(|event| {
+        matches!(
+            event,
+            egui::Event::Key {
+                key: egui::Key::Space,
+                pressed: true,
+                repeat: false,
+                ..
+            }
+        )
+    })
+}
+
 impl App {
     /// Space and the arrows, for the video that has the keyboard.
     ///
@@ -477,11 +495,7 @@ impl App {
 
             if on(Command::CopyPaths) {
                 if let Some(p) = self.panes.iter().find(|p| p.id == pane) {
-                    let mut paths = p.tab().selection_paths();
-                    if paths.is_empty() {
-                        paths.push(p.tab().path.clone());
-                    }
-                    push(Action::CopyPaths(paths));
+                    push(Action::CopyPaths(p.tab().selection_or_here()));
                 }
             }
         });
@@ -501,25 +515,21 @@ impl App {
         // fallback: one row for `Down`, a screenful for `PageDown`, and in the tiles view a whole
         // line of tiles for the first of them — the column count the view last laid out. `lines` is
         // how many steps a page is, which is the same question in both views.
-        let (step, page, lines) = self
-            .panes
-            .iter()
-            .find(|p| p.id == pane)
-            .map(|p| {
-                let tab = p.tab();
-                let height = (p.rect.height() - 80.0).max(1.0);
-                if tab.view_mode.is_icons() {
-                    let columns = tab.grid.columns.max(1) as isize;
-                    let lines = (height / crate::ui::grid::CELL_H).max(1.0) as usize;
-                    (columns, lines as isize * columns, lines)
-                } else {
-                    let lines = (height / crate::pane::ROW_HEIGHT).max(1.0) as usize;
-                    (1, lines as isize, lines)
-                }
-            })
-            .unwrap_or((1, 20, 20));
+        let (step, page, lines) = {
+            let p = &self.panes[index];
+            let tab = p.tab();
+            let height = (p.rect.height() - 80.0).max(1.0);
+            if tab.view_mode.is_icons() {
+                let columns = tab.grid.columns.max(1) as isize;
+                let lines = (height / crate::ui::grid::CELL_H).max(1.0) as usize;
+                (columns, lines as isize * columns, lines)
+            } else {
+                let lines = (height / crate::pane::ROW_HEIGHT).max(1.0) as usize;
+                (1, lines as isize, lines)
+            }
+        };
 
-        let mut open: Option<(bool, PathBuf)> = None;
+        let mut open: Option<Action> = None;
         let mut typed: Vec<char> = Vec::new();
         let mut panel = false;
         // A folder opened or shut from the keyboard, for the other half of a diff to follow.
@@ -660,27 +670,12 @@ impl App {
                 //
                 // No `Space` reaches the type-ahead with `Ctrl` held — the characters below are read
                 // only when it is not — so this is the whole of what the chord does.
-                if i.modifiers.command
-                    && !i.modifiers.alt
-                    && i.events.iter().any(|event| {
-                        matches!(
-                            event,
-                            egui::Event::Key {
-                                key: K::Space,
-                                pressed: true,
-                                repeat: false,
-                                ..
-                            }
-                        )
-                    })
-                {
+                if i.modifiers.command && !i.modifiers.alt && space_pressed(i) {
                     tab.toggle_at_cursor();
                 }
                 if i.key_pressed(K::Enter) {
                     if let Some(at) = tab.cursor {
-                        if let Some(path) = tab.target_at(at) {
-                            open = Some((tab.is_dir_at(at), path));
-                        }
+                        open = Action::open_row(pane, tab, at);
                     }
                 }
                 // Type-ahead: anything printable that is not a shortcut.
@@ -708,18 +703,7 @@ impl App {
                 // Bare only — a modified space stays the letter it was, which is nothing this listing
                 // can find and so nothing that happens.
                 if !i.modifiers.command && !i.modifiers.alt {
-                    let space = i.modifiers.is_none()
-                        && i.events.iter().any(|event| {
-                            matches!(
-                                event,
-                                egui::Event::Key {
-                                    key: K::Space,
-                                    pressed: true,
-                                    repeat: false,
-                                    ..
-                                }
-                            )
-                        });
+                    let space = i.modifiers.is_none() && space_pressed(i);
                     let mut word = tab.typing_a_name(i.time);
                     for event in &i.events {
                         if let egui::Event::Text(text) = event {
@@ -748,12 +732,8 @@ impl App {
         if let Some((name, shut)) = followed {
             self.follow_collapse(pane, &name, shut);
         }
-        if let Some((is_dir, path)) = open {
-            self.actions.push(if is_dir {
-                Action::Navigate { pane, path }
-            } else {
-                Action::Open(path)
-            });
+        if let Some(action) = open {
+            self.actions.push(action);
         }
     }
 }

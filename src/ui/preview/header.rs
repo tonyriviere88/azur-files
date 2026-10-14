@@ -51,55 +51,71 @@ pub(super) fn header(
     // One baseline for the whole bar, taken from its principal font, so the title, the details and
     // the glyph beside them are on one line. `crate::ui::deps` says why at length.
     let baseline = ink_baseline(ui.painter(), &t.fonts.body, rect.top(), rect.height());
-    let surface = t.bg.layer;
     let button = |right: f32| {
         Rect::from_center_size(
             pos2(right - TOOL_SIZE * 0.5, rect.center().y),
             vec2(TOOL_SIZE, TOOL_SIZE),
         )
     };
+    // One of the controls, against `right`, and `right` moved on to where the next one goes. Whether
+    // it was clicked. Every control on the bar is enabled — one that could do nothing is left off.
+    let place = |ui: &mut Ui,
+                 right: &mut f32,
+                 id: Id,
+                 glyph: azur_egui_theme::icons::Icon<'_>,
+                 tip: &str,
+                 on: bool|
+     -> bool {
+        let at = button(*right);
+        let clicked = tool_button(ui, t, at, id, glyph, tip, true, on).clicked();
+        *right = at.left() - PAD;
+        clicked
+    };
+    // **Show what changed since the last commit**, which a picture and a text file both offer and
+    // which is one preference behind both: one answer to "show me what changed", whatever kind of
+    // file is on screen.
+    let git_diff = |ui: &mut Ui, right: &mut f32, layout: &mut Layout, out: &mut Vec<Action>| {
+        if place(
+            ui,
+            right,
+            Id::new(("preview-diff", pane)),
+            &crate::icons::diff,
+            "Show what changed since the last commit",
+            layout.diff,
+        ) {
+            layout.diff = !layout.diff;
+            out.push(Action::RememberLayout);
+        }
+    };
 
     // ---- The controls, from the right edge inwards ------------------------
-    let close = button(rect.right() - PAD);
-    if tool_button(
+    let mut right = rect.right() - PAD;
+    if place(
         ui,
-        t,
-        close,
+        &mut right,
         Id::new(("preview-close", pane)),
         &azur_icons::close,
         &crate::app::shortcuts::tip("Close the preview", &crate::app::shortcuts::Command::Preview),
-        true,
         false,
-        surface,
-    )
-    .clicked()
-    {
+    ) {
         out.push(Action::ClosePreview(pane));
     }
-    let mut right = close.left() - PAD;
 
     // **Which view this is, as a question**, immediately inside close and ahead of every view's own
     // controls: it is about the file rather than about how one view reads it, and it is the one
     // control that stays put as the view underneath it changes. Only for a file whose name had no
     // answer — see [`Slot::choosable`].
-    if slot.choosable() {
-        let at = button(right);
-        if tool_button(
+    if slot.choosable()
+        && place(
             ui,
-            t,
-            at,
+            &mut right,
             Id::new(("preview-view-as", pane)),
             &crate::icons::view_as,
             "Show this file as something else",
-            true,
             slot.choosing,
-            surface,
         )
-        .clicked()
-        {
-            slot.choose();
-        }
-        right = at.left() - PAD;
+    {
+        slot.choose();
     }
 
     // The view's own toggle, immediately inside the close button: showing both sources of a
@@ -118,34 +134,27 @@ pub(super) fn header(
     //
     // Above the match rather than in its arms because the latch is the panel's, not the content's: a
     // pair whose read failed — one side is not text — is still a pair, and needs the button to let go.
-    if viewing && can_compare {
-        let at = button(right);
-        if tool_button(
+    if viewing
+        && can_compare
+        && place(
             ui,
-            t,
-            at,
+            &mut right,
             Id::new(("preview-diff", pane)),
             &crate::icons::diff,
             "Compare the two selected files",
-            true,
             *compare,
-            surface,
         )
-        .clicked()
-        {
-            // Not a preference and not remembered: it dies with these two files. See
-            // [`Preview::compare`].
-            *compare = !*compare;
-        }
-        right = at.left() - PAD;
+    {
+        // Not a preference and not remembered: it dies with these two files. See
+        // [`Preview::compare`].
+        *compare = !*compare;
     }
 
     match &mut slot.content {
         _ if !viewing => {}
         Content::Picture(picture) => {
-            // **A picture git has moved on from gets the same toggle a text file does**, and it is
-            // the same preference behind it: one answer to "show me what changed", whatever kind of
-            // file is on screen. Offered only where there is something to compare with — and unlike
+            // **A picture git has moved on from gets the same toggle a text file does** — see
+            // `git_diff`. It is offered only where there is something to compare with, and unlike
             // the text one, that cannot be read off the payload, because with the toggle off the
             // panel holds one picture and nothing that remembers there was another.
             //
@@ -157,45 +166,21 @@ pub(super) fn header(
             // does nothing is worse than no control; the same argument the two text toggles make.
             // And not while two files are selected, where the compare button above has the slot.
             if !can_compare && changed && !picture.shell {
-                let at = button(right);
-                if tool_button(
-                    ui,
-                    t,
-                    at,
-                    Id::new(("preview-diff", pane)),
-                    &crate::icons::diff,
-                    "Show what changed since the last commit",
-                    true,
-                    layout.diff,
-                    surface,
-                )
-                .clicked()
-                {
-                    layout.diff = !layout.diff;
-                    out.push(Action::RememberLayout);
-                }
-                right = at.left() - PAD;
+                git_diff(ui, &mut right, layout, out);
             }
             // And inside it, the one that only means anything while there are three views to choose
             // between — exactly as the text view nests `collapse` inside `diff`.
-            if picture.frames.len() == 3 {
-                let at = button(right);
-                if tool_button(
+            if picture.frames.len() == 3
+                && place(
                     ui,
-                    t,
-                    at,
+                    &mut right,
                     Id::new(("preview-all", pane)),
                     &crate::icons::columns,
                     "Show both images as well as the difference",
-                    true,
                     picture.all,
-                    surface,
                 )
-                .clicked()
-                {
-                    picture.all = !picture.all;
-                }
-                right = at.left() - PAD;
+            {
+                picture.all = !picture.all;
             }
         }
         Content::Text(text) => {
@@ -203,49 +188,25 @@ pub(super) fn header(
             // — so the gutter's toggle is only offered over something that has lines. That
             // is the one control in this bar that comes and goes with a preference rather
             // than with the file, and the alternative was a button that did nothing.
-            if !text.renderable() || layout.markup {
-                let at = button(right);
-                if tool_button(
+            if (!text.renderable() || layout.markup)
+                && place(
                     ui,
-                    t,
-                    at,
+                    &mut right,
                     Id::new(("preview-numbers", pane)),
                     &crate::icons::line_numbers,
                     "Number the lines",
-                    true,
                     layout.numbers,
-                    surface,
                 )
-                .clicked()
-                {
-                    layout.numbers = !layout.numbers;
-                    out.push(Action::RememberLayout);
-                }
-                right = at.left() - PAD;
+            {
+                layout.numbers = !layout.numbers;
+                out.push(Action::RememberLayout);
             }
             // **Only over a file git has something to say about**, which is the same argument the
             // numbers toggle makes: a control that does nothing is worse than no control. It appearing
             // is itself the news that this file has changed. Not while two files are selected, where
             // the compare button above has the slot.
             if !can_compare && text.diffable() {
-                let at = button(right);
-                if tool_button(
-                    ui,
-                    t,
-                    at,
-                    Id::new(("preview-diff", pane)),
-                    &crate::icons::diff,
-                    "Show what changed since the last commit",
-                    true,
-                    layout.diff,
-                    surface,
-                )
-                .clicked()
-                {
-                    layout.diff = !layout.diff;
-                    out.push(Action::RememberLayout);
-                }
-                right = at.left() - PAD;
+                git_diff(ui, &mut right, layout, out);
             }
             // And beside it, the one that only means anything while a diff is on screen: a file with
             // its unchanged stretches left out. For a pair, only once the pair has arrived — until
@@ -255,50 +216,36 @@ pub(super) fn header(
             } else {
                 text.diffable() && layout.diff
             };
-            if diffing {
-                let at = button(right);
-                if tool_button(
+            if diffing
+                && place(
                     ui,
-                    t,
-                    at,
+                    &mut right,
                     Id::new(("preview-collapse", pane)),
                     &crate::icons::collapse,
                     "Leave out the parts that have not changed",
-                    true,
                     layout.collapse,
-                    surface,
                 )
-                .clicked()
-                {
-                    layout.collapse = !layout.collapse;
-                    out.push(Action::RememberLayout);
-                }
-                right = at.left() - PAD;
+            {
+                layout.collapse = !layout.collapse;
+                out.push(Action::RememberLayout);
             }
-            if text.renderable() {
-                let at = button(right);
-                if tool_button(
+            if text.renderable()
+                && place(
                     ui,
-                    t,
-                    at,
+                    &mut right,
                     Id::new(("preview-markup", pane)),
                     &crate::icons::markup,
                     "Show the Markdown itself",
-                    true,
                     layout.markup,
-                    surface,
                 )
-                .clicked()
-                {
-                    layout.markup = !layout.markup;
-                    // The two views are two different strings, so every hit the find bar
-                    // is holding is an offset into the wrong one. Forgotten rather than
-                    // recomputed here: the search runs again on the next frame, against
-                    // whichever of them is now on screen.
-                    slot.find.forget();
-                    out.push(Action::RememberLayout);
-                }
-                right = at.left() - PAD;
+            {
+                layout.markup = !layout.markup;
+                // The two views are two different strings, so every hit the find bar is
+                // holding is an offset into the wrong one. Forgotten rather than recomputed
+                // here: the search runs again on the next frame, against whichever of them is
+                // now on screen.
+                slot.find.forget();
+                out.push(Action::RememberLayout);
             }
         }
         // A binary gets one control, and it is the same question the listing's own flatten button
@@ -306,24 +253,18 @@ pub(super) fn header(
         // that says how each was reached*. A dependency graph and a folder tree are the same shape
         // and the same two ways of reading it.
         Content::Binary(_) => {
-            let at = button(right);
-            if tool_button(
+            let clicked = place(
                 ui,
-                t,
-                at,
+                &mut right,
                 Id::new(("preview-deps-list", pane)),
                 &crate::icons::flatten,
                 "List every module instead of the tree",
-                true,
                 layout.deps.list,
-                surface,
-            )
-            .clicked()
-            {
+            );
+            if clicked {
                 layout.deps.list = !layout.deps.list;
                 out.push(Action::RememberLayout);
             }
-            right = at.left() - PAD;
         }
         _ => {}
     }
@@ -335,27 +276,21 @@ pub(super) fn header(
     // A button and not a shortcut. `Ctrl+F` is the pane's filter box and has been since long before
     // this panel existed — a preview that took it would be taking the keyboard away from the window
     // it lives in, for a bar that only exists while one kind of file is selected.
-    if viewing && matches!(slot.content, Content::Text(_)) {
-        let at = button(right);
-        if tool_button(
+    if viewing
+        && matches!(slot.content, Content::Text(_))
+        && place(
             ui,
-            t,
-            at,
+            &mut right,
             Id::new(("preview-find", pane)),
             &azur_icons::search,
             "Find in this file",
-            true,
             slot.find.open,
-            surface,
         )
-        .clicked()
-        {
-            slot.find.open = !slot.find.open;
-            // Opening it puts the caret in it: a find bar you have to click into after asking for it
-            // is a find bar that wanted two clicks.
-            slot.find.grab = slot.find.open;
-        }
-        right = at.left() - PAD;
+    {
+        slot.find.open = !slot.find.open;
+        // Opening it puts the caret in it: a find bar you have to click into after asking for it is
+        // a find bar that wanted two clicks.
+        slot.find.grab = slot.find.open;
     }
 
     // The zoom group: in, out, Fit, and the field — laid out right to left, so on screen it reads
@@ -369,40 +304,23 @@ pub(super) fn header(
         if viewing && right - rect.left() > ACTIONS {
             for (glyph, tip, step) in [
                 (
-                    &azur_icons::plus as azur_egui_theme::icons::Icon<'_>,
+                    &crate::icons::plus as azur_egui_theme::icons::Icon<'_>,
                     "Zoom in",
                     Some(ZOOM_STEP),
                 ),
                 (&azur_icons::minus, "Zoom out", Some(1.0 / ZOOM_STEP)),
                 (&crate::icons::fit, "Fit the panel", None),
             ] {
-                let at = button(right);
-                if tool_button(
-                    ui,
-                    t,
-                    at,
-                    Id::new(("preview-zoom", pane, tip)),
-                    glyph,
-                    tip,
-                    true,
-                    false,
-                    surface,
-                )
-                .clicked()
-                {
+                if place(ui, &mut right, Id::new(("preview-zoom", pane, tip)), glyph, tip, false) {
                     match step {
                         // Zoomed about the middle of the canvas, which is where the eye is when a
                         // button rather than the wheel was used.
                         Some(by) => {
                             picture.zoom = Some((picture.scale() * by).clamp(ZOOM_MIN, ZOOM_MAX));
                         }
-                        None => {
-                            picture.zoom = None;
-                            picture.pan = Vec2::ZERO;
-                        }
+                        None => picture.refit(),
                     }
                 }
-                right = at.left() - PAD;
             }
             right = zoom_field(ui, rect, right, pane, picture) - PAD;
         }
@@ -504,8 +422,8 @@ pub(super) fn header(
                 let _ = write!(
                     size,
                     "{files} file{}, {api_sets} API set{}",
-                    if files == 1 { "" } else { "s" },
-                    if api_sets == 1 { "" } else { "s" },
+                    crate::ui::filelist::plural(files),
+                    crate::ui::filelist::plural(api_sets),
                 );
             }
             if view.graph().truncated {
@@ -728,13 +646,7 @@ pub(super) fn zoom_field(ui: &mut Ui, bar: Rect, right: f32, pane: PaneId, pictu
     // press on the list is one of those — the pick has already been taken by the time this runs, so
     // letting go is right there too.
     if typing {
-        let elsewhere = child.input(|i| {
-            i.pointer
-                .any_pressed()
-                .then(|| i.pointer.interact_pos())
-                .flatten()
-                .is_some_and(|at| !field.contains(at))
-        });
+        let elsewhere = crate::ui::pressed_at(&child).is_some_and(|at| !field.contains(at));
         if entered || escaped || elsewhere {
             response.surrender_focus();
         }
@@ -749,8 +661,7 @@ pub(super) fn zoom_field(ui: &mut Ui, bar: Rect, right: f32, pane: PaneId, pictu
 pub(super) fn apply_zoom(picture: &mut Picture, text: &str) {
     let text = text.trim();
     if text.eq_ignore_ascii_case("fit") {
-        picture.zoom = None;
-        picture.pan = Vec2::ZERO;
+        picture.refit();
         return;
     }
     let number: String = text

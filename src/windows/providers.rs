@@ -4,7 +4,11 @@
 //! here loads or runs anybody's DLL, which is the whole reason it is safe to ask on the UI thread.
 //!
 //! Nothing is taken from the parent module, unlike every other file in here: a key path is a string
-//! and a registry handle is its own thing, so this needs neither `wide` nor a `Path`.
+//! and a registry handle is its own thing, so this needs neither `wide` nor a `Path` — only
+//! [`crate::shell::registry`], which opens and closes the keys.
+
+#[cfg(windows)]
+use crate::shell::registry::Key;
 
 /// `IThumbnailProvider` — the interface a shell extension registers under when it can draw a
 /// picture of a file.
@@ -31,35 +35,13 @@ fn under(base: &str) -> bool {
         || exists(&format!("{base}\\ShellEx\\{EXTRACT_IMAGE}"))
 }
 
-/// A NUL-terminated UTF-16 copy of a registry key path.
-///
-/// Not [`crate::shell::wide`], which takes a `Path` and turns `/` into `\` — right for a file name
-/// and wrong for a key whose parts are separated by the very character it rewrites.
-#[cfg(windows)]
-fn utf16(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
 /// Whether a key exists under `HKEY_CLASSES_ROOT`. Opened for reading and closed at once — the
 /// question is only whether it is there.
 #[cfg(windows)]
 fn exists(path: &str) -> bool {
-    use windows_sys::Win32::System::Registry::{
-        RegCloseKey, RegOpenKeyExW, HKEY, HKEY_CLASSES_ROOT, KEY_READ,
-    };
+    use windows_sys::Win32::System::Registry::{HKEY_CLASSES_ROOT, KEY_READ};
 
-    let wide = utf16(path);
-    let mut key: HKEY = std::ptr::null_mut();
-    // SAFETY: `wide` is a NUL-terminated UTF-16 buffer that outlives the call, and `key` is only
-    // used when the call reports success.
-    let opened =
-        unsafe { RegOpenKeyExW(HKEY_CLASSES_ROOT, wide.as_ptr(), 0, KEY_READ, &mut key) };
-    if opened != 0 {
-        return false;
-    }
-    // SAFETY: `key` was opened by the call above and is not used again.
-    unsafe { RegCloseKey(key) };
-    true
+    Key::open(HKEY_CLASSES_ROOT, path, KEY_READ).is_ok()
 }
 
 /// A string value under `HKEY_CLASSES_ROOT\<path>`: the key's own default when `name` is `None`, and
@@ -69,45 +51,15 @@ fn exists(path: &str) -> bool {
 /// mean the same thing to every caller here.
 #[cfg(windows)]
 fn value(path: &str, name: Option<&str>) -> Option<String> {
-    use windows_sys::Win32::System::Registry::{
-        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CLASSES_ROOT, KEY_READ, REG_SZ,
-    };
+    use windows_sys::Win32::System::Registry::{HKEY_CLASSES_ROOT, KEY_READ, REG_SZ};
 
-    let wide = utf16(path);
-    let mut key: HKEY = std::ptr::null_mut();
-    // SAFETY: as `exists` above.
-    let opened =
-        unsafe { RegOpenKeyExW(HKEY_CLASSES_ROOT, wide.as_ptr(), 0, KEY_READ, &mut key) };
-    if opened != 0 {
-        return None;
-    }
-    let wide_name = name.map(utf16);
+    let key = Key::open(HKEY_CLASSES_ROOT, path, KEY_READ).ok()?;
     // Everything read here is a ProgID or a perceived type — short identifiers. Anything that does
     // not fit is not one, and the fixed buffer is what keeps a probe allocation-light.
-    let mut buffer = [0u16; 260];
-    let mut bytes = std::mem::size_of_val(&buffer) as u32;
-    let mut kind = 0u32;
-    // SAFETY: `buffer` and `bytes` describe the same allocation, `bytes` is updated by the call to
-    // what was actually written, and the name pointer is null exactly when there is no name.
-    let read = unsafe {
-        RegQueryValueExW(
-            key,
-            wide_name.as_ref().map_or(std::ptr::null(), |n| n.as_ptr()),
-            std::ptr::null_mut(),
-            &mut kind,
-            buffer.as_mut_ptr().cast(),
-            &mut bytes,
-        )
-    };
-    // SAFETY: `key` was opened above and is not used again.
-    unsafe { RegCloseKey(key) };
-    if read != 0 || kind != REG_SZ {
+    let (kind, text) = key.string::<260>(name)?;
+    if kind != REG_SZ {
         return None;
     }
-    // `bytes` counts bytes and includes the terminator, which is not part of the string.
-    let units = (bytes as usize / 2).min(buffer.len());
-    let text = String::from_utf16_lossy(&buffer[..units]);
-    let text = text.trim_end_matches('\0').trim().to_owned();
     (!text.is_empty()).then_some(text)
 }
 

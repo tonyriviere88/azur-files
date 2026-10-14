@@ -29,16 +29,6 @@ fn three_selected(h: &mut Harness, name: &str) -> (crate::pane::PaneId, PathBuf)
     (pane, root)
 }
 
-fn key(key: egui::Key) -> Event {
-    Event::Key {
-        key,
-        physical_key: None,
-        pressed: true,
-        repeat: false,
-        modifiers: Modifiers::NONE,
-    }
-}
-
 fn says(h: &Harness, words: &str) -> bool {
     h.texts().iter().any(|(_, text)| text.contains(words))
 }

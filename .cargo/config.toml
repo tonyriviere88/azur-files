@@ -56,9 +56,21 @@
 # alias would be worse than useless — both are part of cargo's fingerprint, so either one marks
 # every unit in the warm `target/debug` `Dirty ("the config settings changed")` and rebuilds it
 # from scratch.
+#
+# **`devtools`: release with the developer tools.** The shipped build reads no flag but `--open=`;
+# screenshots, `--trace`, `--walk` and `--scroll` need this one instead, which is the release
+# profile under another name plus the `devtools` feature — see both in `Cargo.toml`. The agent's
+# `claude-build` and `claude-run` turn the feature on as well, because an agent's launch without
+# `YAFE_PROFILE` is a launch that writes the user's own settings. A feature changes this crate's
+# build alone, so the warm dependencies are shared either way.
+#
+#   cargo devtools                 -> target/devtools/azur-files.exe
+#   cargo claude-devtools          -> target/claude/devtools/azur-files.exe
 [alias]
 deploy = "run --quiet --release --example deploy --"
+devtools = "build --profile devtools --features devtools"
 claude-clippy = "clippy --all-targets --target-dir target/claude"
-claude-build = "build --target-dir target/claude"
+claude-build = "build --features devtools --target-dir target/claude"
 claude-test = "test --target-dir target/claude"
-claude-run = "run --target-dir target/claude"
+claude-run = "run --features devtools --target-dir target/claude"
+claude-devtools = "build --profile devtools --features devtools --target-dir target/claude"

@@ -36,9 +36,9 @@ use std::path::{Path, PathBuf};
 mod win;
 #[cfg(windows)]
 use win::read_shortcut;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::Arc;
+
+use crate::inflight::Capped;
 
 /// What a shortcut leads to, as a row shows it.
 ///
@@ -135,7 +135,7 @@ pub struct Links {
     replies: Sender<Ready>,
     /// How many requests are outstanding, so a folder of ten thousand shortcuts cannot queue
     /// ten thousand of them. A row that is turned away is simply asked again next frame.
-    queued: Arc<AtomicUsize>,
+    queued: Capped,
     ctx: egui::Context,
 }
 
@@ -153,7 +153,7 @@ impl Links {
             jobs: None,
             answers,
             replies,
-            queued: Arc::new(AtomicUsize::new(0)),
+            queued: Capped::new(QUEUE_CAP),
             ctx: ctx.clone(),
         }
     }
@@ -164,12 +164,11 @@ impl Links {
     /// current folder, and the entry index within it. An answer to a view nobody holds any more
     /// is dropped on delivery, so nothing about a folder outlives looking at it.
     pub fn request(&mut self, view: u64, row: u32, path: PathBuf, kind: Kind) -> bool {
-        if self.queued.load(Ordering::Relaxed) >= QUEUE_CAP {
+        if !self.queued.try_take() {
             return false;
         }
-        let jobs = self.worker().clone();
-        self.queued.fetch_add(1, Ordering::Relaxed);
-        if jobs
+        if self
+            .worker()
             .send(Job {
                 view,
                 row,
@@ -178,7 +177,7 @@ impl Links {
             })
             .is_err()
         {
-            self.queued.fetch_sub(1, Ordering::Relaxed);
+            self.queued.give_back();
             return false;
         }
         true
@@ -215,7 +214,7 @@ impl Links {
 }
 
 /// Resolve until the channel closes, which is when the application is gone.
-fn work(jobs: Receiver<Job>, replies: Sender<Ready>, queued: Arc<AtomicUsize>, ctx: egui::Context) {
+fn work(jobs: Receiver<Job>, replies: Sender<Ready>, queued: Capped, ctx: egui::Context) {
     apartment();
     // Any read can touch an empty removable drive, which would otherwise raise "Please insert
     // a disk into drive E:" from inside the syscall.
@@ -226,7 +225,7 @@ fn work(jobs: Receiver<Job>, replies: Sender<Ready>, queued: Arc<AtomicUsize>, c
             Kind::Shortcut => shortcut_target(&job.path),
             Kind::Reparse => reparse_target(&job.path),
         };
-        queued.fetch_sub(1, Ordering::Relaxed);
+        queued.give_back();
         if replies
             .send(Ready {
                 view: job.view,
@@ -312,14 +311,7 @@ fn read_shortcut(_path: &Path) -> Option<Shortcut> {
 /// Where a symlink or a junction leads.
 fn reparse_target(path: &Path) -> Option<Target> {
     let target = std::fs::read_link(path).ok()?;
-    let text = target.to_string_lossy();
-    // A junction stores `\\?\C:\…`. The prefix is there to get the path past the Win32 parser
-    // and means nothing to a person reading a row.
-    let shown = text
-        .strip_prefix(r"\\?\")
-        .unwrap_or(&text)
-        .trim_end_matches('\\')
-        .to_owned();
+    let shown = shown(&target.to_string_lossy());
     // `IO_REPARSE_TAG_MOUNT_POINT` is a junction, unless what it names is a volume rather than a
     // folder — which is a mount point, the same tag put to a different use.
     const MOUNT_POINT: u32 = 0xA000_0003;
@@ -338,6 +330,14 @@ fn reparse_target(path: &Path) -> Option<Target> {
         arguments: String::new(),
         what,
     })
+}
+
+/// A link's target as a row shows it.
+///
+/// A junction stores `\\?\C:\…`. The prefix is there to get the path past the Win32 parser and
+/// means nothing to a person reading a row.
+fn shown(raw: &str) -> String {
+    raw.strip_prefix(r"\\?\").unwrap_or(raw).trim_end_matches('\\').to_owned()
 }
 
 /// Write a `.lnk` at `at` pointing at `target`, with `arguments` as its command line — `""` for
@@ -517,17 +517,10 @@ pub fn may_symlink() -> bool {
 fn keeps_links(into: &Path) -> bool {
     #[cfg(windows)]
     {
-        use std::collections::HashMap;
-        use std::sync::Mutex;
-        let Some(root) = into.ancestors().last().filter(|r| !r.as_os_str().is_empty()) else {
-            return false;
-        };
-        static KNOWN: Mutex<Option<HashMap<PathBuf, bool>>> = Mutex::new(None);
-        let mut known = KNOWN.lock().unwrap_or_else(|e| e.into_inner());
-        let known = known.get_or_insert_with(HashMap::new);
-        *known
-            .entry(root.to_owned())
-            .or_insert_with(|| matches!(win::file_system(root).as_deref(), Some("NTFS" | "ReFS")))
+        static KNOWN: crate::shell::PerRoot = std::sync::Mutex::new(None);
+        crate::shell::per_root(into, &KNOWN, |root| {
+            matches!(win::file_system(root).as_deref(), Some("NTFS" | "ReFS"))
+        })
     }
     #[cfg(not(windows))]
     {
@@ -614,13 +607,8 @@ fn free_link_name(into: &Path, name: &Path) -> Option<PathBuf> {
     if !taken(&first) {
         return Some(first);
     }
-    let stem = name.file_stem()?.to_string_lossy();
-    let ext = name
-        .extension()
-        .map(|ext| format!(".{}", ext.to_string_lossy()))
-        .unwrap_or_default();
-    (2..=TRIES)
-        .map(|n| into.join(format!("{stem} ({n}){ext}")))
+    crate::shell::numbered(into, name.as_os_str())
+        .take(TRIES - 1)
         .find(|candidate| !taken(candidate))
 }
 
@@ -635,8 +623,8 @@ fn free_name(into: &Path, name: &str) -> Option<PathBuf> {
     }
     // From two, because the first one has no number: the shell's own `one.txt.lnk` is followed by
     // `one.txt (2).lnk` and never by `one.txt (1).lnk`.
-    (2..=TRIES)
-        .map(|n| into.join(format!("{name} ({n}).lnk")))
+    crate::shell::numbered(into, std::ffi::OsStr::new(&format!("{name}.lnk")))
+        .take(TRIES - 1)
         .find(|candidate| !candidate.exists())
 }
 
@@ -856,17 +844,10 @@ mod tests {
     fn a_reparse_target_is_shown_the_way_a_person_writes_it() {
         // `read_link` is what produces these; this checks the tidying done to its answer, which
         // is the part that is this program's own.
-        let tidy = |raw: &str| {
-            let text = std::borrow::Cow::Borrowed(raw);
-            text.strip_prefix(r"\\?\")
-                .unwrap_or(&text)
-                .trim_end_matches('\\')
-                .to_owned()
-        };
-        assert_eq!(tidy(r"\\?\C:\ProgramData"), r"C:\ProgramData");
-        assert_eq!(tidy(r"C:\ProgramData"), r"C:\ProgramData");
-        assert_eq!(tidy(r"\\?\C:\Users\"), r"C:\Users");
-        assert_eq!(tidy(r"\\server\share"), r"\\server\share");
+        assert_eq!(shown(r"\\?\C:\ProgramData"), r"C:\ProgramData");
+        assert_eq!(shown(r"C:\ProgramData"), r"C:\ProgramData");
+        assert_eq!(shown(r"\\?\C:\Users\"), r"C:\Users");
+        assert_eq!(shown(r"\\server\share"), r"\\server\share");
     }
 }
 

@@ -37,11 +37,7 @@ impl App {
         // payload goes to the one panel waiting for that token and nowhere else: it is a decoded
         // picture or a walked graph, so there is one of it and no copy to hand round.
         for loaded in self.previews.drain().collect::<Vec<_>>() {
-            let wanted = self
-                .panes
-                .iter_mut()
-                .flat_map(|pane| pane.tabs.iter_mut())
-                .find(|tab| tab.preview.wants(loaded.token));
+            let wanted = tabs_mut(&mut self.panes).find(|tab| tab.preview.wants(loaded.token));
             if let Some(tab) = wanted {
                 tab.preview.arrived(loaded.token, loaded.payload, ctx);
             }
@@ -228,9 +224,7 @@ impl App {
         // In display order, so the left-hand or upper tile is the upper row — the panel reads the way
         // the listing above it does rather than the way the clicks happened to land.
         let picked: Vec<usize> = if (2..=crate::ui::preview::MOST).contains(&tab.selected_count) {
-            (0..tab.order.len())
-                .filter(|&row| tab.is_selected(row))
-                .collect()
+            tab.selected_rows()
         } else {
             Vec::new()
         };
@@ -287,7 +281,7 @@ impl App {
         if tab.selected_count != 2 {
             return false;
         }
-        let rows: Vec<usize> = (0..tab.order.len()).filter(|&row| tab.is_selected(row)).collect();
+        let rows = tab.selected_rows();
         let [a, b] = rows[..] else {
             return false;
         };
@@ -356,11 +350,9 @@ impl App {
     ///
     /// For `--shot --preview`, which would otherwise photograph the word `Reading…`: a decode or a
     /// dependency walk takes tens of milliseconds, which is several frames.
+    #[cfg(any(test, feature = "devtools"))]
     pub fn preview_pending(&self) -> bool {
-        self.panes
-            .iter()
-            .flat_map(|pane| pane.tabs.iter())
-            .any(|tab| tab.preview.busy())
+        self.tabs().any(|tab| tab.preview.busy())
     }
 
     /// Where the drag over the window is, in points — `None` when there is no drag.
@@ -388,7 +380,7 @@ impl App {
             return None;
         }
         let at = self.hover_at(scale)?;
-        let pane = self.panes.iter().find(|p| p.id == pane)?;
+        let pane = self.pane_ref(pane)?;
         if pane.tab().path.as_os_str().is_empty() {
             return None;
         }
@@ -444,7 +436,7 @@ impl App {
         };
 
         // What it is carrying, above the pointer; what letting go would do, below it.
-        if let Some((icons, count)) = self.ghost_icons(ui.ctx()) {
+        if let Some((icons, count)) = self.ghost_icons() {
             crate::ui::drag_ghost(ui.painter(), t, at, screen, &icons, count);
         }
         // The ghost stays even with nothing to promise — the files are still in the air over a
@@ -477,10 +469,7 @@ impl App {
     /// per-*type* ones the listing draws for most of its rows — see [`super::Dragging::ghost`] for
     /// why the type and not the item — out of the same atlas, so the ghost costs one textured quad
     /// an icon and no new lookup.
-    fn ghost_icons(
-        &mut self,
-        ctx: &egui::Context,
-    ) -> Option<(Vec<(egui::TextureId, Rect)>, usize)> {
+    fn ghost_icons(&mut self) -> Option<(Vec<(egui::TextureId, Rect)>, usize)> {
         let dragging = self.file_drag.as_ref()?;
         let count = dragging.items.len();
         if count == 0 {
@@ -494,7 +483,7 @@ impl App {
             .iter()
             .filter_map(|(ext, is_dir)| {
                 let icon = self.icons.kind(ext, *is_dir)?;
-                self.icons.uv(ctx, icon)
+                self.icons.uv(icon)
             })
             .collect();
         (!icons.is_empty()).then_some((icons, count))

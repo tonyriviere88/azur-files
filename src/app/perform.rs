@@ -97,8 +97,7 @@ impl App {
             Action::NewTab { pane } => {
                 if let Some(p) = self.pane_mut(pane) {
                     let tab = p.tab().duplicate();
-                    p.tabs.push(tab);
-                    p.show_tab(p.tabs.len() - 1);
+                    p.push_tab(tab);
                 }
                 self.focused = pane;
                 self.config_dirty = true;
@@ -115,7 +114,7 @@ impl App {
             Action::SetDiffShow { pane, show } => self.set_diff_show(pane, show),
             Action::SplitFocused { side } => {
                 let pane = self.focused;
-                if let Some(path) = self.pane_mut(pane).map(|p| p.tab().path.clone()) {
+                if let Some(path) = self.path_of(pane) {
                     self.perform(ctx, Action::OpenInSplit { pane, path, side });
                 }
             }
@@ -125,9 +124,7 @@ impl App {
                 // pane if focus is stale. Popping first and then finding nowhere to open it
                 // would spend the entry and give nothing back.
                 let Some(pane) = self
-                    .panes
-                    .iter()
-                    .find(|p| p.id == self.focused)
+                    .focused_pane()
                     .or_else(|| self.panes.first())
                     .map(|p| p.id)
                 else {
@@ -141,7 +138,7 @@ impl App {
 
             Action::BeginTabDrag { pane, tab, grab_dx } => {
                 let title = self
-                    .pane_mut(pane)
+                    .pane_ref(pane)
                     .and_then(|p| p.tabs.get(tab))
                     .map(|t| t.title.clone());
                 if let Some(title) = title {
@@ -202,8 +199,7 @@ impl App {
             Action::NavigateNewTab { pane, path } => {
                 let (hidden, sort) = (self.show_hidden, self.sort);
                 if let Some(p) = self.pane_mut(pane) {
-                    p.tabs.push(Tab::showing(path, hidden, sort).visited());
-                    p.show_tab(p.tabs.len() - 1);
+                    p.push_tab(Tab::showing(path, hidden, sort).visited());
                 }
                 self.focused = pane;
                 self.config_dirty = true;
@@ -234,8 +230,7 @@ impl App {
                 // so this costs nothing here.
                 self.volumes.refresh(ctx);
                 self.wsl = crate::fs::wsl::distros();
-                let path = self.pane_mut(pane).map(|p| p.tab().path.clone());
-                if let Some(path) = path {
+                if let Some(path) = self.path_of(pane) {
                     // **F5 on a refused share is a request to be asked again**, possibly as
                     // somebody else. Without this the credential dialog is raised once per path per
                     // session and a cancel is permanent — see [`super::connect`], where the
@@ -319,10 +314,8 @@ impl App {
             Action::ToggleHidden => {
                 let on = !self.show_hidden;
                 self.show_hidden = on;
-                for p in &mut self.panes {
-                    for tab in p.tabs.iter_mut() {
-                        tab.set_show_hidden(on);
-                    }
+                for tab in super::tabs_mut(&mut self.panes) {
+                    tab.set_show_hidden(on);
                 }
                 self.config_dirty = true;
             }
@@ -358,8 +351,7 @@ impl App {
                     if on {
                         tab.flatten_keeping_listing(mode, regroup);
                         if tab.flat {
-                            tab.awaiting = Some(super::ask_for(tab, &mut self.loader));
-                            tab.asked_at = Some(now);
+                            super::ask_now(tab, &mut self.loader, now);
                         }
                     } else {
                         tab.toggle_flat(mode, regroup);
@@ -381,10 +373,8 @@ impl App {
             // it takes a filter's walk away, and ticking it starts one, without a keystroke.
             Action::SetSearchSubfolders(on) => {
                 self.search_subfolders = on;
-                for p in &mut self.panes {
-                    for tab in p.tabs.iter_mut() {
-                        tab.flat_asked.clear();
-                    }
+                for tab in super::tabs_mut(&mut self.panes) {
+                    tab.flat_asked.clear();
                 }
                 self.config_dirty = true;
             }
@@ -421,12 +411,7 @@ impl App {
                     tab.select_only(0);
                 }
                 let Some(at) = tab.cursor else { return };
-                let Some(path) = tab.target_at(at) else { return };
-                let action = if tab.is_dir_at(at) {
-                    Action::Navigate { pane, path }
-                } else {
-                    Action::Open(path)
-                };
+                let Some(action) = Action::open_row(pane, tab, at) else { return };
                 self.perform(ctx, action);
             }
             // **`Ctrl+Enter` in the filter box turns the matches into a selection.** Nothing matched
@@ -509,16 +494,13 @@ impl App {
                 if tab.cursor.is_some() {
                     tab.scroll_to_cursor = true;
                 } else {
-                    tab.scroll_y = 0.0;
-                    tab.scroll_to = Some(0.0);
+                    tab.scroll_to_top();
                 }
             }
             Action::SetFlatMode(mode) => {
                 self.flat_mode = mode;
-                for p in &mut self.panes {
-                    for tab in p.tabs.iter_mut() {
-                        tab.set_flat_mode(mode);
-                    }
+                for tab in super::tabs_mut(&mut self.panes) {
+                    tab.set_flat_mode(mode);
                 }
                 self.config_dirty = true;
             }
@@ -527,10 +509,8 @@ impl App {
             // already produced. See [`crate::fs::sort::build_tree_order`].
             Action::SetRegroup(on) => {
                 self.regroup = on;
-                for p in &mut self.panes {
-                    for tab in p.tabs.iter_mut() {
-                        tab.set_regroup(on);
-                    }
+                for tab in super::tabs_mut(&mut self.panes) {
+                    tab.set_regroup(on);
                 }
                 self.config_dirty = true;
             }
@@ -628,8 +608,7 @@ impl App {
                 // Where a changed filter goes, and for the same reason — row 200 of the folder is not
                 // row 200 of what the lens left, and in the tiles it is not even the same arithmetic.
                 // See [`Action::SetView`], which is the other half of this pair.
-                tab.scroll_y = 0.0;
-                tab.scroll_to = Some(0.0);
+                tab.scroll_to_top();
             }
             Action::ToggleCollapsed { pane, position } => {
                 let mut followed = None;
@@ -761,11 +740,11 @@ impl App {
             Action::PasteLinks { into, kind } => self.paste_links_into(into, kind, ctx),
             Action::Delete { pane, permanent } => {
                 let items = self
-                    .pane_mut(pane)
+                    .pane_ref(pane)
                     .map(|p| p.tab().selection_paths())
                     .unwrap_or_default();
                 if items.is_empty() {
-                    self.notice = Some("Nothing selected".to_owned());
+                    self.report("Nothing selected".to_owned());
                     return;
                 }
                 // **In the Recycle Bin, Delete is the bin's own Delete**, which is permanent — with
@@ -812,7 +791,7 @@ impl App {
                             ctx,
                         );
                     }
-                    None => self.notice = Some(self.history.why_not(redo).to_owned()),
+                    None => self.report(self.history.why_not(redo).to_owned()),
                 }
             }
             Action::BeginRename(pane) => {
@@ -821,7 +800,7 @@ impl App {
                 // that matters — but letting somebody type a new name and press Enter to be told
                 // "no" is a worse way to say it than not offering the box.
                 let inside = self
-                    .pane_mut(pane)
+                    .pane_ref(pane)
                     .map(|p| crate::archive::is_virtual_location(&p.tab().path))
                     .unwrap_or(false);
                 if inside {
@@ -832,7 +811,7 @@ impl App {
                 // `$R…` file under it would break the pair the bin restores from. See
                 // [`crate::fs::recycle`].
                 let binned = self
-                    .pane_mut(pane)
+                    .pane_ref(pane)
                     .is_some_and(|p| fs::recycle::is_bin(&p.tab().path));
                 if binned {
                     self.report(fs::recycle::RESTORE_FIRST.to_owned());
@@ -928,7 +907,7 @@ impl App {
                 // the separator is the one that matters, because a name containing one is a path
                 // and asks for something other than a rename.
                 if let Some(why) = crate::fs::why_not_a_name(&name) {
-                    self.notice = Some(why);
+                    self.report(why);
                     return;
                 }
                 let item = dir.target(entry);
@@ -969,13 +948,11 @@ impl App {
                 // pane — the same file can be on show in two. The others only draw them, and draw
                 // them from the store next frame. The column is re-fitted where it is on show, so a
                 // longer set is not elided by a width chosen before it existed.
-                for pane in &mut self.panes {
-                    for tab in &mut pane.tabs {
-                        if tab.dir.as_ref().is_some_and(|dir| dir.volume == Some(key.volume)) {
-                            tab.widths_measured = false;
-                            if tab.sort_by == crate::fs::Column::Keywords {
-                                tab.rebuild_order();
-                            }
+                for tab in super::tabs_mut(&mut self.panes) {
+                    if tab.dir.as_ref().is_some_and(|dir| dir.volume == Some(key.volume)) {
+                        tab.widths_measured = false;
+                        if tab.sort_by == crate::fs::Column::Keywords {
+                            tab.rebuild_order();
                         }
                     }
                 }
@@ -987,14 +964,10 @@ impl App {
             }
             Action::NewFolder(pane) => {
                 let owner = self.owner;
-                let Some(parent) = self.pane_mut(pane).map(|p| p.tab().path.clone()) else {
+                let Some(parent) = self.path_of(pane) else {
                     return;
                 };
-                if fs::is_synthetic(&parent) {
-                    self.notice = Some(format!(
-                        "{} is not a folder to create in",
-                        fs::display_name(&parent)
-                    ));
+                if self.refuse_synthetic(&parent, "to create in") {
                     return;
                 }
                 // The shell picks a free name from this one, so "New folder (2)" and the
@@ -1390,12 +1363,6 @@ impl App {
     }
 }
 
-/// The nearest path the operating system will accept: the path itself, or the **archive** holding it.
-///
-/// For the two actions that are questions for the shell rather than for this program — Reveal and
-/// Open terminal. Neither can be answered about a path inside an archive, because there is no such
-/// file and no such directory, and both have a sensible true answer one level out: the archive is a
-/// real file in a real folder. See the arms that use it.
 impl App {
     /// Run one of the Recycle Bin's own verbs on items it holds, the way a menu entry would be run:
     /// on the modal thread, against the menu the bin gives for them. See
@@ -1412,6 +1379,12 @@ impl App {
     }
 }
 
+/// The nearest path the operating system will accept: the path itself, or the **archive** holding it.
+///
+/// For the two actions that are questions for the shell rather than for this program — Reveal and
+/// Open terminal. Neither can be answered about a path inside an archive, because there is no such
+/// file and no such directory, and both have a sensible true answer one level out: the archive is a
+/// real file in a real folder. See the arms that use it.
 fn nearest_real(path: &std::path::Path) -> std::path::PathBuf {
     // An item in the bin is revealed in the bin: `explorer /select,` on the `$R…` file would open
     // the raw `$Recycle.Bin` folder, mangled names and all.

@@ -36,11 +36,11 @@
 //! per row and nothing is kept per file. See [`names_of`].
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::Sender;
+use std::sync::Mutex;
 
 use crate::fs::Dir;
+use crate::service::Service;
 
 #[cfg(windows)]
 #[path = "windows/hardlinks.rs"]
@@ -101,37 +101,18 @@ pub struct Answer {
 }
 
 /// The counting service. One thread, started the first time a listing on NTFS lands.
-pub struct HardLinks {
-    ctx: egui::Context,
-    jobs: Option<Sender<Request>>,
-    tx: Sender<Answer>,
-    answers: Receiver<Answer>,
-    /// The views on screen. A request for any other is skipped, and one being worked through stops.
-    live: Arc<Mutex<Vec<u64>>>,
-    /// Requests sent and not yet finished with, for [`HardLinks::pending`].
-    queued: Arc<AtomicUsize>,
-}
+pub struct HardLinks(Service<Request, Answer>);
 
 impl HardLinks {
     pub fn new(ctx: &egui::Context) -> Self {
-        let (tx, answers) = channel();
-        Self {
-            ctx: ctx.clone(),
-            jobs: None,
-            tx,
-            answers,
-            live: Arc::new(Mutex::new(Vec::new())),
-            queued: Arc::new(AtomicUsize::new(0)),
-        }
+        // No apartment: a count is a file-system call, and nothing on this thread is COM.
+        Self(Service::new(ctx, "hard-links", false, |request, wanted, tx, _| {
+            count(request, wanted, tx)
+        }))
     }
 
     /// Count the names of every file in a listing, for one view of it.
     pub fn request(&mut self, view: u64, dir: &Dir) {
-        if let Ok(mut live) = self.live.lock() {
-            if !live.contains(&view) {
-                live.push(view);
-            }
-        }
         let rows = (0..dir.len())
             .filter(|&i| !dir.entries[i].is_dir() && !dir.entries[i].is_link())
             .take(LIMIT)
@@ -142,52 +123,23 @@ impl HardLinks {
             dir: dir.path.clone(),
             rows,
         };
-        self.queued.fetch_add(1, Ordering::Relaxed);
-        if self.worker().send(request).is_err() {
-            self.queued.fetch_sub(1, Ordering::Relaxed);
-        }
+        self.0.request(view, request);
     }
 
     /// Which views are on screen.
     pub fn only(&self, views: &[u64]) {
-        if let Ok(mut live) = self.live.lock() {
-            if live.as_slice() != views {
-                live.clear();
-                live.extend_from_slice(views);
-            }
-        }
+        self.0.only(views);
     }
 
     /// Every answer that has arrived since the last call.
     pub fn drain(&self) -> impl Iterator<Item = Answer> + '_ {
-        self.answers.try_iter()
+        self.0.drain()
     }
 
     /// Whether a capture should keep waiting: something asked and not yet finished with.
+    #[cfg(any(test, feature = "devtools"))]
     pub fn pending(&self) -> bool {
-        self.queued.load(Ordering::Relaxed) > 0
-    }
-
-    fn worker(&mut self) -> &Sender<Request> {
-        let tx = self.tx.clone();
-        let ctx = self.ctx.clone();
-        let live = self.live.clone();
-        let queued = self.queued.clone();
-        self.jobs.get_or_insert_with(|| {
-            let (send, receive) = channel::<Request>();
-            let _ = std::thread::Builder::new()
-                .name("hard-links".to_owned())
-                .spawn(move || {
-                    crate::fs::scan::silence_device_dialogs();
-                    let wanted = |view: u64| live.lock().map(|l| l.contains(&view)).unwrap_or(true);
-                    while let Ok(request) = receive.recv() {
-                        count(&request, &wanted, &tx);
-                        queued.fetch_sub(1, Ordering::Relaxed);
-                        ctx.request_repaint();
-                    }
-                });
-            send
-        })
+        self.0.pending()
     }
 }
 

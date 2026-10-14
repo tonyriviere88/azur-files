@@ -401,25 +401,11 @@ fn a_branch_switched_outside_reaches_the_status_line() {
     crate::sandbox::remove(&root);
     std::fs::create_dir_all(&root).expect("sandbox");
 
-    let run = |args: &[&str]| {
-        let mut command = std::process::Command::new("git");
-        command.args(args).current_dir(&root);
-        crate::shell::no_window(&mut command);
-        command
-            .output()
-            .map(|out| out.status.success())
-            .unwrap_or(false)
-    };
-    // No git on this machine is not a test failure; there is nothing to test.
-    if !run(&["init", "--quiet"]) {
+    let run = |args: &[&str]| crate::git::git_in(&root, args);
+    if !crate::git::fresh_repo(&root) {
         eprintln!("no git: skipping");
         return;
     }
-    // A repository of this program's own making, so nothing here depends on the developer's name,
-    // editor or signing key.
-    assert!(run(&["config", "user.email", "test@example.invalid"]));
-    assert!(run(&["config", "user.name", "Test"]));
-    assert!(run(&["config", "commit.gpgsign", "false"]));
     std::fs::write(root.join("one.txt"), b"one
 ").expect("a file");
     assert!(run(&["add", "-A"]));

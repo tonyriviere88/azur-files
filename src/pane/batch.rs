@@ -61,7 +61,7 @@ impl Mode {
 
     /// Read back what [`Self::as_str`] wrote. `None` for anything else, which leaves the default.
     pub fn parse(text: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|mode| mode.as_str() == text)
+        Self::ALL.into_iter().find(|mode| mode.as_str().eq_ignore_ascii_case(text))
     }
 }
 

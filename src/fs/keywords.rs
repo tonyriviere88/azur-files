@@ -257,20 +257,7 @@ fn save(store: &Store) {
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let text = store.to_text();
-    if let Ok(existing) = std::fs::read(&path) {
-        if !existing.is_empty() && existing != text.as_bytes() {
-            let _ = std::fs::write(path.with_extension("tsv.bak"), &existing);
-        }
-    }
-    let staged = path.with_extension("tsv.new");
-    if std::fs::write(&staged, &text).is_ok() {
-        if std::fs::rename(&staged, &path).is_ok() {
-            return;
-        }
-        let _ = std::fs::remove_file(&staged);
-    }
-    let _ = std::fs::write(path, text);
+    crate::config::write_whole(&path, &store.to_text(), true);
 }
 
 #[cfg(test)]

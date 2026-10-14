@@ -18,12 +18,12 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering as Atomic};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 
 use crate::fs::drives::{self, Drive};
 use crate::fs::{scan, Dir};
+use crate::pool::{self, WorkQueue};
 
 /// A finished scan, tagged with the request it answers.
 pub struct Loaded {
@@ -48,12 +48,10 @@ struct Request {
 
 /// The work queue: a deque so navigation can jump the prefetches already in it.
 struct Queue {
-    pending: Mutex<VecDeque<Request>>,
+    pending: WorkQueue<Request>,
     /// Paths already queued or being scanned, so a prefetch storm — one per
     /// arrow-key press — does not enqueue the same folder forty times.
     claimed: Mutex<HashSet<PathBuf>>,
-    wake: Condvar,
-    shutdown: AtomicBool,
 }
 
 /// Recently read directories, newest use last.
@@ -102,8 +100,7 @@ impl Cache {
     fn get(&mut self, path: &Path) -> Option<Arc<Dir>> {
         let dir = self.dirs.get(path)?.clone();
         // Touch: move to the back of the eviction order.
-        if let Some(at) = self.order.iter().position(|p| p == path) {
-            let owned = self.order.remove(at).expect("index came from this deque");
+        if let Some(owned) = self.unlist(path) {
             self.order.push_back(owned);
         }
         self.used.insert(path.to_path_buf(), std::time::Instant::now());
@@ -132,9 +129,7 @@ impl Cache {
         let path = dir.path.clone();
         if let Some(old) = self.dirs.insert(path.clone(), dir.clone()) {
             self.entries -= old.len();
-            if let Some(at) = self.order.iter().position(|p| *p == path) {
-                self.order.remove(at);
-            }
+            self.unlist(&path);
         }
         self.entries += dir.len();
         self.used.insert(path.clone(), std::time::Instant::now());
@@ -157,10 +152,14 @@ impl Cache {
         if let Some(old) = self.dirs.remove(path) {
             self.entries -= old.len();
         }
-        if let Some(at) = self.order.iter().position(|p| p == path) {
-            self.order.remove(at);
-        }
+        self.unlist(path);
         self.used.remove(path);
+    }
+
+    /// Take `path` out of the eviction order, handing back the copy it held.
+    fn unlist(&mut self, path: &Path) -> Option<PathBuf> {
+        let at = self.order.iter().position(|p| p == path)?;
+        self.order.remove(at)
     }
 }
 
@@ -183,10 +182,8 @@ impl Loader {
     /// lands, which is what lets egui stay idle in between.
     pub fn new(ctx: &egui::Context) -> Self {
         let queue = Arc::new(Queue {
-            pending: Mutex::new(VecDeque::new()),
+            pending: WorkQueue::new(),
             claimed: Mutex::new(HashSet::new()),
-            wake: Condvar::new(),
-            shutdown: AtomicBool::new(false),
         });
         let cache = Arc::new(Mutex::new(Cache {
             dirs: HashMap::new(),
@@ -204,18 +201,13 @@ impl Loader {
             .map(|n| n.get().clamp(2, 4))
             .unwrap_or(2);
 
-        let workers = (0..count)
-            .map(|i| {
-                let queue = queue.clone();
-                let cache = cache.clone();
-                let tx = tx.clone();
-                let ctx = ctx.clone();
-                std::thread::Builder::new()
-                    .name(format!("scan-{i}"))
-                    .spawn(move || worker(queue, cache, tx, ctx))
-                    .expect("the OS refused a thread")
-            })
-            .collect();
+        let workers = pool::spawn("scan", count, || {
+            let queue = queue.clone();
+            let cache = cache.clone();
+            let tx = tx.clone();
+            let ctx = ctx.clone();
+            move || worker(queue, cache, tx, ctx)
+        });
 
         Self {
             queue,
@@ -239,6 +231,7 @@ impl Loader {
     /// budget, or something that never lets go — and they are told apart by watching this
     /// against the process's own figure. A cache sitting at its cap while the process keeps
     /// climbing is not the cache.
+    #[cfg(any(test, feature = "devtools"))]
     pub fn held(&self) -> (usize, usize) {
         self.cache
             .lock()
@@ -248,8 +241,7 @@ impl Loader {
 
     /// Ask for a listing. The returned token identifies the answer.
     pub fn request(&mut self, path: &Path) -> u64 {
-        let token = self.next_token;
-        self.next_token += 1;
+        let token = self.next_token();
         self.enqueue(Request {
             token,
             path: path.to_path_buf(),
@@ -282,8 +274,7 @@ impl Loader {
         path: &Path,
         counted: Arc<std::sync::atomic::AtomicUsize>,
     ) -> u64 {
-        let token = self.next_token;
-        self.next_token += 1;
+        let token = self.next_token();
         let path = path.to_path_buf();
         let answers = self.answers.clone();
         let ctx = self.ctx.clone();
@@ -317,8 +308,7 @@ impl Loader {
         if self.cached(path).is_some() {
             return;
         }
-        let token = self.next_token;
-        self.next_token += 1;
+        let token = self.next_token();
         self.enqueue(Request {
             token,
             path: path.to_path_buf(),
@@ -347,6 +337,13 @@ impl Loader {
         }
     }
 
+    /// A token no request has had before, for the answer to be told apart by.
+    fn next_token(&mut self) -> u64 {
+        let token = self.next_token;
+        self.next_token += 1;
+        token
+    }
+
     fn enqueue(&self, request: Request) {
         {
             let Ok(mut claimed) = self.queue.claimed.lock() else {
@@ -360,36 +357,25 @@ impl Loader {
                 return;
             }
         }
-        if let Ok(mut pending) = self.queue.pending.lock() {
-            match request.priority {
-                Priority::Navigation => pending.push_front(request),
-                Priority::Prefetch => {
-                    // Keep the backlog from growing without bound when the user
-                    // holds an arrow key down: the oldest guesses are the least
-                    // likely to still be right.
-                    while pending.len() > 32 {
-                        pending.pop_back();
-                    }
-                    pending.push_back(request);
+        self.queue.pending.push_one(|pending| match request.priority {
+            Priority::Navigation => pending.push_front(request),
+            Priority::Prefetch => {
+                // Keep the backlog from growing without bound when the user
+                // holds an arrow key down: the oldest guesses are the least
+                // likely to still be right.
+                while pending.len() > 32 {
+                    pending.pop_back();
                 }
+                pending.push_back(request);
             }
-        }
-        self.queue.wake.notify_one();
+        });
     }
 }
 
 impl Drop for Loader {
     fn drop(&mut self) {
-        // The flag is set *while holding the queue lock*, which is what makes the
-        // handshake sound. A worker checks `shutdown` with the lock held and then
-        // calls `wait`, which releases it; setting the flag without the lock leaves a
-        // window where the notify lands before the worker is waiting for it, and the
-        // worker then sleeps for ever on a queue nothing will ever push to.
-        {
-            let _held = self.queue.pending.lock();
-            self.queue.shutdown.store(true, Atomic::Release);
-        }
-        self.queue.wake.notify_all();
+        // See [`WorkQueue::close`] for why the flag is set under the queue's lock.
+        self.queue.pending.close();
         // **Detached, not joined**, and that is the whole of this function's cost.
         //
         // A worker parked in a slow call on a dead network share cannot be interrupted: the flag
@@ -806,25 +792,7 @@ fn worker(
     // Per-thread, and the reason an empty card reader does not open a modal.
     scan::silence_device_dialogs();
 
-    loop {
-        let request = {
-            let Ok(mut pending) = queue.pending.lock() else {
-                return;
-            };
-            loop {
-                if queue.shutdown.load(Atomic::Acquire) {
-                    return;
-                }
-                if let Some(request) = pending.pop_front() {
-                    break request;
-                }
-                let Ok(next) = queue.wake.wait(pending) else {
-                    return;
-                };
-                pending = next;
-            }
-        };
-
+    while let Some(request) = queue.pending.next() {
         // Someone may have read it between the request and now.
         let dir = match cache.lock().ok().and_then(|mut c| c.get(&request.path)) {
             Some(hit) => hit,

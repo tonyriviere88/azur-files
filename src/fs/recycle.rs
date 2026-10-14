@@ -108,10 +108,8 @@ fn is_alias(path: &Path) -> bool {
     let text = text.trim_end_matches(['\\', '/']);
     text.eq_ignore_ascii_case(LOCATION)
         || text.eq_ignore_ascii_case(CLSID)
-        || text
-            .get(..6)
-            .is_some_and(|scheme| scheme.eq_ignore_ascii_case("shell:"))
-            && text[6..].eq_ignore_ascii_case(CLSID)
+        || super::strip_prefix_ignore_ascii_case(text, "shell:")
+            .is_some_and(|rest| rest.eq_ignore_ascii_case(CLSID))
 }
 
 /// `X:\$Recycle.Bin`, or one user's folder directly inside it.
@@ -180,16 +178,15 @@ pub struct Index {
 /// version 1 could not hold a path over `MAX_PATH`. Anything shorter than it claims, or any other
 /// version, is `None` — a file the bin itself would not show either.
 pub fn parse_index(bytes: &[u8]) -> Option<Index> {
-    let u64_at = |at: usize| -> Option<u64> {
-        Some(u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?))
-    };
-    let version = u64_at(0)?;
-    let size = u64_at(8)?;
-    let deleted = u64_at(16)?;
+    use crate::bytes::{u32_at, u64_at};
+
+    let version = u64_at(bytes, 0)?;
+    let size = u64_at(bytes, 8)?;
+    let deleted = u64_at(bytes, 16)?;
     let units: &[u8] = match version {
         1 => bytes.get(24..24 + 520)?,
         2 => {
-            let count = u32::from_le_bytes(bytes.get(24..28)?.try_into().ok()?) as usize;
+            let count = u32_at(bytes, 24)? as usize;
             bytes.get(28..28 + count.checked_mul(2)?)?
         }
         _ => return None,

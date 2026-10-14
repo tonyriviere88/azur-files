@@ -37,7 +37,6 @@
 
 use super::*;
 
-use crate::pane::Pane;
 use crate::ui::palette::{Outcome, Row};
 
 /// How many recently picked commands are remembered, and listed first when nothing is typed.
@@ -380,11 +379,6 @@ fn danger(heading: &'static str, label: impl Into<String>) -> Row {
 }
 
 impl App {
-    /// The pane the keyboard is in, which is the one every command acts on.
-    fn focused_pane(&self) -> Option<&Pane> {
-        self.panes.iter().find(|p| p.id == self.focused)
-    }
-
     /// Put the palette up over the window, built from what is true now — or take it down.
     pub(super) fn toggle_palette(&mut self) {
         if self.palette.take().is_some() {
@@ -409,6 +403,7 @@ impl App {
     }
 
     /// Put the palette up with `text` already typed — `--palette=<text>`, for a capture.
+    #[cfg(any(test, feature = "devtools"))]
     pub fn open_palette_with(&mut self, text: &str) {
         if self.palette.is_none() {
             self.toggle_palette();
@@ -651,15 +646,10 @@ impl App {
         if tab.selected_count != 2 || fs::is_synthetic(&tab.path) {
             return None;
         }
-        let dir = tab.dir.as_ref()?;
-        let mut folders = tab
-            .selected
-            .iter()
-            .enumerate()
-            .filter(|&(entry, &on)| on && dir.entries.get(entry).is_some_and(|e| e.is_dir()))
-            .map(|(entry, _)| dir.target(entry));
-        let (left, right) = (folders.next()?, folders.next()?);
-        folders.next().is_none().then_some((left, right))
+        match <[PathBuf; 2]>::try_from(tab.selected_folders()) {
+            Ok([left, right]) => Some((left, right)),
+            Err(_) => None,
+        }
     }
 
     /// Narrow the catalogue to what the field says, when what it says has changed.
@@ -739,10 +729,7 @@ impl App {
             }
         }
 
-        let here = self
-            .focused_pane()
-            .map(|p| p.tab().path.clone())
-            .unwrap_or_default();
+        let here = self.path_of(self.focused).unwrap_or_default();
         let recalled = self.visits.recall(
             text,
             self.bookmarks.paths(),
@@ -898,8 +885,7 @@ impl App {
 
             Command::Open => match under_cursor? {
                 (path, true) if aside => Action::NavigateNewTab { pane, path },
-                (path, true) => Action::Navigate { pane, path },
-                (path, false) => Action::Open(path),
+                _ => Action::open_row(pane, tab, tab.cursor?)?,
             },
             Command::OpenNewTab => Action::NavigateNewTab {
                 pane,
@@ -919,13 +905,7 @@ impl App {
             Command::Copy => Action::Copy(pane),
             Command::Paste => Action::Paste(pane),
             Command::PasteLinks(kind) => Action::PasteLinks { into: here, kind },
-            Command::CopyPaths => {
-                let mut paths = tab.selection_paths();
-                if paths.is_empty() {
-                    paths.push(here);
-                }
-                Action::CopyPaths(paths)
-            }
+            Command::CopyPaths => Action::CopyPaths(tab.selection_or_here()),
             Command::Rename => Action::BeginRename(pane),
             Command::Batch(mode) => Action::BeginBatch { pane, mode },
             Command::NewFolder => Action::NewFolder(pane),

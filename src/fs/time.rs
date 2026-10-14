@@ -22,10 +22,9 @@
 
 /// 1601-01-01 to 1970-01-01, in `FILETIME` ticks.
 ///
-/// Only the portable scanner needs it — the Windows one is handed `FILETIME`s
-/// already — but it is the number this whole module is built around, so it is
-/// stated here rather than buried in a `cfg` block.
-#[allow(dead_code)]
+/// For [`crate::archive`], whose tar headers record Unix seconds — the scanner is handed
+/// `FILETIME`s already — and the number this whole module is built around, so it is stated here
+/// rather than where it is used.
 pub const UNIX_EPOCH_FILETIME: u64 = 116_444_736_000_000_000;
 
 /// Seconds between the `FILETIME` epoch and the Unix epoch.
@@ -37,7 +36,7 @@ const FILETIME_TO_UNIX_SECS: i64 = 11_644_473_600;
 /// itself, which is the whole point of [`crate::fs::scan`], and asking `metadata()` per row is the
 /// 202× mistake that module is built to avoid. This exists for [`crate::archive`], which stats one
 /// file — the archive — to key its cache on, and wants the timestamp in the same units as
-/// everything else here.
+/// everything else here; and for the portable scanner, which has no `FILETIME` to be handed.
 ///
 /// `0` when the platform will not say, which is [`LocalZone::convert`]'s "no date".
 pub fn filetime_of(found: &std::fs::Metadata) -> u64 {

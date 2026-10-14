@@ -231,12 +231,7 @@ pub(super) fn text_canvas(
     } else {
         t.fonts.body.clone()
     };
-    let mut child = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(canvas.shrink2(vec2(PAD, 0.0)))
-            .layout(egui::Layout::top_down(egui::Align::Min)),
-    );
-    child.set_clip_rect(canvas.intersect(ui.clip_rect()));
+    let mut child = crate::ui::clipped_child(ui, canvas.shrink2(vec2(PAD, 0.0)), canvas);
     let output = egui::ScrollArea::vertical()
         .id_salt(("preview-text", spot))
         .auto_shrink([false, false])
@@ -244,13 +239,9 @@ pub(super) fn text_canvas(
             // **What is actually on screen**: the file, or the diff's own body when one is being
             // shown. Everything below reads these two rather than the file, so the diff view costs
             // this line and no branching further down.
-            let body = match &text.view {
-                Some(view) => &view.body,
-                None => &text.body,
-            };
-            let spans = match &text.view {
-                Some(view) => &view.spans,
-                None => &text.spans,
+            let (body, spans) = match &text.view {
+                Some(view) => (&view.body, &view.spans),
+                None => (&text.body, &text.spans),
             };
 
             // The gutter, wide enough for the last line's number. Measured from the count rather
@@ -339,19 +330,7 @@ pub(super) fn text_canvas(
                 // index that came from another string must not be able to panic the panel, whatever
                 // else goes out of step upstream.
                 if let Some(front) = find.hits.get(find.at).and_then(|hit| body.get(..hit.start)) {
-                    // A `CCursor` counts characters and a hit is a range of bytes, because a layout
-                    // section is a range of bytes. Counted here rather than carried: it is one pass
-                    // over the front of the file when the current hit changes, against a second
-                    // vector the length of the hits on every keystroke.
-                    let chars = front.chars().count();
-                    let at = galley.pos_from_cursor(egui::text::CCursor::new(chars));
-                    let mut want = at.translate(shown.rect.min.to_vec2());
-                    // **Grown upwards by the height of the bar**, because the bar is floating over
-                    // the top of this view: without it, "bring the hit into the viewport" is
-                    // satisfied by a hit sitting exactly where the bar is, and stepping through the
-                    // matches at the top of a file scrolls to each one and hides it.
-                    want.min.y -= FIND_H + PAD * 2.0;
-                    ui.scroll_to_rect(want, None);
+                    scroll_to_hit(ui, &galley, shown.rect.min, front);
                 }
                 find.reveal = false;
             }
@@ -466,7 +445,7 @@ pub(super) fn text_canvas(
                             // it came out as a hollow box.
                             format!(
                                 "· · ·   {count} unchanged line{}",
-                                if count == 1 { "" } else { "s" }
+                                crate::ui::filelist::plural(count)
                             ),
                             t.fonts.caption.clone(),
                             t.text.tertiary,
@@ -507,7 +486,6 @@ pub(super) fn text_canvas(
                             );
                         }
                     }
-                    starts = row.ends_with_newline;
                 }
                 if !painted.is_empty() {
                     ui.painter().set(bands, egui::Shape::Vec(painted));
@@ -560,9 +538,23 @@ pub(super) fn reveal(
     if hit.start < block.start || hit.start >= block.end {
         return;
     }
-    // A `CCursor` counts characters, and it counts them from the start of *this galley* — which is
-    // why the block's own slice is what is measured and not the document up to here.
-    let chars = text[block.start..hit.start].chars().count();
+    // Counted from the start of *this galley* — which is why the block's own slice is what is
+    // measured and not the document up to here.
+    scroll_to_hit(ui, galley, origin, &text[block.start..hit.start]);
+}
+
+/// Scroll a hit into view: the one that comes after `front`, in `galley` laid out at `origin`.
+///
+/// A `CCursor` counts characters and a hit is a range of bytes, because a layout section is a range
+/// of bytes — so `front` is everything in the galley ahead of the hit, and its characters are
+/// counted here rather than carried: it is one pass over the front of the text when the current hit
+/// changes, against a second vector the length of the hits on every keystroke.
+///
+/// **Grown upwards by the height of the find bar**, because the bar is floating over the top of the
+/// view: without it, "bring the hit into the viewport" is satisfied by a hit sitting exactly where
+/// the bar is, and stepping through the matches at the top of a file scrolls to each one and hides it.
+fn scroll_to_hit(ui: &Ui, galley: &egui::Galley, origin: egui::Pos2, front: &str) {
+    let chars = front.chars().count();
     let mut want = galley
         .pos_from_cursor(egui::text::CCursor::new(chars))
         .translate(origin.to_vec2());
@@ -711,23 +703,47 @@ pub(super) fn coloured(
     plain: &egui::TextFormat,
     t: &Theme,
 ) -> Vec<(Range<usize>, egui::TextFormat)> {
-    let mut parts = Vec::with_capacity(spans.len() * 2 + 1);
-    let mut cut = 0;
-    for span in spans {
-        if span.at.start > cut {
-            parts.push((cut..span.at.start, plain.clone()));
+    cover(0..len, spans.iter().map(|span| tinted(span, plain, t)), plain)
+}
+
+/// One syntax span in its token's colour, in `plain` otherwise.
+pub(super) fn tinted(
+    span: &syntax::Span,
+    plain: &egui::TextFormat,
+    t: &Theme,
+) -> (Range<usize>, egui::TextFormat) {
+    (
+        span.at.clone(),
+        egui::TextFormat {
+            color: t.tok(span.tok),
+            ..plain.clone()
+        },
+    )
+}
+
+/// A covering of `span` end to end, which is what [`overlay`] needs under it: each of `items` in its
+/// own format, and whatever falls between two of them — or before the first, or after the last — in
+/// `gap`.
+///
+/// `items` are in order and inside `span`. One walk for every formatted run in the panel: a file's
+/// syntax colours, a code block's slice of them, and a paragraph's emphasis.
+pub(super) fn cover(
+    span: Range<usize>,
+    items: impl IntoIterator<Item = (Range<usize>, egui::TextFormat)>,
+    gap: &egui::TextFormat,
+) -> Vec<(Range<usize>, egui::TextFormat)> {
+    let items = items.into_iter();
+    let mut parts = Vec::with_capacity(items.size_hint().0 * 2 + 1);
+    let mut cut = span.start;
+    for (at, format) in items {
+        if at.start > cut {
+            parts.push((cut..at.start, gap.clone()));
         }
-        parts.push((
-            span.at.clone(),
-            egui::TextFormat {
-                color: t.tok(span.tok),
-                ..plain.clone()
-            },
-        ));
-        cut = span.at.end;
+        cut = at.end;
+        parts.push((at, format));
     }
-    if cut < len {
-        parts.push((cut..len, plain.clone()));
+    if cut < span.end {
+        parts.push((cut..span.end, gap.clone()));
     }
     parts
 }

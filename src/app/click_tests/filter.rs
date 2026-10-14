@@ -317,17 +317,6 @@ fn filter_in_src(h: &mut Harness) -> crate::pane::PaneId {
     pane
 }
 
-/// A key pressed with nothing held.
-fn key(key: egui::Key) -> Event {
-    Event::Key {
-        key,
-        physical_key: None,
-        pressed: true,
-        repeat: false,
-        modifiers: Modifiers::NONE,
-    }
-}
-
 /// Past the typing's wait, and the frame after it, which is where the app acts on a settled filter.
 fn past_the_wait(h: &mut Harness) {
     h.time += crate::pane::FILTER_DELAY * 1.5;

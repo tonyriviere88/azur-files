@@ -51,7 +51,8 @@ fn asks_twice(code: u32) -> bool {
 #[cfg(windows)]
 fn scan_by_handle(path: &Path, started: Instant) -> Result<Dir, Option<Box<Dir>>> {
     use std::ffi::c_void;
-    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, HANDLE, INVALID_HANDLE_VALUE};
+    use std::os::windows::io::{FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::Foundation::{GetLastError, INVALID_HANDLE_VALUE};
     use windows_sys::Win32::Storage::FileSystem::{
         CreateFileW, FileIdExtdDirectoryInfo, FileIdInfo, GetFileInformationByHandleEx,
         GetVolumeInformationByHandleW, FILE_FLAG_BACKUP_SEMANTICS, FILE_ID_EXTD_DIR_INFO,
@@ -83,13 +84,9 @@ fn scan_by_handle(path: &Path, started: Instant) -> Result<Dir, Option<Box<Dir>>
         }
         return Err(None);
     }
-    struct Close(HANDLE);
-    impl Drop for Close {
-        fn drop(&mut self) {
-            unsafe { CloseHandle(self.0) };
-        }
-    }
-    let _close = Close(handle);
+    // SAFETY: a handle just opened, and owned from here on, so it is closed on every way out; the
+    // raw `handle` the calls below are given never outlives this guard.
+    let _close = unsafe { OwnedHandle::from_raw_handle(handle) };
 
     // **Which file system, first**: an "ID" on FAT or exFAT is where the entry sits in its
     // directory, and it moves with the entry. Asked of the handle already open, so no path parse.
@@ -106,7 +103,7 @@ fn scan_by_handle(path: &Path, started: Instant) -> Result<Dir, Option<Box<Dir>>
             system.len() as u32,
         )
     } != 0;
-    let system = String::from_utf16_lossy(trimmed(&system));
+    let system = String::from_utf16_lossy(crate::shell::until_nul(&system));
     if !known || !matches!(system.as_str(), "NTFS" | "ReFS") {
         return Err(None);
     }
@@ -204,12 +201,6 @@ fn directory_name(path: &Path) -> Vec<u16> {
     name
 }
 
-#[cfg(windows)]
-fn trimmed(buf: &[u16]) -> &[u16] {
-    let len = buf.iter().position(|&u| u == 0).unwrap_or(buf.len());
-    &buf[..len]
-}
-
 /// The find API's read: no IDs, and every failure worded the way the rest of the program expects.
 #[cfg(windows)]
 pub(super) fn scan_find(path: &Path, started: Instant) -> Dir {
@@ -250,7 +241,7 @@ pub(super) fn scan_find(path: &Path, started: Instant) -> Dir {
 
     let mut builder = DirBuilder::new(path);
     loop {
-        let name = trimmed_name(&data.cFileName);
+        let name = crate::shell::until_nul(&data.cFileName);
         if !is_dot_entry(name) {
             builder.push_wide(
                 name,
@@ -277,10 +268,31 @@ pub(super) fn scan_find(path: &Path, started: Instant) -> Dir {
 /// first.
 #[cfg(windows)]
 pub(super) fn search_pattern(path: &Path) -> Vec<u16> {
+    const SEP: u16 = b'\\' as u16;
+    let mut out = verbatim(path);
+    out.pop(); // the terminator
+    if out.last() != Some(&SEP) {
+        out.push(SEP);
+    }
+    out.push(b'*' as u16);
+    out.push(0);
+    out
+}
+
+/// A path in the `\\?\` form, NUL-terminated: no 260-character limit, and no Win32 parsing of
+/// names that end in a dot or a space.
+///
+/// `\\server\share` becomes `\\?\UNC\server\share` and `C:\x` becomes `\\?\C:\x`; a path already
+/// in either extended form is left as it is, and a relative or otherwise exotic one is handed to the
+/// normal parser untouched. Forward slashes become backslashes throughout, the prefix included,
+/// because the extended form takes backslashes only. `pub(crate)` for the copy engine in
+/// [`crate::shell::ops::fast`], which opens every path it touches this way.
+#[cfg(windows)]
+pub(crate) fn verbatim(path: &Path) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
 
     let raw: Vec<u16> = path.as_os_str().encode_wide().collect();
-    let mut out: Vec<u16> = Vec::with_capacity(raw.len() + 8);
+    let mut out: Vec<u16> = Vec::with_capacity(raw.len() + 10);
 
     const SEP: u16 = b'\\' as u16;
     let starts_with = |prefix: &str| {
@@ -312,20 +324,8 @@ pub(super) fn search_pattern(path: &Path) -> Vec<u16> {
             *unit = SEP;
         }
     }
-    if out.last() != Some(&SEP) {
-        out.push(SEP);
-    }
-    out.push(b'*' as u16);
     out.push(0);
     out
-}
-
-/// The name out of a `cFileName`, without the padding after the terminator.
-#[cfg(windows)]
-#[inline]
-pub(super) fn trimmed_name(buf: &[u16; 260]) -> &[u16] {
-    let len = buf.iter().position(|&u| u == 0).unwrap_or(buf.len());
-    &buf[..len]
 }
 
 /// `.` and `..`, which every directory reports and nobody wants to see.

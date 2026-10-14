@@ -338,19 +338,8 @@ pub(super) fn find_bar(ui: &mut Ui, t: &Theme, canvas: Rect, spot: Spot, find: &
             // ---- The count, and the three buttons after it --------------------
             let count = find.counter();
             let after = Rect::from_min_max(pos2(field.right() + PAD, inner.top()), inner.max);
-            let galley = truncated(
-                ui.painter(),
-                &count,
-                t.fonts.caption.clone(),
-                t.text.secondary,
-                COUNTER,
-            );
-            galley_on_baseline(
-                ui.painter(),
-                after.left(),
-                ink_baseline(ui.painter(), &t.fonts.caption, after.top(), after.height()),
-                galley,
-            );
+            let room = Rect::from_min_size(after.min, vec2(COUNTER, after.height()));
+            crate::ui::caption_line(ui.painter(), t, room, &count, t.text.secondary);
 
             let mut step = 0isize;
             let mut shut = false;
@@ -384,7 +373,6 @@ pub(super) fn find_bar(ui: &mut Ui, t: &Theme, canvas: Rect, spot: Spot, find: &
                     tip,
                     enabled,
                     false,
-                    t.bg.layer_alt,
                 )
                 .clicked()
                 {
@@ -459,27 +447,10 @@ pub(super) fn flag_button(
 ) -> Response {
     let response = ui.interact(rect, id, Sense::click());
     let corner = CornerRadius::same(radius::SMALL);
-    let (hover, pressed) = control_fills(t, t.bg.layer_alt);
-    let latched = azur_egui_theme::desktop::latched(t, response.hovered());
-    let fill = if on {
-        Some(latched.0)
-    } else if response.is_pointer_button_down_on() {
-        Some(pressed)
-    } else if response.hovered() {
-        Some(hover)
-    } else {
-        None
-    };
+    let (fill, ink) = crate::ui::control_look(t, &response, true, on);
     if let Some(fill) = fill {
         ui.painter().rect_filled(rect, corner, fill);
     }
-    let ink = if on {
-        latched.1
-    } else if response.hovered() {
-        t.text.primary
-    } else {
-        t.text.secondary
-    };
 
     let galley = ui
         .painter()

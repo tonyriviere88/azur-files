@@ -62,7 +62,7 @@ use std::path::{Path, PathBuf};
 use azur_egui_theme::tokens::{control, radius, space};
 use egui::{
     pos2, vec2, Align2, CornerRadius, EventFilter, Id, Key, Modifiers, Pos2, Rect, Sense, Stroke,
-    StrokeKind, Ui, Vec2,
+    Ui, Vec2,
 };
 
 use crate::console::{Block, Kind, Session};
@@ -144,16 +144,7 @@ pub fn split(above: Rect, open: bool, share: f32) -> (Rect, Option<Rect>) {
     if !open {
         return (above, None);
     }
-    let room = above.height() - MIN_LIST - SEAM;
-    if room < LEAST {
-        return (above, None);
-    }
-    let take = (above.height() * share).clamp(LEAST, room);
-    let edge = above.bottom() - take;
-    (
-        Rect::from_min_max(above.min, pos2(above.right(), edge - SEAM)),
-        Some(Rect::from_min_max(pos2(above.left(), edge - SEAM), above.max)),
-    )
+    crate::ui::take_panel(above, false, share, LEAST, MIN_LIST)
 }
 
 // ---------------------------------------------------------------------------
@@ -950,12 +941,7 @@ pub fn show(
         pos2(rect.right(), rect.top() + SEAM + GRAB),
     );
 
-    let mut child = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(inside)
-            .layout(egui::Layout::top_down(egui::Align::Min)),
-    );
-    child.set_clip_rect(inside.intersect(ui.clip_rect()));
+    let mut child = crate::ui::clipped_child(ui, inside, inside);
 
     // **The panel is registered as a widget every frame, whatever the pointer is doing.** Not
     // decoration: egui drops focus at the end of any frame in which the focused id did not put a
@@ -1040,14 +1026,7 @@ pub fn show(
     // dragged, so this cannot be re-asked each frame against a band that has gone somewhere else.
     if !child.input(|i| i.pointer.primary_down()) {
         state.resizing = false;
-    } else if child.input(|i| {
-        i.pointer
-            .any_pressed()
-            .then(|| i.pointer.interact_pos())
-            .flatten()
-    })
-    .is_some_and(|at| band.contains(at))
-    {
+    } else if crate::ui::pressed_at(&child).is_some_and(|at| band.contains(at)) {
         state.resizing = true;
     }
 
@@ -1086,12 +1065,7 @@ pub fn show(
     // This is also why the first version of it passed its own test and failed in the user's hands.
     // The test clicked the empty space under the last row — the one place in the panel where there is
     // no inner widget to take the click and no row to be hovered instead.
-    if let Some(at) = child.input(|i| {
-        i.pointer
-            .any_pressed()
-            .then(|| i.pointer.interact_pos())
-            .flatten()
-    }) {
+    if let Some(at) = crate::ui::pressed_at(&child) {
         // `band` as well as `inside`: the resize grip reaches a couple of points *above* the panel, and
         // grabbing your own border is not leaving. Without it, dragging the top edge handed the
         // keyboard back to the listing — so the `Ctrl+C` after a resize reported "Nothing selected"
@@ -1122,6 +1096,9 @@ pub fn show(
 }
 
 /// The drag handle on the seam above the panel.
+///
+/// The gesture every seam in the window answers to — the sidebar's splitter, a column edge, the
+/// preview panel's: drag to size, double click to put it back.
 #[allow(clippy::too_many_arguments)]
 fn grip(
     ui: &mut Ui,
@@ -1133,9 +1110,9 @@ fn grip(
     share: f32,
     out: &mut Outcome,
 ) {
-    let response = ui.interact(band, Id::new(("console-grip", pane)), Sense::drag());
+    let response = ui.interact(band, Id::new(("console-grip", pane)), Sense::click_and_drag());
     if response.hovered() || response.dragged() {
-        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeRow);
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
     }
     if response.dragged() {
         let by = response.drag_delta().y;
@@ -1143,6 +1120,9 @@ fn grip(
             let taken = (body.height() * share - by) / body.height();
             out.share = Some(taken.clamp(0.05, 0.95));
         }
+    }
+    if response.double_clicked() {
+        out.share = Some(SHARE);
     }
     if response.hovered() || response.dragged() {
         ui.painter().rect_filled(

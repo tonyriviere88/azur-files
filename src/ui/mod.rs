@@ -123,17 +123,18 @@ pub fn squared<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
 
 /// The hover and pressed fills for a control, whatever surface it is painted on.
 ///
-/// [`hover_fill`] and then one rung further in the same direction. `surface` is not read, and
+/// [`hover_fill`] and then one rung further in the same direction. **No surface is asked for**, and
 /// that is the point: Azur's `control` / `control-hover` / `control-active` ladder is written for
 /// a control on `background-layer`, so a control on a surface that is *itself* one of those steps
 /// had nowhere to go and painted the surface's own colour onto the surface — the fill vanished at
 /// the moment of the press instead of deepening. That was the path bar in the **light** theme,
-/// where [`seam`] and `control-active` are the same `paper::SLATE_7`.
+/// where [`seam`] and `control-active` are the same `paper::SLATE_7`. It used to take the surface
+/// and not read it; it takes nothing now, so no call site can believe its surface is being heard.
 ///
 /// Both rungs are `azur::desktop`'s now, and so is the check that they step away from every
 /// surface in both themes. `control_active` is left to the two places here that use it as an
 /// inert fill rather than as a press — a sidebar row and a tab go quiet while they are dragged.
-pub fn control_fills(t: &Theme, _surface: Color32) -> (Color32, Color32) {
+pub fn control_fills(t: &Theme) -> (Color32, Color32) {
     azur_egui_theme::desktop::control_fills(t)
 }
 
@@ -352,11 +353,8 @@ pub fn icon_rect(row: Rect, x: f32, size: f32) -> Rect {
 /// the wrong shape for chrome laid out by arithmetic — a breadcrumb has to know
 /// where its buttons end before it can measure the segments that follow. The states are the
 /// design system's: `desktop::latched` when it is on — the same surface a selected row wears —
-/// and otherwise the two [`control_fills`] for the surface behind it.
-///
-/// `surface` is that surface. It has to be told, because a painter cannot read back what
-/// is already under the rect, and the two toolbars this button appears on are different
-/// colours — the tab strip is `background-layer`, the path bar is [`seam`].
+/// and otherwise the two [`control_fills`], which step away from every surface this button is
+/// drawn on without having to be told which one that is.
 #[allow(clippy::too_many_arguments)]
 pub fn tool_button(
     ui: &mut Ui,
@@ -367,7 +365,6 @@ pub fn tool_button(
     tooltip: &str,
     enabled: bool,
     active: bool,
-    surface: Color32,
 ) -> Response {
     let response = ui.interact(
         rect,
@@ -380,36 +377,10 @@ pub fn tool_button(
     );
 
     let corner = CornerRadius::same(radius::SMALL);
-    let (hover, pressed) = control_fills(t, surface);
-    // A latched button wears the surface a selected row wears — `azur::desktop::latched`, which
-    // is where that rule and its numbers live. It used to be `accent-subtle`, Azur's own latch
-    // tint, which in the dark theme is a navy barely off the bar it sits on: the one toggle on
-    // this bar read as *nearly* on.
-    let latched = azur_egui_theme::desktop::latched(t, response.hovered());
-    let fill = if !enabled {
-        None
-    } else if active {
-        Some(latched.0)
-    } else if response.is_pointer_button_down_on() {
-        Some(pressed)
-    } else if response.hovered() {
-        Some(hover)
-    } else {
-        None
-    };
+    let (fill, color) = control_look(t, &response, enabled, active);
     if let Some(fill) = fill {
         ui.painter().rect_filled(rect, corner, fill);
     }
-
-    let color = if !enabled {
-        t.text.disabled
-    } else if active {
-        latched.1
-    } else if response.hovered() {
-        t.text.primary
-    } else {
-        t.text.secondary
-    };
     glyph(
         ui.painter(),
         Rect::from_center_size(rect.center(), vec2(TOOL_ICON, TOOL_ICON)),
@@ -423,6 +394,81 @@ pub fn tool_button(
         azur_egui_theme::components::tooltip(response.clone(), tooltip);
     }
     response
+}
+
+/// The fill and the ink of a control in the state `response` is in: [`tool_button`]'s ladder, for the
+/// buttons that draw something other than a glyph in a square.
+///
+/// Nothing while it is disabled, and `text-disabled`. A latched control wears the surface a selected
+/// row wears — `azur::desktop::latched`, which is where that rule and its numbers live. It used to be
+/// `accent-subtle`, Azur's own latch tint, which in the dark theme is a navy barely off the bar it sits
+/// on: the one toggle on this bar read as *nearly* on. Otherwise the two [`control_fills`] under a
+/// press and under the pointer, and no fill at rest; the ink is `text-primary` under the pointer and
+/// `text-secondary` off it.
+///
+/// What a control does at rest is the caller's to change — a fill of its own on a bare canvas, or ink
+/// that does not step back — which is why the fill is an `Option` rather than a colour.
+pub fn control_look(
+    t: &Theme,
+    response: &Response,
+    enabled: bool,
+    latched: bool,
+) -> (Option<Color32>, Color32) {
+    if !enabled {
+        return (None, t.text.disabled);
+    }
+    if latched {
+        let (fill, ink) = azur_egui_theme::desktop::latched(t, response.hovered());
+        return (Some(fill), ink);
+    }
+    let (hover, pressed) = control_fills(t);
+    let fill = if response.is_pointer_button_down_on() {
+        Some(pressed)
+    } else if response.hovered() {
+        Some(hover)
+    } else {
+        None
+    };
+    let ink = if response.hovered() {
+        t.text.primary
+    } else {
+        t.text.secondary
+    };
+    (fill, ink)
+}
+
+/// One line of caption type in `ink`, from `at`'s left edge, cut to its width with an ellipsis and
+/// sat on its ink baseline in `at`'s height.
+///
+/// On the baseline rather than centred in the box — see `azur_egui_theme::components::ink_baseline`
+/// — because a galley centred on its line box sits a point and a half low beside anything centred on
+/// its own ink. `at` is the room the text has, already inset by whatever padding the caller keeps.
+pub fn caption_line(painter: &Painter, t: &Theme, at: Rect, text: &str, ink: Color32) {
+    use azur_egui_theme::components::{galley_on_baseline, ink_baseline};
+    let baseline = ink_baseline(painter, &t.fonts.caption, at.top(), at.height());
+    let galley = truncated(painter, text, t.fonts.caption.clone(), ink, at.width().max(0.0));
+    galley_on_baseline(painter, at.left(), baseline, galley);
+}
+
+/// A bar saying "this much of that": `share` of `track` filled in `ink`, from its left edge, over the
+/// track itself in `gauge-track` — the drive gauge in the sidebar and the bar under a Size cell, which
+/// are the same kind of thing said the same way.
+///
+/// **Track and fill, not fill alone**: a bar with nothing behind it has no reference to be read
+/// against, and the track is what makes its own width the hundred percent. The fill is never shorter
+/// than `least`, because a share that rounds to nothing is not the same as no share at all. Whether
+/// the track is wide enough to be worth drawing, and where its edges fall, are the caller's.
+pub fn gauge(painter: &Painter, t: &Theme, track: Rect, share: f32, least: f32, ink: Color32) {
+    let corner = CornerRadius::same(radius::CIRCULAR);
+    painter.rect_filled(track, corner, t.gauge_track);
+    painter.rect_filled(
+        Rect::from_min_size(
+            track.min,
+            vec2((track.width() * share).max(least), track.height()),
+        ),
+        corner,
+        ink,
+    );
 }
 
 /// A horizontal `stroke-subtle` rule across `rect`'s bottom edge.
@@ -608,17 +654,9 @@ pub fn drag_ghost(
 
     let size = vec2(SIZE, SIZE) + vec2(LEAN, LEAN) * icons.len().saturating_sub(1) as f32;
     let wanted = pos2(at.x - size.x * 0.5, at.y - GAP - size.y);
-    let stack = Rect::from_min_size(
-        pos2(
-            wanted
-                .x
-                .min(bounds.right() - size.x - GUTTER)
-                .max(bounds.left() + GUTTER),
-            wanted.y.max(bounds.top() + GUTTER),
-        )
-        .round(),
-        size,
-    );
+    // No bottom edge to keep to: the pile is above the pointer, so the top is the only one it can
+    // run off.
+    let stack = Rect::from_min_size(clamp_inside(wanted, size, bounds, false).round(), size);
     for (index, (texture, uv)) in icons.iter().enumerate() {
         let corner = stack.min + vec2(LEAN, LEAN) * index as f32;
         painter.image(
@@ -705,14 +743,7 @@ pub fn drag_saying(
     let sign = SIGN + space::S2;
     let size = galley.size() + vec2(sign, 0.0) + padding * 2.0;
 
-    // `min` before `max`, so a window narrower than the sentence still shows its start rather than
-    // its end.
-    let at = pos2(
-        at.x.min(bounds.right() - size.x - GUTTER)
-            .max(bounds.left() + GUTTER),
-        at.y.min(bounds.bottom() - size.y - GUTTER)
-            .max(bounds.top() + GUTTER),
-    );
+    let at = clamp_inside(at, size, bounds, true);
     let rect = Rect::from_min_size(at.round(), size);
 
     let radius = CornerRadius::same(radius::SMALL);
@@ -733,6 +764,24 @@ pub fn drag_saying(
         galley,
     );
     rect
+}
+
+/// Push a box of `size`, wanted at `at`, back inside `bounds` and a [`GUTTER`] in from its edges.
+///
+/// `min` before `max`, so a window narrower than the box still shows its start rather than its end.
+/// `bottom` is whether the bottom edge holds it as well: [`drag_saying`]'s sentence can run off any
+/// side, and [`drag_ghost`]'s pile, which sits above the pointer, only off the top.
+fn clamp_inside(at: egui::Pos2, size: egui::Vec2, bounds: Rect, bottom: bool) -> egui::Pos2 {
+    let y = if bottom {
+        at.y.min(bounds.bottom() - size.y - GUTTER)
+    } else {
+        at.y
+    };
+    pos2(
+        at.x.min(bounds.right() - size.x - GUTTER)
+            .max(bounds.left() + GUTTER),
+        y.max(bounds.top() + GUTTER),
+    )
 }
 
 /// The mark's box in [`drag_saying`]: a caption line's own height, so the sign sits level with the
@@ -925,6 +974,248 @@ pub fn drop_hint(painter: &Painter, mark: Rect, zone: crate::dock::Zone, t: &The
     ));
 }
 
+/// A point in the window, in the physical pixels a Win32 menu is placed at and an OLE drop reports.
+///
+/// Truncated rather than rounded, as each of the copies this replaced always was.
+pub fn physical(ctx: &egui::Context, at: egui::Pos2) -> (i32, i32) {
+    let scale = ctx.pixels_per_point();
+    ((at.x * scale) as i32, (at.y * scale) as i32)
+}
+
+/// Whether the pointer has moved, or pressed, this frame — which is what ends a keyboard-walked
+/// list's quiet spell and hands its highlight back to the pointer.
+///
+/// A press counts on its own because a click need not move the pointer at all, and the press has to
+/// find the row rather than the cover [`claimed_list`] lays over the rows while they are quiet.
+pub fn pointer_woke(ctx: &egui::Context) -> bool {
+    ctx.input(|i| i.pointer.delta() != egui::Vec2::ZERO || i.pointer.any_pressed())
+}
+
+/// A list of menu rows walked with the keyboard, `wanted` tall and scrolling past that: the path
+/// field's dropdown and the command palette.
+///
+/// **The room the rows need, taken rather than asked for.** An `Area` hands its content *last
+/// frame's size* as this frame's `max_rect` — see `egui::Area::content_ui` — and a `ScrollArea` fits
+/// itself into whatever room it is given without ever asking for more. Put those two together and a
+/// list gets stuck at the size of the first one it ever showed: typing `d` offers one drive, so the
+/// popup is one row tall, and when `d:/` turns that into fifteen folders the scroll area shrinks to
+/// the one row of room, so the area never grows, so the room never grows. Two rows and a scrollbar,
+/// for ever. So the height is claimed instead — a child `Ui` of exactly the size the rows want, at
+/// `origin` — and the cursor advanced past it afterwards so the area sizes itself to what was taken.
+/// Right on the first frame, which matters: the list changes on a keystroke, and there is no second
+/// frame coming until the next one.
+///
+/// Inside it a menu's rows are flush, as `Menu` sets them. The scrollbar **floats**, because a solid
+/// one allocates its width whether or not it is showing — a 14-point gutter of nothing down the right
+/// edge, with the widest name ellipsized into it. And there is **no edge fade**: egui paints a
+/// gradient of the surface over the bottom of a scroll area whose content runs past it, and a scroll
+/// to a row is animated, so every press of Down put the content briefly past the edge and the
+/// gradient over the lower half of the row being read. Holding the key made it blink. The list ends
+/// on a whole row and has a scrollbar to say there is more.
+///
+/// **While `quiet`, a cover over the rows**, interacted under `cover` after them, which puts it on
+/// top — egui hands the pointer to the last widget that claimed its position — so a pointer resting
+/// where the list happened to open lights nothing up. It senses a click because that is what it
+/// takes: egui gives the hover to the topmost widget that can be *clicked*, and one that only sensed
+/// hover would lie on top and hide nothing.
+///
+/// What goes in the rows stays with each caller; [`list_row`] and [`paint_lit`] are the two halves
+/// of a row they share.
+#[allow(clippy::too_many_arguments)]
+pub fn claimed_list(
+    ui: &mut Ui,
+    origin: egui::Pos2,
+    width: f32,
+    wanted: f32,
+    salt: impl egui::AsIdSalt,
+    quiet: bool,
+    cover: Id,
+    rows: impl FnOnce(&mut Ui),
+) {
+    let taken = Rect::from_min_size(origin, vec2(width, wanted));
+    let mut list = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(taken)
+            .layout(egui::Layout::top_down_justified(egui::Align::Min)),
+    );
+    list.spacing_mut().item_spacing.y = 0.0;
+    list.style_mut().spacing.scroll.floating = true;
+    list.style_mut().spacing.scroll.fade.strength = 0.0;
+    egui::ScrollArea::vertical()
+        .id_salt(salt)
+        .max_height(wanted)
+        .show(&mut list, rows);
+    if quiet {
+        ui.interact(taken, cover, Sense::click());
+    }
+    ui.advance_cursor_after_rect(taken);
+}
+
+/// One row of a [`claimed_list`]: a slot kept behind it for [`paint_lit`], and then the row.
+///
+/// `follow` is whether this is the row the keyboard has just moved onto, which is brought into view
+/// at `align` — **and only if it is not already in view.** A scroll to a row that is already showing
+/// is not nothing: it is an animation, the list moves for a few frames while it settles, and with the
+/// key held it never settles at all.
+pub fn list_row(
+    ui: &mut Ui,
+    item: azur_egui_theme::components::MenuItem<'_>,
+    follow: bool,
+    align: Option<egui::Align>,
+) -> (egui::layers::ShapeIdx, Response) {
+    let slot = ui.painter().add(egui::Shape::Noop);
+    let row = ui.add(item);
+    if follow && !ui.clip_rect().contains_rect(row.rect) {
+        row.scroll_to_me(align);
+    }
+    (slot, row)
+}
+
+/// The highlight of a [`claimed_list`], painted into the slot [`list_row`] kept *behind* its row — by
+/// the time a row has been added its label is already down, and a fill over the top of it is a fill
+/// over the top of the name. The same trick the open chevron's pair uses in the breadcrumb.
+///
+/// **On the row under a moving pointer when there is one, and on the keyboard's `hot` otherwise**, so
+/// that the frame the pointer arrives on a row is not a frame with two rows lit: the keyboard's
+/// highlight moves to it only after this frame, and this is where the frame itself agrees.
+///
+/// `control-hover`, which is the fill `MenuItem` gives a row under the pointer: the keyboard is doing
+/// the pointer's job here, and two different greys for one meaning would read as two different things.
+pub fn paint_lit(
+    ui: &Ui,
+    t: &Theme,
+    rows: &[(egui::layers::ShapeIdx, Rect)],
+    hot: Option<usize>,
+    hovered: Option<usize>,
+    quiet: bool,
+) {
+    let lit = if quiet { hot } else { hovered.or(hot) };
+    if let Some(&(slot, rect)) = lit.and_then(|at| rows.get(at)) {
+        ui.painter().set(
+            slot,
+            egui::epaint::RectShape::filled(rect, CornerRadius::ZERO, t.bg.control_hover),
+        );
+    }
+}
+
+/// A top-down child `Ui` over `max`, clipped to `clip` within what the parent may draw.
+///
+/// **Both, because a scroll area inside it needs both.** A `ScrollArea` sizes itself to the child's
+/// `max_rect`, and paints wherever its own clip lets it — which, on a child, is the parent's clip
+/// until it is told otherwise. Without the intersection the content scrolled past the edge of the
+/// panel it lives in is drawn over the panel's header and the status line below it. The two are
+/// separate arguments because a reader that keeps its text off the panel's edges with an inner
+/// `max_rect` still wants it to scroll out of sight at the panel's edge, not at the margin.
+pub fn clipped_child(ui: &mut Ui, max: Rect, clip: Rect) -> Ui {
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(max)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    child.set_clip_rect(clip.intersect(ui.clip_rect()));
+    child
+}
+
+/// A [`clipped_child`] over `rect` for rows painted at exact rects, with no item spacing.
+///
+/// The extent of such a list is counted in whole rows, and the installed style's item spacing is
+/// `space-3`. Anything egui adds per item would put the two out of step the moment something
+/// scrolled — rows landing in the wrong place and the pointer hit-testing a different one than it
+/// looks like, which is what this cost when `ScrollArea::show_rows` was reserving
+/// `row_height + item_spacing.y` a row. Rows are painted at exact rects, so it is nothing.
+pub fn rows_child(ui: &mut Ui, rect: Rect) -> Ui {
+    let mut child = clipped_child(ui, rect, rect);
+    child.spacing_mut().item_spacing = egui::Vec2::ZERO;
+    child
+}
+
+/// Which row of a list painted at `pitch` the point `at` is over: `visible` is the rows on screen,
+/// starting with row `range.start`.
+///
+/// One interaction for a whole visible block and the row worked out from the pointer, rather than a
+/// widget per row — forty of them would cost forty ids, forty hit-tests and forty animation slots for
+/// a hover highlight that arithmetic gives for nothing. Clamped to the last row on screen, so a point
+/// on the block's bottom edge is still that row and never one past it.
+pub fn row_under(
+    visible: Rect,
+    range: &std::ops::Range<usize>,
+    pitch: f32,
+    at: egui::Pos2,
+) -> Option<usize> {
+    let last_visible = range.len().saturating_sub(1);
+    (visible.contains(at) && !range.is_empty())
+        .then(|| range.start + (((at.y - visible.top()) / pitch) as usize).min(last_visible))
+}
+
+/// Where the pointer button went down, **while it is still down** — any button, or the primary one
+/// alone with `primary_only`.
+///
+/// Not the same as where the pointer is, and that difference is the whole point: egui only calls a
+/// press a drag once it has *travelled*, by which time the pointer is a row or two along. Deciding from
+/// the pointer would pick up what the drag arrived at rather than what it started on.
+pub fn held_from(ui: &Ui, primary_only: bool) -> Option<egui::Pos2> {
+    ui.input(|i| {
+        let down = if primary_only {
+            i.pointer.primary_down()
+        } else {
+            i.pointer.any_down()
+        };
+        down.then(|| i.pointer.press_origin()).flatten()
+    })
+}
+
+/// Where the pointer is on the frame a button went down, and `None` on every other frame.
+pub fn pressed_at(ui: &Ui) -> Option<egui::Pos2> {
+    ui.input(|i| i.pointer.any_pressed().then(|| i.pointer.interact_pos()).flatten())
+}
+
+/// Take a panel's room off the right of `body`, or off its bottom when not `sideways`, leaving the
+/// rest to whatever the panel is docked beside: the preview panel and the console.
+///
+/// `share` of the span, but never less than `least` and never so much that the rest falls under
+/// `keep`. The returned panel rect **includes the [`SEAM`] before it**, which is what makes the
+/// boundary one line neither side draws — exactly as between two panes. `None` when the body is too
+/// small to give the panel `least` without squeezing the rest past `keep`.
+pub fn take_panel(
+    body: Rect,
+    sideways: bool,
+    share: f32,
+    least: f32,
+    keep: f32,
+) -> (Rect, Option<Rect>) {
+    let span = if sideways { body.width() } else { body.height() };
+    let room = span - keep - SEAM;
+    if room < least {
+        return (body, None);
+    }
+    let take = (span * share).clamp(least, room);
+    if sideways {
+        let edge = body.right() - take;
+        (
+            Rect::from_min_max(body.min, pos2(edge - SEAM, body.bottom())),
+            Some(Rect::from_min_max(pos2(edge - SEAM, body.top()), body.max)),
+        )
+    } else {
+        let edge = body.bottom() - take;
+        (
+            Rect::from_min_max(body.min, pos2(body.right(), edge - SEAM)),
+            Some(Rect::from_min_max(pos2(body.left(), edge - SEAM), body.max)),
+        )
+    }
+}
+
+/// A line in a menu that is not an entry — `Reading…`, `No subfolders`, `Nothing matches` — in
+/// `text-tertiary`, the ink that says there is nothing here to click.
+///
+/// Here rather than with the path bar's dropdowns, where it started, because the command palette
+/// says it too and a palette has no business reaching into the breadcrumb for it.
+pub fn menu_note<'a>(ui: &mut Ui, text: impl Into<std::borrow::Cow<'a, str>>) {
+    ui.add(
+        azur_egui_theme::components::Text::new(text)
+            .color(azur_egui_theme::components::TextColor::Tertiary),
+    );
+}
+
 /// Centre a single line in a rect — for the empty and error states.
 pub fn text_center(painter: &Painter, rect: Rect, font: FontId, color: Color32, text: &str) {
     painter.text(rect.center(), Align2::CENTER_CENTER, text, font, color);
@@ -934,6 +1225,24 @@ pub fn text_center(painter: &Painter, rect: Rect, font: FontId, color: Color32, 
 mod tests {
     use super::*;
     use azur_egui_theme::desktop;
+
+    /// Every shape `draw` adds to the root layer in one frame of `ctx`, and nothing that was there
+    /// before it — so a test can look at what one painter call drew.
+    fn shapes_after(
+        ctx: &egui::Context,
+        mut draw: impl FnMut(&mut Ui),
+    ) -> Vec<egui::epaint::ClippedShape> {
+        let mut shapes = Vec::new();
+        let _ = ctx.run_ui(Default::default(), |ui| {
+            let from = ui.painter().add(egui::Shape::Noop);
+            draw(ui);
+            let layer = ui.layer_id();
+            shapes = ui.ctx().graphics_mut(|g| {
+                g.entry(layer).all_entries().skip(from.0).cloned().collect()
+            });
+        });
+        shapes
+    }
 
     /// **The ghost under the pointer draws one icon per file it is carrying, and says how many.**
     ///
@@ -967,24 +1276,18 @@ mod tests {
             let mut quads = 0;
             let mut texts = Vec::new();
             let mut rect = Rect::NOTHING;
-            let _ = ctx.run_ui(Default::default(), |ui| {
-                let from = ui.painter().add(egui::Shape::Noop);
+            let shapes = shapes_after(&ctx, |ui| {
                 rect = drag_ghost(ui.painter(), &t, at, bounds, icons, count);
-                let layer = ui.layer_id();
-                ui.ctx().graphics_mut(|g| {
-                    for clipped in g.entry(layer).all_entries().skip(from.0) {
-                        match &clipped.shape {
-                            egui::Shape::Mesh(mesh)
-                                if mesh.texture_id != egui::TextureId::default() =>
-                            {
-                                quads += 1;
-                            }
-                            egui::Shape::Text(text) => texts.push(text.galley.text().to_owned()),
-                            _ => {}
-                        }
-                    }
-                });
             });
+            for clipped in &shapes {
+                match &clipped.shape {
+                    egui::Shape::Mesh(mesh) if mesh.texture_id != egui::TextureId::default() => {
+                        quads += 1;
+                    }
+                    egui::Shape::Text(text) => texts.push(text.galley.text().to_owned()),
+                    _ => {}
+                }
+            }
             (quads, texts, rect)
         };
 
@@ -1037,22 +1340,18 @@ mod tests {
 
         let mut sections: Vec<(String, Color32)> = Vec::new();
         let bounds = Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0));
-        let _ = ctx.run_ui(Default::default(), |ui| {
-            let from = ui.painter().add(egui::Shape::Noop);
+        let shapes = shapes_after(&ctx, |ui| {
             drag_saying(ui.painter(), &t, pos2(100.0, 100.0), bounds, &told);
-            let layer = ui.layer_id();
-            ui.ctx().graphics_mut(|g| {
-                for clipped in g.entry(layer).all_entries().skip(from.0) {
-                    if let egui::Shape::Text(text) = &clipped.shape {
-                        let whole = text.galley.text();
-                        for section in &text.galley.job.sections {
-                            let range = section.byte_range.start.0..section.byte_range.end.0;
-                            sections.push((whole[range].to_owned(), section.format.color));
-                        }
-                    }
-                }
-            });
         });
+        for clipped in &shapes {
+            if let egui::Shape::Text(text) = &clipped.shape {
+                let whole = text.galley.text();
+                for section in &text.galley.job.sections {
+                    let range = section.byte_range.start.0..section.byte_range.end.0;
+                    sections.push((whole[range].to_owned(), section.format.color));
+                }
+            }
+        }
 
         assert_eq!(
             sections
@@ -1115,49 +1414,44 @@ mod tests {
             let mut text_x = 0.0;
             let mut rect = Rect::NOTHING;
             let bounds = Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 600.0));
-            let _ = ctx.run_ui(Default::default(), |ui| {
-                let from = ui.painter().add(egui::Shape::Noop);
+            let shapes = shapes_after(&ctx, |ui| {
                 rect = drag_saying(ui.painter(), &t, pos2(100.0, 100.0), bounds, told);
-                let layer = ui.layer_id();
-                ui.ctx().graphics_mut(|g| {
-                    // Every glyph in `icons` is strokes, circles and filled polygons in the one
-                    // colour it was handed — so the mark is whatever is drawn in something other
-                    // than the frame's own greys, wherever the glyph puts it.
-                    for clipped in g.entry(layer).all_entries().skip(from.0) {
-                        let (colour, box_) = match &clipped.shape {
-                            egui::Shape::LineSegment { stroke, points } => (
-                                stroke.color,
-                                Rect::from_two_pos(points[0], points[1]),
-                            ),
-                            egui::Shape::Circle(circle) => {
-                                (circle.stroke.color, clipped.shape.visual_bounding_rect())
-                            }
-                            // A filled glyph carries its colour in the fill and an outlined one in
-                            // the stroke — the star is drawn both ways, so both are read.
-                            egui::Shape::Path(path) => {
-                                let ink = match (path.fill, &path.stroke.color) {
-                                    (fill, _) if fill.a() > 0 => fill,
-                                    (_, egui::epaint::ColorMode::Solid(colour)) => *colour,
-                                    _ => Color32::TRANSPARENT,
-                                };
-                                (ink, clipped.shape.visual_bounding_rect())
-                            }
-                            egui::Shape::Text(text) => {
-                                words = text.galley.text().to_owned();
-                                text_x = text.pos.x;
-                                continue;
-                            }
-                            _ => continue,
-                        };
-                        // A glyph drawn as a stroked outline leaves a `Path` with no fill; its ink
-                        // is in the segments beside it, so a transparent colour is not a mark.
-                        if colour.a() > 0 && colour != t.stroke.subtle && colour != t.bg.layer_alt {
-                            marks.push(colour);
-                            ink = ink.union(box_);
-                        }
-                    }
-                });
             });
+            // Every glyph in `icons` is strokes, circles and filled polygons in the one colour it
+            // was handed — so the mark is whatever is drawn in something other than the frame's
+            // own greys, wherever the glyph puts it.
+            for clipped in &shapes {
+                let (colour, box_) = match &clipped.shape {
+                    egui::Shape::LineSegment { stroke, points } => {
+                        (stroke.color, Rect::from_two_pos(points[0], points[1]))
+                    }
+                    egui::Shape::Circle(circle) => {
+                        (circle.stroke.color, clipped.shape.visual_bounding_rect())
+                    }
+                    // A filled glyph carries its colour in the fill and an outlined one in the
+                    // stroke — the star is drawn both ways, so both are read.
+                    egui::Shape::Path(path) => {
+                        let ink = match (path.fill, &path.stroke.color) {
+                            (fill, _) if fill.a() > 0 => fill,
+                            (_, egui::epaint::ColorMode::Solid(colour)) => *colour,
+                            _ => Color32::TRANSPARENT,
+                        };
+                        (ink, clipped.shape.visual_bounding_rect())
+                    }
+                    egui::Shape::Text(text) => {
+                        words = text.galley.text().to_owned();
+                        text_x = text.pos.x;
+                        continue;
+                    }
+                    _ => continue,
+                };
+                // A glyph drawn as a stroked outline leaves a `Path` with no fill; its ink is in
+                // the segments beside it, so a transparent colour is not a mark.
+                if colour.a() > 0 && colour != t.stroke.subtle && colour != t.bg.layer_alt {
+                    marks.push(colour);
+                    ink = ink.union(box_);
+                }
+            }
             Drawn {
                 marks,
                 ink,
@@ -1443,7 +1737,7 @@ mod tests {
     fn the_window_wears_the_desktop_preset() {
         for t in Theme::all() {
             let name = t.palette.key();
-            let (hover, pressed) = control_fills(&t, seam(&t));
+            let (hover, pressed) = control_fills(&t);
             assert_eq!(
                 hover,
                 desktop::hover_fill(t.azur()),

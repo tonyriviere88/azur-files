@@ -211,18 +211,13 @@ pub fn show(
     // the body. See [`bare_body`].
     let mut listed = false;
 
-    if tab.dir.as_ref().is_some_and(|d| d.error.is_some()) {
-        let message = tab
-            .dir
-            .as_ref()
-            .and_then(|d| d.error.clone())
-            .unwrap_or_default();
+    if let Some(message) = tab.dir.as_ref().and_then(|d| d.error.as_deref()) {
         text_center(
             ui.painter(),
             body,
             t.fonts.body.clone(),
             t.status.danger,
-            &message,
+            message,
         );
     } else if tab.dir.is_none() {
         // A scan that has not landed yet, and **only once it has been long enough to notice**.
@@ -372,7 +367,6 @@ pub(crate) fn context_menu(
         .interact_pointer_pos()
         .or_else(|| ui.ctx().pointer_interact_pos())
         .unwrap_or(response.rect.center());
-    let scale = ui.ctx().pixels_per_point();
 
     // `row` is what the menu is for, and by the time this is called the selection already agrees
     // with it — the caller selected the row the click landed on, or cleared the selection and
@@ -389,7 +383,7 @@ pub(crate) fn context_menu(
     out.push(Action::ShellMenu {
         pane,
         items,
-        at: ((at.x * scale) as i32, (at.y * scale) as i32),
+        at: crate::ui::physical(ui.ctx(), at),
     });
 }
 

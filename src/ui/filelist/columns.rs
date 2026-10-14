@@ -279,7 +279,7 @@ pub(crate) fn header_strip(
                 .rect_filled(cell, CornerRadius::ZERO, t.bg.control_active);
         } else if response.hovered() {
             ui.painter()
-                .rect_filled(cell, CornerRadius::ZERO, t.bg.control_hover);
+                .rect_filled(cell, CornerRadius::ZERO, crate::ui::hover_fill(t));
         }
         if response.clicked() {
             out.push(Action::Sort { pane, column });
@@ -327,13 +327,13 @@ pub(crate) fn header_strip(
                 text_right(ui.painter(), shifted, galley);
                 if sorted {
                     let x = shifted.right() + space::S2 * 0.5;
-                    sort_glyph(ui, t, icon_rect(cell, x, 10.0), tab.ascending, color);
+                    sort_glyph(ui, icon_rect(cell, x, 10.0), tab.ascending, color);
                 }
             } else {
                 text_left(ui.painter(), inner, galley);
                 if sorted {
                     let x = inner.left() + label_width + space::S2;
-                    sort_glyph(ui, t, icon_rect(cell, x, 10.0), tab.ascending, color);
+                    sort_glyph(ui, icon_rect(cell, x, 10.0), tab.ascending, color);
                 }
             }
         }
@@ -493,7 +493,7 @@ fn header_glyph(p: &egui::Painter, column: Column, rect: Rect, ink: Color32, und
     }
 }
 
-pub(crate) fn sort_glyph(ui: &Ui, _t: &Theme, rect: Rect, ascending: bool, color: Color32) {
+pub(crate) fn sort_glyph(ui: &Ui, rect: Rect, ascending: bool, color: Color32) {
     if ascending {
         azur_icons::sort_asc(ui.painter(), rect, color);
     } else {

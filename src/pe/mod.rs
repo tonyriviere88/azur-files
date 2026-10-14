@@ -65,6 +65,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+use crate::bytes::{u16_at, u32_at, u64_at};
+
 // ---------------------------------------------------------------------------
 // The graph
 // ---------------------------------------------------------------------------
@@ -145,6 +147,7 @@ impl Graph {
             match module.state {
                 State::Found => files += 1,
                 State::ApiSet => api_sets += 1,
+                // What [`is_absent`] calls absent, spelt out so a new state has to be placed here.
                 State::Missing | State::Unreadable(_) => missing += 1,
                 State::Unvisited => {}
             }
@@ -174,19 +177,10 @@ impl Graph {
     /// something people learned to ignore. Two composable facts rather than a third walk that answered
     /// only their intersection.
     pub fn upfront(&self) -> Vec<bool> {
-        let mut reached = vec![false; self.modules.len()];
-        let mut queue = std::collections::VecDeque::from([0usize]);
-        reached[0] = true;
-        while let Some(at) = queue.pop_front() {
-            for edge in &self.modules[at].imports {
-                if edge.delayed || reached[edge.to] {
-                    continue;
-                }
-                reached[edge.to] = true;
-                queue.push_back(edge.to);
-            }
-        }
-        reached
+        self.reach(|edge| !edge.delayed)
+            .into_iter()
+            .map(|parent| parent != usize::MAX)
+            .collect()
     }
 
     /// **Every** module that is not there, delay-loaded or not, with the chain down to each.
@@ -201,7 +195,7 @@ impl Graph {
     /// So the count and this list are the same set, and the difference between the two kinds is
     /// carried by how each row is *drawn* rather than by which ones exist.
     pub fn missing(&self) -> Vec<Vec<usize>> {
-        self.chains(is_absent)
+        self.chains_to(is_absent)
     }
 
     /// The shortest chain from the root down to every module `want` says yes to.
@@ -209,48 +203,50 @@ impl Graph {
     /// The same question [`missing`](Self::missing) asks, asked about anything: the panel's search box
     /// uses it to answer "where does this come in, and through what" — which is what a tree can say
     /// and a filter over the rows on show cannot.
-    pub fn chains_to(&self, want: impl Fn(&Module) -> bool) -> Vec<Vec<usize>> {
-        self.chains(want)
-    }
-
-    /// One breadth-first walk from the root, and the chain down to each module that is wanted.
     ///
     /// Every edge, delay-loaded or not — which is what makes the chain the *shortest* one and not the
     /// shortest that avoids a delay-load. Whether anything on it is opened up front is
     /// [`upfront`](Self::upfront)'s question, asked of the module rather than of the route.
-    fn chains(&self, want: impl Fn(&Module) -> bool) -> Vec<Vec<usize>> {
-        // Breadth-first from the root, remembering how each module was first reached — which gives
-        // the shortest such chain, and a simple one.
-        let mut parent = vec![usize::MAX; self.modules.len()];
-        let mut reached = vec![false; self.modules.len()];
-        let mut queue = std::collections::VecDeque::from([0usize]);
-        reached[0] = true;
-        while let Some(at) = queue.pop_front() {
-            for edge in &self.modules[at].imports {
-                if reached[edge.to] {
-                    continue;
-                }
-                reached[edge.to] = true;
-                parent[edge.to] = at;
-                queue.push_back(edge.to);
-            }
-        }
-
+    pub fn chains_to(&self, want: impl Fn(&Module) -> bool) -> Vec<Vec<usize>> {
+        let parent = self.reach(|_| true);
         let mut out = Vec::new();
         for (i, module) in self.modules.iter().enumerate() {
-            if !reached[i] || !want(module) {
+            if parent[i] == usize::MAX || !want(module) {
                 continue;
             }
             let mut chain = vec![i];
-            let mut at = parent[i];
-            while at != usize::MAX {
-                chain.push(at);
+            let mut at = i;
+            while at != 0 {
                 at = parent[at];
+                chain.push(at);
             }
             chain.reverse();
             out.push(chain);
         }
         out
+    }
+
+    /// Breadth-first from the root along the edges `follow` accepts, and how each module was first
+    /// reached: its parent on the walk, the root's being itself and an unreached module's
+    /// `usize::MAX`.
+    ///
+    /// Breadth-first, so following parents back up from any module gives the shortest chain to it
+    /// along those edges — and a simple one. The one walk [`upfront`](Self::upfront) and
+    /// [`chains_to`](Self::chains_to) both take, differing only in which edges count.
+    fn reach(&self, follow: impl Fn(&Edge) -> bool) -> Vec<usize> {
+        let mut parent = vec![usize::MAX; self.modules.len()];
+        let mut queue = std::collections::VecDeque::from([0usize]);
+        parent[0] = 0;
+        while let Some(at) = queue.pop_front() {
+            for edge in &self.modules[at].imports {
+                if !follow(edge) || parent[edge.to] != usize::MAX {
+                    continue;
+                }
+                parent[edge.to] = at;
+                queue.push_back(edge.to);
+            }
+        }
+        parent
     }
 
     /// Whether module `i` was built for a different processor than the root.
@@ -491,30 +487,15 @@ pub fn walk(root: &Path, budget: usize, patience: Duration) -> Graph {
 
     // The root is read here rather than through `probe`: it is named by a path and not by a
     // name to be resolved, which is the one module in the graph that is not a search result.
-    let mut modules = Vec::new();
-    let mut raw: Vec<Vec<(String, bool)>> = Vec::new();
-    match read(root) {
-        Ok(image) => {
-            modules.push(Module {
-                name,
-                path: Some(root.to_path_buf()),
-                machine: image.machine,
-                state: State::Found,
-                imports: Vec::new(),
-            });
-            raw.push(image.imports);
-        }
-        Err(why) => {
-            modules.push(Module {
-                name,
-                path: Some(root.to_path_buf()),
-                machine: 0,
-                state: State::Unreadable(why),
-                imports: Vec::new(),
-            });
-            raw.push(Vec::new());
-        }
-    }
+    let found = read_probe(root.to_path_buf());
+    let mut modules = vec![Module {
+        name,
+        path: found.path,
+        machine: found.machine,
+        state: found.state,
+        imports: Vec::new(),
+    }];
+    let mut raw: Vec<Vec<(String, bool)>> = vec![found.imports];
 
     // Which module a name belongs to. Keyed by the *name*, lowercased, because resolution is a
     // function of the name alone: two references to `kernel32.dll` from two different modules
@@ -709,7 +690,7 @@ fn probe_all(
                 gave_up = true;
             }
             out.push(if gave_up {
-                unvisited()
+                Probe::bare(State::Unvisited)
             } else {
                 probe(name, search)
             });
@@ -757,38 +738,40 @@ fn probe_all(
     }
     let gave_up = answered < names.len();
     (
-        done.into_iter().map(|p| p.unwrap_or_else(unvisited)).collect(),
+        done.into_iter()
+            .map(|p| p.unwrap_or_else(|| Probe::bare(State::Unvisited)))
+            .collect(),
         gave_up,
     )
 }
 
-fn unvisited() -> Probe {
-    Probe {
-        path: None,
-        machine: 0,
-        state: State::Unvisited,
-        imports: Vec::new(),
+impl Probe {
+    /// A name that was never read, and so has no file, no machine and no imports: one that was
+    /// not looked for, or looked for and not found.
+    fn bare(state: State) -> Probe {
+        Probe {
+            path: None,
+            machine: 0,
+            state,
+            imports: Vec::new(),
+        }
     }
 }
 
 /// Look one name up and read what it turns out to be.
 fn probe(name: &str, search: &[PathBuf]) -> Probe {
     if is_api_set(name) {
-        return Probe {
-            path: None,
-            machine: 0,
-            state: State::ApiSet,
-            imports: Vec::new(),
-        };
+        return Probe::bare(State::ApiSet);
     }
     let Some(path) = resolve(name, search) else {
-        return Probe {
-            path: None,
-            machine: 0,
-            state: State::Missing,
-            imports: Vec::new(),
-        };
+        return Probe::bare(State::Missing);
     };
+    read_probe(path)
+}
+
+/// Read the file at `path`, which is already known to be the one: the half of [`probe`] that the
+/// root, named by a path rather than resolved, shares with every other module.
+fn read_probe(path: PathBuf) -> Probe {
     match read(&path) {
         Ok(image) => Probe {
             path: Some(path),
@@ -1002,8 +985,10 @@ impl Image {
     ///
     /// A section is longer in memory than on disk whenever it has a zero-filled tail, and an
     /// address in that tail has no bytes behind it — which is a legitimate thing for a data
-    /// directory to point at and has to come back as `None` rather than as a wild offset.
-    fn offset(&self, rva: u32) -> Option<u64> {
+    /// directory to point at and has to come back as `None` rather than as a wild offset. So does
+    /// an address too large to be one: an image's addresses are 32 bits, whatever field held them.
+    fn offset(&self, rva: u64) -> Option<u64> {
+        let rva = u32::try_from(rva).ok()?;
         for section in &self.sections {
             let span = if section.vsize == 0 {
                 section.rsize
@@ -1024,7 +1009,6 @@ impl Image {
     }
 
     fn at_rva(&mut self, rva: u64, len: usize) -> Option<Vec<u8>> {
-        let rva = u32::try_from(rva).ok()?;
         let offset = self.offset(rva)?;
         at(&mut self.file, offset, len)
     }
@@ -1036,7 +1020,7 @@ impl Image {
     /// declared length as one exact read would come back with nothing at all rather than with the
     /// part that is there.
     fn upto_rva(&mut self, rva: u64, len: usize) -> Option<Vec<u8>> {
-        let offset = self.offset(u32::try_from(rva).ok()?)?;
+        let offset = self.offset(rva)?;
         let len = self.len.saturating_sub(offset).min(len as u64) as usize;
         at(&mut self.file, offset, len)
     }
@@ -1071,7 +1055,7 @@ impl Image {
 
     /// The file from an *address* on, out of the window. Where both readers below start.
     fn block_at(&mut self, rva: u64) -> Option<&[u8]> {
-        let offset = self.offset(u32::try_from(rva).ok()?)?;
+        let offset = self.offset(rva)?;
         self.window(offset)
     }
 
@@ -1405,18 +1389,6 @@ fn at(file: &mut File, offset: u64, len: usize) -> Option<Vec<u8>> {
     let mut buffer = vec![0u8; len];
     file.read_exact(&mut buffer).ok()?;
     Some(buffer)
-}
-
-fn u16_at(bytes: &[u8], at: usize) -> Option<u16> {
-    Some(u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?))
-}
-
-fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
-}
-
-fn u64_at(bytes: &[u8], at: usize) -> Option<u64> {
-    Some(u64::from_le_bytes(bytes.get(at..at + 8)?.try_into().ok()?))
 }
 
 #[cfg(test)]

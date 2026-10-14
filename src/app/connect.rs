@@ -97,33 +97,16 @@ impl App {
             return;
         }
 
-        let sender = self.connecting.sender.clone();
-        let path = path.to_path_buf();
         let owner = self.owner;
-        let ctx = ctx.clone();
-
-        // Detached, like a volume probe: a dialog nobody answered when the window closes is not
-        // worth holding the process open for.
-        //
         // **Nothing here is gated on `cfg(test)`** — the guard is inside
         // [`crate::fs::drives::connect`], one line above the syscall, which is where a rule about
         // not touching the real system belongs. Gating this call site instead made the function
         // dead code in a test build, which is a warning telling the truth: a guard the compiler
         // removes along with its subject has not been tested either.
-        let _ = std::thread::Builder::new()
-            .name("connect".to_owned())
-            .spawn(move || {
-                let worked = crate::fs::drives::connect(&target, owner).is_ok();
-                let signed = Signed {
-                    pane,
-                    path,
-                    worked,
-                    what: Asked::SignIn,
-                };
-                if sender.send(signed).is_ok() {
-                    ctx.request_repaint();
-                }
-            });
+        let path = path.to_path_buf();
+        self.spawn_signed("connect".to_owned(), pane, path, Asked::SignIn, ctx, move |_| {
+            crate::fs::drives::connect(&target, owner).is_ok()
+        });
     }
 
     /// Close a network connection that has no letter, from its row's menu.
@@ -132,23 +115,11 @@ impl App {
     /// channel so that the Network group is read again once the connection is really gone. Not
     /// once-per-path: it is a command somebody chose, not something raised on their behalf.
     pub(super) fn disconnect(&mut self, remote: PathBuf, ctx: &egui::Context) {
-        let sender = self.connecting.sender.clone();
-        let ctx = ctx.clone();
         let pane = self.focused;
-        let _ = std::thread::Builder::new()
-            .name("disconnect".to_owned())
-            .spawn(move || {
-                let worked = crate::fs::drives::disconnect(&remote).is_ok();
-                let signed = Signed {
-                    pane,
-                    path: remote,
-                    worked,
-                    what: Asked::Disconnect,
-                };
-                if sender.send(signed).is_ok() {
-                    ctx.request_repaint();
-                }
-            });
+        let name = "disconnect".to_owned();
+        self.spawn_signed(name, pane, remote, Asked::Disconnect, ctx, |remote| {
+            crate::fs::drives::disconnect(remote).is_ok()
+        });
     }
 
     /// Bring back the mapped drive `path` is on, when Windows has not reconnected it — `H:` after a
@@ -168,27 +139,45 @@ impl App {
         if !self.connecting.asked.insert(path.to_path_buf()) {
             return;
         }
-        let sender = self.connecting.sender.clone();
-        let path = path.to_path_buf();
         let owner = self.owner;
-        let ctx = ctx.clone();
         // A sentence while SMB takes its time, which against a server that is not there is twenty
         // seconds of a pane that otherwise says only "path not found".
-        self.notice = Some(format!("Reconnecting {letter}…"));
-        let _ = std::thread::Builder::new()
-            .name(format!("reconnect-{letter}"))
-            .spawn(move || {
-                let worked = crate::fs::drives::reconnect(&letter, owner).is_ok();
-                let signed = Signed {
-                    pane,
-                    path,
-                    worked,
-                    what: Asked::Reconnect,
-                };
-                if sender.send(signed).is_ok() {
-                    ctx.request_repaint();
-                }
-            });
+        self.report(format!("Reconnecting {letter}…"));
+        let name = format!("reconnect-{letter}");
+        self.spawn_signed(name, pane, path.to_path_buf(), Asked::Reconnect, ctx, move |_| {
+            crate::fs::drives::reconnect(&letter, owner).is_ok()
+        });
+    }
+
+    /// Ask `work` on a thread of its own, named `name`, and send what it answered back on the
+    /// channel as `what` about `pane` and `path` — the one shape all three of the questions above
+    /// have. `work` is handed `path`, which is what the disconnect closes.
+    ///
+    /// Detached, like a volume probe: a dialog nobody answered when the window closes is not worth
+    /// holding the process open for.
+    fn spawn_signed(
+        &self,
+        name: String,
+        pane: PaneId,
+        path: PathBuf,
+        what: Asked,
+        ctx: &egui::Context,
+        work: impl FnOnce(&Path) -> bool + Send + 'static,
+    ) {
+        let sender = self.connecting.sender.clone();
+        let ctx = ctx.clone();
+        let _ = std::thread::Builder::new().name(name).spawn(move || {
+            let worked = work(&path);
+            let signed = Signed {
+                pane,
+                path,
+                worked,
+                what,
+            };
+            if sender.send(signed).is_ok() {
+                ctx.request_repaint();
+            }
+        });
     }
 
     /// Take delivery of any sign-in that has finished, and read the folder again if it worked.
@@ -215,7 +204,7 @@ impl App {
                     if done.worked {
                         self.volumes.refresh(ctx);
                     } else {
-                        self.notice = Some(format!(
+                        self.report(format!(
                             "Could not disconnect {} — is a file on it still open?",
                             done.path.display()
                         ));

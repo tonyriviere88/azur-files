@@ -1200,3 +1200,18 @@ fn the_skip_is_worth_having() {
     flat("byte at a time", &natural_cmp_plain);
     flat("skipping", &natural_cmp);
 }
+
+/// A hand-edited `sort=` is read whatever its case, as every other word in the settings file is.
+///
+/// It used to need exact lower case, so `Size,DESC` was silently a sort by name, ascending — the
+/// line skipped as unreadable, which is the one outcome that looks like the setting doing nothing.
+#[test]
+fn a_sort_setting_is_read_whatever_its_case() {
+    for written in ["size,desc", "Size,DESC", "SIZE,Desc"] {
+        let sort = Sort::parse(written).unwrap_or_else(|| panic!("`{written}` was not read"));
+        assert_eq!(sort.by, Column::Size, "`{written}`");
+        assert!(!sort.ascending, "`{written}` came back ascending");
+    }
+    // And what is written back is still the one canonical spelling.
+    assert_eq!(Sort::parse("Size,DESC").map(|sort| sort.as_text()), Some("size,desc".to_owned()));
+}

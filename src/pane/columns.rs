@@ -68,38 +68,12 @@ impl Columns {
     /// column the order **does not mention** — a file written before that column existed, or one
     /// edited by hand — goes back beside the one it follows in [`Column::ALL`].
     pub fn set_order(&mut self, order: impl IntoIterator<Item = Column>) {
-        let mut list: Vec<Column> = Vec::with_capacity(Column::COUNT);
-        for column in order {
-            if !list.contains(&column) {
-                list.push(column);
-            }
-        }
-        for (at, column) in Column::ALL.into_iter().enumerate() {
-            if list.contains(&column) {
-                continue;
-            }
-            let after = Column::ALL[..at]
-                .iter()
-                .rev()
-                .find_map(|before| list.iter().position(|had| had == before));
-            list.insert(after.map_or(0, |index| index + 1), column);
-        }
-        self.order.copy_from_slice(&list);
+        arrange(&mut self.order, Column::ALL, order);
     }
 
     /// Take `from` out and put it on one side of `to`. Whether anything moved.
     pub fn move_beside(&mut self, from: Column, to: Column, after: bool) -> bool {
-        if from == to {
-            return false;
-        }
-        let before = self.order;
-        let mut list: Vec<Column> = self.order.into_iter().filter(|c| *c != from).collect();
-        let Some(at) = list.iter().position(|c| *c == to) else {
-            return false;
-        };
-        list.insert(at + usize::from(after), from);
-        self.order.copy_from_slice(&list);
-        self.order != before
+        move_beside(&mut self.order, from, to, after)
     }
 
     /// Whether there is anything for [`Self::reset`] to undo.
@@ -113,6 +87,59 @@ impl Columns {
         *self = Self::default();
         changed
     }
+}
+
+/// Put into `order` every one of `all`, in the order `wanted` names them.
+///
+/// `wanted` may name any of them in any number: a repeat is dropped, and one it **does not
+/// mention** goes back in beside the one it follows in `all`, so an arrangement written before
+/// something existed gains it beside its neighbour, wherever the neighbour was put. The rule behind
+/// both [`Columns::set_order`] and [`crate::ui::sidebar::Sections::set_order`].
+pub(crate) fn arrange<T: Copy + PartialEq, const N: usize>(
+    order: &mut [T; N],
+    all: [T; N],
+    wanted: impl IntoIterator<Item = T>,
+) {
+    let mut list: Vec<T> = Vec::with_capacity(N);
+    for item in wanted {
+        if !list.contains(&item) {
+            list.push(item);
+        }
+    }
+    for (at, item) in all.into_iter().enumerate() {
+        if list.contains(&item) {
+            continue;
+        }
+        let after = all[..at]
+            .iter()
+            .rev()
+            .find_map(|before| list.iter().position(|had| had == before));
+        list.insert(after.map_or(0, |index| index + 1), item);
+    }
+    order.copy_from_slice(&list);
+}
+
+/// Take `from` out of `order` and put it on one side of `to`. Whether anything moved.
+///
+/// A drag dropped on a header or a heading, for [`Columns::move_beside`] and
+/// [`crate::ui::sidebar::Sections::move_beside`].
+pub(crate) fn move_beside<T: Copy + PartialEq, const N: usize>(
+    order: &mut [T; N],
+    from: T,
+    to: T,
+    after: bool,
+) -> bool {
+    if from == to {
+        return false;
+    }
+    let before = *order;
+    let mut list: Vec<T> = order.iter().copied().filter(|item| *item != from).collect();
+    let Some(at) = list.iter().position(|item| *item == to) else {
+        return false;
+    };
+    list.insert(at + usize::from(after), from);
+    order.copy_from_slice(&list);
+    *order != before
 }
 
 #[cfg(test)]

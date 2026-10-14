@@ -73,10 +73,11 @@ pub fn parent_of(path: &Path) -> Option<PathBuf> {
         Some(parent) if !parent.as_os_str().is_empty() => Some(parent.to_path_buf()),
         // A root. `C:\` goes to This PC; `\\server\share` goes to the machine, which is a place
         // of its own — and is why this asks for the share's *own* server rather than reusing the
-        // `None` above, which `Path` gives for both.
-        _ => Some(match drives::split_unc(path) {
-            Some((host, _)) if !host.contains(['\\', '/']) => PathBuf::from(format!("\\\\{host}")),
-            _ => PathBuf::new(),
+        // `None` above, which `Path` gives for both. A bare `\\server` was answered above, so what
+        // [`drives::machine_of`] finds here is always the server of a share.
+        _ => Some(match drives::machine_of(path) {
+            Some(host) => drives::machine_path(&host),
+            None => PathBuf::new(),
         }),
     }
 }
@@ -117,6 +118,17 @@ pub fn is_unc(path: &Path) -> bool {
     path.to_string_lossy().starts_with(r"\\")
 }
 
+/// Whether a path is a UNC path **on the network**: `\\server\share`, and not the `\\?\` or `\\.\`
+/// that start the same way.
+///
+/// Those two are the extended-length and device forms of a *local* path, which [`is_unc`]
+/// deliberately counts in. This is the narrower question: whether the path names a server at all.
+/// Asked of the text as it stands, so it is backslashes only, like [`is_unc`].
+pub fn is_network_unc(path: &Path) -> bool {
+    let text = path.as_os_str().to_string_lossy();
+    text.starts_with(r"\\") && !text.starts_with(r"\\?\") && !text.starts_with(r"\\.\")
+}
+
 /// Whether some text is one of the shell's own names rather than a path: `shell:Downloads`,
 /// `shell:RecycleBinFolder`, `::{20D04FE0-…}`.
 ///
@@ -125,9 +137,18 @@ pub fn is_unc(path: &Path) -> bool {
 /// as a file to select. One function for every place that has to tell the two apart: resolving what
 /// was typed, revealing it, and asking for its icon.
 pub fn is_shell_name(text: &str) -> bool {
-    text.get(..6)
-        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("shell:"))
-        || text.starts_with("::{")
+    strip_prefix_ignore_ascii_case(text, "shell:").is_some() || text.starts_with("::{")
+}
+
+/// What follows `prefix` in `text`, when `text` starts with it in any case: `Shell:` and `FILE:`
+/// are as good as their lower-case spellings to whatever reads them. `None` when it does not.
+///
+/// ASCII-only, as every prefix it is asked about is, and by byte rather than by `char` — so a
+/// `text` that is too short, or whose `prefix.len()`th byte falls inside a character, simply does
+/// not match.
+pub(crate) fn strip_prefix_ignore_ascii_case<'a>(text: &'a str, prefix: &str) -> Option<&'a str> {
+    let head = text.get(..prefix.len())?;
+    head.eq_ignore_ascii_case(prefix).then(|| &text[prefix.len()..])
 }
 
 /// Whether a pane at this path is showing a listing this program **assembles** rather than a
@@ -332,10 +353,7 @@ fn resolve_names(text: &str) -> Expanded {
 /// path in every sense but its spelling. Percent-escapes are decoded as UTF-8, which is what a URL
 /// is; one that is not valid UTF-8 is left as it was rather than guessed at.
 fn from_file_url(text: &str) -> Option<String> {
-    let rest = text
-        .get(..5)
-        .filter(|scheme| scheme.eq_ignore_ascii_case("file:"))
-        .map(|_| &text[5..])?;
+    let rest = strip_prefix_ignore_ascii_case(text, "file:")?;
     let rest = rest.strip_prefix("//").unwrap_or(rest);
     // `file:///C:/x` has an empty host and a path beginning `/C:`; `file://server/share` has one.
     let path = match rest.strip_prefix('/') {

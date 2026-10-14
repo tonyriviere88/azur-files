@@ -101,9 +101,12 @@ const TAB_MAX: f32 = 220.0;
 /// name in a tab is x-height and ascenders; the room being reserved is for descenders most of
 /// them do not have.
 const TEXT_LIFT: f32 = 2.0;
+/// Where a tab's glyph starts, in from its left edge — the dragged tab's ghost too, so the two are
+/// laid out alike.
+const GLYPH_X: f32 = 8.0;
 /// Everything in a tab that is not its label: two 14px glyphs, the gaps around
 /// them, and the padding at each end.
-const TAB_FURNITURE: f32 = 8.0 + TOOL_ICON + space::S2 + space::S2 + TOOL_ICON + space::S2;
+const TAB_FURNITURE: f32 = GLYPH_X + TOOL_ICON + space::S2 + space::S2 + TOOL_ICON + space::S2;
 
 /// A tab being dragged.
 pub struct TabDrag {
@@ -351,7 +354,7 @@ pub fn title_bar(
     let mark_response = ui.interact(mark, Id::new("app-menu"), Sense::click());
     if mark_response.hovered() {
         ui.painter()
-            .rect_filled(mark, CornerRadius::same(radius::SMALL), t.bg.control_hover);
+            .rect_filled(mark, CornerRadius::same(radius::SMALL), crate::ui::hover_fill(t));
     }
     // The one icon in the window that takes no colour from the theme. Everywhere else an icon
     // is a glyph in the colour of the text beside it; this is the brand, it is a full-colour
@@ -421,20 +424,15 @@ pub fn title_bar(
             .map(|p| p.tab().title.clone())
             .unwrap_or_default();
         if !label.is_empty() {
-            let galley = truncated(
+            lifted_label(
                 ui.painter(),
+                t,
                 &label,
-                t.fonts.body.clone(),
                 t.text.secondary,
-                (controls_left - space::S3 - x).max(0.0),
-            );
-            crate::ui::text_left(
-                ui.painter(),
-                Rect::from_min_max(
-                    pos2(x, bar.top() - TEXT_LIFT),
-                    pos2(controls_left, bar.bottom() - TEXT_LIFT),
-                ),
-                galley,
+                bar,
+                x,
+                controls_left - space::S3,
+                controls_left,
             );
         }
     }
@@ -507,7 +505,7 @@ pub fn tab_strip(
         // in a listing.
         let shell = icons_cache
             .place(&tab.path)
-            .and_then(|icon| icons_cache.uv(ui.ctx(), icon));
+            .and_then(|icon| icons_cache.uv(icon));
         let filled = paint_tab(
             ui,
             t,
@@ -563,15 +561,13 @@ pub fn tab_strip(
             t,
             plus,
             Id::new(("new-tab", pane.id)),
-            &azur_icons::plus,
+            &crate::icons::plus,
             // Its key as well as what it does, which is the one thing the menu under the mark said
             // and this button did not — and the two are the same command, so they say it the same
             // way. See `azur_egui_theme::components::shortcut_in` for the bracket going grey.
             &crate::app::shortcuts::tip("New tab in this folder", &crate::app::shortcuts::Command::NewTab),
             true,
             false,
-            // The strip it sits in, whether that is the title bar or a band of its own.
-            t.surfaces.titlebar,
         )
         .clicked()
     {
@@ -704,8 +700,7 @@ fn paint_tab(
     // The glyph: a folder, or the machine for This PC. Dimmed while the listing is
     // still on its way, which is the only loading indicator a fast scan has time
     // to show.
-    let glyph_x = rect.left() + 8.0;
-    let box_rect = icon_rect(rect, glyph_x, TOOL_ICON);
+    let box_rect = tab_glyph(rect);
     match shell {
         Some((texture, uv)) => {
             ui.painter().image(
@@ -786,22 +781,17 @@ fn paint_tab(
         }
     }
 
-    let label_left = glyph_x + TOOL_ICON + space::S2;
+    let label_left = tab_label_left(rect);
     if text_right > label_left {
-        let galley = truncated(
+        lifted_label(
             ui.painter(),
+            t,
             title,
-            t.fonts.body.clone(),
             text_color,
-            text_right - label_left,
-        );
-        crate::ui::text_left(
-            ui.painter(),
-            Rect::from_min_max(
-                pos2(label_left, rect.top() - TEXT_LIFT),
-                pos2(text_right, rect.bottom() - TEXT_LIFT),
-            ),
-            galley,
+            rect,
+            label_left,
+            text_right,
+            text_right,
         );
     }
 
@@ -884,7 +874,7 @@ fn app_menu(
         }
         azur_egui_theme::components::menu_divider(ui);
         if ui
-            .add(MenuItem::new("New tab").shortcut(crate::app::shortcuts::label(&crate::app::shortcuts::Command::NewTab)).icon(&azur_icons::plus))
+            .add(MenuItem::new("New tab").shortcut(crate::app::shortcuts::label(&crate::app::shortcuts::Command::NewTab)).icon(&crate::icons::plus))
             .clicked()
         {
             out.push(Action::NewTabFocused);
@@ -1097,7 +1087,7 @@ fn update_badge(
     let lit = open || (response.hovered() && !busy);
     if lit {
         ui.painter()
-            .rect_filled(rect, CornerRadius::same(radius::SMALL), t.bg.control_hover);
+            .rect_filled(rect, CornerRadius::same(radius::SMALL), crate::ui::hover_fill(t));
     }
     let ink = if lit { t.text.primary } else { t.text.secondary };
     let glyph = icon_rect(rect, rect.left() + BADGE_PAD, TOOL_ICON);
@@ -1201,7 +1191,7 @@ fn window_buttons(
                 // One red whatever the palette; see `desktop::CLOSE_FILL`.
                 (Some(azur_egui_theme::desktop::CLOSE_FILL), azur_egui_theme::desktop::CLOSE_INK)
             } else {
-                (Some(t.bg.control_hover), t.text.primary)
+                (Some(crate::ui::hover_fill(t)), t.text.primary)
             }
         } else {
             (None, t.text.secondary)
@@ -1278,7 +1268,7 @@ pub fn resolve_drag(
     // accent goes on top, so what says "here" is still the only blue on screen.
     for pane in panes {
         for zone in Zone::ALL {
-            if !accepts(pane, panes, state, zone) {
+            if !accepts(pane, state, zone) {
                 continue;
             }
             crate::ui::drop_hint(&painter, dock::hint_rect(pane.rect, zone), zone, t);
@@ -1379,7 +1369,7 @@ fn drop_target(pointer: Pos2, slots: &[Slot], panes: &[Pane], state: &TabDrag) -
     for pane in panes {
         if pane.rect.contains(pointer) {
             let zone = dock::zone_at(pane.rect, pointer);
-            if !accepts(pane, panes, state, zone) {
+            if !accepts(pane, state, zone) {
                 return Drop::Nowhere;
             }
             return match zone {
@@ -1399,16 +1389,14 @@ fn drop_target(pointer: Pos2, slots: &[Slot], panes: &[Pane], state: &TabDrag) -
 ///
 /// Asked by [`drop_target`] of the one zone the pointer is in, and by the hints of all of them,
 /// so a grey rect is never drawn where a release would do nothing.
-fn accepts(pane: &Pane, panes: &[Pane], state: &TabDrag, zone: Zone) -> bool {
+fn accepts(pane: &Pane, state: &TabDrag, zone: Zone) -> bool {
     if pane.id != state.pane {
         return true;
     }
+    // `pane` is the one the tab came from, so it is the one whose tabs are counted.
     match zone {
         Zone::Into => false,
-        Zone::Split(_) => panes
-            .iter()
-            .find(|p| p.id == state.pane)
-            .is_some_and(|p| p.tabs.len() > 1),
+        Zone::Split(_) => pane.tabs.len() > 1,
     }
 }
 
@@ -1447,24 +1435,53 @@ fn ghost(painter: &egui::Painter, t: &Theme, pointer: Pos2, state: &TabDrag) {
     let corner = CornerRadius::same(radius::SMALL);
     painter.rect_filled(rect, corner, t.bg.layer_alt);
     painter.rect_stroke(rect, corner, Stroke::new(1.0, t.accent.default), StrokeKind::Inside);
-    icons::folder(
+    icons::folder(painter, tab_glyph(rect), t.folder);
+    // Cut short of the far edge by a tab's end padding, and laid in a box that runs to it.
+    lifted_label(
         painter,
-        icon_rect(rect, rect.left() + 8.0, TOOL_ICON),
-        t.folder,
-    );
-    let label_left = rect.left() + 8.0 + TOOL_ICON + space::S2;
-    let galley = truncated(
-        painter,
+        t,
         &state.title,
-        t.fonts.body.clone(),
         t.text.primary,
-        rect.right() - space::S2 - label_left,
+        rect,
+        tab_label_left(rect),
+        rect.right() - space::S2,
+        rect.right(),
     );
+}
+
+/// The box a tab's glyph is drawn in: [`TOOL_ICON`] square, [`GLYPH_X`] in from the tab's left edge.
+fn tab_glyph(tab: Rect) -> Rect {
+    icon_rect(tab, tab.left() + GLYPH_X, TOOL_ICON)
+}
+
+/// Where a tab's label starts: past its glyph and the gap after it.
+fn tab_label_left(tab: Rect) -> f32 {
+    tab.left() + GLYPH_X + TOOL_ICON + space::S2
+}
+
+/// A name on this bar, in `body`: cut to end at `cut` with an ellipsis, and laid from `left` in a box
+/// that runs to `right` and is lifted [`TEXT_LIFT`] off `band` — a tab's rect, or the whole bar.
+///
+/// `cut` and `right` are two figures because the ghost under a dragged tab and the title bar's
+/// fallback name keep some air clear of the text and still lay it in a box out to the edge; a tab,
+/// whose box already stops short of its close button, gives both the same.
+#[allow(clippy::too_many_arguments)]
+fn lifted_label(
+    painter: &egui::Painter,
+    t: &Theme,
+    text: &str,
+    color: Color32,
+    band: Rect,
+    left: f32,
+    cut: f32,
+    right: f32,
+) {
+    let galley = truncated(painter, text, t.fonts.body.clone(), color, cut - left);
     crate::ui::text_left(
         painter,
         Rect::from_min_max(
-            pos2(label_left, rect.top() - TEXT_LIFT),
-            pos2(rect.right(), rect.bottom() - TEXT_LIFT),
+            pos2(left, band.top() - TEXT_LIFT),
+            pos2(right, band.bottom() - TEXT_LIFT),
         ),
         galley,
     );

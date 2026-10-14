@@ -30,6 +30,9 @@ use crate::ui::sidebar::{self, Sections};
 use crate::ui::{filelist, GUTTER};
 
 mod action;
+/// The developer flags' half of the program, which a shipped build does not carry: see the
+/// `devtools` feature in `Cargo.toml`.
+#[cfg(any(test, feature = "devtools"))]
 mod capture;
 mod cloud;
 mod columns;
@@ -44,6 +47,7 @@ mod menu;
 mod palette;
 mod perform;
 mod preview;
+mod settling;
 pub(crate) mod shortcuts;
 mod transfer;
 
@@ -58,7 +62,10 @@ mod tests;
 pub use action::{Action, WindowAction};
 pub use palette::Zoom;
 use action::Asking;
-use capture::{process_memory, Scrolling, Settling, Shape, Walk};
+use settling::{Settling, Shape};
+/// For the memory click tests, which read the process figures as `--trace` does.
+#[cfg(test)]
+use capture::process_memory;
 use git::GIT_WRITE_SETTLE;
 
 /// How many closed tabs are remembered, for `Ctrl+Shift+T`.
@@ -493,10 +500,9 @@ pub struct App {
 
     /// Keeps frames coming while the window is being resized, rescaled or restored.
     settling: Settling,
-    /// `--walk=<dir>`: browse by itself, for measuring a real session's memory.
-    walk: Option<Walk>,
-    /// `--scroll`: run the listing up and down, for the same reason.
-    scrolling: Scrolling,
+    /// `--walk`, `--scroll` and `--trace`: the instruments a measuring run drives the window with.
+    #[cfg(any(test, feature = "devtools"))]
+    devtools: capture::Devtools,
 
     /// Names of the actions performed, when something is watching.
     ///
@@ -532,6 +538,38 @@ fn ask_for(tab: &mut Tab, loader: &mut Loader) -> u64 {
     } else {
         tab.walked = None;
         loader.request(&tab.path)
+    }
+}
+
+/// [`ask_for`], and when — which is what decides whether the listing says anything about waiting.
+/// See [`crate::pane::SLOW_SCAN`].
+fn ask_now(tab: &mut Tab, loader: &mut Loader, now: f64) {
+    tab.awaiting = Some(ask_for(tab, loader));
+    tab.asked_at = Some(now);
+}
+
+/// Every tab of every pane, to write — [`App::tabs`] for a caller that is also holding another
+/// field of the window, which a method taking the whole of it would refuse.
+fn tabs_mut(panes: &mut [Pane]) -> impl Iterator<Item = &mut Tab> {
+    panes.iter_mut().flat_map(|pane| pane.tabs.iter_mut())
+}
+
+/// Put a worker's per-row answers into a listing's slots: one slot per entry of a listing `len`
+/// long, made afresh with `fill` when the length is not that, and each `(entry, value)` written to
+/// its own. An entry past the end is dropped rather than grown into.
+fn scatter<T: Clone>(
+    slots: &mut Vec<T>,
+    len: usize,
+    fill: T,
+    answers: impl IntoIterator<Item = (u32, T)>,
+) {
+    if slots.len() != len {
+        *slots = vec![fill; len];
+    }
+    for (index, value) in answers {
+        if let Some(slot) = slots.get_mut(index as usize) {
+            *slot = value;
+        }
     }
 }
 
@@ -782,8 +820,8 @@ impl App {
             config_saved_at: f64::NEG_INFINITY,
             cut_checked_at: f64::NEG_INFINITY,
             settling: Settling::default(),
-            walk: None,
-            scrolling: Scrolling::default(),
+            #[cfg(any(test, feature = "devtools"))]
+            devtools: capture::Devtools::default(),
             journal: None,
         }
     }
@@ -884,7 +922,7 @@ impl App {
         let mut order = Vec::new();
         self.layout.panes(&mut order);
         for (slot, id) in order.iter().enumerate() {
-            let Some(pane) = self.panes.iter().find(|p| p.id == *id) else {
+            let Some(pane) = self.pane_ref(*id) else {
                 // A leaf with no pane behind it cannot happen, and if it did the layout would
                 // no longer describe what follows it — so the tree is dropped rather than
                 // written wrong. The tabs are still all here.
@@ -1018,6 +1056,40 @@ impl App {
         self.panes.iter_mut().find(|p| p.id == id)
     }
 
+    /// [`App::pane_mut`], to read. Not `pane`, which is the name of the call that draws one.
+    fn pane_ref(&self, id: PaneId) -> Option<&Pane> {
+        self.panes.iter().find(|p| p.id == id)
+    }
+
+    /// The pane the keyboard is in, which is the one every command acts on.
+    fn focused_pane(&self) -> Option<&Pane> {
+        self.pane_ref(self.focused)
+    }
+
+    /// The folder pane `id` is showing, in its tab in front.
+    fn path_of(&self, id: PaneId) -> Option<PathBuf> {
+        self.pane_ref(id).map(|p| p.tab().path.clone())
+    }
+
+    /// Every tab of every pane, in pane order and each pane's tabs in strip order — the walk any
+    /// question about the whole window makes. See [`tabs_mut`] for the one that writes.
+    fn tabs(&self) -> impl Iterator<Item = &Tab> {
+        self.panes.iter().flat_map(|pane| pane.tabs.iter())
+    }
+
+    /// Pane `pane`, at `position` in [`App::panes`], has just lost its last tab: take it out of the
+    /// window, and the keyboard with it if the keyboard was there.
+    fn drop_emptied_pane(&mut self, position: usize, pane: PaneId) {
+        // Only close the pane if the tree can absorb it; a lone root pane has
+        // nowhere to collapse into, and is refilled by the caller.
+        if self.layout.remove(pane) {
+            self.panes.remove(position);
+            if self.focused == pane {
+                self.focused = self.panes.first().map(|p| p.id).unwrap_or(pane);
+            }
+        }
+    }
+
     fn spawn_pane(&mut self, tab: Tab) -> PaneId {
         let id = self.next_pane;
         self.next_pane += 1;
@@ -1032,18 +1104,13 @@ impl App {
             return None;
         }
         let tab = self.panes[position].tabs.remove(index);
-        let p = &mut self.panes[position];
-        if p.tabs.is_empty() {
-            // Only close the pane if the tree can absorb it; a lone root pane has
-            // nowhere to collapse into, and is refilled by the caller.
-            if self.layout.remove(pane) {
-                self.panes.remove(position);
-                if self.focused == pane {
-                    self.focused = self.panes.first().map(|p| p.id).unwrap_or(pane);
-                }
+        if self.panes[position].tabs.is_empty() {
+            self.drop_emptied_pane(position, pane);
+        } else {
+            let p = &mut self.panes[position];
+            if p.active >= p.tabs.len() {
+                p.show_tab(p.tabs.len() - 1);
             }
-        } else if p.active >= p.tabs.len() {
-            p.show_tab(p.tabs.len() - 1);
         }
         Some(tab)
     }
@@ -1074,8 +1141,7 @@ impl App {
             // The destination went away; keep the tab by putting it back somewhere.
             let anchor = self.focused;
             if let Some(p) = self.pane_mut(anchor) {
-                p.tabs.push(tab);
-                p.show_tab(p.tabs.len() - 1);
+                p.push_tab(tab);
             }
             return;
         };
@@ -1117,12 +1183,7 @@ impl App {
         }
         if !self.panes[position].close_tab(index) {
             // The pane is empty now, so it goes too.
-            if self.layout.remove(pane) {
-                self.panes.remove(position);
-                if self.focused == pane {
-                    self.focused = self.panes.first().map(|p| p.id).unwrap_or(pane);
-                }
-            }
+            self.drop_emptied_pane(position, pane);
         }
         self.config_dirty = true;
     }

@@ -4,9 +4,7 @@ use super::*;
 use std::path::{PathBuf, MAIN_SEPARATOR};
 
 fn scratch(name: &str) -> PathBuf {
-    let root = crate::sandbox::dir("preview");
-    std::fs::create_dir_all(&root).expect("a directory in the temp folder");
-    root.join(name)
+    crate::sandbox::dir("preview").join(name)
 }
 
 /// What a search finds, as the matched text rather than as offsets — a list of byte ranges is
@@ -1050,22 +1048,11 @@ fn a_picture_is_compared_with_the_one_in_the_last_commit() {
     crate::sandbox::remove(&root);
     std::fs::create_dir_all(&root).expect("a temp folder");
 
-    let run = |args: &[&str]| {
-        let mut command = std::process::Command::new("git");
-        command.args(args).current_dir(&root);
-        crate::shell::no_window(&mut command);
-        command
-            .output()
-            .map(|out| out.status.success())
-            .unwrap_or(false)
-    };
-    if !run(&["init", "--quiet"]) {
+    let run = |args: &[&str]| crate::git::git_in(&root, args);
+    if !crate::git::fresh_repo(&root) {
         eprintln!("no git: skipping");
         return;
     }
-    assert!(run(&["config", "user.email", "test@example.invalid"]));
-    assert!(run(&["config", "user.name", "Test"]));
-    assert!(run(&["config", "commit.gpgsign", "false"]));
 
     // 2×1, committed grey, and then one of its two pixels turned red on disk.
     let path = root.join("mark.png");

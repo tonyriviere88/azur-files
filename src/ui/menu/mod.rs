@@ -183,6 +183,16 @@ impl Open {
         }
     }
 
+    /// What the menu was raised over: the selection, or the folder itself when there is none — the
+    /// background menu's answer to "this entry is about what?".
+    pub fn items_or_folder(&self) -> Vec<std::path::PathBuf> {
+        if self.items.is_empty() {
+            vec![self.folder.clone()]
+        } else {
+            self.items.clone()
+        }
+    }
+
     /// The same menu, banded: Windows' flat list turned into the arrangement this program shows.
     ///
     /// Chained onto [`Open::new`] by the one caller that has a shell menu to show —
@@ -1318,33 +1328,34 @@ fn keyboard(ctx: &egui::Context, menu: &mut Open) -> Keys {
             .filter(|c| c.len() == level_path.len() + 1 && c.starts_with(&level_path))
             .and_then(|c| c.last().copied());
         let step: isize = if down { 1 } else { -1 };
-        let mut next = match current {
+        let from = match current {
             Some(index) => index as isize + step,
             None if down => 0,
             None => count as isize - 1,
         };
-        // Skip separators and anything disabled, and wrap.
-        for _ in 0..count * 2 {
-            let wrapped = next.rem_euclid(count as isize) as usize;
+        let at = |index: usize| {
             let mut candidate = level_path.clone();
-            candidate.push(wrapped);
-            let usable = menu.entry(&candidate).is_some_and(|e| match &e.kind {
+            candidate.push(index);
+            candidate
+        };
+        // Skip separators and anything disabled, and wrap.
+        let usable = |index: usize| {
+            menu.entry(&at(index)).is_some_and(|e| match &e.kind {
                 Kind::Separator => false,
                 // A row of five whose every tile is greyed — a selection nothing can be done to —
                 // is a row there is no point stopping on.
                 Kind::Tiles(tiles) => tiles.iter().any(|tile| tile.enabled),
                 _ => e.enabled,
-            });
-            if usable {
-                // Landing on the tile row starts at its first usable tile rather than at whatever
-                // tile was last under the cursor, which may since have been greyed.
-                if let Some(Kind::Tiles(tiles)) = menu.entry(&candidate).map(|e| &e.kind) {
-                    menu.tile = tiles.iter().position(|tile| tile.enabled).unwrap_or(0);
-                }
-                menu.cursor = Some(candidate);
-                return Keys::Moved;
+            })
+        };
+        if let Some(index) = next_usable(count, from, step, count * 2, usable) {
+            let candidate = at(index);
+            // Landing on the tile row starts at its first usable tile rather than at whatever
+            // tile was last under the cursor, which may since have been greyed.
+            if let Some(Kind::Tiles(tiles)) = menu.entry(&candidate).map(|e| &e.kind) {
+                menu.tile = tiles.iter().position(|tile| tile.enabled).unwrap_or(0);
             }
-            next += step;
+            menu.cursor = Some(candidate);
         }
         return Keys::Moved;
     }
@@ -1358,14 +1369,9 @@ fn keyboard(ctx: &egui::Context, menu: &mut Open) -> Keys {
             if let Some(Kind::Tiles(tiles)) = menu.entry(&cursor).map(|e| &e.kind) {
                 let count = tiles.len();
                 let step: isize = if right { 1 } else { -1 };
-                let mut next = menu.tile as isize + step;
-                for _ in 0..count {
-                    let wrapped = next.rem_euclid(count as isize) as usize;
-                    if tiles[wrapped].enabled {
-                        menu.tile = wrapped;
-                        break;
-                    }
-                    next += step;
+                let from = menu.tile as isize + step;
+                if let Some(index) = next_usable(count, from, step, count, |at| tiles[at].enabled) {
+                    menu.tile = index;
                 }
                 return Keys::Moved;
             }
@@ -1408,6 +1414,30 @@ fn keyboard(ctx: &egui::Context, menu: &mut Open) -> Keys {
         }
     }
     Keys::Idle
+}
+
+/// The first of `count` places, starting at `from` and moving by `step`, that is `usable` —
+/// wrapping round either end, and giving up after `tries` looks.
+///
+/// What the arrow keys do down a menu level and along its tile row: both skip what cannot be
+/// stopped on and go round a ring. `from` may be off either end already; it is wrapped like every
+/// place after it.
+fn next_usable(
+    count: usize,
+    from: isize,
+    step: isize,
+    tries: usize,
+    mut usable: impl FnMut(usize) -> bool,
+) -> Option<usize> {
+    let mut next = from;
+    for _ in 0..tries {
+        let wrapped = next.rem_euclid(count as isize) as usize;
+        if usable(wrapped) {
+            return Some(wrapped);
+        }
+        next += step;
+    }
+    None
 }
 
 #[cfg(test)]

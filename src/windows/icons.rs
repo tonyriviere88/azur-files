@@ -20,7 +20,7 @@ pub(crate) fn index_of(path: &Path, is_dir: bool, use_attributes: bool) -> Optio
         SHGetFileInfoW, SHFILEINFOW, SHGFI_SYSICONINDEX, SHGFI_USEFILEATTRIBUTES,
     };
 
-    let wide: Vec<u16> = wide(path);
+    let wide = crate::shell::nul_terminated(path);
     let attributes = if is_dir {
         FILE_ATTRIBUTE_DIRECTORY
     } else {
@@ -74,36 +74,24 @@ pub(crate) fn index_of_place(path: &Path) -> Option<i32> {
 #[cfg(windows)]
 pub(super) fn index_of_moniker(moniker: &str) -> Option<i32> {
     use windows::core::PCWSTR;
-    use windows::Win32::UI::Shell::Common::ITEMIDLIST;
-    use windows::Win32::UI::Shell::{
-        ILFree, SHGetFileInfoW, SHParseDisplayName, SHFILEINFOW, SHGFI_PIDL, SHGFI_SYSICONINDEX,
-    };
+    use windows::Win32::UI::Shell::{SHGetFileInfoW, SHFILEINFOW, SHGFI_PIDL, SHGFI_SYSICONINDEX};
 
-    let wide: Vec<u16> = moniker.encode_utf16().chain(std::iter::once(0)).collect();
-    let mut pidl: *mut ITEMIDLIST = std::ptr::null_mut();
-    // SAFETY: `wide` is null-terminated and outlives the call. `pidl` is written only on
-    // success and freed on both paths out below.
-    unsafe {
-        SHParseDisplayName(PCWSTR(wide.as_ptr()), None, &mut pidl, 0, None).ok()?;
-    }
-    if pidl.is_null() {
-        return None;
-    }
+    // Taken as written, and not through `crate::shell::wide`: a moniker is not a path, and that
+    // function's slash rewrite is for paths. The ID list is freed when `pidl` goes.
+    let pidl = crate::shell::parsed_pidl(&crate::shell::nul_terminated(moniker))?;
 
     let mut info = SHFILEINFOW::default();
     // SAFETY: with `SHGFI_PIDL` the first argument is a PIDL cast to `PCWSTR`, which is
     // the shape this API has always had. `info` is sized by `size_of`.
     let ok = unsafe {
         SHGetFileInfoW(
-            PCWSTR(pidl as *const u16),
+            PCWSTR(pidl.0 as *const u16),
             Default::default(),
             Some(&mut info),
             std::mem::size_of::<SHFILEINFOW>() as u32,
             SHGFI_SYSICONINDEX | SHGFI_PIDL,
         )
     };
-    // SAFETY: allocated by `SHParseDisplayName`, freed exactly once.
-    unsafe { ILFree(Some(pidl)) };
     (ok != 0).then_some(info.iIcon)
 }
 
@@ -291,14 +279,4 @@ unsafe fn read_bgra(
         });
     }
     Some(ColorImage::from_rgba_unmultiplied([w, h], &pixels))
-}
-
-/// A path as a null-terminated wide string.
-#[cfg(windows)]
-pub(super) fn wide(path: &Path) -> Vec<u16> {
-    use std::os::windows::ffi::OsStrExt as _;
-    path.as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect()
 }

@@ -5,7 +5,8 @@
 //! behind that [`release`] cannot take back.
 //!
 //! Nothing is taken from the parent module, as in `windows/providers.rs` and for the same reason: a
-//! key path is a string, so this needs neither `wide` nor a `Path`.
+//! key path is a string, so this needs neither `wide` nor a `Path` — only the key guard in
+//! [`crate::shell::registry`] and [`crate::shell::nul_terminated`].
 //!
 //! # Which key, and why that one
 //!
@@ -45,6 +46,8 @@
 //! falling back to Explorer rather than to the command line. Only a value it cannot read as a CLSID
 //! at all sends it to the command line. See [`claim`].
 
+use crate::shell::nul_terminated;
+use crate::shell::registry::Key;
 use windows_sys::Win32::System::Registry::HKEY;
 
 /// The shell folder `Win+E` opens, spelled as the registry spells it — **relative to a classes
@@ -95,14 +98,6 @@ fn chain() -> [String; 4] {
 /// The value that decides whether the command line is read at all. See the module header.
 const DELEGATE: &str = "DelegateExecute";
 
-/// A NUL-terminated UTF-16 copy of a registry key path or value name.
-///
-/// Not [`crate::shell::wide`], which takes a `Path` and turns `/` into `\` — right for a file name
-/// and wrong for a key whose parts are separated by the very character it rewrites.
-fn utf16(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(std::iter::once(0)).collect()
-}
-
 /// A string value under an open key: the key's own default when `name` is `None`, and a named one
 /// otherwise.
 ///
@@ -111,54 +106,27 @@ fn utf16(text: &str) -> Vec<u16> {
 /// [`DELEGATE`] is not a missing `DelegateExecute`, it is the override that makes the command line
 /// live. `windows/providers.rs`' near-twin of this function folds the two together, because there
 /// an empty ProgID and no ProgID mean the same thing. Here they could not mean less alike.
-fn value(key: HKEY, name: Option<&str>) -> Option<String> {
-    use windows_sys::Win32::System::Registry::{RegQueryValueExW, REG_EXPAND_SZ, REG_SZ};
+fn value(key: &Key, name: Option<&str>) -> Option<String> {
+    use windows_sys::Win32::System::Registry::{REG_EXPAND_SZ, REG_SZ};
 
-    let wide_name = name.map(utf16);
     // A command line, which `MAX_PATH` quoted plus a switch or two fits inside twice over. A value
     // longer than this is not one this program put there and not one it can act on.
-    let mut buffer = [0u16; 1024];
-    let mut bytes = std::mem::size_of_val(&buffer) as u32;
-    let mut kind = 0u32;
-    // SAFETY: `key` is open for reading, `buffer` and `bytes` describe the same allocation, `bytes`
-    // is updated by the call to what was actually written, and the name pointer is null exactly
-    // when there is no name — which is how the API is told to read the key's default value.
-    let read = unsafe {
-        RegQueryValueExW(
-            key,
-            wide_name.as_ref().map_or(std::ptr::null(), |n| n.as_ptr()),
-            std::ptr::null_mut(),
-            &mut kind,
-            buffer.as_mut_ptr().cast(),
-            &mut bytes,
-        )
-    };
-    if read != 0 {
-        return None;
-    }
+    let (kind, text) = key.string::<1024>(name)?;
     // `REG_EXPAND_SZ` as well as `REG_SZ`: the stock command line for this very key is one, and a
     // value read here is only ever compared or shown — never run — so nothing needs expanding.
     if kind != REG_SZ && kind != REG_EXPAND_SZ {
         return None;
     }
-    // `bytes` counts bytes and includes the terminator, which is not part of the string. An empty
-    // value is two bytes of terminator, or occasionally none at all, and both arrive here as an
-    // empty string rather than as nothing.
-    let units = (bytes as usize / 2).min(buffer.len());
-    let text = String::from_utf16_lossy(&buffer[..units]);
-    Some(text.trim_end_matches('\0').trim().to_owned())
+    // An empty value is two bytes of terminator, or occasionally none at all, and both arrive here
+    // as an empty string rather than as nothing.
+    Some(text)
 }
 
 /// Open a key under one of the roots for reading. `None` when it is not there.
-fn open_read(root: HKEY, path: &str) -> Option<HKEY> {
-    use windows_sys::Win32::System::Registry::{RegOpenKeyExW, KEY_READ};
+fn open_read(root: HKEY, path: &str) -> Option<Key> {
+    use windows_sys::Win32::System::Registry::KEY_READ;
 
-    let wide = utf16(path);
-    let mut key: HKEY = std::ptr::null_mut();
-    // SAFETY: `wide` is a NUL-terminated UTF-16 buffer that outlives the call, and `key` is only
-    // used when the call reports success.
-    let opened = unsafe { RegOpenKeyExW(root, wide.as_ptr(), 0, KEY_READ, &mut key) };
-    (opened == 0).then_some(key)
+    Key::open(root, path, KEY_READ).ok()
 }
 
 /// The command line `Win+E` would actually run, or `None` when the shell's own handler has it.
@@ -172,13 +140,13 @@ fn open_read(root: HKEY, path: &str) -> Option<HKEY> {
 /// `None` when [`DELEGATE`] is present and non-empty, because that is precisely the state in which
 /// the command line is dead text; see the module header.
 pub fn registered() -> Option<String> {
-    use windows_sys::Win32::System::Registry::{RegCloseKey, HKEY_CLASSES_ROOT};
+    use windows_sys::Win32::System::Registry::HKEY_CLASSES_ROOT;
 
     let key = open_read(HKEY_CLASSES_ROOT, &merged())?;
-    let delegate = value(key, Some(DELEGATE));
-    let command = value(key, None);
-    // SAFETY: `key` was opened above, both reads are done with, and it is not used again.
-    unsafe { RegCloseKey(key) };
+    let delegate = value(&key, Some(DELEGATE));
+    let command = value(&key, None);
+    // Both reads are done with.
+    drop(key);
 
     if delegate.is_some_and(|d| !d.is_empty()) {
         return None;
@@ -196,11 +164,11 @@ pub fn registered() -> Option<String> {
 /// half-written setting.
 pub fn claim(command: &str) -> Result<(), u32> {
     use windows_sys::Win32::System::Registry::{
-        RegCloseKey, RegCreateKeyExW, RegSetValueExW, HKEY_CURRENT_USER, KEY_SET_VALUE,
+        RegCreateKeyExW, RegSetValueExW, HKEY_CURRENT_USER, KEY_SET_VALUE,
         REG_OPTION_NON_VOLATILE, REG_SZ,
     };
 
-    let wide = utf16(&mine(&merged()));
+    let wide = nul_terminated(mine(&merged()));
     let mut key: HKEY = std::ptr::null_mut();
     // SAFETY: `wide` outlives the call; the class and security-attribute pointers are null, which
     // the API documents as "default"; `key` is only used when the call reports success. Every
@@ -221,16 +189,17 @@ pub fn claim(command: &str) -> Result<(), u32> {
     if created != 0 {
         return Err(created);
     }
+    let key = Key(key);
 
     let write = |name: Option<&str>, text: &str| {
-        let wide_name = name.map(utf16);
-        let data = utf16(text);
+        let wide_name = name.map(nul_terminated);
+        let data = nul_terminated(text);
         // SAFETY: `key` is open for writing, `data` is a NUL-terminated UTF-16 buffer that outlives
         // the call, and the byte count describes exactly it — terminator included, which is what
         // `REG_SZ` wants.
         let set = unsafe {
             RegSetValueExW(
-                key,
+                key.0,
                 wide_name.as_ref().map_or(std::ptr::null(), |n| n.as_ptr()),
                 0,
                 REG_SZ,
@@ -242,15 +211,15 @@ pub fn claim(command: &str) -> Result<(), u32> {
     };
 
     let wrote = write(None, command).and_then(|()| write(Some(DELEGATE), ""));
-    // SAFETY: `key` was created above and is not used again.
-    unsafe { RegCloseKey(key) };
+    // Created above, and not used again.
+    drop(key);
     wrote
 }
 
 /// Whether a key has neither subkeys nor values — the one question [`release`] asks before deleting
 /// an ancestor it may not have created.
 fn empty(path: &str) -> bool {
-    use windows_sys::Win32::System::Registry::{RegCloseKey, RegQueryInfoKeyW, HKEY_CURRENT_USER};
+    use windows_sys::Win32::System::Registry::{RegQueryInfoKeyW, HKEY_CURRENT_USER};
 
     let Some(key) = open_read(HKEY_CURRENT_USER, path) else {
         // Not there at all, which for the caller's purposes is the same answer: nothing to keep.
@@ -262,7 +231,7 @@ fn empty(path: &str) -> bool {
     // — or to a local that outlives the call.
     let asked = unsafe {
         RegQueryInfoKeyW(
-            key,
+            key.0,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             std::ptr::null(),
@@ -276,8 +245,8 @@ fn empty(path: &str) -> bool {
             std::ptr::null_mut(),
         )
     };
-    // SAFETY: `key` was opened above and is not used again.
-    unsafe { RegCloseKey(key) };
+    // Opened above, and not used again.
+    drop(key);
     asked == 0 && subkeys == 0 && values == 0
 }
 
@@ -294,35 +263,29 @@ fn empty(path: &str) -> bool {
 /// that program's to do — see [`crate::shell::winkey::State::Other`].
 pub fn release() -> Result<(), u32> {
     use windows_sys::Win32::System::Registry::{
-        RegCloseKey, RegDeleteKeyW, RegDeleteValueW, RegOpenKeyExW, HKEY_CURRENT_USER,
-        KEY_SET_VALUE,
+        RegDeleteKeyW, RegDeleteValueW, HKEY_CURRENT_USER, KEY_SET_VALUE,
     };
 
     /// `ERROR_FILE_NOT_FOUND` — a key or value that is not there, which for everything below is the
     /// state this function is trying to reach rather than a failure to reach it.
     const NOT_FOUND: u32 = 2;
 
-    let wide = utf16(&mine(&merged()));
-    let mut key: HKEY = std::ptr::null_mut();
-    // SAFETY: as `open_read`, with write access because the values are about to go.
-    let opened =
-        unsafe { RegOpenKeyExW(HKEY_CURRENT_USER, wide.as_ptr(), 0, KEY_SET_VALUE, &mut key) };
-    if opened == NOT_FOUND {
+    // As `open_read`, with write access because the values are about to go.
+    let key = match Key::open(HKEY_CURRENT_USER, &mine(&merged()), KEY_SET_VALUE) {
+        Ok(key) => key,
         // Never claimed, or already given back. Which is what the menu does the first time somebody
         // unticks something they never ticked, so it cannot be an error.
-        return Ok(());
-    }
-    if opened != 0 {
-        return Err(opened);
-    }
+        Err(NOT_FOUND) => return Ok(()),
+        Err(opened) => return Err(opened),
+    };
 
-    let name = utf16(DELEGATE);
+    let name = nul_terminated(DELEGATE);
     // SAFETY: `key` is open for writing; the name buffer outlives its call, and a null name is how
     // the API is told to delete the key's default value.
     let (default, delegate) = unsafe {
-        let default = RegDeleteValueW(key, std::ptr::null());
-        let delegate = RegDeleteValueW(key, name.as_ptr());
-        RegCloseKey(key);
+        let default = RegDeleteValueW(key.0, std::ptr::null());
+        let delegate = RegDeleteValueW(key.0, name.as_ptr());
+        drop(key);
         (default, delegate)
     };
     // **The two values are the whole of the setting**, and the walk below is only tidiness — so a
@@ -339,7 +302,7 @@ pub fn release() -> Result<(), u32> {
         if !empty(&path) {
             break;
         }
-        let wide = utf16(&path);
+        let wide = nul_terminated(&path);
         // SAFETY: `wide` outlives the call. The key is known to have no subkeys, which is the one
         // thing `RegDeleteKeyW` requires; a key already gone answers `ERROR_FILE_NOT_FOUND`, which
         // is the state this was trying to reach.

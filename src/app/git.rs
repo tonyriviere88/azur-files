@@ -57,24 +57,22 @@ impl App {
         let arrived: Vec<_> = self.git.drain().collect();
         self.git_waiting = self.git_waiting.saturating_sub(arrived.len());
         for answer in arrived {
-            for pane in &mut self.panes {
-                for tab in &mut pane.tabs {
-                    if tab.view == answer.view {
-                        tab.git = answer.repo.clone();
-                        tab.git_answered = true;
-                        // See [`crate::pane::Tab::git_settled_at`]: the read that produced this
-                        // answer may have just written the repository's own index, and that write
-                        // is what `collect_changes` is about to see arrive under `.git`.
-                        tab.git_settled_at = Some(now);
-                        // **A listing that asked about git has been waiting for this.**
-                        // [`crate::pane::Lens::Git`] cannot be evaluated until the answer is here —
-                        // see [`crate::pane::Tab::git_answered`] — so until now the listing has been
-                        // showing every row, and this is the frame it narrows in. Only when the lens
-                        // asks: nothing else about the order depends on git, and rebuilding it for
-                        // every folder in a repository would be a sort per navigation for nothing.
-                        if tab.filters_on_git() {
-                            tab.rebuild_order();
-                        }
+            for tab in tabs_mut(&mut self.panes) {
+                if tab.view == answer.view {
+                    tab.git = answer.repo.clone();
+                    tab.git_answered = true;
+                    // See [`crate::pane::Tab::git_settled_at`]: the read that produced this
+                    // answer may have just written the repository's own index, and that write
+                    // is what `collect_changes` is about to see arrive under `.git`.
+                    tab.git_settled_at = Some(now);
+                    // **A listing that asked about git has been waiting for this.**
+                    // [`crate::pane::Lens::Git`] cannot be evaluated until the answer is here —
+                    // see [`crate::pane::Tab::git_answered`] — so until now the listing has been
+                    // showing every row, and this is the frame it narrows in. Only when the lens
+                    // asks: nothing else about the order depends on git, and rebuilding it for
+                    // every folder in a repository would be a sort per navigation for nothing.
+                    if tab.filters_on_git() {
+                        tab.rebuild_order();
                     }
                 }
             }
@@ -89,12 +87,9 @@ impl App {
     /// rather than a git process. `false` for a folder outside a repository, for a listing that has not
     /// landed, and while the answer from git is still on its way.
     pub(super) fn changed_here(tab: &Tab) -> bool {
-        let (Some(repo), Some(dir), Some(at)) = (tab.git.as_ref(), tab.dir.as_ref(), tab.cursor)
-        else {
-            return false;
-        };
-        tab.entry_at(at)
-            .and_then(|entry| repo.state(dir.name(entry)))
+        tab.cursor
+            .and_then(|at| tab.entry_at(at))
+            .and_then(|entry| tab.git_of(entry))
             .is_some_and(crate::git::State::differs_from_head)
     }
 }

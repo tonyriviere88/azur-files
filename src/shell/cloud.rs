@@ -20,12 +20,11 @@
 //! top rather than all at once at the end.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::Sender;
 
 use crate::fs::dir::Sync;
 use crate::fs::Dir;
+use crate::service::Service;
 
 #[cfg(windows)]
 #[path = "../windows/cloud.rs"]
@@ -56,40 +55,23 @@ pub struct Answer {
 
 /// Asks the sync provider about synced folders, one thread, started the first time it is needed —
 /// a session that never opens a synced folder never has it.
-pub struct Cloud {
-    ctx: egui::Context,
-    jobs: Option<Sender<Request>>,
-    tx: Sender<Answer>,
-    answers: Receiver<Answer>,
-    /// The views on screen. A request for any other is skipped, and one being worked through stops.
-    live: Arc<Mutex<Vec<u64>>>,
-    /// Requests sent and not yet finished with, for [`Cloud::pending`].
-    queued: Arc<AtomicUsize>,
-}
+pub struct Cloud(Service<Request, Answer>);
 
 impl Cloud {
     pub fn new(ctx: &egui::Context) -> Self {
-        let (tx, answers) = channel();
-        Self {
-            ctx: ctx.clone(),
-            jobs: None,
-            tx,
-            answers,
-            live: Arc::new(Mutex::new(Vec::new())),
-            queued: Arc::new(AtomicUsize::new(0)),
-        }
+        // An apartment, because the property store is COM.
+        Self(Service::new(ctx, "shell-cloud", true, |request, wanted, tx, ctx| {
+            // Caught for the reason `shell::thumbs` gives: the property read runs the provider's
+            // handler, which is somebody else's code on this thread.
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                ask(request, wanted, tx, ctx)
+            }));
+        }))
     }
 
     /// Ask about the entries of a listing, for one view of it: the folders first, since they are the
     /// rows with nothing to show until this answers.
     pub fn request(&mut self, view: u64, dir: &Dir) {
-        // A view that is asking is on screen, whatever `only` last heard — the frame that lands a
-        // listing asks before it reports what is showing.
-        if let Ok(mut live) = self.live.lock() {
-            if !live.contains(&view) {
-                live.push(view);
-            }
-        }
         let (folders, files): (Vec<usize>, Vec<usize>) =
             (0..dir.len()).partition(|&i| dir.entries[i].is_dir());
         let rows = folders
@@ -103,59 +85,23 @@ impl Cloud {
             dir: dir.path.clone(),
             rows,
         };
-        self.queued.fetch_add(1, Ordering::Relaxed);
-        if self.worker().send(request).is_err() {
-            self.queued.fetch_sub(1, Ordering::Relaxed);
-        }
+        self.0.request(view, request);
     }
 
     /// Which views are on screen.
     pub fn only(&self, views: &[u64]) {
-        if let Ok(mut live) = self.live.lock() {
-            if live.as_slice() != views {
-                live.clear();
-                live.extend_from_slice(views);
-            }
-        }
+        self.0.only(views);
     }
 
     /// Every answer that has arrived since the last call.
     pub fn drain(&self) -> impl Iterator<Item = Answer> + '_ {
-        self.answers.try_iter()
+        self.0.drain()
     }
 
     /// Whether a capture should keep waiting: something asked and not yet finished with.
+    #[cfg(any(test, feature = "devtools"))]
     pub fn pending(&self) -> bool {
-        self.queued.load(Ordering::Relaxed) > 0
-    }
-
-    fn worker(&mut self) -> &Sender<Request> {
-        let tx = self.tx.clone();
-        let ctx = self.ctx.clone();
-        let live = self.live.clone();
-        let queued = self.queued.clone();
-        self.jobs.get_or_insert_with(|| {
-            let (send, receive) = channel::<Request>();
-            let _ = std::thread::Builder::new()
-                .name("shell-cloud".to_owned())
-                .spawn(move || {
-                    crate::shell::init();
-                    crate::fs::scan::silence_device_dialogs();
-                    let wanted = |view: u64| live.lock().map(|l| l.contains(&view)).unwrap_or(true);
-                    while let Ok(request) = receive.recv() {
-                        // Caught for the reason `shell::thumbs` gives: the property read runs the
-                        // provider's handler, which is somebody else's code on this thread.
-                        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            ask(&request, &wanted, &tx, &ctx)
-                        }));
-                        queued.fetch_sub(1, Ordering::Relaxed);
-                        // The last batch may have been empty, and a capture waiting on `pending`
-                        // needs a frame to see that it is done.
-                        ctx.request_repaint();
-                    }
-                });
-            send
-        })
+        self.0.pending()
     }
 }
 

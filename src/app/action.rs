@@ -408,6 +408,18 @@ pub enum Action {
 }
 
 impl Action {
+    /// What opening row `at` of `tab` in pane `pane` is: a folder navigated to, or anything else
+    /// opened — a double click, `Enter`, `Enter` in the filter box and the palette's `Open`, which
+    /// is why it is said once. `None` for a position with no row.
+    pub fn open_row(pane: PaneId, tab: &Tab, at: usize) -> Option<Self> {
+        let path = tab.target_at(at)?;
+        Some(if tab.is_dir_at(at) {
+            Self::Navigate { pane, path }
+        } else {
+            Self::Open(path)
+        })
+    }
+
     /// A stable name, for the journal the click tests read.
     pub fn name(&self) -> &'static str {
         match self {

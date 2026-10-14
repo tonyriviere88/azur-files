@@ -6,6 +6,7 @@
 //! See `app::click_tests::sidebar`.
 
 use super::*;
+use crate::ui::sidebar::INDENT;
 
 fn path(name: &str) -> PathBuf {
     PathBuf::from(name)

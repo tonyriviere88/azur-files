@@ -122,15 +122,9 @@ pub(crate) fn log(
         return;
     }
 
-    let mut child = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(rect)
-            .layout(egui::Layout::top_down(egui::Align::Min)),
-    );
-    child.set_clip_rect(rect.intersect(ui.clip_rect()));
     // See the module header: `show_rows` reserves `row_height + item_spacing.y` per row, and rows
     // painted at exact rects need the spacing to be nothing or they drift out of their own boxes.
-    child.spacing_mut().item_spacing = Vec2::ZERO;
+    let mut child = crate::ui::rows_child(ui, rect);
 
     let mut scroll = egui::ScrollArea::both()
         .id_salt(("console-log", pane))
@@ -152,14 +146,10 @@ pub(crate) fn log(
     let reach = (count as f32 * row_h - view).max(0.0);
     if let Some(row) = state.reveal.take() {
         // Nudged into view rather than centred, and against last frame's offset because
-        // `ScrollArea` takes an absolute one — the same discipline as the listing's cursor.
+        // `ScrollArea` takes an absolute one — the listing's cursor's own
+        // [`crate::ui::filelist::nudge`].
         let top = row as f32 * row_h;
-        let mut offset = state.offset;
-        if top < offset {
-            offset = top;
-        } else if top + row_h > offset + view {
-            offset = top + row_h - view;
-        }
+        let offset = crate::ui::filelist::nudge(state.offset, view, top, row_h, false);
         scroll = scroll.vertical_scroll_offset(offset.clamp(0.0, reach));
     } else if state.tail {
         scroll = scroll.vertical_scroll_offset(reach);
@@ -281,12 +271,7 @@ pub(crate) fn log(
         // `drag_started`, which is the bug this replaces: egui only calls a press a drag once it
         // has *travelled*, and by then the pointer is a row or two along — so the selection
         // anchored on the wrong row, or never anchored at all on a short drag.
-        let held = ui.input(|i| {
-            i.pointer
-                .primary_down()
-                .then(|| i.pointer.press_origin())
-                .flatten()
-        });
+        let held = crate::ui::held_from(ui, true);
         let held = held.filter(|_| !state.resizing);
         if let Some(from) = held.filter(|at| hit.contains(*at) && !band.contains(*at)) {
             if from.x < origin.x + PAD + FOLD + space::S1 {

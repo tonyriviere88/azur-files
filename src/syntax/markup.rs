@@ -82,10 +82,7 @@ pub(crate) fn markup(body: &str, out: &mut Vec<Span>) {
             ("<!", ">", Tok::Kind),
         ] {
             if body[i..].starts_with(open) {
-                let from = i + open.len();
-                let end = body[from..]
-                    .find(close)
-                    .map_or(n, |at| from + at + close.len());
+                let end = through(body, i + open.len(), close);
                 out.push(Span { at: i..end, tok });
                 i = end;
                 break;
@@ -112,10 +109,8 @@ pub(crate) fn markup(body: &str, out: &mut Vec<Span>) {
         while i < n && b[i] != b'>' {
             let c = b[i];
             if c == b'"' || c == b'\'' {
-                let close = body[i + 1..]
-                    .find(c as char)
-                    .map_or(n, |at| i + 1 + at + 1)
-                    .min(n);
+                // The quote it opened with, which is one byte.
+                let close = through(body, i + 1, &body[i..i + 1]);
                 out.push(Span {
                     at: i..close,
                     tok: Tok::Str,

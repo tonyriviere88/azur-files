@@ -487,7 +487,7 @@ fn the_drop_highlight_marks_the_row_and_not_the_pane() {
 
     // Over the row: the preview covers the row.
     let at = row.center();
-    h.app.drop_hover = Some(((at.x * scale) as i32, (at.y * scale) as i32));
+    h.app.drop_hover = Some(crate::ui::physical(&h.ctx, at));
     let drawn = h.app.preview_rect_for_tests(pane, scale);
     assert_eq!(
         drawn,
@@ -505,7 +505,7 @@ fn the_drop_highlight_marks_the_row_and_not_the_pane() {
     let below = rows.iter().map(|(r, _)| r.bottom()).fold(f32::MIN, f32::max);
     if below + 4.0 < listing.bottom() {
         let at = egui::pos2(listing.center().x, below + 2.0);
-        h.app.drop_hover = Some(((at.x * scale) as i32, (at.y * scale) as i32));
+        h.app.drop_hover = Some(crate::ui::physical(&h.ctx, at));
         assert_eq!(
             h.app.preview_rect_for_tests(pane, scale),
             Some(listing),
@@ -516,7 +516,7 @@ fn the_drop_highlight_marks_the_row_and_not_the_pane() {
     // Over the column header, which sorts rather than receives: no highlight, because
     // there is no drop to promise there.
     let at = egui::pos2(listing.center().x, listing.top() - 6.0);
-    h.app.drop_hover = Some(((at.x * scale) as i32, (at.y * scale) as i32));
+    h.app.drop_hover = Some(crate::ui::physical(&h.ctx, at));
     assert_eq!(
         h.app.preview_rect_for_tests(pane, scale),
         None,
@@ -545,8 +545,8 @@ fn a_drag_says_what_the_drop_would_do() {
     let mut h = Harness::new();
     h.settle();
     let screen = Rect::from_min_size(Pos2::ZERO, h.size);
-    let scale = h.ctx.pixels_per_point();
-    let physical = |at: Pos2| ((at.x * scale) as i32, (at.y * scale) as i32);
+    let ctx = h.ctx.clone();
+    let physical = |at: Pos2| crate::ui::physical(&ctx, at);
 
     let rows = h.app.panes[0].drop_rows.clone();
     let (row, _) = rows
@@ -632,7 +632,7 @@ fn a_refused_drop_stops_the_destination_promising_it() {
     let at = row.center();
     h.app
         .drops
-        .hover(Some(((at.x * scale) as i32, (at.y * scale) as i32)));
+        .hover(Some(crate::ui::physical(&h.ctx, at)));
 
     // Allowed: the row is the highlight, which is what `the_drop_highlight_marks_the_row_and_not`
     // `_the_pane` covers in full.
@@ -735,7 +735,8 @@ fn the_pane_a_drag_started_in_goes_out_and_a_hushed_drop_is_not_drawn() {
     let scale = h.ctx.pixels_per_point();
     let (from, other) = (h.app.panes[0].id, h.app.panes[1].id);
     assert_ne!(from, other, "two panes to drag between");
-    let physical = |at: Pos2| ((at.x * scale) as i32, (at.y * scale) as i32);
+    let ctx = h.ctx.clone();
+    let physical = |at: Pos2| crate::ui::physical(&ctx, at);
     let middle_of = |h: &Harness, pane: usize| h.app.panes[pane].rect.center();
 
     // ---- Nothing in flight: there is no pane to hush anything in ----
@@ -1062,7 +1063,8 @@ fn a_tab_strip_takes_folders_and_opens_them_in_tabs() {
 
     h.app.publish_drop_targets(&h.ctx.clone());
     let scale = h.ctx.pixels_per_point();
-    let physical = |at: Pos2| ((at.x * scale) as i32, (at.y * scale) as i32);
+    let ctx = h.ctx.clone();
+    let physical = |at: Pos2| crate::ui::physical(&ctx, at);
     // The one tab that is there, and the empty room past the `+` at the end of the strip.
     let tab = h.app.tab_slots.first().expect("a tab on screen").rect;
     for at in [tab.center(), pos2(strip.right() - 2.0, strip.center().y)] {
@@ -1151,8 +1153,8 @@ fn a_drag_over_a_tab_brings_it_forward() {
     h.app.panes[0].active = 1;
     h.settle();
 
-    let scale = h.ctx.pixels_per_point();
-    let physical = |at: Pos2| ((at.x * scale) as i32, (at.y * scale) as i32);
+    let ctx = h.ctx.clone();
+    let physical = |at: Pos2| crate::ui::physical(&ctx, at);
     let first = h
         .app
         .tab_slots

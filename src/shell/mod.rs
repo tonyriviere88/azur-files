@@ -49,7 +49,14 @@ pub mod winkey;
 #[path = "../windows/com.rs"]
 mod win;
 #[cfg(windows)]
-pub(crate) use win::{answering_calls, wide};
+pub(crate) use win::{
+    answering_calls, display_name, global_medium, hdrop_paths, hglobal_format, nul_terminated,
+    parse_item, parsed_pidl, pidl_of, take_co_string, token_information, until_nul, wide,
+    wide_text, win32_message, Apartment, Pidl, CF_HDROP, FSCTL_SET_REPARSE_POINT,
+};
+#[cfg(windows)]
+#[path = "../windows/registry.rs"]
+pub(crate) mod registry;
 
 /// Initialise COM for the calling thread as a single-threaded apartment.
 ///
@@ -105,13 +112,122 @@ pub fn flush() {
 ///
 /// The production code does not need it: the retry in [`clipboard`] covers the contention
 /// a real desktop produces, and there is one UI thread rather than eight.
+///
+/// **Thumbnails are the other measurement behind it.** Two `GetImage` calls in flight from one
+/// process answer *one of them* with a failure, whether or not they are about the same file —
+/// reproduced by letting two of [`thumbs`]' tests run in parallel, in both orders and on both
+/// files. It is a property of the tests rather than of the service, which has exactly one worker;
+/// and it is this lock rather than one of their own because `GetImage` is called from more than
+/// one module, and two private locks would exclude each test from its own neighbours and from
+/// nothing else.
 #[cfg(test)]
 pub(crate) static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// Take [`ONE_AT_A_TIME`], ignoring a poisoning from some other test's panic.
+/// Take [`ONE_AT_A_TIME`], ignoring a poisoning from some other test's panic: a failing test has
+/// a failure to report, and the next one refusing to run because the first panicked would hide it.
 #[cfg(test)]
 pub(crate) fn serialised() -> std::sync::MutexGuard<'static, ()> {
     ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Every visible top-level window this process owns, as `(HWND, class, title)` — for the tests
+/// that watch what the shell puts on screen.
+#[cfg(all(test, windows))]
+pub(crate) fn windows_of_this_process() -> Vec<(isize, String, String)> {
+    use windows::core::BOOL;
+    use windows::Win32::Foundation::{HWND, LPARAM, TRUE};
+    use windows::Win32::System::Threading::GetCurrentProcessId;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        EnumWindows, GetClassNameW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
+    };
+
+    unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
+        let found = &mut *(lparam.0 as *mut Vec<(isize, String, String)>);
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid != GetCurrentProcessId() || !IsWindowVisible(hwnd).as_bool() {
+            return TRUE;
+        }
+        let mut class = [0u16; 256];
+        let n = GetClassNameW(hwnd, &mut class);
+        let mut title = [0u16; 512];
+        let m = GetWindowTextW(hwnd, &mut title);
+        found.push((
+            hwnd.0 as isize,
+            String::from_utf16_lossy(&class[..n.max(0) as usize]),
+            String::from_utf16_lossy(&title[..m.max(0) as usize]),
+        ));
+        TRUE
+    }
+
+    let mut found: Vec<(isize, String, String)> = Vec::new();
+    // SAFETY: the callback only writes through the pointer it is handed, which outlives
+    // the enumeration.
+    unsafe {
+        let _ = EnumWindows(Some(visit), LPARAM(&mut found as *mut _ as isize));
+    }
+    found
+}
+
+/// Ask a window to go away, which for a shell dialog is a cancel.
+#[cfg(all(test, windows))]
+pub(crate) fn close_window(hwnd: isize) {
+    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
+    use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
+    // SAFETY: posting is asynchronous and safe against a window that has already gone.
+    unsafe {
+        let _ = PostMessageW(
+            Some(HWND(hwnd as *mut std::ffi::c_void)),
+            WM_CLOSE,
+            WPARAM(0),
+            LPARAM(0),
+        );
+    }
+}
+
+/// Book a frame a tenth of a second from now, for an answer that has landed or a request that has
+/// been turned away and has to be able to ask again.
+///
+/// Delayed rather than immediate: answers arrive in bursts, and one frame after the burst is worth
+/// sixty-four during it — and a hundred refused requests are one wake-up rather than a hundred.
+pub(crate) fn nudge(ctx: &egui::Context) {
+    ctx.request_repaint_after(std::time::Duration::from_millis(100));
+}
+
+/// `image` padded into a transparent `cell`×`cell` square from its top-left corner, cropped where it
+/// is bigger, and the size of the part that went in.
+///
+/// The whole cell, not only the part the picture covers: an atlas slot is reused, and a smaller
+/// picture arriving in it would otherwise be drawn over the corner of whatever was there before. A
+/// row at a time rather than a pixel at a time: a 96-pixel cell is 9,216 bounds-checked index pairs.
+pub(crate) fn into_cell(image: &egui::ColorImage, cell: usize) -> (egui::ColorImage, [usize; 2]) {
+    let mut out = egui::ColorImage::filled([cell, cell], egui::Color32::TRANSPARENT);
+    let [across, h] = image.size;
+    let (w, h) = (across.min(cell), h.min(cell));
+    for y in 0..h {
+        let from = &image.pixels[y * across..y * across + w];
+        out.pixels[y * cell..y * cell + w].copy_from_slice(from);
+    }
+    (out, [w, h])
+}
+
+/// `dir\stem (2).ext`, `dir\stem (3).ext` and up, for a `name` in `dir` — the names Explorer gives a
+/// second copy of something, the number before the extension.
+///
+/// Unbounded and unchecked: the callers decide whether the plain name is free, what counts as
+/// taken, and how far to count. A dot at the very start is a name and not an extension, so it is
+/// `.gitignore (2)`; a name ending in a dot keeps it, `a (2).`.
+pub(crate) fn numbered<'a>(
+    dir: &'a std::path::Path,
+    name: &std::ffi::OsStr,
+) -> impl Iterator<Item = std::path::PathBuf> + 'a {
+    let name = std::path::Path::new(name);
+    let stem = name.file_stem().map(|stem| stem.to_string_lossy().into_owned()).unwrap_or_default();
+    let ext = name
+        .extension()
+        .map(|ext| format!(".{}", ext.to_string_lossy()))
+        .unwrap_or_default();
+    (2u32..).map(move |n| dir.join(format!("{stem} ({n}){ext}")))
 }
 
 /// The window the shell should parent its dialogs to.
@@ -119,11 +235,6 @@ pub(crate) fn serialised() -> std::sync::MutexGuard<'static, ()> {
 /// A progress dialog with no owner appears behind the window that started it and
 /// looks like it has hung. `None` is safe — the shell then owns them to the desktop —
 /// but it is worth having.
-#[cfg(windows)]
-#[derive(Clone, Copy, Default)]
-pub struct Owner(pub isize);
-
-#[cfg(not(windows))]
 #[derive(Clone, Copy, Default)]
 pub struct Owner(pub isize);
 
@@ -210,45 +321,56 @@ pub fn new_guid() -> Option<String> {
 pub fn over_network(path: &std::path::Path) -> bool {
     #[cfg(windows)]
     {
-        use std::collections::HashMap;
-        use std::sync::Mutex;
         use windows::Win32::Storage::FileSystem::GetDriveTypeW;
         use windows::Win32::System::WindowsProgramming::DRIVE_REMOTE;
 
         // `\\server\share\...`, which is a network path by construction and needs no asking.
-        // `\\?\` and `\\.\` are not: they are the extended-length and device forms of a local
-        // path, and are checked for first because they start the same way.
-        let text = path.as_os_str().to_string_lossy();
-        let bytes = text.as_bytes();
-        if bytes.starts_with(br"\\") && !bytes.starts_with(br"\\?\") && !bytes.starts_with(br"\\.\")
-        {
+        if crate::fs::is_network_unc(path) {
             return true;
         }
 
-        // `H:\a\b` -> `H:\`, which is what `GetDriveTypeW` wants. Anything without a root —
-        // a relative path, or the empty path that means This PC — is not ours to judge.
-        let Some(root) = path.ancestors().last().filter(|r| !r.as_os_str().is_empty()) else {
-            return false;
-        };
-
-        static KNOWN: Mutex<Option<HashMap<std::path::PathBuf, bool>>> = Mutex::new(None);
-        let mut known = KNOWN.lock().unwrap_or_else(|e| e.into_inner());
-        let known = known.get_or_insert_with(HashMap::new);
-        if let Some(&remote) = known.get(root) {
-            return remote;
-        }
-        let root_wide = wide(root);
-        // SAFETY: null-terminated by `wide`, and it outlives the call.
-        let remote =
-            unsafe { GetDriveTypeW(windows::core::PCWSTR(root_wide.as_ptr())) } == DRIVE_REMOTE;
-        known.insert(root.to_owned(), remote);
-        remote
+        static KNOWN: PerRoot = std::sync::Mutex::new(None);
+        per_root(path, &KNOWN, |root| {
+            let root_wide = wide(root);
+            // SAFETY: null-terminated by `wide`, and it outlives the call.
+            let kind = unsafe { GetDriveTypeW(windows::core::PCWSTR(root_wide.as_ptr())) };
+            kind == DRIVE_REMOTE
+        })
     }
     #[cfg(not(windows))]
     {
         let _ = path;
         false
     }
+}
+
+/// One yes-or-no answer per drive root, remembered for the session. See [`per_root`].
+#[cfg(windows)]
+pub(crate) type PerRoot =
+    std::sync::Mutex<Option<std::collections::HashMap<std::path::PathBuf, bool>>>;
+
+/// What `ask` says about the root `path` is on, asked once per root and remembered in `known`.
+///
+/// `H:\a\b` -> `H:\`, which is what the volume calls want. Anything without a root — a relative
+/// path, or the empty path that means This PC — is not ours to judge, and is `false`. The lock is
+/// held while `ask` runs, so two threads asking about one new drive ask the system once.
+#[cfg(windows)]
+pub(crate) fn per_root(
+    path: &std::path::Path,
+    known: &PerRoot,
+    ask: impl FnOnce(&std::path::Path) -> bool,
+) -> bool {
+    let Some(root) = path.ancestors().last().filter(|r| !r.as_os_str().is_empty()) else {
+        return false;
+    };
+    let mut known = known.lock().unwrap_or_else(|e| e.into_inner());
+    let known = known.get_or_insert_with(std::collections::HashMap::new);
+    if let Some(&answer) = known.get(root) {
+        return answer;
+    }
+    let answer = ask(root);
+    known.insert(root.to_owned(), answer);
+    answer
 }
 
 /// Start a child process with no console window behind it.
@@ -441,5 +563,29 @@ impl Modal {
             }
             Err(_) => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
+    use std::path::{Path, PathBuf};
+
+    /// The names a second copy is given, as each of [`super::numbered`]'s callers gave them before
+    /// they shared it: the number before the last extension, a leading dot part of the name, and a
+    /// trailing one kept where it was.
+    #[test]
+    fn the_number_goes_before_the_last_extension() {
+        let names = |name: &str| -> Vec<PathBuf> {
+            super::numbered(Path::new(r"C:\d"), OsStr::new(name)).take(2).collect()
+        };
+        let want = |a: &str, b: &str| vec![PathBuf::from(a), PathBuf::from(b)];
+        assert_eq!(names("one.txt"), want(r"C:\d\one (2).txt", r"C:\d\one (3).txt"));
+        assert_eq!(names("one.txt.lnk"), want(r"C:\d\one.txt (2).lnk", r"C:\d\one.txt (3).lnk"));
+        assert_eq!(names("a folder.lnk"), want(r"C:\d\a folder (2).lnk", r"C:\d\a folder (3).lnk"));
+        assert_eq!(names("a folder"), want(r"C:\d\a folder (2)", r"C:\d\a folder (3)"));
+        assert_eq!(names(".gitignore"), want(r"C:\d\.gitignore (2)", r"C:\d\.gitignore (3)"));
+        assert_eq!(names("a."), want(r"C:\d\a (2).", r"C:\d\a (3)."));
+        assert_eq!(names("..x"), want(r"C:\d\. (2).x", r"C:\d\. (3).x"));
     }
 }

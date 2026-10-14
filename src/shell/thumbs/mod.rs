@@ -177,7 +177,6 @@ mod win;
 #[cfg(windows)]
 use win::picture;
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 
@@ -352,9 +351,9 @@ pub struct Thumbs {
     /// Questions in flight, so a tile does not re-ask on every frame while one is out.
     pending: Arc<Mutex<HashSet<PathBuf>>>,
     /// The views on screen. See [`Thumbs::only`].
-    live: Arc<Mutex<HashSet<u64>>>,
+    live: crate::service::LiveViews,
     jobs: Option<Sender<Job>>,
-    queued: Arc<AtomicUsize>,
+    queued: crate::inflight::Capped,
     tx: Sender<Ready>,
     rx: Receiver<Ready>,
     ctx: egui::Context,
@@ -367,11 +366,15 @@ pub struct Thumbs {
     spare: usize,
     /// Diagnostics for `--trace`: how many pictures have been fetched and how many uploaded. Both
     /// should stop climbing as soon as a folder has settled.
+    #[cfg(any(test, feature = "devtools"))]
     pub fetched: u64,
+    #[cfg(any(test, feature = "devtools"))]
     pub uploads: u64,
     /// How many tiles asked in the frame that just finished — which should be a screenful and nothing
     /// like the size of the folder. See `Thumbs::asks`.
+    #[cfg(any(test, feature = "devtools"))]
     pub asks: usize,
+    #[cfg(any(test, feature = "devtools"))]
     asking: usize,
 }
 
@@ -384,17 +387,21 @@ impl Thumbs {
             next_slot: 0,
             free: Vec::new(),
             pending: Arc::new(Mutex::new(HashSet::new())),
-            live: Arc::new(Mutex::new(HashSet::new())),
+            live: Default::default(),
             jobs: None,
-            queued: Arc::new(AtomicUsize::new(0)),
+            queued: crate::inflight::Capped::new(QUEUE_CAP),
             tx,
             rx,
             ctx: ctx.clone(),
             frame: 1,
             spare: SLOTS,
+            #[cfg(any(test, feature = "devtools"))]
             fetched: 0,
+            #[cfg(any(test, feature = "devtools"))]
             uploads: 0,
+            #[cfg(any(test, feature = "devtools"))]
             asks: 0,
+            #[cfg(any(test, feature = "devtools"))]
             asking: 0,
         }
     }
@@ -446,7 +453,10 @@ impl Thumbs {
                         continue;
                     };
                     let size = self.blit(slot, &image);
-                    self.uploads += 1;
+                    #[cfg(any(test, feature = "devtools"))]
+                    {
+                        self.uploads += 1;
+                    }
                     Held {
                         slot: Some(slot),
                         size,
@@ -475,7 +485,10 @@ impl Thumbs {
         // How many tiles asked in the frame that has just finished. **A screenful, or something is
         // drawing the whole folder**: every tile that asks marks its cell as live and spends a share of
         // the queue, so a view that asks about rows nobody can see would starve the ones they can.
-        self.asks = std::mem::take(&mut self.asking);
+        #[cfg(any(test, feature = "devtools"))]
+        {
+            self.asks = std::mem::take(&mut self.asking);
+        }
         // What the *next* frame's tiles may ask for, counted now that this frame's are known — and then
         // the frame moves on, so a `get` during the next one marks its cell as drawn in that one.
         self.spare = self.room();
@@ -491,7 +504,10 @@ impl Thumbs {
     /// [`crate::shell::icons::Icons::kind`]: the tile draws its painted glyph for a frame or two and
     /// nothing ever waits on the shell inside a frame.
     pub fn get(&mut self, path: &Path, stamp: u64, view: u64) -> Option<Thumb> {
-        self.asking += 1;
+        #[cfg(any(test, feature = "devtools"))]
+        {
+            self.asking += 1;
+        }
         // Four answers, in one pass over the entry: it has a picture; it is waiting for its next
         // attempt, which may or may not be due; or it has run out of attempts.
         let frame = self.frame;
@@ -549,13 +565,7 @@ impl Thumbs {
     /// reason: scrolling away leaves a queue of questions about tiles nothing is drawing, and each
     /// of them is a blocking shell call.
     pub fn only(&mut self, views: &[u64]) {
-        if let Ok(mut live) = self.live.lock() {
-            if live.len() == views.len() && views.iter().all(|view| live.contains(view)) {
-                return;
-            }
-            live.clear();
-            live.extend(views.iter().copied());
-        }
+        self.live.set(views);
     }
 
     /// Whether any tile is still waiting for its picture.
@@ -563,8 +573,9 @@ impl Thumbs {
     /// For the capture runs, which have to wait for the same reason `App::git_pending` makes them
     /// wait: a screenshot of a grid of placeholder glyphs says nothing about the grid. Nothing in the
     /// window reads this — a tile that has not been answered draws its glyph and asks again.
+    #[cfg(any(test, feature = "devtools"))]
     pub fn pending(&self) -> bool {
-        self.queued.load(Ordering::Relaxed) > 0
+        self.queued.count() > 0
             || self.pending.lock().map(|held| !held.is_empty()).unwrap_or(false)
     }
 
@@ -576,13 +587,14 @@ impl Thumbs {
     ///   file, and every tile behind it is waiting on that.
     /// - both at zero while tiles show glyphs means nothing has been *asked*, which is a third thing
     ///   again.
+    #[cfg(any(test, feature = "devtools"))]
     pub fn stuck(&self) -> (usize, usize) {
         (
             self.known
                 .values()
                 .filter(|held| held.slot.is_none() && held.retry_at.is_none())
                 .count(),
-            self.queued.load(Ordering::Relaxed),
+            self.queued.count(),
         )
     }
 
@@ -597,6 +609,7 @@ impl Thumbs {
     /// end of a frame, which is where `poll` reads it; asked from anywhere else — and `--trace` reports
     /// from the top of a frame — every cell looks reusable, because nothing has been drawn yet. A
     /// figure that always reads "plenty" is worse than no figure at all, and it read that way once.
+    #[cfg(any(test, feature = "devtools"))]
     pub fn held(&self) -> (usize, usize, usize, usize) {
         (
             self.known.len(),
@@ -624,8 +637,8 @@ impl Thumbs {
         // It cannot spin: the delay throttles it, and it is only reached while a tile on screen is
         // actually waiting. A tile that has run out of attempts never gets here at all — `get` answers
         // `Never` and asks for nothing.
-        if self.queued.load(Ordering::Relaxed) >= QUEUE_CAP {
-            self.nudge();
+        if !self.queued.try_take() {
+            crate::shell::nudge(&self.ctx);
             return;
         }
         // **Nowhere to put the answer is a reason not to ask the question.** A window showing more
@@ -634,7 +647,8 @@ impl Thumbs {
         // Spent rather than tested, so the tiles that *do* fit are the first ones asked.
         //
         if self.spare == 0 {
-            self.nudge();
+            self.queued.give_back();
+            crate::shell::nudge(&self.ctx);
             return;
         }
         // Claimed before the send, so the tile behind this one in the same frame does not ask again.
@@ -645,19 +659,28 @@ impl Thumbs {
             .unwrap_or(false);
         if !claimed {
             // Somebody is already asking — which is not a reason to stop expecting an answer.
-            self.nudge();
+            self.queued.give_back();
+            crate::shell::nudge(&self.ctx);
             return;
         }
-        self.fetched += 1;
+        #[cfg(any(test, feature = "devtools"))]
+        {
+            self.fetched += 1;
+        }
         self.spare -= 1;
-        self.queued.fetch_add(1, Ordering::Relaxed);
+        // **A view that is asking is live**, for the reason `shell::icons`' `request_file` gives at
+        // length: `only` is published near the top of a frame and a listing lands further down it, so
+        // on the frame a folder's tiles first ask, their view is not in the set yet, and the worker
+        // would skip every one of them as abandoned. A skipped job books no frame, so in a window that
+        // paints on demand those tiles then sat as glyphs until something else asked for one.
+        self.live.add(view);
         let job = Job {
             view,
             path: path.to_path_buf(),
             stamp,
         };
         if self.worker().send(job).is_err() {
-            self.queued.fetch_sub(1, Ordering::Relaxed);
+            self.queued.give_back();
             if let Ok(mut pending) = self.pending.lock() {
                 pending.remove(path);
             }
@@ -667,18 +690,6 @@ impl Thumbs {
             // it. `worker` is `get_or_insert_with`, so clearing this is all it takes.
             self.jobs = None;
         }
-    }
-
-    /// Book a frame, because a tile that has just been refused has to be able to ask again.
-    ///
-    /// A tenth of a second: fast enough that a queue draining or a cell freeing is picked up while the
-    /// eye is still on the tile, slow enough that a hundred refused tiles are one wake-up rather than a
-    /// hundred. It replaces nothing — before this, three of the four ways a request could be refused
-    /// simply returned, and whether the tile was ever asked about again depended on something else in
-    /// the window happening to want a frame.
-    fn nudge(&self) {
-        self.ctx
-            .request_repaint_after(std::time::Duration::from_millis(100));
     }
 
     /// The one worker, started on first use.
@@ -710,10 +721,7 @@ impl Thumbs {
                         // Nothing is showing that view any more: the folder was left while this was
                         // in the queue. Dropped here rather than fetched and discarded, because the
                         // fetching is the whole of the cost.
-                        let wanted = live
-                            .lock()
-                            .map(|live| live.contains(&view))
-                            .unwrap_or(true);
+                        let wanted = live.has(view);
                         // Skipped for a dead view, and then nothing is sent at all — see below. The
                         // placeholder is never looked at.
                         //
@@ -731,7 +739,7 @@ impl Thumbs {
                         } else {
                             Got::Later
                         };
-                        queued.fetch_sub(1, Ordering::Relaxed);
+                        queued.give_back();
                         // **The claim on this path is held until the answer has been *recorded*.**
                         //
                         // Released here, as it used to be, there is a window one frame wide between the
@@ -931,16 +939,9 @@ impl Thumbs {
         }
         // The whole cell is written every time, not only the part the picture covers: a slot is
         // reused, and a smaller picture arriving in it would otherwise be drawn over the corner of
-        // whatever was there before.
-        // A row at a time rather than a pixel at a time: a full cell is 9,216 bounds-checked index
-        // pairs, and a scroll places up to a queue's worth of them in one frame.
-        let mut cell = ColorImage::filled([CELL, CELL], egui::Color32::TRANSPARENT);
-        let [across, h] = image.size;
-        let (w, h) = (across.min(CELL), h.min(CELL));
-        for y in 0..h {
-            let from = &image.pixels[y * across..y * across + w];
-            cell.pixels[y * CELL..y * CELL + w].copy_from_slice(from);
-        }
+        // whatever was there before. See `into_cell`, and note that a scroll places up to a queue's
+        // worth of cells in one frame.
+        let (cell, [w, h]) = crate::shell::into_cell(image, CELL);
         let (column, row) = Self::cell_of(slot);
         self.pages[slot as usize / PER_PAGE]
             .set_partial([column * CELL, row * CELL], cell, TextureOptions::LINEAR);

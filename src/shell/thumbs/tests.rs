@@ -1,28 +1,6 @@
 use super::*;
 use std::time::{Duration, Instant};
 
-/// **One test at a time reaches the shell**, and this is not caution — it is a measurement.
-///
-/// Two `GetImage` calls in flight from one process answer *one of them* with a failure, whether or
-/// not they are about the same file. Reproduced by letting the two tests below run in parallel, in
-/// both orders and on both files: whichever pair overlapped, one of them came back with nothing.
-///
-/// It is a property of the tests rather than of the service, which has exactly one worker and
-/// therefore never has two calls out. Saying so with a lock is honest; discovering it again as a
-/// test that fails one run in three would not be. [`BACKOFF`] is what the *program* does about the
-/// same fact when the other caller is Explorer.
-///
-/// **[`crate::shell::serialised`] and not a lock of its own**, which it was until the preview panel
-/// started asking the same question: `GetImage` is now called from two modules, and two private locks
-/// exclude each test from its own neighbours and from nothing else. One lock for everything that
-/// reaches the shell is the only version of this that holds.
-///
-/// Poisoning is stepped over deliberately, inside `serialised`: a failing test has a failure to
-/// report, and the second one refusing to run because the first panicked would hide it.
-fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
-    crate::shell::serialised()
-}
-
 /// The shell draws a picture for a file that is not a picture.
 ///
 /// Which is the claim the grid rests on and the reason this module asks the shell rather than
@@ -32,7 +10,7 @@ fn one_at_a_time() -> std::sync::MutexGuard<'static, ()> {
 /// Asked about this crate's own `Cargo.toml`, which is read and never written.
 #[test]
 fn the_shell_draws_a_picture_for_something_that_is_not_one() {
-    let _one = one_at_a_time();
+    let _one = crate::shell::serialised();
     crate::shell::init();
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
     let Got::Picture(image) = picture(&manifest) else {
@@ -65,7 +43,7 @@ fn the_shell_draws_a_picture_for_something_that_is_not_one() {
 /// of them on every frame.
 #[test]
 fn a_picture_is_fetched_once_and_off_the_ui_thread() {
-    let _one = one_at_a_time();
+    let _one = crate::shell::serialised();
     crate::shell::init();
     let ctx = egui::Context::default();
     let mut thumbs = Thumbs::new(&ctx);
@@ -401,7 +379,7 @@ fn svg(dir: &Path, name: &str, body: &str) -> PathBuf {
 /// so a picture arriving proved nothing about which decoder drew it. A picture that is *byte-for-byte*
 /// what `resvg` produced could not have come from a browser engine.
 ///
-/// No [`one_at_a_time`] and no [`crate::shell::init`], unlike every other test here that names
+/// No [`crate::shell::serialised`] and no [`crate::shell::init`], unlike every other test here that names
 /// `picture`: if this passes, nothing in it reached the shell, and claiming the lock would only queue
 /// it behind the two tests that do.
 #[test]
@@ -438,7 +416,7 @@ fn an_svg_is_drawn_here_and_not_by_the_shell() {
 /// arriving proves nothing about which decoder drew it. Pixels that are what `image` produced could not
 /// have come from the shell.
 ///
-/// No [`one_at_a_time`] and no [`crate::shell::init`]: if this passes, nothing in it reached the shell.
+/// No [`crate::shell::serialised`] and no [`crate::shell::init`]: if this passes, nothing in it reached the shell.
 #[test]
 fn a_tga_is_decoded_here_because_the_shell_has_nothing() {
     let dir = crate::sandbox::fresh("thumbs-tga");

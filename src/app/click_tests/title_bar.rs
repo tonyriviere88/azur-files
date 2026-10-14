@@ -506,7 +506,7 @@ fn the_changed_count_is_a_button_that_shows_what_has_changed() {
 
     // Nothing under it at rest, and something under it hovered. The pointer is parked off the
     // bar for the first half: `hovers` left it on the button.
-    let hover_fill = crate::ui::control_fills(&h.app.theme, h.app.theme.bg.layer_alt).0;
+    let hover_fill = crate::ui::control_fills(&h.app.theme).0;
     let button_shaped = move |rect: &Rect, fill: &egui::Color32| {
         *fill == hover_fill
             && rect.contains(at)

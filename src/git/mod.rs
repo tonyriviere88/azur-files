@@ -56,9 +56,10 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering as Atomic};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::Arc;
+
+use crate::pool::{self, WorkQueue};
 
 /// What one row's file is to git.
 ///
@@ -468,7 +469,7 @@ fn span_of(field: &str) -> Option<(u32, u32)> {
 /// stray `\r` — because a removed line is shown *among* the file's own lines and one of them laying
 /// its indentation out differently is worse than not showing it.
 fn shown_as(line: &str) -> String {
-    line.trim_end_matches('\r').replace('\t', "    ")
+    line.trim_end_matches('\r').replace('\t', crate::preview::text::TAB)
 }
 
 /// A finished query, tagged with the view of the folder that asked.
@@ -492,42 +493,27 @@ struct Request {
 /// and is therefore the least likely to still be on screen.
 const BACKLOG: usize = 4;
 
-struct Queue {
-    pending: Mutex<std::collections::VecDeque<Request>>,
-    wake: Condvar,
-    shutdown: AtomicBool,
-}
-
 /// Asks git about folders, off the UI thread.
 ///
 /// Modelled on [`crate::loader::Loader`] and for the same reason: a question that can take a second
 /// on somebody else's repository does not get to hold up a repaint. Two workers, because a window
 /// has two panes and one slow answer must not be the other's queue.
 pub struct Git {
-    queue: Arc<Queue>,
+    queue: Arc<WorkQueue<Request>>,
     answers: Receiver<Answer>,
     workers: Vec<std::thread::JoinHandle<()>>,
 }
 
 impl Git {
     pub fn new(ctx: &egui::Context) -> Self {
-        let queue = Arc::new(Queue {
-            pending: Mutex::new(std::collections::VecDeque::new()),
-            wake: Condvar::new(),
-            shutdown: AtomicBool::new(false),
-        });
+        let queue = Arc::new(WorkQueue::new());
         let (tx, answers) = channel();
-        let workers = (0..2)
-            .map(|i| {
-                let queue = queue.clone();
-                let tx = tx.clone();
-                let ctx = ctx.clone();
-                std::thread::Builder::new()
-                    .name(format!("git-{i}"))
-                    .spawn(move || worker(queue, tx, ctx))
-                    .expect("the OS refused a thread")
-            })
-            .collect();
+        let workers = pool::spawn("git", 2, || {
+            let queue = queue.clone();
+            let tx = tx.clone();
+            let ctx = ctx.clone();
+            move || worker(queue, tx, ctx)
+        });
         Self {
             queue,
             answers,
@@ -537,17 +523,15 @@ impl Git {
 
     /// Ask about a folder, for one view of it.
     pub fn request(&self, view: u64, dir: &Path) {
-        let Ok(mut pending) = self.queue.pending.lock() else {
-            return;
-        };
-        while pending.len() >= BACKLOG {
-            pending.pop_front();
-        }
-        pending.push_back(Request {
-            view,
-            dir: dir.to_path_buf(),
+        self.queue.push_one(|pending| {
+            while pending.len() >= BACKLOG {
+                pending.pop_front();
+            }
+            pending.push_back(Request {
+                view,
+                dir: dir.to_path_buf(),
+            });
         });
-        self.queue.wake.notify_one();
     }
 
     /// Every answer that has arrived since the last call.
@@ -558,16 +542,8 @@ impl Git {
 
 impl Drop for Git {
     fn drop(&mut self) {
-        // The flag is set *while holding the queue lock*, which is what makes the handshake sound: a
-        // worker checks `shutdown` with the lock held and then calls `wait`, which releases it.
-        // Setting it without the lock leaves a window where the notify lands before the worker is
-        // waiting for it, and the worker then sleeps for ever on a queue nothing will push to. The
-        // same handshake as [`crate::loader::Loader`], for the same reason.
-        {
-            let _held = self.queue.pending.lock();
-            self.queue.shutdown.store(true, Atomic::Release);
-        }
-        self.queue.wake.notify_all();
+        // See [`WorkQueue::close`] for why the flag is set under the queue's lock.
+        self.queue.close();
         // Detached rather than joined, for the reason [`crate::loader::Loader::drop`] sets out: a
         // worker waiting on a `git status` cannot be interrupted, and that is seconds on a monorepo
         // and a redirector timeout on a repository that lives on a share which has gone away. The
@@ -577,25 +553,8 @@ impl Drop for Git {
     }
 }
 
-fn worker(queue: Arc<Queue>, tx: Sender<Answer>, ctx: egui::Context) {
-    loop {
-        let request = {
-            let Ok(mut pending) = queue.pending.lock() else {
-                return;
-            };
-            loop {
-                if queue.shutdown.load(Atomic::Acquire) {
-                    return;
-                }
-                if let Some(request) = pending.pop_front() {
-                    break request;
-                }
-                let Ok(next) = queue.wake.wait(pending) else {
-                    return;
-                };
-                pending = next;
-            }
-        };
+fn worker(queue: Arc<WorkQueue<Request>>, tx: Sender<Answer>, ctx: egui::Context) {
+    while let Some(request) = queue.next() {
         let repo = read(&request.dir).map(Arc::new);
         if tx
             .send(Answer {
@@ -767,15 +726,7 @@ pub fn stamp(dot_git: &Path) -> u64 {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         entry.file_name().hash(&mut hasher);
         if let Ok(meta) = entry.metadata() {
-            meta.len().hash(&mut hasher);
-            // A folder has no useful length, and on Windows its modification time moves when an
-            // entry is added or removed — which is how a new branch under `refs/heads` is seen.
-            if let Ok(at) = meta.modified() {
-                at.duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_nanos()
-                    .hash(&mut hasher);
-            }
+            hash_meta(&meta, &mut hasher);
         }
         total = total.wrapping_add(hasher.finish());
     }
@@ -785,20 +736,31 @@ pub fn stamp(dot_git: &Path) -> u64 {
 
 /// [`stamp`] for a `.git` that is a file: its size and modification time.
 fn file_stamp(dot_git: &Path) -> u64 {
-    use std::hash::{Hash, Hasher};
+    use std::hash::Hasher;
 
     let Ok(meta) = std::fs::symlink_metadata(dot_git) else {
         return 0;
     };
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    meta.len().hash(&mut hasher);
+    hash_meta(&meta, &mut hasher);
+    hasher.finish() | 1
+}
+
+/// What [`stamp`] and [`file_stamp`] read of one entry: its size, then its modification time where
+/// the platform says.
+///
+/// A folder has no useful length, and on Windows its modification time moves when an entry is
+/// added or removed — which is how a new branch under `refs/heads` is seen.
+fn hash_meta(meta: &std::fs::Metadata, hasher: &mut impl std::hash::Hasher) {
+    use std::hash::Hash;
+
+    meta.len().hash(hasher);
     if let Ok(at) = meta.modified() {
         at.duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos()
-            .hash(&mut hasher);
+            .hash(hasher);
     }
-    hasher.finish() | 1
 }
 
 /// Where the repository rooted at `root` keeps the things a change to them is worth re-reading for:
@@ -1109,23 +1071,46 @@ fn mark(repo: &mut Repo, prefix: &str, path: &str, state: State) {
     }
     // Every ancestor as well as the path itself, so that a folder row wears the strongest state
     // under it without anything having to walk the map to find out.
-    for (at, _) in rel.match_indices('/') {
-        let ancestor = &rel[..at];
+    let ends = rel.match_indices('/').map(|(at, _)| at);
+    for end in ends.chain(std::iter::once(rel.len())) {
+        let key = &rel[..end];
         let now = repo
             .marks
-            .get(ancestor)
+            .get(key)
             .copied()
             .unwrap_or(State::Clean)
             .or_stronger(state);
-        repo.marks.insert(ancestor.to_owned(), now);
+        repo.marks.insert(key.to_owned(), now);
     }
-    let now = repo
-        .marks
-        .get(rel)
-        .copied()
-        .unwrap_or(State::Clean)
-        .or_stronger(state);
-    repo.marks.insert(rel.to_owned(), now);
+}
+
+/// Run `git` with `args` in `dir`, for a test: whether it ran and succeeded. `false` when there is
+/// no git to run, which is how a test tells that it has nothing to test.
+#[cfg(test)]
+pub(crate) fn git_in(dir: &Path, args: &[&str]) -> bool {
+    let mut command = Command::new("git");
+    command.args(args).current_dir(dir);
+    crate::shell::no_window(&mut command);
+    command
+        .output()
+        .map(|out| out.status.success())
+        .unwrap_or(false)
+}
+
+/// Make `dir` a new repository, for a test. `false` when there is no git on this machine, which is
+/// not a test failure: there is nothing to test.
+///
+/// A repository of this program's own making, so nothing in it depends on the developer's name,
+/// editor or signing key.
+#[cfg(test)]
+pub(crate) fn fresh_repo(dir: &Path) -> bool {
+    if !git_in(dir, &["init", "--quiet"]) {
+        return false;
+    }
+    assert!(git_in(dir, &["config", "user.email", "test@example.invalid"]));
+    assert!(git_in(dir, &["config", "user.name", "Test"]));
+    assert!(git_in(dir, &["config", "commit.gpgsign", "false"]));
+    true
 }
 
 #[cfg(test)]

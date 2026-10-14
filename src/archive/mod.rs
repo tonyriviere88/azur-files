@@ -368,6 +368,19 @@ pub struct Item {
     pub at: u32,
 }
 
+impl Item {
+    /// The listing flags for this entry as a row of its own.
+    ///
+    /// Read-only throughout: nothing in an archive can be written, and the flag is what the details
+    /// view and the rename guard already read.
+    fn flags(&self) -> u16 {
+        FLAG_READONLY
+            | if self.is_dir { FLAG_DIR } else { 0 }
+            | if self.unsized_ { FLAG_UNSIZED } else { 0 }
+            | if self.link { FLAG_LINK } else { 0 }
+    }
+}
+
 /// Every entry in one archive, read once.
 #[derive(Debug, Default)]
 pub struct Index {
@@ -381,12 +394,36 @@ pub struct Index {
 }
 
 impl Index {
+    /// A read that worked, as far as it got.
+    fn listed(items: Vec<Item>, truncated: bool) -> Self {
+        Self {
+            items,
+            truncated,
+            ..Self::default()
+        }
+    }
+
     fn failed(why: impl Into<String>) -> Self {
         Self {
             error: Some(why.into()),
             ..Self::default()
         }
     }
+}
+
+// The sentences more than one reader can say, kept in one place so that listing an archive and
+// extracting from it cannot word the same failure two ways.
+
+/// The archive file itself has gone since it was listed, or since the folder was opened.
+const GONE: &str = "This archive is no longer there";
+
+/// An entry that needs a password, which nothing in this program can ask for.
+const ENCRYPTED: &str =
+    "This entry is encrypted, and there is nowhere in this program to type a password";
+
+/// A `.7z` whose headers the reader refused, with the reader's own reason.
+fn unreadable_7z(why: impl std::fmt::Display) -> String {
+    format!("This 7z archive could not be read ({why})")
 }
 
 /// What identifies a cached [`Index`]: the archive, and enough of its metadata to notice it has
@@ -439,7 +476,7 @@ const CACHE_ITEMS: usize = 400_000;
 fn index(file: &Path, format: Format) -> (Arc<Index>, bool) {
     let Some(key) = key_for(file) else {
         return (
-            Arc::new(Index::failed("This archive is no longer there")),
+            Arc::new(Index::failed(GONE)),
             true,
         );
     };
@@ -531,6 +568,7 @@ pub fn forget_each<'a>(paths: impl IntoIterator<Item = &'a Path>) {
 
 /// Everything the cache is holding: archives, and entries across them. For `--trace`, and the same
 /// question [`crate::loader::Loader::held`] answers about folders.
+#[cfg(any(test, feature = "devtools"))]
 pub fn held() -> (usize, usize) {
     CACHE
         .lock()
@@ -549,6 +587,21 @@ pub fn held() -> (usize, usize) {
 /// either there is no archive in the path, or what looked like one is a folder that happens to be
 /// named like an archive, in which case the ordinary scan is exactly right.
 pub fn listing(path: &Path, started: Instant) -> Option<Dir> {
+    Some(match opened(path)? {
+        Ok((inside, index, freshly_read)) => build(path, &inside, &index, freshly_read, started),
+        Err(failed) => failed,
+    })
+}
+
+/// What [`opened`] hands back: the archive, its index and whether it was read just now — or the
+/// listing to show instead.
+type Opened = Result<(Inside, Arc<Index>, bool), Dir>;
+
+/// The archive a path is inside, and its index: what [`listing`] and [`flattened`] both start from.
+///
+/// `None` is "not mine", for both of their reasons. `Err` is the listing to show instead, when the
+/// archive is there and could not be read.
+fn opened(path: &Path) -> Option<Opened> {
     let inside = split(path)?;
     // Confirms the archive is a file before anything is read, which is what makes the extension
     // guess in [`split`] safe. A folder called `stuff.zip` falls through to the real scan here.
@@ -556,9 +609,34 @@ pub fn listing(path: &Path, started: Instant) -> Option<Dir> {
 
     let (index, freshly_read) = index(&inside.file, inside.format);
     if let Some(error) = &index.error {
-        return Some(Dir::failed(path, error.clone()));
+        return Some(Err(Dir::failed(path, error.clone())));
     }
-    Some(build(path, &inside, &index, freshly_read, started))
+    Some(Ok((inside, index, freshly_read)))
+}
+
+/// The finished listing, with the archive's read charged to it.
+///
+/// The archive's own read is what the time went on, and it is charged to the folder that triggered
+/// it rather than hidden: the first listing of a tarball is slow and the status line should say so.
+/// **Once**, though — a later folder of the same archive reports only its own slicing, which is
+/// microseconds, and which is the honest number for what that listing did.
+fn finished(builder: DirBuilder, index: &Index, freshly_read: bool, started: Instant) -> Dir {
+    let mut dir = builder.finish(started.elapsed().as_micros() as u64);
+    if freshly_read {
+        dir.scan_micros += index.micros;
+    }
+    dir.truncated = index.truncated;
+    dir
+}
+
+/// Whether an interior path is below `within`: past it, and past a separator.
+///
+/// The byte after the prefix has to be the separator, because a sibling whose name merely starts
+/// with the same letters — `srcfoo/x` under `src` — is not part of `src`. False for an empty
+/// `within`, which is the archive's root and has every entry below it: the callers that list the
+/// root say so themselves.
+fn below(path: &str, within: &str) -> bool {
+    path.starts_with(within) && path.as_bytes().get(within.len()) == Some(&b'/')
 }
 
 /// One file or folder a drag is offering, named the way the drop target will recreate it.
@@ -628,11 +706,8 @@ pub fn manifest(paths: &[PathBuf]) -> Result<Vec<Dragged>, String> {
                 }
                 continue;
             }
-            // Below it. The separator test is the same one [`build`] makes, and for the same
-            // reason: `srcfoo/x` is not part of `src`.
-            if !item.path.starts_with(within.as_str())
-                || item.path.as_bytes().get(within.len()) != Some(&b'/')
-            {
+            // Below it, by the test [`build`] makes. Never the root here: that was skipped above.
+            if !below(&item.path, within) {
                 continue;
             }
             let rest = &item.path[within.len() + 1..];
@@ -644,12 +719,9 @@ pub fn manifest(paths: &[PathBuf]) -> Result<Vec<Dragged>, String> {
             // looks redundant and is not: a folder that is *empty* is named by no file below it and
             // would simply not arrive. Being explicit costs one descriptor per folder and is what
             // makes a dragged tree land as the tree it was.
-            let mut at = 0;
-            while let Some(cut) = rest[at..].find('/') {
-                at += cut;
-                let folder = format!("{leaf}\\{}", rest[..at].replace('/', "\\"));
-                let inner = &item.path[..within.len() + 1 + at];
-                at += 1;
+            for ancestor in ancestors(rest) {
+                let folder = format!("{leaf}\\{}", ancestor.replace('/', "\\"));
+                let inner = &item.path[..within.len() + 1 + ancestor.len()];
                 if seen.insert(folder.clone()) {
                     out.push(Dragged {
                         name: folder,
@@ -698,6 +770,12 @@ pub fn manifest(paths: &[PathBuf]) -> Result<Vec<Dragged>, String> {
     Ok(out)
 }
 
+/// Every folder `rest` passes through on the way down, outermost first, as the leading part of it:
+/// `a`, then `a/b`, for `a/b/c`. Not `rest` itself.
+fn ancestors(rest: &str) -> impl Iterator<Item = &str> {
+    rest.match_indices('/').map(|(cut, _)| &rest[..cut])
+}
+
 /// The **flattened** listing of a folder inside an archive: everything under it, at every depth, in
 /// one listing. The flatten button, and the tree view built on it.
 ///
@@ -713,13 +791,10 @@ pub fn manifest(paths: &[PathBuf]) -> Result<Vec<Dragged>, String> {
 /// threads, no truncation of its own: what [`Index::truncated`] already says is the only limit there
 /// is.
 pub fn flattened(path: &Path, started: Instant) -> Option<Dir> {
-    let inside = split(path)?;
-    key_for(&inside.file)?;
-
-    let (index, freshly_read) = index(&inside.file, inside.format);
-    if let Some(error) = &index.error {
-        return Some(Dir::failed(path, error.clone()));
-    }
+    let (inside, index, freshly_read) = match opened(path)? {
+        Ok(opened) => opened,
+        Err(failed) => return Some(failed),
+    };
 
     let within = &inside.within;
     let from = if within.is_empty() {
@@ -731,15 +806,11 @@ pub fn flattened(path: &Path, started: Instant) -> Option<Dir> {
     // Every folder on the way down, so the tree view has something to indent under and something to
     // collapse — the real walk emits them because it opens them, and a listing without them would
     // draw `src\ui\mod.rs` with no `src` above it.
-    let mut seen: HashMap<String, bool> = HashMap::new();
     let mut order: Vec<String> = Vec::new();
     let mut rows: HashMap<String, (u64, u64, u16)> = HashMap::new();
 
     for item in &index.items {
-        if !within.is_empty()
-            && (!item.path.starts_with(within.as_str())
-                || item.path.as_bytes().get(within.len()) != Some(&b'/'))
-        {
+        if !within.is_empty() && !below(&item.path, within) {
             continue;
         }
         let rest = &item.path[from..];
@@ -749,31 +820,24 @@ pub fn flattened(path: &Path, started: Instant) -> Option<Dir> {
 
         // Each ancestor, then the entry itself. `\` rather than `/`, which is what a real flattened
         // listing stores and what [`Dir::within`] and [`Dir::depth`] read.
-        let mut at = 0;
-        while let Some(cut) = rest[at..].find('/') {
-            at += cut;
-            let folder = rest[..at].replace('/', "\\");
-            at += 1;
-            if seen.insert(folder.clone(), true).is_none() {
-                order.push(folder.clone());
-                rows.insert(folder, (0, item.modified, FLAG_DIR | FLAG_READONLY));
-            } else if let Some(held) = rows.get_mut(&folder) {
-                held.1 = held.1.max(item.modified);
+        for ancestor in ancestors(rest) {
+            let folder = ancestor.replace('/', "\\");
+            match rows.get_mut(&folder) {
+                Some(held) => held.1 = held.1.max(item.modified),
+                None => {
+                    order.push(folder.clone());
+                    rows.insert(folder, (0, item.modified, FLAG_DIR | FLAG_READONLY));
+                }
             }
         }
 
         let name = rest.replace('/', "\\");
-        let flags = FLAG_READONLY
-            | if item.is_dir { FLAG_DIR } else { 0 }
-            | if item.unsized_ { FLAG_UNSIZED } else { 0 }
-            | if item.link { FLAG_LINK } else { 0 };
-        match seen.insert(name.clone(), true) {
+        let flags = item.flags();
+        match rows.get_mut(&name) {
             // Already there as an inferred folder, and the archive's own record of it wins.
-            Some(_) => {
-                if let Some(held) = rows.get_mut(&name) {
-                    if flags & FLAG_DIR == 0 {
-                        *held = (item.size, item.modified, flags);
-                    }
+            Some(held) => {
+                if flags & FLAG_DIR == 0 {
+                    *held = (item.size, item.modified, flags);
                 }
             }
             None => {
@@ -790,13 +854,7 @@ pub fn flattened(path: &Path, started: Instant) -> Option<Dir> {
             builder.push(name, size, modified, flags);
         }
     }
-
-    let mut dir = builder.finish(started.elapsed().as_micros() as u64);
-    if freshly_read {
-        dir.scan_micros += index.micros;
-    }
-    dir.truncated = index.truncated;
-    Some(dir)
+    Some(finished(builder, &index, freshly_read, started))
 }
 
 /// Turn the flat list of interior paths into the listing of one folder.
@@ -851,15 +909,10 @@ fn build(
     let mut rows: Vec<Row> = Vec::new();
 
     for item in &index.items {
-        if !within.is_empty() {
-            // The folder itself is not one of its own rows, and a sibling whose name merely starts
-            // with the same letters — `srcfoo/x` under `src` — is not either: the byte after the
-            // prefix has to be the separator.
-            if !item.path.starts_with(within.as_str())
-                || item.path.as_bytes().get(within.len()) != Some(&b'/')
-            {
-                continue;
-            }
+        // The folder itself is not one of its own rows, and neither is a sibling that merely shares
+        // its first letters — see [`below`].
+        if !within.is_empty() && !below(&item.path, within) {
+            continue;
         }
         let rest = &item.path[from..];
         if rest.is_empty() {
@@ -882,12 +935,7 @@ fn build(
                 Row {
                     size: item.size,
                     modified: item.modified,
-                    // Read-only throughout: nothing in an archive can be written, and the flag is
-                    // what the details view and the rename guard already read.
-                    flags: FLAG_READONLY
-                        | if item.is_dir { FLAG_DIR } else { 0 }
-                        | if item.unsized_ { FLAG_UNSIZED } else { 0 }
-                        | if item.link { FLAG_LINK } else { 0 },
+                    flags: item.flags(),
                 },
             ),
         };
@@ -922,15 +970,5 @@ fn build(
     for (name, row) in names.iter().zip(&rows) {
         builder.push(name, row.size, row.modified, row.flags);
     }
-
-    let mut dir = builder.finish(started.elapsed().as_micros() as u64);
-    // The archive's own read is what the time went on, and it is charged to the folder that
-    // triggered it rather than hidden: the first listing of a tarball is slow and the status line
-    // should say so. **Once**, though — a later folder of the same archive reports only its own
-    // slicing, which is microseconds, and which is the honest number for what that listing did.
-    if freshly_read {
-        dir.scan_micros += index.micros;
-    }
-    dir.truncated = index.truncated;
-    dir
+    finished(builder, index, freshly_read, started)
 }

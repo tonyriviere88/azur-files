@@ -864,36 +864,6 @@ fn properties_on_a_background_menu_goes_through_the_folder_as_an_item() {
     crate::sandbox::remove(&dir);
 }
 
-/// Every visible top-level window this process owns, as `(HWND, title)`.
-#[cfg(windows)]
-fn windows_of_this_process() -> Vec<(isize, String)> {
-    use windows::core::BOOL;
-    use windows::Win32::Foundation::{HWND, LPARAM, TRUE};
-    use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
-    };
-    type Found = Vec<(isize, String)>;
-    // SAFETY: called by `EnumWindows` for the duration of the call below, with `lparam`
-    // pointing at the `Found` on that frame's stack and nothing else touching it.
-    unsafe extern "system" fn each(hwnd: HWND, lparam: LPARAM) -> BOOL {
-        let out = &mut *(lparam.0 as *mut Found);
-        let mut pid = 0u32;
-        GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        if pid == std::process::id() && IsWindowVisible(hwnd).as_bool() {
-            let mut text = [0u16; 256];
-            let read = GetWindowTextW(hwnd, &mut text);
-            out.push((hwnd.0 as isize, String::from_utf16_lossy(&text[..read as usize])));
-        }
-        TRUE
-    }
-    let mut out: Found = Vec::new();
-    // SAFETY: the pointer is to `out`, which outlives the call.
-    unsafe {
-        let _ = EnumWindows(Some(each), LPARAM(&mut out as *mut Found as isize));
-    }
-    out
-}
-
 /// Wait for a window of this process to turn up, up to `secs`.
 ///
 /// **Answering calls while waiting, not sleeping.** The shell puts a property sheet on a thread
@@ -905,7 +875,10 @@ fn windows_of_this_process() -> Vec<(isize, String)> {
 fn wait_for_a_window(secs: u64) -> Vec<(isize, String)> {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(secs);
     loop {
-        let found = windows_of_this_process();
+        let found: Vec<(isize, String)> = crate::shell::windows_of_this_process()
+            .into_iter()
+            .map(|(hwnd, _, title)| (hwnd, title))
+            .collect();
         if !found.is_empty() || std::time::Instant::now() >= deadline {
             return found;
         }
@@ -916,18 +889,8 @@ fn wait_for_a_window(secs: u64) -> Vec<(isize, String)> {
 /// Ask each of these windows to close, and give them a moment to.
 #[cfg(windows)]
 fn close_these(windows: &[isize]) {
-    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-    use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
-    for hwnd in windows {
-        // SAFETY: posting to a window of this process; a stale handle is answered with an error.
-        unsafe {
-            let _ = PostMessageW(
-                Some(HWND(*hwnd as *mut std::ffi::c_void)),
-                WM_CLOSE,
-                WPARAM(0),
-                LPARAM(0),
-            );
-        }
+    for &hwnd in windows {
+        crate::shell::close_window(hwnd);
     }
     crate::shell::answering_calls(300);
 }

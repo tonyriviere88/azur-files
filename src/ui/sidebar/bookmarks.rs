@@ -23,13 +23,13 @@
 //! instead — see [`crate::icons::bookmark_group`].
 
 use azur_egui_theme::components::{ContextMenu, MenuItem};
-use azur_egui_theme::icons as azur_icons;
-use azur_egui_theme::tokens::{radius, space};
+use azur_egui_theme::tokens::space;
 use egui::{pos2, vec2, CornerRadius, Id, Rect, Sense, Ui};
 use std::path::{Path, PathBuf};
 
 use super::{
-    hint, menu_targets, navigate_on, row, shell_icon, IconQueue, Marks, CHILD, GLYPH, INDENT, ROW,
+    caret, fold_chevron, hint, menu_targets, navigate_on, paint_caret, row, shell_icon, IconQueue,
+    Marks, CHILD, GLYPH, GLYPH_X, ROW,
 };
 use crate::app::Action;
 use crate::fs::display_name;
@@ -559,7 +559,7 @@ fn mark_row(
     focused: PaneId,
     out: &mut Vec<Action>,
 ) -> Rect {
-    let shell = shell_icon(ui, icons_cache, path);
+    let shell = shell_icon(icons_cache, path);
     let response = row(
         ui,
         t,
@@ -679,19 +679,9 @@ fn group_row(
     // The chevron goes in the slot every row leaves for it — the same twelve points a
     // section's heading uses, which is what puts a group's glyph in the same column as the
     // bookmarks' rather than beside it.
-    let chevron = icon_rect(rect, rect.left() + INDENT, 12.0);
-    let ink = if response.hovered() {
-        t.text.secondary
-    } else {
-        t.text.tertiary
-    };
-    if group.open {
-        azur_icons::chevron_down(ui.painter(), chevron, ink);
-    } else {
-        azur_icons::chevron_right(ui.painter(), chevron, ink);
-    }
+    fold_chevron(ui.painter(), t, rect, group.open, response.hovered());
 
-    let glyph = icon_rect(rect, rect.left() + INDENT + 12.0 + space::S2, GLYPH);
+    let glyph = icon_rect(rect, rect.left() + GLYPH_X, GLYPH);
     icons::bookmark_group(ui.painter(), glyph, t.status.warning);
 
     // How many are in a folded group, right-aligned — so a long name loses width to the count
@@ -831,33 +821,25 @@ fn name_field(
         .painter()
         .layout_no_wrap(rename.text.clone(), font, egui::Color32::PLACEHOLDER)
         .size();
-    use egui::emath::GuiRounding as _;
-    let top = (at.center().y - line.y * 0.5).round_to_pixels(ui.painter().pixels_per_point());
-    let height = crate::ui::filelist::FIELD_HEIGHT;
-    let field = Rect::from_min_size(
-        pos2(at.left(), top - (height - line.y) * 0.5),
-        vec2(at.width().max(MIN_NAME), height),
+    let field = crate::ui::filelist::field_at(
+        ui.painter(),
+        line,
+        at.left(),
+        at.center().y,
+        at.width().max(MIN_NAME),
     );
 
     // Azur's focus ring taken off the way a rename in the listing takes it off, and for the
     // same reason: the field is already an obviously editable box, on a row whose own
     // highlight has been removed for it, and the ring on top was the loudest thing in the
-    // window. The *width* only — the colour that stroke carries is what selected text is drawn
-    // in, and zeroing the whole thing paints the selected name in nothing.
-    let ring = ui.visuals().selection.stroke;
-    ui.visuals_mut().selection.stroke = egui::Stroke::new(0.0, ring.color);
-    let response = crate::ui::squared(ui, |ui| {
-        ui.put(
-            field,
-            egui::TextEdit::singleline(&mut rename.text)
-                .id(id)
-                .margin(egui::Margin::ZERO)
-                .vertical_align(egui::Align::Center)
-                .background_color(t.bg.layer)
-                .desired_width(field.width()),
-        )
-    });
-    ui.visuals_mut().selection.stroke = ring;
+    // window. See [`crate::ui::filelist::inline_edit`].
+    let response = crate::ui::filelist::inline_edit(
+        ui,
+        t,
+        field,
+        id,
+        egui::TextEdit::singleline(&mut rename.text),
+    );
 
     if fresh {
         response.request_focus();
@@ -914,13 +896,7 @@ fn dragging(
             // A group accepts what is dropped on it, so it lights up the way every other drop
             // target in this window does rather than showing a caret beside itself.
             Landing::Into { rect, .. } => crate::ui::drop_target(ui.painter(), rect, t),
-            Landing::Between { edge, .. } => {
-                ui.painter().rect_filled(
-                    edge,
-                    CornerRadius::same(radius::CIRCULAR),
-                    t.accent.default,
-                );
-            }
+            Landing::Between { edge, .. } => paint_caret(ui.painter(), t, edge),
         }
         ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
         return;
@@ -1007,14 +983,6 @@ fn landing(lines: &[Line], pointer: egui::Pos2, moving_group: bool, top: usize) 
             if row.spot.group.is_some() { CHILD } else { 0.0 },
         ),
     })
-}
-
-/// The two points of accent that say a row is going between these two.
-fn caret(row: Rect, y: f32, indent: f32) -> Rect {
-    Rect::from_min_max(
-        pos2(row.left() + INDENT + indent, y - 1.0),
-        pos2(row.right() - space::S3, y + 1.0),
-    )
 }
 
 #[cfg(test)]

@@ -36,7 +36,7 @@ use crate::fs;
 use crate::icons;
 use crate::pane::{Lens, PaneId, Tab};
 use crate::theme::Theme;
-use crate::ui::{text_left, tool_button, truncated, TOOL_SIZE};
+use crate::ui::{menu_note, text_left, tool_button, truncated, TOOL_SIZE};
 
 /// The bar's height: `tokens::control::MEDIUM`, so the buttons in it are Azur's
 /// small size with room to breathe.
@@ -158,10 +158,7 @@ impl CrumbMenu {
         self.items.clear();
         self.truncated = false;
         // Asked once per folder, and once only for one that cannot be read. See [`Self::asked`].
-        if self.asked.as_deref() != Some(path) {
-            self.asked = Some(path.to_path_buf());
-            loader.prefetch(path);
-        }
+        ask_once(&mut self.asked, Some(path), loader);
         // Whatever the loader already has, which for a folder on the trail is usually everything:
         // walking down through it is what put it in the cache. A miss leaves the menu waiting, and
         // the worker wakes the window when it lands — see [`crate::loader::Loader::new`], which
@@ -184,8 +181,7 @@ impl CrumbMenu {
         items.sort_by(|a, b| fs::sort::natural_cmp(&a.0, &b.0));
         // A menu is for picking one of a few; past this it is a listing, and the
         // listing is what the pane behind it is for.
-        self.truncated = items.len() > MENU_LIMIT;
-        items.truncate(MENU_LIMIT);
+        self.truncated = cap(&mut items);
 
         self.path = Some(path.to_path_buf());
         self.items = items;
@@ -209,6 +205,23 @@ impl CrumbMenu {
     fn reopen(&mut self) {
         self.path = None;
         self.asked = None;
+    }
+
+    /// A click on the trigger of dropdown `key`: open it, or close it if it is the one up — which is
+    /// what clicking an open menu's button does everywhere.
+    fn toggle(&mut self, key: (PaneId, usize)) {
+        self.open = (self.open != Some(key)).then_some(key);
+    }
+
+    /// Dropdown `key`'s popup has had its frame, and `open` is what it said about itself afterwards.
+    ///
+    /// `false` while this still records it as up means it closed itself — an entry was clicked,
+    /// something outside it was, or `Escape` — and that is the end of the bar's tracking mode. This
+    /// is the only place it is reported.
+    fn closed_itself(&mut self, key: (PaneId, usize), open: bool) {
+        if !open && self.open == Some(key) {
+            self.open = None;
+        }
     }
 
     /// What the open dropdown is listing: the folder it read, and how many subfolders it
@@ -290,12 +303,8 @@ pub fn show(
     ui.painter().rect_filled(rect, CornerRadius::ZERO, surface);
 
     let center = rect.center().y;
-    let button = |x: f32| {
-        Rect::from_min_size(
-            pos2(x.round(), (center - TOOL_SIZE * 0.5).round()),
-            vec2(TOOL_SIZE, TOOL_SIZE),
-        )
-    };
+    // A toolbar button's square, with its left edge at `x`, centred on the bar.
+    let button = |x: f32| crate::ui::icon_rect(rect, x, TOOL_SIZE);
 
     // ---- Getting about ---------------------------------------------------
     //
@@ -351,7 +360,6 @@ pub fn show(
             &tip,
             enabled,
             false,
-            surface,
         );
         if response.clicked() {
             out.push(action);
@@ -602,7 +610,6 @@ pub fn show(
             "Filter by something other than the name",
             true,
             tab.lens.is_some(),
-            surface,
         );
         funnel_menu(ui, &response, pane, tab.lens, subfolders, out);
         right = field.left() - space::S2;
@@ -636,7 +643,6 @@ pub fn show(
                 tip,
                 true,
                 show != crate::diff::Show::All,
-                surface,
             );
             if response.clicked() {
                 out.push(Action::SetDiffShow {
@@ -679,7 +685,6 @@ pub fn show(
             // rows already carry the whole path they came from — see `Tab::toggle_flat`.
             !crate::fs::is_synthetic(&tab.path),
             tab.flat,
-            surface,
         );
         if response.clicked() {
             out.push(Action::ToggleFlat(pane));
@@ -712,7 +717,6 @@ pub fn show(
             &crate::app::shortcuts::tip("Preview the selected file", &crate::app::shortcuts::Command::Preview),
             true,
             tab.preview.open,
-            surface,
         );
         if response.clicked() {
             out.push(Action::TogglePreview(pane));

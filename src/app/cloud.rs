@@ -30,21 +30,13 @@ impl App {
         }
 
         for answer in self.cloud.drain() {
-            for pane in &mut self.panes {
-                for tab in &mut pane.tabs {
-                    if tab.view != answer.view {
-                        continue;
-                    }
-                    let Some(len) = tab.dir.as_ref().map(|dir| dir.len()) else { continue };
-                    if tab.cloud.len() != len {
-                        tab.cloud = vec![None; len];
-                    }
-                    for &(index, state) in &answer.states {
-                        if let Some(slot) = tab.cloud.get_mut(index as usize) {
-                            *slot = Some(state);
-                        }
-                    }
+            for tab in tabs_mut(&mut self.panes) {
+                if tab.view != answer.view {
+                    continue;
                 }
+                let Some(len) = tab.dir.as_ref().map(|dir| dir.len()) else { continue };
+                let states = answer.states.iter().map(|&(index, state)| (index, Some(state)));
+                scatter(&mut tab.cloud, len, None, states);
             }
         }
     }

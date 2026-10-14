@@ -5,6 +5,10 @@
 
 use super::*;
 
+/// What a tab is laid out as: four spaces, because egui lays a tab out as one and every indented
+/// file would be flat. Shared with [`crate::git`], which draws removed lines among the file's own.
+pub(crate) const TAB: &str = "    ";
+
 /// A file read as text.
 pub struct Text {
     pub body: String,
@@ -56,6 +60,10 @@ pub(super) fn sniff(path: &Path) -> Option<bool> {
 }
 
 /// Whether the file at `path` wants the monospace role, from its name.
+///
+/// The name half of [`lang_and_face`], which asks it of the halves it already has rather than
+/// splitting the name twice — so this is the tests' way in to the same answer.
+#[cfg(test)]
 pub(super) fn code_of(path: &Path) -> bool {
     let (stem, ext) = halves(path);
     is_code(&stem, &ext)
@@ -75,12 +83,13 @@ pub(super) fn code_of(path: &Path) -> bool {
 /// `.txt` is prose is that most of them are, and this one demonstrably is not.
 fn lang_and_face(path: &Path, body: &str) -> (crate::syntax::Lang, bool) {
     let (stem, ext) = halves(path);
+    let code = is_code(&stem, &ext);
     let named = crate::syntax::lang_of(&stem, &ext);
     if named != crate::syntax::Lang::None {
-        return (named, code_of(path));
+        return (named, code);
     }
     let sniffed = crate::syntax::lang_of_body(body);
-    (sniffed, sniffed != crate::syntax::Lang::None || code_of(path))
+    (sniffed, sniffed != crate::syntax::Lang::None || code)
 }
 
 /// The name with the extension off, and the extension — the two things every question
@@ -139,7 +148,7 @@ pub(super) fn read(path: &Path) -> Result<Text, Payload> {
     // And a tab, which egui lays out as a single space. Four, because the alternative is that
     // every indented file in the preview is flat.
     if body.contains('\t') {
-        body = body.replace('\t', "    ");
+        body = body.replace('\t', TAB);
     }
     // Asked of the name first and of the body only where the name said nothing — and after the two
     // substitutions above, so what is probed is the string the panel will actually lay out.

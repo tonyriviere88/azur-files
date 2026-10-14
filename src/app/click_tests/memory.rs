@@ -59,7 +59,7 @@ fn scrolling_the_same_folder_up_and_down_costs_nothing() {
         for top in (0..rows).step_by(11) {
             h.app.panes[0].tab_mut().scroll_to = Some(top as f32 * crate::pane::ROW_HEIGHT);
             h.frame(Vec::new());
-            h.app.icons.poll(&h.ctx.clone());
+            h.app.icons.poll();
             h.app.deliver_icons();
         }
         for top in (0..rows).step_by(11).rev() {
@@ -161,7 +161,7 @@ fn what_scrolling_a_folder_of_executables_costs() {
         for _ in 0..3 {
             h.frame(Vec::new());
         }
-        h.app.icons.poll(&h.ctx.clone());
+        h.app.icons.poll();
         h.app.deliver_icons();
         if top % (step * 40) == 0 {
             let (private, gdi, _) = process_memory();

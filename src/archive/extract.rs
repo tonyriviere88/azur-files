@@ -429,7 +429,7 @@ impl Wanted {
 /// yesterday's bytes.
 fn destination(inside: &Inside) -> Result<PathBuf, String> {
     let found = std::fs::metadata(&inside.file)
-        .map_err(|_| "This archive is no longer there".to_owned())?;
+        .map_err(|_| super::GONE.to_owned())?;
 
     // `DefaultHasher` is fixed-seed and so gives the same answer in every process, which is what
     // makes an extraction survive being asked for again by a different one. It is not a
@@ -467,10 +467,7 @@ fn wanted_from(inside: &Inside, index: &Index, root: &Path) -> Result<Vec<Wanted
             continue;
         }
         if item.encrypted {
-            return Err(
-                "This entry is encrypted, and there is nowhere in this program to type a password"
-                    .to_owned(),
-            );
+            return Err(super::ENCRYPTED.to_owned());
         }
         wanted.push(Wanted {
             item: at,
@@ -518,9 +515,7 @@ fn write_out(inside: &Inside, index: &Index, wanted: &[&Wanted]) -> Result<(), S
 
 /// A zip is the one format that can seek to an entry, so this asks for each by its index.
 fn write_zip(inside: &Inside, index: &Index, wanted: &[&Wanted]) -> Result<(), String> {
-    let handle = File::open(&inside.file).map_err(|why| why.to_string())?;
-    let mut archive = zip::ZipArchive::new(std::io::BufReader::new(handle))
-        .map_err(|why| format!("This zip file could not be read ({why})"))?;
+    let mut archive = read::open_zip(&inside.file)?;
 
     for item in wanted {
         if item.is_dir {
@@ -545,12 +540,12 @@ fn write_sevenz(inside: &Inside, index: &Index, wanted: &[&Wanted]) -> Result<()
         return Ok(());
     }
 
-    let handle = File::open(&inside.file).map_err(|why| why.to_string())?;
+    let handle = File::open(&inside.file).map_err(|why| read::reason(&why))?;
     let mut archive = sevenz_rust2::ArchiveReader::new(
         std::io::BufReader::new(handle),
         sevenz_rust2::Password::empty(),
     )
-    .map_err(|why| format!("This 7z archive could not be read ({why})"))?;
+    .map_err(super::unreadable_7z)?;
 
     // Collected rather than returned through the closure, whose error type is the crate's and
     // cannot carry one of these.
@@ -645,7 +640,7 @@ fn write_tar(inside: &Inside, index: &Index, wanted: &[&Wanted]) -> Result<(), S
         return Ok(());
     }
 
-    let stream = read::stream(&inside.file, inside.format).map_err(|why| why.to_string())?;
+    let stream = read::stream(&inside.file, inside.format).map_err(|why| read::reason(&why))?;
     // Around the whole stream and not around each entry: the crate skips what was not asked for
     // without handing it to anybody, and under a `.tar.gz` every skipped byte was still inflated to
     // be skipped. See [`Counted`].
@@ -657,8 +652,7 @@ fn write_tar(inside: &Inside, index: &Index, wanted: &[&Wanted]) -> Result<(), S
     let mut left = by_name.len();
     for entry in entries {
         let mut entry = entry.map_err(|why| format!("This archive stops early ({why})"))?;
-        let raw = String::from_utf8_lossy(&entry.path_bytes()).into_owned();
-        let Some(name) = read::interior(&raw) else {
+        let Some(name) = read::tar_name(&entry) else {
             continue;
         };
         if let Some(item) = by_name.get(name.as_str()) {
@@ -679,7 +673,7 @@ fn write_stream(inside: &Inside, wanted: &[&Wanted]) -> Result<(), String> {
     let Some(item) = wanted.first() else {
         return Ok(());
     };
-    let stream = read::stream(&inside.file, inside.format).map_err(|why| why.to_string())?;
+    let stream = read::stream(&inside.file, inside.format).map_err(|why| read::reason(&why))?;
     save(&item.dest, &mut Counted(stream))
 }
 
@@ -753,8 +747,7 @@ fn unsupported(why: &str) -> String {
         );
     }
     if lower.contains("password") || lower.contains("encrypt") {
-        return "This entry is encrypted, and there is nowhere in this program to type a password"
-            .to_owned();
+        return super::ENCRYPTED.to_owned();
     }
     format!("This entry could not be decompressed ({why})")
 }
@@ -771,22 +764,13 @@ mod tests {
     /// A zip of stored (uncompressed) entries in the sandbox, so a byte count is arithmetic anybody
     /// can check rather than a compression ratio.
     fn a_zip(name: &str, entries: &[(&str, usize)]) -> (PathBuf, u64) {
-        use std::io::Write as _;
-
         let root = crate::sandbox::fresh(&format!("progress-{name}"));
         let pkg = root.join("pkg.zip");
-        let file = File::create(&pkg).expect("sandbox");
-        let mut writer = zip::ZipWriter::new(file);
-        let stored = zip::write::SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Stored);
-        let mut bytes = 0u64;
-        for (entry, size) in entries {
-            writer.start_file(*entry, stored).expect("zip");
-            writer.write_all(&vec![b'x'; *size]).expect("zip");
-            bytes += *size as u64;
-        }
-        writer.finish().expect("zip");
-        (pkg, bytes)
+        let bodies: Vec<String> = entries.iter().map(|&(_, size)| "x".repeat(size)).collect();
+        let named: Vec<(&str, &str)> =
+            entries.iter().zip(&bodies).map(|(&(entry, _), body)| (entry, body.as_str())).collect();
+        crate::archive::tests::zip_at(&pkg, &named);
+        (pkg, entries.iter().map(|&(_, size)| size as u64).sum())
     }
 
     /// Claim the counter for this test, waiting for any other test's extraction to have finished with

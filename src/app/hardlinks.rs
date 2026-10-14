@@ -27,31 +27,26 @@ impl App {
         }
 
         for answer in self.hard_links.drain() {
-            for pane in &mut self.panes {
-                for tab in &mut pane.tabs {
-                    if tab.view != answer.view {
-                        continue;
-                    }
-                    let Some(len) = tab.dir.as_ref().map(|dir| dir.len()) else { continue };
-                    let digits = |n: u32| n.checked_ilog10().unwrap_or(0);
-                    let widest = tab.hard_links.iter().copied().max().map(digits);
-                    if !answer.counts.is_empty() && tab.hard_links.len() != len {
-                        tab.hard_links = vec![0; len];
-                    }
-                    for &(index, count) in &answer.counts {
-                        if let Some(slot) = tab.hard_links.get_mut(index as usize) {
-                            *slot = count;
-                        }
-                    }
-                    // The column opens on the first count, and widens if a count needs another
-                    // digit. Re-fitted rather than set, so its width is decided where the others' are.
-                    let now = tab.hard_links.iter().copied().max().map(digits);
-                    if now > widest {
-                        tab.widths_measured = false;
-                    }
-                    if answer.done && tab.sort_by == crate::fs::Column::HardLinks {
-                        tab.rebuild_order();
-                    }
+            for tab in tabs_mut(&mut self.panes) {
+                if tab.view != answer.view {
+                    continue;
+                }
+                let Some(len) = tab.dir.as_ref().map(|dir| dir.len()) else { continue };
+                let digits = |n: u32| n.checked_ilog10().unwrap_or(0);
+                let widest = tab.hard_links.iter().copied().max().map(digits);
+                // Only with counts in it: an answer that only says the walk is over leaves the slots
+                // as they are.
+                if !answer.counts.is_empty() {
+                    scatter(&mut tab.hard_links, len, 0, answer.counts.iter().copied());
+                }
+                // The column opens on the first count, and widens if a count needs another
+                // digit. Re-fitted rather than set, so its width is decided where the others' are.
+                let now = tab.hard_links.iter().copied().max().map(digits);
+                if now > widest {
+                    tab.widths_measured = false;
+                }
+                if answer.done && tab.sort_by == crate::fs::Column::HardLinks {
+                    tab.rebuild_order();
                 }
             }
         }

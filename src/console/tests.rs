@@ -677,7 +677,8 @@ fn a_line_typed_at_a_running_command_goes_down_the_pipe_and_into_the_log() {
 /// for ever, so the only way out was Stop. Every message names the way to run the thing.
 #[test]
 fn a_program_that_needs_a_terminal_is_told_so_rather_than_left_hanging() {
-    for command in ["vim", "htop", "less log.txt", r"C:\tools\nvim.exe x", "claude", "python"] {
+    // `vim.Exe` because Windows ignores the case of an extension, and so must the check.
+    for command in ["vim", "vim.Exe", "htop", "less log.txt", r"C:\tools\nvim.exe x", "claude", "python"] {
         let why = needs_a_terminal(command)
             .unwrap_or_else(|| panic!("`{command}` would have hung with nothing on screen"));
         assert!(

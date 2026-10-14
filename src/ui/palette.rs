@@ -24,11 +24,11 @@
 
 use azur_egui_theme::components::{
     menu_divider, menu_frame, menu_header, menu_header_height, menu_item_height, menu_item_metrics,
-    MenuItem, Size, Text, TextColor, TextField,
+    MenuItem, Size, TextField,
 };
 use azur_egui_theme::icons as azur_icons;
 use azur_egui_theme::tokens::space;
-use egui::{pos2, vec2, CornerRadius, Id, Order, Rect, Sense};
+use egui::{pos2, Id, Order, Rect};
 
 use crate::theme::Theme;
 
@@ -192,7 +192,7 @@ pub fn show(ctx: &egui::Context, t: &Theme, screen: Rect, state: &mut State, row
     );
     let wanted = list_height(rows);
 
-    if ctx.input(|i| i.pointer.delta() != egui::Vec2::ZERO || i.pointer.any_pressed()) {
+    if crate::ui::pointer_woke(ctx) {
         state.quiet = false;
     }
     let quiet = state.quiet;
@@ -259,27 +259,24 @@ pub fn show(ctx: &egui::Context, t: &Theme, screen: Rect, state: &mut State, row
 
                 if rows.is_empty() {
                     ui.add_space(space::S2);
-                    ui.add(Text::new("Nothing matches").color(TextColor::Tertiary));
+                    crate::ui::menu_note(ui, "Nothing matches");
                     ui.add_space(space::S2);
                     return;
                 }
 
-                // The room the rows need, claimed rather than asked for — see `offers_height` in
-                // `crate::ui::breadcrumb` for the `Area` and `ScrollArea` behaviour that makes
-                // asking get stuck at the size of the first list.
-                let taken = Rect::from_min_size(ui.cursor().min, vec2(width, wanted));
-                let mut list = ui.new_child(
-                    egui::UiBuilder::new()
-                        .max_rect(taken)
-                        .layout(egui::Layout::top_down_justified(egui::Align::Min)),
-                );
-                list.spacing_mut().item_spacing.y = 0.0;
-                list.style_mut().spacing.scroll.floating = true;
-                list.style_mut().spacing.scroll.fade.strength = 0.0;
-                egui::ScrollArea::vertical()
-                    .id_salt("command-palette-rows")
-                    .max_height(wanted)
-                    .show(&mut list, |ui| {
+                // The room the rows need, claimed rather than asked for, and covered while the
+                // keyboard has them — see [`crate::ui::claimed_list`], which the path field's
+                // dropdown is drawn with too.
+                let origin = ui.cursor().min;
+                crate::ui::claimed_list(
+                    ui,
+                    origin,
+                    width,
+                    wanted,
+                    "command-palette-rows",
+                    quiet,
+                    Id::new("command-palette-quiet"),
+                    |ui| {
                         let mut slots: Vec<(egui::layers::ShapeIdx, Rect)> =
                             Vec::with_capacity(rows.len());
                         let mut heading = "";
@@ -288,7 +285,6 @@ pub fn show(ctx: &egui::Context, t: &Theme, screen: Rect, state: &mut State, row
                                 heading = row.heading;
                                 menu_header(ui, heading);
                             }
-                            let slot = ui.painter().add(egui::Shape::Noop);
                             let mut item = MenuItem::new(row.label.as_str())
                                 .shortcut(row.shortcut.as_str())
                                 .selected(row.checked)
@@ -297,13 +293,8 @@ pub fn show(ctx: &egui::Context, t: &Theme, screen: Rect, state: &mut State, row
                             if let Some(icon) = row.icon {
                                 item = item.icon(icon);
                             }
-                            let response = ui.add(item);
-                            if follow
-                                && state.hot == index
-                                && !ui.clip_rect().contains_rect(response.rect)
-                            {
-                                response.scroll_to_me(None);
-                            }
+                            let (slot, response) =
+                                crate::ui::list_row(ui, item, follow && state.hot == index, None);
                             if response.hovered() {
                                 hovered = Some(index);
                             }
@@ -312,26 +303,10 @@ pub fn show(ctx: &egui::Context, t: &Theme, screen: Rect, state: &mut State, row
                             }
                             slots.push((slot, response.rect));
                         }
-                        // Behind the row it lights, in the slot kept for it: by now the label is
-                        // down, and a fill over it would be a fill over the name.
-                        let lit = if quiet { Some(state.hot) } else { hovered.or(Some(state.hot)) };
-                        if let Some(&(slot, rect)) = lit.and_then(|at| slots.get(at)) {
-                            ui.painter().set(
-                                slot,
-                                egui::epaint::RectShape::filled(
-                                    rect,
-                                    CornerRadius::ZERO,
-                                    t.bg.control_hover,
-                                ),
-                            );
-                        }
-                    });
-                // Over the rows while the keyboard has them, so a pointer resting where the palette
-                // happened to open lights nothing up.
-                if quiet {
-                    ui.interact(taken, Id::new("command-palette-quiet"), Sense::click());
-                }
-                ui.advance_cursor_after_rect(taken);
+                        // Behind the row it lights, in the slot kept for it.
+                        crate::ui::paint_lit(ui, t, &slots, Some(state.hot), hovered, quiet);
+                    },
+                );
             });
         });
 

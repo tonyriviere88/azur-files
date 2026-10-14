@@ -46,6 +46,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::fs::Column;
 use crate::theme::Palette;
 use crate::ui::sidebar::{Bookmarks, Entry, Section, Sections};
 
@@ -413,20 +414,14 @@ impl Config {
                     if let Some(at) = crate::ui::preview::Where::parse(at.trim()) {
                         config.preview.at = at;
                     }
-                    // `is_finite` before the clamp, for the reason `crate::dock` sets out where it
-                    // refuses one: `"nan".parse::<f32>()` succeeds and `f32::clamp` passes a NaN
-                    // straight through, so the guard cannot be the clamp.
-                    if let Ok(share) = share.trim().parse::<f32>() {
-                        if share.is_finite() {
-                            config.preview.share = share.clamp(0.1, 0.9);
-                        }
+                    // `finite` before the clamp — see [`finite`].
+                    if let Some(share) = finite(share.trim()) {
+                        config.preview.share = share.clamp(0.1, 0.9);
                     }
                 }
                 "console_share" => {
-                    if let Ok(share) = value.trim().parse::<f32>() {
-                        if share.is_finite() {
-                            config.console_share = share.clamp(0.1, 0.9);
-                        }
+                    if let Some(share) = finite(value.trim()) {
+                        config.console_share = share.clamp(0.1, 0.9);
                     }
                 }
                 "console_shell" => {
@@ -470,10 +465,10 @@ impl Config {
                 }
                 // By name, like `sidebar_order` below. A name this build does not know is skipped,
                 // and a column the line does not name goes back beside its neighbour.
-                "columns" => config.columns.set_order(columns_named(value)),
+                "columns" => config.columns.set_order(split_keys(value, Column::parse)),
                 // Name among them is ignored: it is the one column that cannot be taken off.
                 "columns_hidden" => {
-                    for column in columns_named(value) {
+                    for column in split_keys(value, Column::parse) {
                         config.columns.set_shown(column, false);
                     }
                 }
@@ -542,16 +537,14 @@ impl Config {
                 // `deps::Sizes`', so what is read here cannot drift from what is written.
                 "dependency" => config.preview.deps = crate::ui::deps::Sizes::parse(value),
                 "sidebar_width" => {
-                    // `is_finite` first — see `preview` above. This is the one of the three where a
+                    // `finite` first — see [`finite`]. This is the one of the three where a
                     // NaN could not be recovered from inside the program: the sidebar rect would be
                     // NaN, so the grip derived from its right edge never hit-tests, and neither the
                     // drag nor the double-click that puts the width back can be reached. It also
                     // round-trips, `format!("{:.0}", f32::NAN)` being `NaN`, so every launch came up
                     // the same way until the file was edited by hand.
-                    if let Ok(width) = value.parse::<f32>() {
-                        if width.is_finite() {
-                            config.sidebar_width = width.clamp(140.0, 520.0);
-                        }
+                    if let Some(width) = finite(value) {
+                        config.sidebar_width = width.clamp(140.0, 520.0);
                     }
                 }
                 // "Anything but 0", like `regroup` above: the panel showing is the default, so a file
@@ -578,34 +571,32 @@ impl Config {
                 // **By name**, unlike `sections=` above, so a group added later cannot shift what an
                 // arrangement already on disk means. A name it does not know is skipped and a group
                 // it does not name goes back beside its neighbour — see [`Sections::set_order`].
-                "sidebar_order" => config.sections.set_order(named(value)),
+                "sidebar_order" => {
+                    config.sections.set_order(split_keys(value, Section::from_key))
+                }
                 // The groups taken off the panel, by name. An empty line is none of them.
                 "sidebar_hidden" => {
-                    for section in named(value) {
+                    for section in split_keys(value, Section::from_key) {
                         config.sections.set_shown(section, false);
                     }
                 }
                 "window" => {
-                    if let Some((w, h)) = value.split_once(',') {
-                        if let (Ok(w), Ok(h)) = (w.trim().parse::<f32>(), h.trim().parse::<f32>()) {
-                            // A window smaller than this would have no room for the
-                            // chrome, and a saved size can come from another monitor.
-                            if w >= 640.0 && h >= 400.0 && w < 20_000.0 && h < 20_000.0 {
-                                config.window = Some([w, h]);
-                            }
+                    if let Some((w, h)) = pair(value) {
+                        // A window smaller than this would have no room for the
+                        // chrome, and a saved size can come from another monitor.
+                        if w >= 640.0 && h >= 400.0 && w < 20_000.0 && h < 20_000.0 {
+                            config.window = Some([w, h]);
                         }
                     }
                 }
                 "position" => {
-                    if let Some((x, y)) = value.split_once(',') {
-                        if let (Ok(x), Ok(y)) = (x.trim().parse::<f32>(), y.trim().parse::<f32>()) {
-                            // A desktop is bounded, and a position outside these is either
-                            // corrupt or from a machine with a wall of monitors this one
-                            // does not have. Whether it is on a monitor *now* is a question
-                            // only the platform can answer — see `main::restore_position`.
-                            if x.abs() < 60_000.0 && y.abs() < 60_000.0 {
-                                config.position = Some([x, y]);
-                            }
+                    if let Some((x, y)) = pair(value) {
+                        // A desktop is bounded, and a position outside these is either
+                        // corrupt or from a machine with a wall of monitors this one
+                        // does not have. Whether it is on a monitor *now* is a question
+                        // only the platform can answer — see `main::restore_position`.
+                        if x.abs() < 60_000.0 && y.abs() < 60_000.0 {
+                            config.position = Some([x, y]);
                         }
                     }
                 }
@@ -613,10 +604,8 @@ impl Config {
                 // `is_finite` for the reason `sidebar_width` gives, and clamped to the range egui's
                 // own keyboard zoom keeps to, so a hand-edited file cannot open an unusable window.
                 "zoom" => {
-                    if let Ok(zoom) = value.parse::<f32>() {
-                        if zoom.is_finite() {
-                            config.zoom = zoom.clamp(ZOOM_MIN, ZOOM_MAX);
-                        }
+                    if let Some(zoom) = finite(value) {
+                        config.zoom = zoom.clamp(ZOOM_MIN, ZOOM_MAX);
                     }
                 }
                 // An unreadable name leaves the default rather than refusing to start: a
@@ -649,41 +638,8 @@ impl Config {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        let text = self.to_text();
-
-        // One level of undo, and the reason it is here: settings are written whole, so
-        // anything wrong with the in-memory copy at the moment of a save — a launch that read
-        // no config, a second instance, a test run against the wrong profile — replaces the
-        // file with it and the bookmarks are simply gone. The previous contents cost one write.
-        if let Ok(existing) = std::fs::read(&path) {
-            if !existing.is_empty() && existing != text.as_bytes() {
-                let _ = std::fs::write(path.with_extension("ini.bak"), &existing);
-            }
-        }
-
-        // **Written beside the file and then renamed over it, never into it.** `fs::write` is a
-        // truncate followed by a write, so there is a window in which `config.ini` is zero bytes
-        // or half a file — and this is called on the UI thread from the frame loop, so the window
-        // is real rather than theoretical. What made it worse than losing one save is the order of
-        // [`Self::to_text`]: the scalars come first and the bookmarks and the session come *last*,
-        // so a torn write keeps the theme and the sidebar width and loses every bookmark. The next
-        // save then copies that truncated file over the `.bak` and both are gone.
-        //
-        // A rename onto an existing file is atomic on NTFS: the entry points at the old contents
-        // or the new one, never at part of either. So a crash mid-save leaves the previous
-        // settings, which is the answer the user would ask for.
-        let staged = path.with_extension("ini.new");
-        if std::fs::write(&staged, &text).is_ok() {
-            if std::fs::rename(&staged, &path).is_ok() {
-                return;
-            }
-            // The rename is the part that can fail on Windows for a reason that has nothing to do
-            // with this program — a scanner or a backup agent holding the destination open. Falling
-            // back to the plain write keeps the setting rather than dropping it silently, and the
-            // staged file is cleared so the next launch does not find a stray one.
-            let _ = std::fs::remove_file(&staged);
-        }
-        let _ = std::fs::write(path, text);
+        // With the previous contents kept as `config.ini.bak` — see [`write_whole`].
+        write_whole(&path, &self.to_text(), true);
     }
 
     /// What [`Self::save`] would write. Separated from it for the same reason
@@ -712,8 +668,11 @@ impl Config {
         text.push_str(&format!("batch_mode={}\n", self.batch_mode.as_str()));
         text.push_str(&format!("show_hidden={}\n", flag(self.show_hidden)));
         text.push_str(&format!("sort={}\n", self.sort.as_text()));
-        text.push_str(&format!("columns={}\n", column_keys(self.columns.order())));
-        text.push_str(&format!("columns_hidden={}\n", column_keys(self.columns.hidden())));
+        text.push_str(&format!("columns={}\n", join_keys(self.columns.order(), Column::key)));
+        text.push_str(&format!(
+            "columns_hidden={}\n",
+            join_keys(self.columns.hidden(), Column::key)
+        ));
         text.push_str(&format!(
             "forward_slashes={}\n",
             flag(self.forward_slashes)
@@ -771,8 +730,11 @@ impl Config {
         ));
         // The arrangement and what is taken off the panel, by name — see the reading side.
         let hidden = Section::ALL.into_iter().filter(|s| !self.sections.shown(*s));
-        text.push_str(&format!("sidebar_order={}\n", keys(self.sections.order)));
-        text.push_str(&format!("sidebar_hidden={}\n", keys(hidden)));
+        text.push_str(&format!(
+            "sidebar_order={}\n",
+            join_keys(self.sections.order, Section::key)
+        ));
+        text.push_str(&format!("sidebar_hidden={}\n", join_keys(hidden, Section::key)));
         if let Some([w, h]) = self.window {
             text.push_str(&format!("window={w:.0},{h:.0}\n"));
         }
@@ -825,27 +787,80 @@ fn flag(value: bool) -> u8 {
     u8::from(value)
 }
 
-/// Sidebar groups as a comma-separated list of their names.
-fn keys(sections: impl IntoIterator<Item = Section>) -> String {
-    let names: Vec<&str> = sections.into_iter().map(Section::key).collect();
+/// Write a whole file, staged beside it and renamed over it: `config.ini` is written through
+/// `config.ini.new`, and with `keep_backup` its previous contents are kept as `config.ini.bak`.
+/// Best effort, like every caller of it. For the settings, and for the history and the keywords,
+/// which are written the same way.
+///
+/// **The backup is one level of undo**, and the reason it is here: these files are written whole,
+/// so anything wrong with the in-memory copy at the moment of a save — a launch that read no
+/// config, a second instance, a test run against the wrong profile — replaces the file with it and
+/// the bookmarks are simply gone. The previous contents cost one write.
+///
+/// **Written beside the file and then renamed over it, never into it.** `fs::write` is a truncate
+/// followed by a write, so there is a window in which `config.ini` is zero bytes or half a file —
+/// and [`Config::save`] is called on the UI thread from the frame loop, so the window is real
+/// rather than theoretical. What made it worse than losing one save is the order of
+/// [`Config::to_text`]: the scalars come first and the bookmarks and the session come *last*, so a
+/// torn write keeps the theme and the sidebar width and loses every bookmark. The next save then
+/// copies that truncated file over the `.bak` and both are gone.
+///
+/// A rename onto an existing file is atomic on NTFS: the entry points at the old contents or the
+/// new one, never at part of either. So a crash mid-save leaves the previous file, which is the
+/// answer the user would ask for.
+pub(crate) fn write_whole(path: &Path, text: &str, keep_backup: bool) {
+    let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or_default();
+    if keep_backup {
+        if let Ok(existing) = std::fs::read(path) {
+            if !existing.is_empty() && existing != text.as_bytes() {
+                let _ = std::fs::write(path.with_extension(format!("{ext}.bak")), &existing);
+            }
+        }
+    }
+    let staged = path.with_extension(format!("{ext}.new"));
+    if std::fs::write(&staged, text).is_ok() && std::fs::rename(&staged, path).is_ok() {
+        return;
+    }
+    // The rename is the part that can fail on Windows for a reason that has nothing to do with
+    // this program — a scanner or a backup agent holding the destination open. Falling back to the
+    // plain write keeps the contents rather than dropping them silently, and the staged file is
+    // cleared so the next launch does not find a stray one.
+    let _ = std::fs::remove_file(&staged);
+    let _ = std::fs::write(path, text);
+}
+
+/// A number, or `None` for one that does not parse **or is not finite**.
+///
+/// `is_finite` before any clamp, for the reason `crate::dock` sets out where it refuses one:
+/// `"nan".parse::<f32>()` succeeds and `f32::clamp` passes a NaN straight through, so the guard
+/// cannot be the clamp.
+fn finite(text: &str) -> Option<f32> {
+    text.parse::<f32>().ok().filter(|number| number.is_finite())
+}
+
+/// Two numbers, `a,b`, each as [`finite`] reads it.
+///
+/// Refusing a NaN or an infinity here changes nothing for either line that reads one — both
+/// bounds-check what comes back, and every comparison with a NaN or with `±inf` past a bound is
+/// already false — but it means the bounds are about the desktop and not about the float format.
+fn pair(text: &str) -> Option<(f32, f32)> {
+    let (a, b) = text.split_once(',')?;
+    Some((finite(a.trim())?, finite(b.trim())?))
+}
+
+/// Sidebar groups or columns as a comma-separated list of their names — for a column
+/// [`crate::fs::Column::key`], not the header, which is screen text and free to change.
+fn join_keys<T>(items: impl IntoIterator<Item = T>, key: impl Fn(T) -> &'static str) -> String {
+    let names: Vec<&str> = items.into_iter().map(key).collect();
     names.join(",")
 }
 
-/// And back: the groups a list of names names, skipping any it does not know.
-fn named(value: &str) -> impl Iterator<Item = Section> + '_ {
-    value.split(',').filter_map(|key| Section::from_key(key.trim()))
-}
-
-/// Columns as a comma-separated list of their names: [`crate::fs::Column::key`], not the header,
-/// which is screen text and free to change.
-fn column_keys(columns: impl IntoIterator<Item = crate::fs::Column>) -> String {
-    let names: Vec<&str> = columns.into_iter().map(crate::fs::Column::key).collect();
-    names.join(",")
-}
-
-/// And back, skipping any name it does not know.
-fn columns_named(value: &str) -> impl Iterator<Item = crate::fs::Column> + '_ {
-    value.split(',').filter_map(|key| crate::fs::Column::parse(key.trim()))
+/// And back: what a list of names names, skipping any it does not know.
+fn split_keys<'a, T>(
+    value: &'a str,
+    parse: impl Fn(&str) -> Option<T> + 'a,
+) -> impl Iterator<Item = T> + 'a {
+    value.split(',').filter_map(move |key| parse(key.trim()))
 }
 
 /// Where the settings live.
@@ -872,7 +887,11 @@ pub(crate) fn profile_file(file: &str) -> Option<PathBuf> {
 /// test that drives this program with real mouse and keyboard input has to launch it for real,
 /// and a real launch writes real settings on the way out: the window size, the open tabs, the
 /// bookmarks. Point it somewhere disposable and a test run cannot touch anybody's own.
+///
+/// Read by tests and the `devtools` build only — the builds that are driven by something other than
+/// a person. A shipped build has its one settings folder and no hidden way to move it.
 fn base_dir() -> Option<PathBuf> {
+    #[cfg(any(test, feature = "devtools"))]
     if let Some(dir) = std::env::var_os("YAFE_PROFILE") {
         return Some(PathBuf::from(dir));
     }

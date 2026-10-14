@@ -110,6 +110,26 @@ fn buttons(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui)) {
     );
 }
 
+/// A row of small buttons, `space-2` apart, in the order the row's own layout lays them — so in a
+/// [`buttons`] row, which runs right to left, the first in `list` is the one at the right-hand end.
+/// `on` is handed the value beside whichever was clicked.
+fn choices<T: Copy>(ui: &mut egui::Ui, list: &[(&str, T, Variant)], mut on: impl FnMut(T)) {
+    ui.spacing_mut().item_spacing.x = space::S2;
+    for &(label, value, variant) in list {
+        if ui
+            .add(Button::new(label).size(Size::Small).variant(variant))
+            .clicked()
+        {
+            on(value);
+        }
+    }
+}
+
+/// One line of a card, in `font` and `color`.
+fn line(ui: &mut egui::Ui, text: impl Into<String>, font: &egui::FontId, color: egui::Color32) {
+    ui.label(RichText::new(text).font(font.clone()).color(color));
+}
+
 /// How far above the component's own placement a tick's label is drawn. See [`tick`].
 const TICK_LIFT: f32 = 2.0;
 
@@ -182,38 +202,28 @@ fn asking_to_delete(
             Some(name) => format!("Permanently delete {name}?"),
             None => format!("Permanently delete these {} items?", confirm.count),
         };
-        ui.label(
-            RichText::new(what)
-                .font(t.fonts.body_strong.clone())
-                .color(t.text.primary),
-        );
+        line(ui, what, &t.fonts.body_strong, t.text.primary);
         let said = if confirm.folders {
             "They and everything in them will not go to the Recycle Bin, and cannot be put back."
         } else {
             "They will not go to the Recycle Bin, and cannot be put back."
         };
-        ui.label(
-            RichText::new(said)
-                .font(t.fonts.caption.clone())
-                .color(t.text.secondary),
-        );
+        line(ui, said, &t.fonts.caption, t.text.secondary);
         ui.add_space(space::S1);
         buttons(ui, |ui| {
-            ui.spacing_mut().item_spacing.x = space::S2;
-            for (label, yes, variant) in [
-                ("Cancel", false, Variant::Secondary),
-                ("Delete", true, Variant::Danger),
-            ] {
-                if ui
-                    .add(Button::new(label).size(Size::Small).variant(variant))
-                    .clicked()
-                {
+            choices(
+                ui,
+                &[
+                    ("Cancel", false, Variant::Secondary),
+                    ("Delete", true, Variant::Danger),
+                ],
+                |yes| {
                     out.push(Action::Steer {
                         transfer: s.id,
                         steer: Steer::Confirm(yes),
-                    });
-                }
-            }
+                    })
+                },
+            );
         });
     });
 }
@@ -222,31 +232,29 @@ fn asking_to_delete(
 /// copy mid-file and leave a half-written file under its real name, so it asks first.
 fn leaving(ui: &mut egui::Ui, t: &Theme, out: &mut Vec<Action>) {
     card(ui, t, |ui| {
-        ui.label(
-            RichText::new("A copy, move or delete is still running")
-                .font(t.fonts.body_strong.clone())
-                .color(t.text.primary),
+        line(
+            ui,
+            "A copy, move or delete is still running",
+            &t.fonts.body_strong,
+            t.text.primary,
         );
-        ui.label(
-            RichText::new("Closing now would stop it part way through.")
-                .font(t.fonts.caption.clone())
-                .color(t.text.secondary),
+        line(
+            ui,
+            "Closing now would stop it part way through.",
+            &t.fonts.caption,
+            t.text.secondary,
         );
         ui.add_space(space::S1);
         buttons(ui, |ui| {
-            ui.spacing_mut().item_spacing.x = space::S2;
-            for (label, leave, variant) in [
-                ("Keep window", Leave::Stay, Variant::Subtle),
-                ("Stop and close", Leave::StopAndClose, Variant::Secondary),
-                ("Close when done", Leave::WhenDone, Variant::Primary),
-            ] {
-                if ui
-                    .add(Button::new(label).size(Size::Small).variant(variant))
-                    .clicked()
-                {
-                    out.push(Action::Leave(leave));
-                }
-            }
+            choices(
+                ui,
+                &[
+                    ("Keep window", Leave::Stay, Variant::Subtle),
+                    ("Stop and close", Leave::StopAndClose, Variant::Secondary),
+                    ("Close when done", Leave::WhenDone, Variant::Primary),
+                ],
+                |leave| out.push(Action::Leave(leave)),
+            );
         });
     });
 }
@@ -263,11 +271,7 @@ fn panel(ui: &mut egui::Ui, t: &Theme, s: &Snapshot, out: &mut Vec<Action>) {
             steer,
         };
 
-        ui.label(
-            RichText::new(headline(s))
-                .font(t.fonts.body_strong.clone())
-                .color(t.text.primary),
-        );
+        line(ui, headline(s), &t.fonts.body_strong, t.text.primary);
         let color = if s.failed > 0 {
             ProgressColor::Danger
         } else if s.paused {
@@ -281,11 +285,7 @@ fn panel(ui: &mut egui::Ui, t: &Theme, s: &Snapshot, out: &mut Vec<Action>) {
             ProgressBar::new(s.fraction())
         };
         ui.add(bar.color(color).small(true));
-        ui.label(
-            RichText::new(figures(s))
-                .font(t.fonts.caption.clone())
-                .color(t.text.secondary),
-        );
+        line(ui, figures(s), &t.fonts.caption, t.text.secondary);
         if s.phase == Phase::Running && !s.current.is_empty() {
             ui.add(
                 egui::Label::new(
@@ -321,10 +321,11 @@ fn panel(ui: &mut egui::Ui, t: &Theme, s: &Snapshot, out: &mut Vec<Action>) {
             }
             let named = s.failures.len().min(NAMED) as u64;
             if s.failed > named {
-                ui.label(
-                    RichText::new(format!("and {} more", s.failed - named))
-                        .font(t.fonts.caption.clone())
-                        .color(t.text.secondary),
+                line(
+                    ui,
+                    format!("and {} more", s.failed - named),
+                    &t.fonts.caption,
+                    t.text.secondary,
                 );
             }
         }
@@ -361,40 +362,35 @@ fn panel(ui: &mut egui::Ui, t: &Theme, s: &Snapshot, out: &mut Vec<Action>) {
 /// Not enough room where the copy is going: how much short, and whether to look again or go on.
 fn no_room(ui: &mut egui::Ui, t: &Theme, id: u64, short: &Short, out: &mut Vec<Action>) {
     ui.add_space(space::S1);
-    ui.label(
-        RichText::new(format!(
+    line(
+        ui,
+        format!(
             "There is not enough room on {}",
             crate::fs::display_name(&short.into)
-        ))
-        .font(t.fonts.body.clone())
-        .color(t.text.primary),
+        ),
+        &t.fonts.body,
+        t.text.primary,
     );
-    let mut line = String::from("Needs ");
-    crate::fs::fmt::size(short.needed, &mut line);
-    line.push_str(" so far, and ");
-    crate::fs::fmt::size(short.free, &mut line);
-    line.push_str(" is free");
-    ui.label(
-        RichText::new(line)
-            .font(t.fonts.caption.clone())
-            .color(t.text.secondary),
-    );
+    let mut needs = String::from("Needs ");
+    crate::fs::fmt::size(short.needed, &mut needs);
+    needs.push_str(" so far, and ");
+    crate::fs::fmt::size(short.free, &mut needs);
+    needs.push_str(" is free");
+    line(ui, needs, &t.fonts.caption, t.text.secondary);
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = space::S2;
-        for (label, room, variant) in [
-            ("Try again", Room::TryAgain, Variant::Primary),
-            ("Copy anyway", Room::Anyway, Variant::Secondary),
-        ] {
-            if ui
-                .add(Button::new(label).size(Size::Small).variant(variant))
-                .clicked()
-            {
+        choices(
+            ui,
+            &[
+                ("Try again", Room::TryAgain, Variant::Primary),
+                ("Copy anyway", Room::Anyway, Variant::Secondary),
+            ],
+            |room| {
                 out.push(Action::Steer {
                     transfer: id,
                     steer: Steer::Room(room),
-                });
-            }
-        }
+                })
+            },
+        );
     });
 }
 
@@ -423,11 +419,7 @@ fn stuck(
             ("Copy without encryption", Mend::Decrypt),
         ),
     };
-    ui.label(
-        RichText::new(said)
-            .font(t.fonts.body.clone())
-            .color(t.text.primary),
-    );
+    line(ui, said, &t.fonts.body, t.text.primary);
     ui.add(
         egui::Label::new(
             RichText::new(&snag.why)
@@ -445,49 +437,44 @@ fn stuck(
         "Do this for every file like it",
     );
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = space::S2;
-        for (label, mend, variant) in [
-            (fix.0, fix.1, Variant::Primary),
-            ("Skip", Mend::Skip, Variant::Secondary),
-        ] {
-            if ui
-                .add(Button::new(label).size(Size::Small).variant(variant))
-                .clicked()
-            {
+        choices(
+            ui,
+            &[
+                (fix.0, fix.1, Variant::Primary),
+                ("Skip", Mend::Skip, Variant::Secondary),
+            ],
+            |mend| {
                 out.push(Action::Steer {
                     transfer: id,
                     steer: Steer::Mend { mend, every },
-                });
-            }
-        }
+                })
+            },
+        );
     });
 }
 
 /// The conflict: which file, the two of them side by side, and the three answers.
 fn question(ui: &mut egui::Ui, t: &Theme, id: u64, clash: &Clash, out: &mut Vec<Action>) {
     ui.add_space(space::S1);
-    ui.label(
-        RichText::new(format!(
+    line(
+        ui,
+        format!(
             "{} is already in {}",
             clash.name,
             crate::fs::display_name(&clash.into)
-        ))
-        .font(t.fonts.body.clone())
-        .color(t.text.primary),
+        ),
+        &t.fonts.body,
+        t.text.primary,
     );
     let zone = crate::fs::time::LocalZone::current();
     for (which, facts) in [("This one", clash.incoming), ("The one there", clash.existing)] {
-        let mut line = format!("{which}: ");
-        crate::fs::fmt::size(facts.size, &mut line);
+        let mut said = format!("{which}: ");
+        crate::fs::fmt::size(facts.size, &mut said);
         if facts.modified != 0 {
-            line.push_str(", ");
-            crate::fs::fmt::modified(facts.modified, &zone, &mut line);
+            said.push_str(", ");
+            crate::fs::fmt::modified(facts.modified, &zone, &mut said);
         }
-        ui.label(
-            RichText::new(line)
-                .font(t.fonts.caption.clone())
-                .color(t.text.secondary),
-        );
+        line(ui, said, &t.fonts.caption, t.text.secondary);
     }
     let every = tick(
         ui,
@@ -496,22 +483,20 @@ fn question(ui: &mut egui::Ui, t: &Theme, id: u64, clash: &Clash, out: &mut Vec<
         "Do this for every conflict",
     );
     ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = space::S2;
-        for (label, choice, variant) in [
-            ("Replace", Choice::Replace, Variant::Primary),
-            ("Keep both", Choice::KeepBoth, Variant::Secondary),
-            ("Skip", Choice::Skip, Variant::Secondary),
-        ] {
-            if ui
-                .add(Button::new(label).size(Size::Small).variant(variant))
-                .clicked()
-            {
+        choices(
+            ui,
+            &[
+                ("Replace", Choice::Replace, Variant::Primary),
+                ("Keep both", Choice::KeepBoth, Variant::Secondary),
+                ("Skip", Choice::Skip, Variant::Secondary),
+            ],
+            |choice| {
                 out.push(Action::Steer {
                     transfer: id,
                     steer: Steer::Answer { choice, every },
-                });
-            }
-        }
+                })
+            },
+        );
     });
 }
 

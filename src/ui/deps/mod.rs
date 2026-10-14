@@ -508,6 +508,7 @@ impl View {
     /// mouse — the same reason `--rename` and `--preview` exist. By name because that is the only
     /// thing a person on a command line has; the first row of that module, because a module under two
     /// importers is two rows and either of them answers the question the flag is asking.
+    #[cfg(any(test, feature = "devtools"))]
     pub fn pick_named(&mut self, name: &str) -> bool {
         let found = self.rows.iter().find(|row| {
             self.graph.modules[row.module]
@@ -838,15 +839,7 @@ struct Strip {
 
 /// What a strip says, on the line the rest of it reads along.
 fn caption(ui: &Ui, t: &Theme, at: Rect, text: &str) {
-    let baseline = ink_baseline(ui.painter(), &t.fonts.caption, at.top(), at.height());
-    let galley = truncated(
-        ui.painter(),
-        text,
-        t.fonts.caption.clone(),
-        t.text.secondary,
-        at.width().max(0.0),
-    );
-    galley_on_baseline(ui.painter(), at.left(), baseline, galley);
+    crate::ui::caption_line(ui.painter(), t, at, text, t.text.secondary);
 }
 
 /// The strip's own height: [`crate::ui::TOOL_SIZE`], which is what the search field in it is.
@@ -940,8 +933,8 @@ pub fn about(graph: &Graph) -> String {
     let (files, api_sets, missing) = graph.tally();
     let mut text = format!(
         "{files} file{}, {api_sets} API set{}, {missing} missing \u{2014} {:.0} ms{}",
-        if files == 1 { "" } else { "s" },
-        if api_sets == 1 { "" } else { "s" },
+        crate::ui::filelist::plural(files),
+        crate::ui::filelist::plural(api_sets),
         graph.micros as f64 / 1000.0,
         if graph.truncated {
             "\nThe walk stopped at its budget or its patience, so this is incomplete."
@@ -1280,7 +1273,7 @@ fn tree(ui: &mut Ui, t: &Theme, whole: Rect, id: Id, view: &mut View) {
         strip.caption,
         &match view.matched {
             Some(found) => format!("{found} of {all} modules"),
-            None => format!("{all} module{}", if all == 1 { "" } else { "s" }),
+            None => format!("{all} module{}", crate::ui::filelist::plural(all)),
         },
     );
 
@@ -1288,17 +1281,11 @@ fn tree(ui: &mut Ui, t: &Theme, whole: Rect, id: Id, view: &mut View) {
     let graph = view.graph.clone();
     let count = view.rows.len();
 
-    let mut child = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(rect)
-            .layout(egui::Layout::top_down(egui::Align::Min)),
-    );
-    child.set_clip_rect(rect.intersect(ui.clip_rect()));
     // Rows are painted at exact rects, so the scroll extent has to be the rows and nothing
-    // else — see the same line in `filelist`, and the same reason: the installed style's item
-    // spacing would make the extent taller than what is drawn and put every row a little
-    // further from where the pointer thinks it is.
-    child.spacing_mut().item_spacing = egui::Vec2::ZERO;
+    // else — see [`crate::ui::rows_child`]: the installed style's item spacing would make the
+    // extent taller than what is drawn and put every row a little further from where the pointer
+    // thinks it is.
+    let mut child = crate::ui::rows_child(ui, rect);
 
     let mut toggled = None;
     let mut took = None;
@@ -1320,11 +1307,9 @@ fn tree(ui: &mut Ui, t: &Theme, whole: Rect, id: Id, view: &mut View) {
         // the reason `filelist` gives: a widget per row would be an id, a hit test and an
         // animation slot each for a highlight that arithmetic gives away.
         let response = ui.interact(visible, id.with("deps-hit"), Sense::click());
-        let last = range.len().saturating_sub(1);
-        let hovered = response.hover_pos().and_then(|at| {
-            (visible.contains(at) && !range.is_empty())
-                .then(|| first + (((at.y - visible.top()) / ROW) as usize).min(last))
-        });
+        let hovered = response
+            .hover_pos()
+            .and_then(|at| crate::ui::row_under(visible, &range, ROW, at));
 
         let location_x = (visible.left() + visible.width() * LOCATION_AT).round();
         let arch_right = visible.right() - PAD;

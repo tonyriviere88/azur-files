@@ -5,11 +5,13 @@
 //! is reachable by a person using the program; all of it is how the screenshots in `docs/` are
 //! taken and how "does browsing let go of what it read?" is answered by a number.
 //!
-//! Two kinds of thing live here. The **instruments** — [`Shape`], [`Settling`], [`Walk`],
-//! [`Scrolling`], [`process_memory`] — watch the window from inside and say when it has stopped
-//! changing, which is what a capture has to wait for. The **entry points** are the other half:
-//! one method per flag, each doing what a click or a keystroke would have done.
-
+//! **Not in a shipped build.** This module is compiled for tests and for the `devtools` feature
+//! (`cargo devtools`), and for nothing else — a release build has no flag that reaches it. See
+//! `devtools` in `Cargo.toml` for why.
+//!
+//! Two kinds of thing live here. The **instruments** — [`Walk`], [`Scrolling`], `--trace` and
+//! [`process_memory`] — drive the window and watch it from inside. The **entry points** are the
+//! other half: one method per flag, each doing what a click or a keystroke would have done.
 use super::*;
 
 #[cfg(windows)]
@@ -17,44 +19,6 @@ use super::*;
 mod win;
 #[cfg(windows)]
 pub(super) use win::process_memory;
-
-/// What the window looks like to the platform, as far as rendering crisply is concerned.
-#[derive(Clone, Copy, PartialEq, Debug, Default)]
-pub(super) struct Shape {
-    /// In *physical pixels*, which is what the framebuffer is sized in.
-    pub(super) pixels: (u32, u32),
-    /// Rounded, because a scale factor arrives as a float and comparing floats for
-    /// equality every frame is a way to request repaints for ever.
-    pub(super) scale: u32,
-    /// What the *platform* says the scale is, against `scale`, which is what egui rasterised
-    /// the glyph atlas for.
-    ///
-    /// Tracked separately because the two disagreeing is the one thing that would make text
-    /// soft without anything else moving: an atlas built for one scale, drawn at another.
-    /// Zero when the platform has not said.
-    pub(super) native_scale: u32,
-    pub(super) focused: bool,
-    pub(super) minimized: bool,
-}
-
-impl Shape {
-    pub(super) fn of(ctx: &egui::Context) -> Self {
-        let scale = ctx.pixels_per_point();
-        ctx.input(|i| {
-            let size = i.viewport_rect().size() * scale;
-            Self {
-                pixels: (size.x.round() as u32, size.y.round() as u32),
-                scale: (scale * 1000.0).round() as u32,
-                native_scale: i
-                    .viewport()
-                    .native_pixels_per_point
-                    .map_or(0, |ppp| (ppp * 1000.0).round() as u32),
-                focused: i.viewport().focused.unwrap_or(true),
-                minimized: i.viewport().minimized.unwrap_or(false),
-            }
-        })
-    }
-}
 
 /// This process's private bytes, and its GDI and USER handle counts.
 ///
@@ -167,63 +131,97 @@ impl Scrolling {
     }
 }
 
-/// Asks for frames for a moment after the window's shape changes.
-///
-/// This program paints on demand, which is the right default — a file listing that repaints
-/// sixty times a second to show the same rows is a laptop fan. But it means that between
-/// events the screen holds whatever was painted last, and a *stale* frame is only as good
-/// as the assumption that the window still looks the way it did: restore it from the
-/// taskbar, drag it to a monitor at another scale, or let a maximised window resize when
-/// the taskbar hides, and the compositor has a surface of the wrong size to show. It
-/// stretches it, which arrives as text going soft for as long as nothing asks for a new
-/// frame — and then coming back sharp the moment something does.
-///
-/// So: notice the shape changing, and keep asking for frames until it has been still for
-/// [`Self::QUIET`]. Costs a handful of frames per window gesture and nothing at rest.
+/// `--walk`, `--scroll` and `--trace` together: the state a measuring run drives the window with.
 #[derive(Default)]
-pub(super) struct Settling {
-    pub(super) was: Shape,
-    /// When the shape last changed, in `InputState::time`.
-    pub(super) changed_at: Option<f64>,
-    /// `--trace`: report each change on stdout.
+pub(super) struct Devtools {
+    pub(super) walk: Option<Walk>,
+    pub(super) scrolling: Scrolling,
+    /// `--trace`: report each change of the window's shape, and the memory figures, on stdout.
     pub(super) trace: bool,
     /// When `--trace` last reported the memory figures.
     pub(super) reported_at: f64,
 }
 
-impl Settling {
-    /// How long after a change to keep painting. Long enough to cover a restore animation
-    /// and a scale change, short enough that nobody notices the frames.
-    pub(super) const QUIET: f64 = 0.75;
-
+impl Devtools {
     /// How often `--trace` reports the memory figures. Often enough to see a curve over a
     /// minute of browsing, rare enough that the log stays readable.
     pub(super) const REPORT: f64 = 3.0;
-
-    /// Whether a frame should be asked for.
-    pub(super) fn observe(&mut self, now: Shape, time: f64) -> bool {
-        if now != self.was {
-            if self.trace {
-                println!("{time:8.3}  {:?} -> {now:?}", self.was);
-            }
-            self.was = now;
-            self.changed_at = Some(time);
-        }
-        match self.changed_at {
-            Some(at) if time - at < Self::QUIET => true,
-            Some(_) => {
-                self.changed_at = None;
-                false
-            }
-            None => false,
-        }
-    }
 }
 
 impl App {
+    /// One frame's worth of `--walk`, `--scroll` and `--trace`, called from [`App::frame`] with the
+    /// shape it is about to settle against.
+    pub(super) fn drive_devtools(&mut self, ctx: &egui::Context, shape: super::settling::Shape, now: f64) {
+        // `--trace`, the first half: one line per change of shape, which says whether it was the
+        // size, the scale, the focus or the minimised flag that moved — the difference between a fix
+        // and a guess for text that goes soft after a window gesture.
+        if self.devtools.trace && shape != self.settling.was {
+            println!("{now:8.3}  {:?} -> {shape:?}", self.settling.was);
+        }
+        // `--walk`: step to the next folder by itself, so a real window can be measured
+        // browsing rather than sitting still.
+        if let Some(next) = self.devtools.walk.as_mut().and_then(|walk| walk.step(now)) {
+            let pane = self.focused;
+            self.perform(ctx, Action::Navigate { pane, path: next });
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(Walk::STEP));
+        }
+        // `--scroll`: keep the listing moving, so the painting is measured and not just the
+        // reading.
+        if self.devtools.scrolling.on {
+            let span = self.focused_pane().map_or(0.0, |p| {
+                let tab = p.tab();
+                if tab.view_mode.is_icons() {
+                    tab.grid.height()
+                } else {
+                    tab.order.len() as f32 * crate::pane::ROW_HEIGHT
+                }
+            });
+            if let Some(to) = self.devtools.scrolling.step(span) {
+                if let Some(pane) = self.pane_mut(self.focused) {
+                    pane.tab_mut().scroll_to = Some(to);
+                }
+                ctx.request_repaint();
+            }
+        }
+        // `--trace`: the memory figures, every few seconds, beside what the cache is holding.
+        // Together they say whether growth is the cache filling up or something being kept.
+        //
+        // A repaint has to be booked for it, because this program is idle between events and
+        // a report that only fires when something else asks for a frame is a report that
+        // never fires while you sit and watch the number climb.
+        if self.devtools.trace {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(Devtools::REPORT));
+            if now - self.devtools.reported_at > Devtools::REPORT {
+                self.devtools.reported_at = now;
+                let (private, gdi, user) = process_memory();
+                let (dirs, entries) = self.loader.held();
+                // Beside the folder cache and separate from it, because they answer the two halves
+                // of "memory grows as I browse" that look identical from the outside: a session that
+                // walked through a few tarballs is holding their indexes, which are not folders.
+                let (archives, in_archives) = crate::archive::held();
+                let (kinds, paths, textures) = self.icons.held();
+                let (known, pictures, pages, spare) = self.thumbs.held();
+                let (gaveup, queued) = self.thumbs.stuck();
+                println!(
+                    "{now:8.1}  private {:>7} KB   gdi {gdi:>5}   user {user:>4}   \
+                     cache {dirs:>3} folders / {entries:>8} entries   \
+                     archives {archives:>2} / {in_archives:>7} entries   \
+                     icons {kinds:>4} kinds / {paths:>5} paths / {textures:>4} textures /                      {} bitmaps / {} uploads   \
+                     thumbs {known:>4} known / {pictures:>4} drawn / {gaveup:>4} gaveup / {queued:>3} queued / {:>4} asks / {pages} pages / {spare:>4} spare / {} fetched / {} uploads",
+                    private / 1024,
+                    self.icons.bitmaps,
+                    self.icons.uploads,
+                    self.thumbs.asks,
+                    self.thumbs.fetched,
+                    self.thumbs.uploads,
+                );
+            }
+        }
+    }
+
     /// `--walk=<dir>`: browse subfolder after subfolder by itself. See [`Walk`].
     pub fn walking(mut self, from: Option<PathBuf>) -> Self {
-        self.walk = from.as_deref().map(Walk::collect);
+        self.devtools.walk = from.as_deref().map(Walk::collect);
         self
     }
 
@@ -231,15 +229,13 @@ impl App {
     /// press the button first. The same family as `--menu` and `--rename`.
     pub fn flattened(mut self, on: bool) -> Self {
         if on {
-            for pane in &mut self.panes {
-                for tab in &mut pane.tabs {
-                    tab.flat = true;
-                    // In whichever mode the settings ask for, because that is what pressing the
-                    // button would have done — a flag that opened the list while the settings said
-                    // tree would be a capture of a view nobody can reach.
-                    tab.flat_mode = self.flat_mode;
-                    tab.regroup = self.regroup;
-                }
+            for tab in super::tabs_mut(&mut self.panes) {
+                tab.flat = true;
+                // In whichever mode the settings ask for, because that is what pressing the
+                // button would have done — a flag that opened the list while the settings said
+                // tree would be a capture of a view nobody can reach.
+                tab.flat_mode = self.flat_mode;
+                tab.regroup = self.regroup;
             }
         }
         self
@@ -255,12 +251,10 @@ impl App {
     /// is *wait* for it — see [`App::sizes_pending`].
     pub fn measuring(mut self, on: bool) -> Self {
         if on {
-            for pane in &mut self.panes {
-                for tab in &mut pane.tabs {
-                    // Not `Tab::set_sizes`: there is no listing yet, so there is nothing to size, put
-                    // back or re-measure. This is the flag pressing the button before the window opens.
-                    tab.sizes.on = true;
-                }
+            for tab in super::tabs_mut(&mut self.panes) {
+                // Not `Tab::set_sizes`: there is no listing yet, so there is nothing to size, put
+                // back or re-measure. This is the flag pressing the button before the window opens.
+                tab.sizes.on = true;
             }
         }
         self
@@ -268,7 +262,7 @@ impl App {
 
     /// `--scroll`: run the listing up and down for ever. See [`Scrolling`].
     pub fn scrolling(mut self, on: bool) -> Self {
-        self.scrolling.on = on;
+        self.devtools.scrolling.on = on;
         self
     }
 
@@ -279,7 +273,7 @@ impl App {
     /// was the size, the scale, the focus or the minimised flag that moved, which is the
     /// difference between a fix and a guess.
     pub fn tracing(mut self, on: bool) -> Self {
-        self.settling.trace = on;
+        self.devtools.trace = on;
         self
     }
 
@@ -333,10 +327,7 @@ impl App {
 
     /// Whether the focused pane has a listing with anything in it.
     pub fn has_rows(&self) -> bool {
-        self.panes
-            .iter()
-            .find(|p| p.id == self.focused)
-            .is_some_and(|p| !p.tab().order.is_empty())
+        self.focused_pane().is_some_and(|p| !p.tab().order.is_empty())
     }
 
     /// Select every file in the focused pane and open the batch rename panel over them.
@@ -396,7 +387,7 @@ impl App {
     /// that is already there, and the panel holds still on its question for as long as the capture
     /// needs it.
     pub fn copy_here(&mut self, from: PathBuf, ctx: &egui::Context) {
-        let Some(into) = self.pane_mut(self.focused).map(|p| p.tab().path.clone()) else {
+        let Some(into) = self.path_of(self.focused) else {
             return;
         };
         let owner = self.owner;
@@ -475,10 +466,7 @@ impl App {
     /// what bounds it; a folder big enough to outlast that is one whose screenshot is honestly
     /// half-counted.
     pub fn sizes_pending(&self) -> bool {
-        self.panes
-            .iter()
-            .flat_map(|pane| pane.tabs.iter())
-            .any(|tab| tab.sizes.waiting() > 0)
+        self.tabs().any(|tab| tab.sizes.waiting() > 0)
     }
 
     /// Whether a capture should keep waiting for the tiles' pictures.
@@ -529,8 +517,7 @@ impl App {
         match against {
             Some(right) => {
                 let host = self.focused;
-                let left = self.panes.iter().find(|p| p.id == host).map(|p| p.tab().path.clone());
-                if let Some(left) = left {
+                if let Some(left) = self.path_of(host) {
                     self.diff_folders(host, left, Some(right));
                 }
             }
@@ -544,9 +531,7 @@ impl App {
 
     /// Whether a capture should keep waiting for a folder diff's comparison to land.
     pub fn diff_pending(&self) -> bool {
-        self.panes
-            .iter()
-            .flat_map(|pane| pane.tabs.iter())
+        self.tabs()
             .filter_map(|tab| tab.diff.as_ref())
             .any(|side| side.is_left() && side.comparison.is_none())
     }
@@ -585,17 +570,7 @@ impl App {
         let pane = self.focused;
         let Some(p) = self.pane_mut(pane) else { return };
         let tab = p.tab_mut();
-        let kind = |tab: &Tab, at: usize| {
-            tab.entry_at(at)
-                .zip(tab.dir.as_ref())
-                .and_then(|(entry, dir)| {
-                    crate::preview::kind_of(
-                        dir.leaf(entry),
-                        dir.ext(entry),
-                        dir.entries[entry].is_dir(),
-                    )
-                })
-        };
+        let kind = Self::preview_kind_at;
         let previewable = |tab: &Tab, at: usize| kind(tab, at).is_some();
         // **A kind this program decodes, in preference to one the shell would draw.** Nearly every
         // file is previewable now — see [`crate::preview::kind_of`] — so "the first previewable row"

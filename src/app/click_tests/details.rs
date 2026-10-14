@@ -421,12 +421,7 @@ fn a_row_says_what_it_is_when_the_pointer_rests_on_it() {
     let row = (0..h.tab(0).order.len()).find(|&at| {
         let tab = h.tab(0);
         tab.entry_at(at)
-            .zip(tab.dir.as_ref())
-            .and_then(|(entry, dir)| {
-                tab.git
-                    .as_ref()
-                    .and_then(|repo| repo.state(dir.name(entry)))
-            })
+            .and_then(|entry| tab.git_of(entry))
             .is_some_and(|state| state != crate::git::State::Clean)
     });
     let Some(row) = row else {

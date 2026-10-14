@@ -567,11 +567,10 @@ fn the_plus_is_a_hover_control_that_stands_down_for_a_drag() {
     // And a drag from a listing takes it away again, with the pointer where it was. Put over the
     // window the way OLE puts one there — `drop_hover` is refreshed from that at the top of
     // every frame, so setting the field would not survive to the frame it was set for.
-    let scale = h.ctx.pixels_per_point();
     let at = section.center();
     h.app
         .drops
-        .hover(Some(((at.x * scale) as i32, (at.y * scale) as i32)));
+        .hover(Some(crate::ui::physical(&h.ctx, at)));
     h.frame(Vec::new());
     assert!(
         h.app.drop_hover.is_some(),
@@ -625,7 +624,8 @@ fn a_group_is_its_own_drop_zone_rows_and_all() {
 
     h.app.publish_drop_targets(&h.ctx.clone());
     let scale = h.ctx.pixels_per_point();
-    let physical = |at: Pos2| ((at.x * scale) as i32, (at.y * scale) as i32);
+    let ctx = h.ctx.clone();
+    let physical = |at: Pos2| crate::ui::physical(&ctx, at);
     // Two places in it: the group's own row, and the bookmark under it.
     for at in [
         pos2(block.center().x, block.top() + 2.0),
@@ -1042,7 +1042,7 @@ fn the_bookmarks_group_shows_a_drop_target() {
         .expect("the Bookmarks group is on screen");
     let scale = h.ctx.pixels_per_point();
     let put = |h: &mut Harness, at: egui::Pos2| {
-        h.app.drop_hover = Some(((at.x * scale) as i32, (at.y * scale) as i32));
+        h.app.drop_hover = Some(crate::ui::physical(&h.ctx, at));
     };
 
     put(&mut h, rect.center());

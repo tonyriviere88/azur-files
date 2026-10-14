@@ -12,7 +12,7 @@ impl App {
     /// thread before there is anything a clipboard can name — see [`App::put_these_on_clipboard`].
     pub(super) fn put_on_clipboard(&mut self, ctx: &egui::Context, pane: PaneId, cutting: bool) {
         let paths = self
-            .pane_mut(pane)
+            .pane_ref(pane)
             .map(|p| p.tab().selection_paths())
             .unwrap_or_default();
         self.put_these_on_clipboard(ctx, paths, cutting);
@@ -33,7 +33,7 @@ impl App {
         use crate::shell::clipboard::{put, Effect};
 
         if paths.is_empty() {
-            self.notice = Some("Nothing selected".to_owned());
+            self.report("Nothing selected".to_owned());
             return;
         }
         // **Nor out of the Recycle Bin**, where what a row names is the `$R…` file the bin holds.
@@ -41,7 +41,7 @@ impl App {
         // entry in the bin describing nothing. Restoring is the way out — see
         // [`crate::fs::recycle`].
         if paths.iter().any(|path| fs::recycle::is_held(path)) {
-            self.notice = Some(fs::recycle::RESTORE_FIRST.to_owned());
+            self.report(fs::recycle::RESTORE_FIRST.to_owned());
             return;
         }
         // **Inside an archive there is nothing yet to put on a clipboard.** A `CF_HDROP` is a list of
@@ -56,8 +56,8 @@ impl App {
         // the same reason.
         if paths.iter().any(|path| crate::archive::is_virtual_item(path)) {
             if cutting {
-                self.notice =
-                    Some("Files cannot be moved out of an archive. Copy them instead.".to_owned());
+                let why = "Files cannot be moved out of an archive. Copy them instead.";
+                self.report(why.to_owned());
             } else {
                 // Re-entered from `Extracted::Copied` with real paths, so this cannot recurse.
                 self.copy_out_of_archive(ctx, paths);
@@ -72,13 +72,13 @@ impl App {
                 self.cut = if cutting { paths } else { Vec::new() };
                 self.notice = None;
             }
-            Err(why) => self.notice = Some(why),
+            Err(why) => self.report(why),
         }
     }
 
     /// Act on whatever is on the clipboard, into this pane's folder.
     pub(super) fn paste_into(&mut self, pane: PaneId, ctx: &egui::Context) {
-        let Some(into) = self.pane_mut(pane).map(|p| p.tab().path.clone()) else {
+        let Some(into) = self.path_of(pane) else {
             return;
         };
         self.paste_into_folder(into, ctx);
@@ -96,15 +96,7 @@ impl App {
         // **Nor is the Recycle Bin**, though a drop onto it is a delete: Explorer offers no Paste
         // there either, and a paste that quietly deleted what was on the clipboard would be the one
         // gesture in this program that loses a copy by making one.
-        if fs::is_synthetic(&into) {
-            self.notice = Some(format!(
-                "{} is not a folder to paste into",
-                fs::display_name(&into)
-            ));
-            return;
-        }
-        let Some(pasteable) = clipboard::get() else {
-            self.notice = Some("There are no files on the clipboard".to_owned());
+        let Some(pasteable) = self.clipboard_for(&into) else {
             return;
         };
 
@@ -127,6 +119,29 @@ impl App {
         self.ops.start_then(job, after, self.owner, ctx);
     }
 
+    /// What is on the clipboard, for a paste into `into` — or `None`, with the reason in the status
+    /// line: `into` is not a folder anything can be pasted into, or there are no files to paste.
+    fn clipboard_for(&mut self, into: &Path) -> Option<crate::shell::clipboard::Pasteable> {
+        if self.refuse_synthetic(into, "to paste into") {
+            return None;
+        }
+        let pasteable = crate::shell::clipboard::get();
+        if pasteable.is_none() {
+            self.report("There are no files on the clipboard".to_owned());
+        }
+        pasteable
+    }
+
+    /// Whether `path` is one of the places that are not a folder — This PC, the Recycle Bin — and so
+    /// refused, saying it is not a folder `to` do what was asked: "to paste into", "to create in".
+    pub(super) fn refuse_synthetic(&mut self, path: &Path, to: &str) -> bool {
+        let refused = fs::is_synthetic(path);
+        if refused {
+            self.report(format!("{} is not a folder {to}", fs::display_name(path)));
+        }
+        refused
+    }
+
     /// Link to each file on the clipboard from `into`, as `kind` — *Paste as symbolic link* and the
     /// rest. The clipboard is left as it is: a cut is not finished by linking to it, because nothing
     /// has moved.
@@ -136,15 +151,7 @@ impl App {
         kind: crate::shell::links::Make,
         ctx: &egui::Context,
     ) {
-        if fs::is_synthetic(&into) {
-            self.notice = Some(format!(
-                "{} is not a folder to paste into",
-                fs::display_name(&into)
-            ));
-            return;
-        }
-        let Some(pasteable) = crate::shell::clipboard::get() else {
-            self.notice = Some("There are no files on the clipboard".to_owned());
+        let Some(pasteable) = self.clipboard_for(&into) else {
             return;
         };
         self.notice = None;
@@ -361,12 +368,11 @@ impl App {
         // [`crate::shell::dnd::Targets::from`]. The whole pane and not the row: a folder is in one
         // pane's listing, so being back in the pane the drag came from is what makes a refusal
         // there unremarkable rather than wrong.
-        let from = self.file_drag.as_ref().and_then(|dragging| {
-            self.panes
-                .iter()
-                .find(|pane| pane.id == dragging.pane)
-                .map(|pane| physical(pane.rect))
-        });
+        let from = self
+            .file_drag
+            .as_ref()
+            .and_then(|dragging| self.pane_ref(dragging.pane))
+            .map(|pane| physical(pane.rect));
         self.drops.publish(Targets { zones, from });
     }
 
@@ -513,23 +519,14 @@ impl App {
             // items have changed under it since, and not the rule: the rule is that a selection
             // is pinnable or it is refused, rather than half of it going in quietly.
             crate::shell::dnd::Onto::Bookmarks => {
-                for item in dropped.items {
-                    if item.is_dir() {
-                        self.perform(ctx, Action::AddBookmark(item));
-                    }
-                }
-                return;
+                return self.perform_on_folders(ctx, dropped.items, Action::AddBookmark);
             }
             // Onto a group's row: into that group. Which group was decided when the pointer
             // was over it, like everything else about where a drop landed — and the list
             // cannot have changed since, because a drag holds the pointer.
             crate::shell::dnd::Onto::BookmarkGroup(group) => {
-                for item in dropped.items {
-                    if item.is_dir() {
-                        self.perform(ctx, Action::AddBookmarkIn { group, path: item });
-                    }
-                }
-                return;
+                let pin = |path| Action::AddBookmarkIn { group, path };
+                return self.perform_on_folders(ctx, dropped.items, pin);
             }
             // Onto a pane's tab strip: a tab per folder, in the order they were dragged, and the
             // last of them showing — which is what opening several tabs any other way leaves.
@@ -542,12 +539,8 @@ impl App {
                 if !self.panes.iter().any(|it| it.id == pane) {
                     return;
                 }
-                for item in dropped.items {
-                    if item.is_dir() {
-                        self.perform(ctx, Action::NavigateNewTab { pane, path: item });
-                    }
-                }
-                return;
+                let open = |path| Action::NavigateNewTab { pane, path };
+                return self.perform_on_folders(ctx, dropped.items, open);
             }
             crate::shell::dnd::Onto::Folder(into) => into,
         };
@@ -606,21 +599,7 @@ impl App {
                 .into_iter()
                 .map(Entry::own)
                 .collect();
-            self.close_menu();
-            // Built here rather than through the builder: these are this program's own
-            // entries and there is nothing to ask the shell about, so the menu is ready now.
-            // Token 0 matches no build, which is exactly right -- no answer is coming, and
-            // the depth is the same nothing: every entry here is this program's own, so
-            // there is no shell menu for one of them ever to be resolved against.
-            self.menu = Some(crate::ui::menu::Open::new(
-                pane,
-                at,
-                items,
-                into,
-                own,
-                crate::shell::menu::Depth::Full,
-                0,
-            ));
+            self.open_own_menu(pane, at, items, into, own);
             return;
         }
         let job = match dropped.effect {
@@ -637,23 +616,54 @@ impl App {
                     [] => return,
                     [only] => Job::Link { items, into, kind: only },
                     _ => {
-                        self.close_menu();
-                        // Built here, as the right-button menu above is: every entry is this
-                        // program's own, so there is nothing to ask the shell.
-                        self.menu = Some(crate::ui::menu::Open::new(
-                            pane,
-                            at,
-                            items,
-                            into,
-                            crate::shell::menu::with_our_links(&offered),
-                            crate::shell::menu::Depth::Full,
-                            0,
-                        ));
+                        let entries = crate::shell::menu::with_our_links(&offered);
+                        self.open_own_menu(pane, at, items, into, entries);
                         return;
                     }
                 }
             }
         };
         self.ops.start(job, self.owner, ctx);
+    }
+
+    /// [`App::perform`] the action `make` names for each dropped item that is a folder, and nothing
+    /// for the rest — the three drops that pin or open rather than move anything.
+    fn perform_on_folders(
+        &mut self,
+        ctx: &egui::Context,
+        items: Vec<PathBuf>,
+        make: impl Fn(PathBuf) -> Action,
+    ) {
+        for item in items {
+            if item.is_dir() {
+                self.perform(ctx, make(item));
+            }
+        }
+    }
+
+    /// Put up a menu of nothing but this program's own entries, about `items` dropped into `into`.
+    ///
+    /// Built here rather than through the builder: there is nothing to ask the shell about, so the
+    /// menu is ready now. Token 0 matches no build, which is exactly right — no answer is coming —
+    /// and the depth is the same nothing: every entry is this program's own, so there is no shell
+    /// menu for one of them ever to be resolved against.
+    fn open_own_menu(
+        &mut self,
+        pane: PaneId,
+        at: egui::Pos2,
+        items: Vec<PathBuf>,
+        into: PathBuf,
+        entries: Vec<crate::shell::menu::Entry>,
+    ) {
+        self.close_menu();
+        self.menu = Some(crate::ui::menu::Open::new(
+            pane,
+            at,
+            items,
+            into,
+            entries,
+            crate::shell::menu::Depth::Full,
+            0,
+        ));
     }
 }

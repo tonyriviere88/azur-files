@@ -450,12 +450,15 @@ pub struct Entry {
 }
 
 impl Entry {
-    fn separator() -> Self {
+    /// A row of this program's making: no shortcut, no tick, no bitmap, not the default, and no
+    /// verb — a canonical name is the shell's to give, and having none is also what keeps a row of
+    /// ours out of `Moves` and out of every band; see `Moves::key`.
+    fn bare(label: String, kind: Kind, enabled: bool) -> Self {
         Self {
-            label: String::new(),
+            label,
             shortcut: String::new(),
-            kind: Kind::Separator,
-            enabled: false,
+            kind,
+            enabled,
             checked: false,
             icon: None,
             default: false,
@@ -463,20 +466,13 @@ impl Entry {
         }
     }
 
+    fn separator() -> Self {
+        Self::bare(String::new(), Kind::Separator, false)
+    }
+
     /// One of this program's own entries.
     pub fn own(which: Own) -> Self {
-        Self {
-            label: which.label().to_owned(),
-            shortcut: String::new(),
-            kind: Kind::Command(Command::Own(which)),
-            enabled: true,
-            checked: false,
-            icon: None,
-            default: false,
-            // This program's own entries are not the shell's and have no canonical name. Which is
-            // also what keeps them out of `Moves` and out of every band; see `Moves::key`.
-            verb: None,
-        }
+        Self::bare(which.label().to_owned(), Kind::Command(Command::Own(which)), true)
     }
 
     /// A submenu of this program's making, holding entries the shell handed over flat.
@@ -486,20 +482,14 @@ impl Entry {
     /// to an extension at all, which a real shell submenu cannot do; see [`Live::fill`].
     fn group(label: String, children: Vec<Entry>) -> Self {
         Self {
-            label,
             // How many are in it, in the slot a shortcut would use — right-aligned and in the
             // caption font, which is exactly the weight a count wants. It answers the only question
             // a collapsed row raises before you open it, and it costs no width the row was not
             // already reserving. Windows does not show one; Windows is also not collapsing anything.
             shortcut: children.len().to_string(),
             // A group with nothing in it is not offered — see `regroup` — so this is always usable.
-            enabled: true,
-            kind: Kind::group(children),
-            checked: false,
-            icon: None,
-            default: false,
-            // A group is this program's arrangement, not a command the shell knows.
-            verb: None,
+            // And it is this program's arrangement, not a command the shell knows: no verb.
+            ..Self::bare(label, Kind::group(children), true)
         }
     }
 
@@ -511,6 +501,12 @@ impl Entry {
     /// Whether this is the shell's own command for `verb`, whatever language the label is in.
     fn is(&self, verb: &str) -> bool {
         self.verb().is_some_and(|found| found.eq_ignore_ascii_case(verb))
+    }
+
+    /// Whether this is a shell *command* for `verb` — [`Entry::is`] without the submenu rows, which
+    /// carry a verb too.
+    fn is_command(&self, verb: &str) -> bool {
+        matches!(self.kind, Kind::Command(Command::Shell { .. })) && self.is(verb)
     }
 }
 
@@ -609,12 +605,7 @@ fn link_entry(which: Own, enabled: bool) -> Entry {
 /// out of the scrolling part. Those two have to agree about which row Properties is, or the entry
 /// that was inserted beside it scrolls away from it.
 pub fn properties_at(entries: &[Entry]) -> Option<usize> {
-    entries.iter().rposition(|entry| match &entry.kind {
-        Kind::Command(Command::Shell { verb: Some(verb), .. }) => {
-            verb.eq_ignore_ascii_case(PROPERTIES)
-        }
-        _ => false,
-    })
+    entries.iter().rposition(|entry| entry.is_command(PROPERTIES))
 }
 
 /// Put this program's `Copy path(s)` into a shell menu, just above Properties. See
@@ -631,10 +622,8 @@ pub fn properties_at(entries: &[Entry]) -> Option<usize> {
 ///
 /// Inserting into the middle is as safe as [`with_our_paste`]'s prepending, for the reason set out
 /// there: nothing in an entry is a position in this list.
-pub fn with_our_copy_paths(mut entries: Vec<Entry>) -> Vec<Entry> {
-    let at = properties_at(&entries).unwrap_or(entries.len());
-    entries.insert(at, Entry::own(Own::CopyPaths));
-    entries
+pub fn with_our_copy_paths(entries: Vec<Entry>) -> Vec<Entry> {
+    above_properties(entries, Own::CopyPaths)
 }
 
 /// Put this program's `Folder diff` into a shell menu, just after its first `open` — see
@@ -659,18 +648,20 @@ pub fn with_our_drive_entries(entries: Vec<Entry>) -> Vec<Entry> {
 
 /// Put `Disconnect` into a letterless network location's menu, just above Properties, which is
 /// where Windows puts its own *Disconnect* on a mapped drive — see [`Own::Disconnect`].
-pub fn with_our_disconnect(mut entries: Vec<Entry>) -> Vec<Entry> {
+pub fn with_our_disconnect(entries: Vec<Entry>) -> Vec<Entry> {
+    above_properties(entries, Own::Disconnect)
+}
+
+/// Insert one of ours directly above Properties, or at the end of the level without one.
+fn above_properties(mut entries: Vec<Entry>, which: Own) -> Vec<Entry> {
     let at = properties_at(&entries).unwrap_or(entries.len());
-    entries.insert(at, Entry::own(Own::Disconnect));
+    entries.insert(at, Entry::own(which));
     entries
 }
 
 /// Insert some of ours after the first top-level `open`, or at the head of the menu without one.
 fn after_open(mut entries: Vec<Entry>, own: &[Own]) -> Vec<Entry> {
-    let open = entries.iter().position(|entry| match &entry.kind {
-        Kind::Command(Command::Shell { verb: Some(verb), .. }) => verb.eq_ignore_ascii_case("open"),
-        _ => false,
-    });
+    let open = entries.iter().position(|entry| entry.is_command("open"));
     let at = open.map_or(0, |at| at + 1);
     entries.splice(at..at, own.iter().map(|&which| Entry::own(which)));
     entries
@@ -1031,16 +1022,7 @@ pub fn regroup(entries: Vec<Entry>, handlers: &Handlers, moved: &Moves) -> Vec<E
     out.extend(send_to);
     out.push(Entry::separator());
     if !tiles.is_empty() {
-        out.push(Entry {
-            label: String::new(),
-            shortcut: String::new(),
-            kind: Kind::Tiles(tiles),
-            enabled: true,
-            checked: false,
-            icon: None,
-            default: false,
-            verb: None,
-        });
+        out.push(Entry::bare(String::new(), Kind::Tiles(tiles), true));
     }
     out.extend(link);
     out.extend(properties);

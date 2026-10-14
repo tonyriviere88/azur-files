@@ -7,6 +7,20 @@ description = "A file explorer that stays out of the way: tabs in the title bar,
 build = "build.rs"
 publish = false
 
+[features]
+# **The developer flags, and nothing a person using the program can reach.** `--shot`, `--trace`,
+# `--walk`, `--scroll`, the staging flags (`--menu`, `--rename`, `--preview`, `--console`, …) and the
+# `YAFE_PROFILE` / `YAFE_UPDATE_AS` hooks: how the screenshots are taken and how memory and frame
+# time are measured. Off by default, so a release build carries none of them — no hidden feature
+# behind a word on the command line, and no bytes spent on the tools that check the program rather
+# than on the program. `--open=` is the one flag a shipped build reads.
+#
+# Tests have all of it regardless (`cfg(test)`); this is for a *window* that has it:
+#
+#   cargo devtools                -> target/devtools/azur-files.exe, release-optimised
+#   cargo claude-devtools         the same, into target/claude
+devtools = []
+
 [dependencies]
 # Must resolve to the same egui the theme tracks: two egui versions in one graph
 # are two different `Context` types, and the theme would style neither.
@@ -407,6 +421,78 @@ opt-level = "z"
 opt-level = "z"
 [profile.release.package.svgtypes]
 opt-level = "z"
+
+# **The GPU stack is on the frame path, and it is still `z`, because that was measured.** wgpu's
+# per-frame work is recording a couple of render passes and a submit; the rest of it — adapter
+# probing, device creation, pipeline and shader-module creation, Vulkan's loader — runs while the
+# window is cloaked. 655,360 bytes for the four crates. Timed with `--scroll` over System32 at
+# 1400×900, three alternating rounds of each: both hold 120 fps (the refresh rate), egui's
+# `cpu_usage` for the frame is 1.003 ms against 1.034 ms, and whole-process CPU per frame came out
+# *lower* under `z` in every round, which is to say it is noise.
+[profile.release.package.wgpu]
+opt-level = "z"
+[profile.release.package.wgpu-core]
+opt-level = "z"
+[profile.release.package.wgpu-hal]
+opt-level = "z"
+[profile.release.package.wgpu-types]
+opt-level = "z"
+
+# The window's own startup and plumbing, none of it per frame: winit and eframe set the window up
+# and translate messages; `ash`, the allocators and `wgpu-naga-bridge` are device creation;
+# `codespan-reporting` only formats a shader error; `url`, `idna` and ICU are there because eframe
+# turns on egui-winit's `links` unconditionally and nobody here opens one; the clipboard is one call
+# per Ctrl+C. 225,280 bytes together.
+[profile.release.package.winit]
+opt-level = "z"
+[profile.release.package.eframe]
+opt-level = "z"
+[profile.release.package.egui-winit]
+opt-level = "z"
+[profile.release.package.accesskit]
+opt-level = "z"
+[profile.release.package.ash]
+opt-level = "z"
+[profile.release.package.gpu-allocator]
+opt-level = "z"
+[profile.release.package.gpu-descriptor]
+opt-level = "z"
+[profile.release.package.spirv]
+opt-level = "z"
+[profile.release.package.wgpu-naga-bridge]
+opt-level = "z"
+[profile.release.package.codespan-reporting]
+opt-level = "z"
+[profile.release.package.url]
+opt-level = "z"
+[profile.release.package.idna]
+opt-level = "z"
+[profile.release.package.idna_adapter]
+opt-level = "z"
+[profile.release.package.icu_normalizer]
+opt-level = "z"
+[profile.release.package.icu_properties]
+opt-level = "z"
+[profile.release.package.icu_collections]
+opt-level = "z"
+[profile.release.package.icu_provider]
+opt-level = "z"
+[profile.release.package.icu_locale_core]
+opt-level = "z"
+[profile.release.package.webbrowser]
+opt-level = "z"
+[profile.release.package.arboard]
+opt-level = "z"
+[profile.release.package.clipboard-win]
+opt-level = "z"
+
+# **Release with the developer tools**, for screenshots and measurements: everything above, inherited
+# with its per-package overrides, plus the `devtools` feature that the aliases in
+# `.cargo/config.toml` turn on. A profile of its own so that it lands in `target/devtools/` and never
+# overwrites the shipped `target/release/azur-files.exe`, and so a capture is taken of code optimised
+# exactly the way the shipped one is.
+[profile.devtools]
+inherits = "release"
 
 # A file explorer is only worth using at speed, and an unoptimised `sort_by` over
 # 100k entries is visible. Optimise the dependencies even in a debug build.

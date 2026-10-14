@@ -184,7 +184,7 @@ fn a_bitmap_is_fetched_off_the_ui_thread() {
     // A real image-list index to ask about: the folder icon.
     let deadline = Instant::now() + Duration::from_secs(10);
     let icon = loop {
-        icons.poll(&ctx);
+        icons.poll();
         if let Some(icon) = icons.kind("", true) {
             break icon;
         }
@@ -194,17 +194,17 @@ fn a_bitmap_is_fetched_off_the_ui_thread() {
 
     // Asked here, not fetched here.
     assert!(
-        icons.uv(&ctx, icon).is_none(),
+        icons.uv(icon).is_none(),
         "the first ask must not go to the shell"
     );
     assert_eq!(icons.bitmaps, 1, "and it must not ask twice");
-    assert!(icons.uv(&ctx, icon).is_none());
+    assert!(icons.uv(icon).is_none());
     assert_eq!(icons.bitmaps, 1);
 
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        icons.poll(&ctx);
-        if icons.uv(&ctx, icon).is_some() {
+        icons.poll();
+        if icons.uv(icon).is_some() {
             break;
         }
         assert!(Instant::now() < deadline, "the bitmap never arrived");
@@ -229,7 +229,7 @@ fn leaving_a_folder_cancels_its_questions() {
     // because the point is that the worker *reached* the job and skipped it.
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
-        icons.poll(&ctx);
+        icons.poll();
         assert!(
             icons.answers().is_empty(),
             "a question from a view that has gone should not be answered"
@@ -243,7 +243,7 @@ fn leaving_a_folder_cancels_its_questions() {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut got = Vec::new();
     while Instant::now() < deadline && got.is_empty() {
-        icons.poll(&ctx);
+        icons.poll();
         got = icons.answers();
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -275,7 +275,7 @@ fn a_view_that_asks_before_the_live_set_knows_it_is_still_answered() {
     let deadline = Instant::now() + Duration::from_secs(10);
     let mut got = Vec::new();
     while Instant::now() < deadline && got.is_empty() {
-        icons.poll(&ctx);
+        icons.poll();
         got = icons.answers();
         std::thread::sleep(Duration::from_millis(10));
     }
@@ -298,7 +298,7 @@ fn the_cache_asks_once_per_type() {
     // Give the worker a moment, then it is cached and every later ask is free.
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
-        icons.poll(&egui::Context::default());
+        icons.poll();
         if icons.kind("", true).is_some() {
             break;
         }

@@ -150,15 +150,14 @@ impl Watch {
         if self.pending.is_empty() {
             return Vec::new();
         }
-        let due: Vec<PathBuf> = self
-            .pending
-            .iter()
-            .filter(|(_, &at)| at <= now)
-            .map(|(path, _)| path.clone())
-            .collect();
-        for path in &due {
-            self.pending.remove(path);
-        }
+        let mut due = Vec::new();
+        self.pending.retain(|path, &mut at| {
+            let settled = at <= now;
+            if settled {
+                due.push(path.clone());
+            }
+            !settled
+        });
         due
     }
 

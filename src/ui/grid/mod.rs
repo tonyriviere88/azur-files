@@ -45,7 +45,7 @@
 //! on the pane, which is the same rule with nothing above it.
 
 use azur_egui_theme::icons as azur_icons;
-use azur_egui_theme::tokens::{radius, space, typography};
+use azur_egui_theme::tokens::{space, typography};
 use egui::{pos2, vec2, Color32, CornerRadius, Id, Rect, Sense, Stroke, StrokeKind, Ui};
 
 use crate::app::Action;
@@ -709,36 +709,16 @@ pub fn show(
     layout.ensure(tab, body.width());
     let content = layout.height();
 
-    let mut child = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(body)
-            .layout(egui::Layout::top_down(egui::Align::Min)),
-    );
-    child.set_clip_rect(body.intersect(ui.clip_rect()));
     // Cells are painted at exact rects, so anything egui adds per item would put the arithmetic and
     // the painting out of step the moment something scrolled. The listing does the same.
-    child.spacing_mut().item_spacing = egui::Vec2::ZERO;
-
-    let mut scroll = egui::ScrollArea::vertical()
-        .id_salt(("tiles", pane))
-        .auto_shrink([false, false]);
+    let mut child = crate::ui::rows_child(ui, body);
 
     // Keyboard movement has to bring the cursor with it — nudged into view rather than centred, as
     // in the details view. What is different here is only how a position becomes a `y`: a tile is on
     // a line whose top the layout knows, where a row's is a multiplication.
-    if let Some(offset) = tab.scroll_to.take() {
-        scroll = scroll.vertical_scroll_offset(offset.max(0.0));
-        tab.scroll_to_cursor = false;
-        tab.scroll_context = false;
-    } else if tab.scroll_to_cursor {
-        if let Some((top, height)) = tab.cursor.and_then(|at| layout.locate(at)) {
-            let offset =
-                crate::ui::filelist::nudge(tab.scroll_y, body.height(), top, height, tab.scroll_context);
-            scroll = scroll.vertical_scroll_offset(offset);
-        }
-        tab.scroll_to_cursor = false;
-        tab.scroll_context = false;
-    }
+    let scroll = filelist::listing_scroll(tab, body.height(), ("tiles", pane), |at| {
+        layout.locate(at)
+    });
 
     let output = scroll.show_viewport(&mut child, |ui, viewport| {
         ui.set_height(content + TAIL);
@@ -806,12 +786,7 @@ pub fn show(
         // calls a press a drag once it has travelled, by which time the pointer is a cell or two
         // along, so deciding from the pointer would pick up the file the drag arrived at. The
         // details view has the same note.
-        let press = ui.input(|i| {
-            i.pointer
-                .any_down()
-                .then(|| i.pointer.press_origin())
-                .flatten()
-        });
+        let press = crate::ui::held_from(ui, false);
         let pressed = press.and_then(at_of);
 
         // Held back and drawn in one run after the loop: every picture is a textured quad and
@@ -827,7 +802,6 @@ pub fn show(
         let mut renaming: Option<(usize, Rect, f32)> = None;
         // Every visible twisty and the row it opens, for the click below.
         let mut twisties: Vec<(Rect, usize)> = Vec::new();
-        let git = tab.git.clone();
         // The filter's words, marked in every name on screen exactly as the details view marks them
         // — against the whole path the filter kept the cell for. See `filelist::highlight`.
         let marks = filelist::Marks::parse(&tab.filter);
@@ -847,29 +821,15 @@ pub fn show(
 
             // The same fill ladder as a row, on a different shape: rounded, because a tile is a
             // card-sized thing floating in a grid rather than a band welded to the pane's edges.
-            // The row of a tree keeps the details view's square band, because that is what it is.
-            let corners = if cell.row {
-                CornerRadius::ZERO
+            // The row of a tree keeps the details view's square band, because that is what it is,
+            // and wears what it wears — the bar only while the selection is the quiet one. See
+            // [`filelist::row_surface`], where the measurement is. A tile never had one.
+            let under = if renaming_here {
+                t.bg.layer
             } else {
-                CornerRadius::same(radius::SMALL)
+                let painter = ui.painter();
+                filelist::row_surface(painter, t, cell.hit, cell.row, selected, focused, is_hovered)
             };
-            let mut under = t.bg.layer;
-            if !renaming_here {
-                let fill = match (selected, focused) {
-                    (true, false) => Some(crate::ui::row_fill_quiet(t)),
-                    _ => crate::ui::row_fill(t, selected, is_hovered),
-                };
-                if let Some(fill) = fill {
-                    ui.painter().rect_filled(cell.hit, corners, fill);
-                    under = fill;
-                }
-                // A tree's rows are the details view's band and wear what it wears — the bar
-                // only while the selection is the quiet one. See `filelist::rows`, where the
-                // measurement is. A tile never had one.
-                if selected && cell.row && !focused {
-                    crate::ui::selection_bar(ui.painter(), cell.hit, t);
-                }
-            }
             if focused && tab.cursor == Some(position) {
                 let ink = filelist::cursor_ink(t, selected);
                 // Clamped to the clip on the right, like the listing's — a tree's row is the full
@@ -882,6 +842,10 @@ pub fn show(
             let pending_cut = crate::ui::is_cut(cut, &dir.path, dir.name(entry_index));
             let dim = entry.is_hidden() || pending_cut;
             let name_color = if dim { t.text.tertiary } else { t.text.primary };
+            // The dimmed half of a tree row's name — the folders in front of a merged chain, the path in
+            // front of a flattened leaf — in the ink the details view gives it, which steps back with
+            // the row. A hidden folder's prefix in plain secondary was brighter than its own name.
+            let meta_color = if dim { t.text.disabled } else { t.text.secondary };
             let kind = fmt::kind_of(dir.ext(entry_index), entry.is_dir());
 
             if entry.is_dir() {
@@ -894,37 +858,20 @@ pub fn show(
                 let shut = tab.collapsed.contains(dir.name(entry_index));
                 if shut || tab.has_children_below(position) {
                     let box_rect = filelist::twisty_rect(cell.hit, cell.depth);
-                    let chevron: azur_icons::Icon<'_> = if shut {
-                        &azur_icons::chevron_right
-                    } else {
-                        &azur_icons::chevron_down
-                    };
-                    chevron(
-                        ui.painter(),
-                        crate::ui::icon_rect(cell.hit, box_rect.left(), filelist::TWISTY),
-                        if is_hovered {
-                            t.text.primary
-                        } else {
-                            t.text.secondary
-                        },
-                    );
+                    filelist::twisty_glyph(ui.painter(), t, cell.hit, box_rect, shut, is_hovered);
                     twisties.push((box_rect, position));
                 }
                 let glyph_x = stem + filelist::TWISTY;
                 let box_rect = crate::ui::icon_rect(cell.hit, glyph_x, filelist::GLYPH);
                 match icons_cache
                     .kind(dir.ext(entry_index), true)
-                    .and_then(|icon| icons_cache.uv(ui.ctx(), icon))
+                    .and_then(|icon| icons_cache.uv(icon))
                 {
                     Some((texture, uv)) => pictures.push((
                         texture,
                         uv,
                         box_rect,
-                        if dim {
-                            Color32::from_white_alpha(110)
-                        } else {
-                            Color32::WHITE
-                        },
+                        filelist::picture_tint(dim),
                     )),
                     None => icons::folder(
                         ui.painter(),
@@ -932,10 +879,7 @@ pub fn show(
                         if dim { t.text.disabled } else { t.folder },
                     ),
                 }
-                if let Some(state) = git
-                    .as_ref()
-                    .and_then(|repo| repo.state(dir.name(entry_index)))
-                {
+                if let Some(state) = tab.git_of(entry_index) {
                     badges.push((filelist::badge_rect(box_rect), state, under));
                 }
 
@@ -969,7 +913,7 @@ pub fn show(
                             merged,
                             t.fonts.body.clone(),
                             name_color,
-                            t.text.secondary,
+                            meta_color,
                             name_right - name_left,
                             marked,
                         )
@@ -983,7 +927,7 @@ pub fn show(
                             None,
                             t.fonts.body.clone(),
                             name_color,
-                            t.text.secondary,
+                            meta_color,
                             name_right - name_left,
                             marked,
                         )
@@ -1014,11 +958,7 @@ pub fn show(
                         thumb.texture,
                         thumb.uv,
                         fitted,
-                        if dim {
-                            Color32::from_white_alpha(110)
-                        } else {
-                            Color32::WHITE
-                        },
+                        filelist::picture_tint(dim),
                     ));
                     // A hairline round the picture, and **only** where the file really is one.
                     //
@@ -1059,10 +999,7 @@ pub fn show(
                     );
                 }
             }
-            if let Some(state) = git
-                .as_ref()
-                .and_then(|repo| repo.state(dir.name(entry_index)))
-            {
+            if let Some(state) = tab.git_of(entry_index) {
                 badges.push((
                     Rect::from_min_size(
                         pos2(picture.left(), picture.bottom() - BADGE),
@@ -1177,21 +1114,10 @@ pub fn show(
             // field losing focus, not by moving the selection.
             return;
         }
-        if response.clicked() || response.secondary_clicked() {
-            out.push(Action::Focus(pane));
-        }
         // A twisty first, and it returns: opening a folder is not selecting it. The details view
-        // draws the same distinction and says why at length.
-        if response.clicked() {
-            let at = response
-                .interact_pointer_pos()
-                .or_else(|| ui.ctx().pointer_interact_pos());
-            if let Some(&(_, position)) = at
-                .and_then(|at| twisties.iter().find(|(hit, _)| hit.contains(at)))
-            {
-                out.push(Action::ToggleCollapsed { pane, position });
-                return;
-            }
+        // draws the same distinction and says why at length — see [`filelist::twisty_clicked`].
+        if filelist::twisty_clicked(ui, &response, pane, &twisties, out) {
+            return;
         }
 
         // Which cell the context menu is *for*, as a display position. `None` means the folder's own
@@ -1199,38 +1125,10 @@ pub fn show(
         let mut menu_row = hovered.and_then(|at| placed.get(at)).map(|cell| cell.position);
         if let Some(cell) = hovered.and_then(|at| placed.get(at)) {
             let position = cell.position;
-            if response.clicked() {
-                if modifiers.command {
-                    tab.toggle(position);
-                } else if modifiers.shift {
-                    tab.select_range_to(position);
-                } else {
-                    tab.select_only(position);
-                }
-                if tab.is_dir_at(position) {
-                    outcome.prefetch = tab.target_at(position);
-                }
-            }
-            if response.double_clicked() {
-                if let Some(path) = tab.target_at(position) {
-                    if tab.is_dir_at(position) {
-                        out.push(Action::Navigate { pane, path });
-                    } else {
-                        out.push(Action::Open(path));
-                    }
-                }
-            }
-            // An archive opens in its own tab like a folder, for the reason the details view's
-            // copy of this says: it is a place to this program. See [`crate::archive`].
-            if response.middle_clicked() {
-                if let Some(path) = tab.target_at(position) {
-                    if tab.is_dir_at(position) {
-                        out.push(Action::NavigateNewTab { pane, path });
-                    } else if crate::archive::browsable(&path) || tab.is_shortcut_at(position) {
-                        out.push(Action::OpenNewTab(path));
-                    }
-                }
-            }
+            // Select, open, or open in a tab: the details view's own [`filelist::row_clicks`]. An
+            // archive opens in its own tab like a folder, for the reason that says: it is a place to
+            // this program. See [`crate::archive`].
+            filelist::row_clicks(&response, modifiers, pane, tab, position, outcome, out);
             // A right click on a tile is about that file unless it is already in the selection, in
             // which case it is about the selection — the same rule the details view follows, and
             // simpler here because a tile has no columns to land between: its box *is* the file.
@@ -1254,15 +1152,7 @@ pub fn show(
             || response.drag_started_by(egui::PointerButton::Secondary);
         if dragging {
             match pressed.and_then(|at| placed.get(at)).map(|cell| cell.position) {
-                Some(grabbed) => {
-                    if !tab.is_selected(grabbed) {
-                        tab.select_only(grabbed);
-                    }
-                    out.push(Action::DragOut {
-                        pane,
-                        items: tab.selection_paths(),
-                    });
-                }
+                Some(grabbed) => filelist::drag_out(pane, tab, grabbed, out),
                 None => {
                     filelist::start_band(ui, body, tab, press);
                     out.push(Action::Focus(pane));
@@ -1276,48 +1166,9 @@ pub fn show(
     tab.scroll_y = output.state.offset.y;
 
     // Everything below the last tile: the canvas a short folder leaves, and the [`TAIL`] a long one
-    // leaves once it is scrolled to the end. Part of the listing — clicking it cancels the
-    // selection, right-clicking it is how the folder's own menu is reached — and the sheet above
-    // deliberately covers only the blocks, so nothing up there is listening for it.
-    let bottom = body.top() + content - output.state.offset.y;
-    let empty = Rect::from_min_max(
-        pos2(body.left(), bottom.clamp(body.top(), body.bottom())),
-        pos2(output.inner_rect.right(), body.bottom()),
-    );
-    if empty.height() > 1.0 && empty.width() > 1.0 {
-        let response = child.interact(
-            empty,
-            Id::new(("tiles-empty", pane)),
-            Sense::click_and_drag(),
-        );
-        if response.clicked() {
-            tab.clear_selection();
-            out.push(Action::Focus(pane));
-        }
-        if response.secondary_clicked() {
-            out.push(Action::Focus(pane));
-        }
-        filelist::context_menu(&child, &response, pane, tab, None, out);
-        if response.drag_started_by(egui::PointerButton::Primary)
-            || response.drag_started_by(egui::PointerButton::Secondary)
-        {
-            let origin = child.input(|i| i.pointer.press_origin());
-            filelist::start_band(&child, body, tab, origin);
-            out.push(Action::Focus(pane));
-        }
-    }
-
-    // There is more above, and there is more below. Measured off the content rather than off the
-    // scroll area's own extent, because [`TAIL`] of that extent is deliberately empty.
-    let above = output.state.offset.y;
-    let below = (content - output.inner_rect.height() - above).max(0.0);
-    azur_egui_theme::components::scroll_fades(
-        &child.painter_at(output.inner_rect),
-        output.inner_rect,
-        t.bg.layer,
-        above,
-        below,
-    );
+    // leaves once it is scrolled to the end — and the fades, measured off the content rather than off
+    // the scroll area's own extent. See [`filelist::below_rows`].
+    filelist::below_rows(&child, t, body, &output, content, "tiles-empty", pane, tab, out);
 
     if tab.band.is_some() && filelist::band_move(&mut child, body, tab, content) {
         let covered = covered_by_band(&layout, tab, body);

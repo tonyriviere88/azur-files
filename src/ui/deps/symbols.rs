@@ -429,13 +429,7 @@ fn panel(ui: &mut Ui, t: &Theme, rect: Rect, id: Id, list: &mut List, query: &mu
     };
     let number = if list.numbers { NUMBER_W } else { 0.0 };
 
-    let mut child = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(body)
-            .layout(egui::Layout::top_down(egui::Align::Min)),
-    );
-    child.set_clip_rect(body.intersect(ui.clip_rect()));
-    child.spacing_mut().item_spacing = egui::Vec2::ZERO;
+    let mut child = crate::ui::rows_child(ui, body);
 
     let scroll = egui::ScrollArea::vertical()
         .id_salt(id.with("rows"))

@@ -199,10 +199,8 @@ impl Tab {
         // **A different folder opens at the top.** Row 200 of the folder you just left is not
         // row 200 of anything, and the scroll offset does not belong to this tab as far as egui
         // is concerned — it belongs to the pane's one scroll area, which goes on showing
-        // whatever it was showing unless something asks it not to. Setting `scroll_y` alone
-        // records where the listing *is*; `scroll_to` is what moves it.
-        self.scroll_y = 0.0;
-        self.scroll_to = Some(0.0);
+        // whatever it was showing unless something asks it not to. See [`Tab::scroll_to_top`].
+        self.scroll_to_top();
         self.band = None;
         self.renaming = None;
         self.keywords = None;
@@ -210,6 +208,16 @@ impl Tab {
         self.keep_selected.clear();
         // A snapshot of somewhere else says nothing about what is new here.
         self.name_the_new = None;
+    }
+
+    /// Put the listing back at its first row.
+    ///
+    /// **Both halves, always.** Setting `scroll_y` alone records where the listing *is*;
+    /// `scroll_to` is what moves it — the offset lives in the pane's one scroll area, which goes on
+    /// showing whatever it was showing unless something asks it not to.
+    pub fn scroll_to_top(&mut self) {
+        self.scroll_y = 0.0;
+        self.scroll_to = Some(0.0);
     }
 
     /// Flatten this folder, or stop flattening it.
@@ -271,23 +279,9 @@ impl Tab {
         self.sizes.forget();
         // The top, because row 200 of a folder's own children is not row 200 of its
         // whole tree — the same reason a new folder opens at the top in [`Tab::go_to`].
-        self.scroll_y = 0.0;
-        self.scroll_to = Some(0.0);
+        self.scroll_to_top();
     }
 
-    /// Show the flattened tree the other way round.
-    ///
-    /// **Nothing is re-read**, which is the point of the two modes being one listing: the walk's
-    /// answer is already here and the mode only decides the order built over it. So this is a
-    /// re-sort, and on a tree that took seconds to walk it is instant.
-    ///
-    /// The selection *is* kept, unlike [`Tab::toggle_flat`]'s — it is held by entry index, and
-    /// both modes are orders over the same entries, so every selected row is still the same file.
-    /// Its position moves, which is what [`Tab::rebuild_order`] already puts the cursor back for.
-    ///
-    /// Nothing happens when the tab is not flattened: the mode is the window's preference and
-    /// takes effect the next time the button is pressed. Answering `false` for that case rather
-    /// than doing the work anyway is what lets `App` skip the rebuild.
     /// Merge chains of only-children into one row, or stop. Answers whether it did anything.
     ///
     /// [`Tab::set_flat_mode`]'s twin, and everything said there applies: it is a re-sort and never a
@@ -308,8 +302,7 @@ impl Tab {
         self.rebuild_order();
         // The rows are the same rows arranged differently, which is [`Tab::set_flat_mode`]'s reason
         // for going back to the top as well.
-        self.scroll_y = 0.0;
-        self.scroll_to = Some(0.0);
+        self.scroll_to_top();
         true
     }
 
@@ -332,6 +325,19 @@ impl Tab {
         true
     }
 
+    /// Show the flattened tree the other way round.
+    ///
+    /// **Nothing is re-read**, which is the point of the two modes being one listing: the walk's
+    /// answer is already here and the mode only decides the order built over it. So this is a
+    /// re-sort, and on a tree that took seconds to walk it is instant.
+    ///
+    /// The selection *is* kept, unlike [`Tab::toggle_flat`]'s — it is held by entry index, and
+    /// both modes are orders over the same entries, so every selected row is still the same file.
+    /// Its position moves, which is what [`Tab::rebuild_order`] already puts the cursor back for.
+    ///
+    /// Nothing happens when the tab is not flattened: the mode is the window's preference and
+    /// takes effect the next time the button is pressed. Answering `false` for that case rather
+    /// than doing the work anyway is what lets `App` skip the rebuild.
     pub fn set_flat_mode(&mut self, mode: FlatMode) -> bool {
         // A folder diff is a tree whatever the window prefers. See [`Tab::diff`].
         if self.diff.is_some() {
@@ -345,8 +351,7 @@ impl Tab {
         self.rebuild_order();
         // Straight to the top for the reason a settled filter goes there: the rows are the same
         // rows, and row 200 of a list is not row 200 of the tree the same files make.
-        self.scroll_y = 0.0;
-        self.scroll_to = Some(0.0);
+        self.scroll_to_top();
         true
     }
 
@@ -495,16 +500,7 @@ impl Tab {
     /// holds the old names, which will not be there to find.
     pub fn refresh(&mut self) {
         if self.keep_selected.is_empty() {
-            if let Some(dir) = &self.dir {
-                self.keep_selected = self
-                    .selected
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, &on)| on)
-                    .filter(|&(entry, _)| entry < dir.len())
-                    .map(|(entry, _)| dir.name(entry).to_owned())
-                    .collect();
-            }
+            self.keep_selected = self.selected_names();
         }
         self.dir = None;
         self.awaiting = None;

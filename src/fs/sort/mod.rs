@@ -119,7 +119,7 @@ impl Column {
     }
 
     pub fn parse(key: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|column| column.key() == key)
+        Self::ALL.into_iter().find(|column| column.key().eq_ignore_ascii_case(key))
     }
 }
 
@@ -153,10 +153,13 @@ impl Sort {
     pub fn parse(value: &str) -> Option<Self> {
         let (by, way) = value.split_once(',').unwrap_or((value, ""));
         let by = Column::parse(by.trim())?;
-        let ascending = match way.trim() {
-            "asc" => true,
-            "desc" => false,
-            _ => by.starts_ascending(),
+        let way = way.trim();
+        let ascending = if way.eq_ignore_ascii_case("asc") {
+            true
+        } else if way.eq_ignore_ascii_case("desc") {
+            false
+        } else {
+            by.starts_ascending()
         };
         Some(Self { by, ascending })
     }
@@ -204,22 +207,36 @@ pub fn image_rows(dir: &Dir, tree: bool) -> Vec<bool> {
         }
     }
     for i in 0..dir.len() {
-        if !kept[i] {
-            continue;
-        }
-        let mut within = dir.within(i);
-        while !within.is_empty() {
-            let Some(&at) = folder_at.get(within) else {
-                break;
-            };
-            if kept[at as usize] {
-                break;
-            }
-            kept[at as usize] = true;
-            within = dir.within(at as usize);
+        if kept[i] {
+            mark_ancestors(dir, &folder_at, &mut kept, i);
         }
     }
     kept
+}
+
+/// Mark every folder above row `i` in a tree, stopping at the first one already marked.
+///
+/// The walk up that [`image_rows`] and [`build_tree_order`] both make from each row they keep, and
+/// the reason either is linear: an ancestor already marked has had its own ancestors marked too, so
+/// the whole pass costs one step per row plus one per ancestor not already accounted for.
+#[inline]
+fn mark_ancestors(
+    dir: &Dir,
+    folder_at: &std::collections::HashMap<&str, u32>,
+    marked: &mut [bool],
+    i: usize,
+) {
+    let mut within = dir.within(i);
+    while !within.is_empty() {
+        let Some(&at) = folder_at.get(within) else {
+            break;
+        };
+        if marked[at as usize] {
+            break;
+        }
+        marked[at as usize] = true;
+        within = dir.within(at as usize);
+    }
 }
 
 /// Build the display order for a directory.
@@ -434,17 +451,7 @@ pub fn build_tree_order(
                 continue;
             }
             wanted[i] = true;
-            let mut within = dir.within(i);
-            while !within.is_empty() {
-                let Some(&at) = folder_at.get(within) else {
-                    break;
-                };
-                if wanted[at as usize] {
-                    break;
-                }
-                wanted[at as usize] = true;
-                within = dir.within(at as usize);
-            }
+            mark_ancestors(dir, &folder_at, &mut wanted, i);
         }
     }
 

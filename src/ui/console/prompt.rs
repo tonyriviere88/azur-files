@@ -62,13 +62,11 @@ pub(crate) fn prompt(
     // controls sitting on it, and a filled box around the shell name made it the loudest thing in a
     // panel whose whole job is the text above it. The name alone says which shell; the box only has
     // to appear when the pointer is looking for something to press.
-    let (hover, pressed) = control_fills(t, t.bg.canvas);
-    let fill = if state.picking || picker.is_pointer_button_down_on() {
-        Some(pressed)
-    } else if picker.hovered() {
-        Some(hover)
+    // An open menu holds the button down, so it wears the press for as long as the menu is up.
+    let fill = if state.picking {
+        Some(control_fills(t).1)
     } else {
-        None
+        crate::ui::control_look(t, &picker, true, false).0
     };
     if let Some(fill) = fill {
         ui.painter()
@@ -102,12 +100,7 @@ pub(crate) fn prompt(
             state.run(false, out);
         }
     }
-    if button.hovered() || button.is_pointer_button_down_on() {
-        let fill = if button.is_pointer_button_down_on() {
-            pressed
-        } else {
-            hover
-        };
+    if let Some(fill) = crate::ui::control_look(t, &button, true, false).0 {
         ui.painter()
             .rect_filled(run, CornerRadius::same(radius::SMALL), fill);
     }
@@ -157,12 +150,7 @@ pub(crate) fn prompt(
     }
 
     let text_x = field.left() + space::S2;
-    if let Some(from) = ui.input(|i| {
-        i.pointer
-            .primary_down()
-            .then(|| i.pointer.press_origin())
-            .flatten()
-    }) {
+    if let Some(from) = crate::ui::held_from(ui, true) {
         if field.contains(from) {
             let col = |at: Pos2| ((at.x - text_x) / advance).round().max(0.0) as usize;
             let to = ui.input(|i| i.pointer.latest_pos()).unwrap_or(from);
@@ -223,73 +211,45 @@ pub(crate) fn prompt(
 }
 
 /// The shell dropdown, opening upwards out of its button.
+///
+/// The design system's menu — `menu_frame` around `MenuItem`s, the chosen shell wearing the same
+/// tick as every other choice in the window — placed by hand rather than by `Menu`, for the one
+/// thing `Menu` does not do: open *upwards*. The prompt sits at the foot of its pane, and in a
+/// stacked layout that is the middle of the window, where a menu dropping down would cover the pane
+/// below instead of the log it belongs to.
 pub(crate) fn shells(ui: &mut Ui, t: &Theme, anchor: Rect, pane: PaneId, state: &mut State, out: &mut Outcome) {
-    let row = control::SMALL;
-    let size = vec2(
-        anchor.width().max(96.0),
-        row * Kind::ALL.len() as f32 + space::S2 * 2.0,
-    );
-    let at = pos2(anchor.left(), anchor.top() - size.y - space::S1);
+    use azur_egui_theme::components::{menu_frame, MenuItem};
+
     let area = egui::Area::new(Id::new(("console-shells", pane)))
         .order(egui::Order::Foreground)
-        .fixed_pos(at)
+        // Hung by its bottom edge just above the button, so it grows upwards by however tall the
+        // frame turns out to be rather than by a height worked out here and kept in step by hand.
+        .pivot(Align2::LEFT_BOTTOM)
+        .fixed_pos(pos2(anchor.left(), anchor.top() - space::S1))
         .show(ui.ctx(), |ui| {
-            let rect = Rect::from_min_size(at, size);
-            // `bg.layer_alt`, not `bg.overlay`. The overlay role is a *scrim* — a translucent wash
-            // over the window while something modal is up — so a menu wearing it had the log showing
-            // through its own rows. This is the surface the design system's tooltip and menu sit on.
-            ui.painter()
-                .rect_filled(rect, CornerRadius::same(radius::MEDIUM), t.bg.layer_alt);
-            ui.painter().rect_stroke(
-                rect,
-                CornerRadius::same(radius::MEDIUM),
-                Stroke::new(1.0, t.stroke.subtle),
-                StrokeKind::Inside,
-            );
-            for (slot, kind) in Kind::ALL.iter().enumerate() {
-                let item = Rect::from_min_size(
-                    pos2(rect.left(), rect.top() + space::S2 + slot as f32 * row),
-                    vec2(rect.width(), row),
-                );
-                let response =
-                    ui.interact(item, Id::new(("console-shell-item", pane, slot)), Sense::click());
-                if response.hovered() {
-                    ui.painter()
-                        .rect_filled(item, CornerRadius::ZERO, crate::ui::hover_fill(t));
-                    ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
-                }
-                if *kind == state.kind {
-                    crate::ui::selection_bar(ui.painter(), item, t);
-                }
-                let caption = t.fonts.caption.clone();
-                let cm = metrics(ui, &caption);
-                ui.painter().text(
-                    pos2(item.left() + space::S3, ink_top(item, &cm)),
-                    Align2::LEFT_TOP,
-                    kind.label(),
-                    caption,
-                    t.text.primary,
-                );
-                if response.clicked() {
-                    state.picking = false;
-                    if *kind != state.kind {
-                        state.kind = *kind;
-                        out.swap = Some(*kind);
+            menu_frame(t)
+                .show(ui, |ui| {
+                    ui.set_width(anchor.width().max(96.0));
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    for kind in Kind::ALL {
+                        let item = MenuItem::new(kind.label()).selected(kind == state.kind);
+                        if ui.add(item).clicked() {
+                            state.picking = false;
+                            if kind != state.kind {
+                                state.kind = kind;
+                                out.swap = Some(kind);
+                            }
+                        }
                     }
-                }
-            }
-            rect
+                })
+                .response
+                .rect
         });
 
     // Dismissed by a press anywhere else — including on the button, which is what makes a second
     // click on it close the menu rather than reopen it. The press that *opened* it is inside the
     // button, so it is excluded here and the menu survives its own opening click.
-    if let Some(at) = ui.input(|i| {
-        i.pointer
-            .any_pressed()
-            .then(|| i.pointer.interact_pos())
-            .flatten()
-    }) {
+    if let Some(at) = crate::ui::pressed_at(ui) {
         if !area.inner.contains(at) && !anchor.contains(at) {
             state.picking = false;
         }

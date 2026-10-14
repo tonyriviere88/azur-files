@@ -282,16 +282,27 @@ fn share_bar(painter: &egui::Painter, t: &Theme, cell: Rect, share: f32, dim: bo
         pos2(cell.left().round(), top),
         vec2(cell.width().round(), height),
     );
-    let corner = CornerRadius::same(radius::CIRCULAR);
-    painter.rect_filled(track, corner, t.gauge_track);
-    painter.rect_filled(
-        Rect::from_min_size(
-            track.min,
-            vec2((track.width() * share).max(1.0), track.height()),
-        ),
-        corner,
-        if dim { t.text.disabled } else { t.accent.mark },
-    );
+    let ink = if dim { t.text.disabled } else { t.accent.mark };
+    crate::ui::gauge(painter, t, track, share, 1.0, ink);
+}
+
+/// The ink of a left-aligned cell `width` wide, between `left` and `right`: what a drag or a right
+/// click on `row` is tested against. The whole row's height, whatever line the text sits on.
+#[inline]
+fn ink_left(row: Rect, left: f32, right: f32, width: f32) -> Rect {
+    Rect::from_min_max(
+        pos2(left, row.top()),
+        pos2((left + width).min(right), row.bottom()),
+    )
+}
+
+/// And a right-aligned one's, against the right edge of the cell.
+#[inline]
+fn ink_right(row: Rect, left: f32, right: f32, width: f32) -> Rect {
+    Rect::from_min_max(
+        pos2((right - width).max(left), row.top()),
+        pos2(right, row.bottom()),
+    )
 }
 
 /// How many rows a jump to the cursor leaves showing beyond it — see [`crate::pane::Tab::scroll_context`].
@@ -320,6 +331,300 @@ pub(crate) fn nudge(offset: f32, view: f32, top: f32, height: f32, context: bool
     offset.max(0.0)
 }
 
+/// The scroll area a listing is drawn in, with the cursor brought into view if a key moved it.
+///
+/// Nudged into view rather than centred: a listing that recentres on every arrow press is
+/// unreadable. `ScrollArea` takes an absolute offset, so the nudge is computed against last frame's,
+/// which the pane records once the area has been shown. The rubber band's auto-scroll is an absolute
+/// offset as well, and it wins over the nudge because the pointer is the thing being followed.
+///
+/// Shared by the details view and the tiles, which differ only in how a cursor becomes a `top` and a
+/// `height` — `locate` is that, a multiplication for a row and a lookup in the layout for a tile.
+pub(crate) fn listing_scroll(
+    tab: &mut Tab,
+    view: f32,
+    salt: impl egui::AsIdSalt,
+    locate: impl FnOnce(usize) -> Option<(f32, f32)>,
+) -> egui::ScrollArea {
+    let mut scroll = egui::ScrollArea::vertical()
+        .id_salt(salt)
+        .auto_shrink([false, false]);
+    if let Some(offset) = tab.scroll_to.take() {
+        scroll = scroll.vertical_scroll_offset(offset.max(0.0));
+        tab.scroll_to_cursor = false;
+        tab.scroll_context = false;
+    } else if tab.scroll_to_cursor {
+        if let Some((top, height)) = tab.cursor.and_then(locate) {
+            let offset = nudge(tab.scroll_y, view, top, height, tab.scroll_context);
+            scroll = scroll.vertical_scroll_offset(offset);
+        }
+        tab.scroll_to_cursor = false;
+        tab.scroll_context = false;
+    }
+    scroll
+}
+
+/// The fill under a row or a tile, painted, and the surface that leaves showing — which is what a
+/// git badge is punched out of and a filter hit's fill is chosen against.
+///
+/// A selection in a listing that does not have the keyboard goes quiet. `focused` is false both when
+/// another pane has it and when *this* pane's console does, which is the same statement either way:
+/// these rows are still selected, and the arrow keys are not about them. See
+/// [`crate::ui::row_fill_quiet`].
+///
+/// `band` is whether the shape is the details view's square band across the pane — a row, or a
+/// tree's folder row among the tiles — rather than a tile, which is rounded because it is a
+/// card-sized thing floating in a grid. A band wears the 2px accent bar, and **only while its pane
+/// does not have the keyboard.** On the pane being worked in it said nothing the row was not already
+/// saying: the fill is 24.7 ΔL* off the panel, and the row the cursor is on carries a dashed ring in
+/// the same `accent.mark` the bar was drawn in — two blue marks down one row's left edge, for one
+/// fact. A quiet selection is the opposite case and it is why this is a condition rather than a
+/// deletion: [`crate::ui::row_fill_quiet`] is 1.15 ΔL* off the panel in the dark theme — 1.02:1,
+/// which is to say invisible on its own — so with the bar gone as well, a selection in the pane you
+/// are not typing in would be a selection nothing on screen mentions. The bar is what has been
+/// carrying that state all along; there it is the only thing carrying it. A tile never had one.
+///
+/// The row being renamed is not handed here at all: it wears none of it — see [`rows`].
+#[inline]
+pub(crate) fn row_surface(
+    painter: &egui::Painter,
+    t: &Theme,
+    rect: Rect,
+    band: bool,
+    selected: bool,
+    focused: bool,
+    hovered: bool,
+) -> Color32 {
+    let fill = match (selected, focused) {
+        (true, false) => Some(row_fill_quiet(t)),
+        _ => row_fill(t, selected, hovered),
+    };
+    let mut under = t.bg.layer;
+    if let Some(fill) = fill {
+        let corners = if band {
+            CornerRadius::ZERO
+        } else {
+            CornerRadius::same(radius::SMALL)
+        };
+        painter.rect_filled(rect, corners, fill);
+        under = fill;
+    }
+    if band && selected && !focused {
+        selection_bar(painter, rect, t);
+    }
+    under
+}
+
+/// A tree row's chevron, in the box [`twisty_rect`] put it in on `row`: pointing right while the
+/// folder is shut and down while it is open.
+///
+/// `text-secondary`, so the ladder of chevrons down a branch does not compete with the names beside
+/// it — and `text-primary` under the pointer, which is the only affordance a painted glyph with no
+/// button around it has.
+#[inline]
+pub(crate) fn twisty_glyph(
+    painter: &egui::Painter,
+    t: &Theme,
+    row: Rect,
+    hit: Rect,
+    shut: bool,
+    hovered: bool,
+) {
+    let chevron: azur_icons::Icon<'_> = if shut {
+        &azur_icons::chevron_right
+    } else {
+        &azur_icons::chevron_down
+    };
+    chevron(
+        painter,
+        icon_rect(row, hit.left(), TWISTY),
+        if hovered {
+            t.text.primary
+        } else {
+            t.text.secondary
+        },
+    );
+}
+
+/// The tint a shell icon or a thumbnail is drawn with: faded on a hidden or cut entry, as it is.
+///
+/// Faded rather than recoloured: a shell icon carries its own colours, and tinting them would
+/// misreport what kind of file it is.
+#[inline]
+pub(crate) fn picture_tint(dim: bool) -> Color32 {
+    if dim {
+        Color32::from_white_alpha(110)
+    } else {
+        Color32::WHITE
+    }
+}
+
+/// The first two things a click in a listing means, before it is about any row: it gives the pane
+/// the keyboard, and on a twisty it opens or shuts that folder — **and that is all it does**, which
+/// is what the `true` says.
+///
+/// Opening or shutting a folder in a tree is not selecting it, so this is tested first: a click that
+/// both opened a folder and moved the selection onto it would make the twisty unusable as a way of
+/// *looking* at a branch without disturbing what is picked out. Explorer's tree draws the same
+/// distinction, and so does every other one.
+///
+/// The whole box is the target rather than the chevron's ink — a 6-point arrowhead is not something
+/// to ask anybody to hit. Nothing here needs a hovered row: a box was only pushed for a row that drew
+/// one. The keyboard has already been claimed by the `Focus` pushed first — a twisty is still a click
+/// in this pane.
+pub(crate) fn twisty_clicked(
+    ui: &Ui,
+    response: &egui::Response,
+    pane: PaneId,
+    twisties: &[(Rect, usize)],
+    out: &mut Vec<Action>,
+) -> bool {
+    if response.clicked() || response.secondary_clicked() {
+        out.push(Action::Focus(pane));
+    }
+    if !response.clicked() {
+        return false;
+    }
+    let at = response
+        .interact_pointer_pos()
+        .or_else(|| ui.ctx().pointer_interact_pos());
+    match at.and_then(|at| twisties.iter().find(|(hit, _)| hit.contains(at))) {
+        Some(&(_, position)) => {
+            out.push(Action::ToggleCollapsed { pane, position });
+            true
+        }
+        None => false,
+    }
+}
+
+/// What a click, a double click and a middle click on the row or tile at `position` do — the same in
+/// both views, which differ only in what a right click there is about.
+///
+/// A click selects: `Ctrl` toggles, `Shift` extends, and a plain one makes the row the selection. A
+/// folder landed on is prefetched. A double click opens it.
+///
+/// Middle click opens a folder in its own tab — including a folder *shortcut*, which is a row this
+/// cannot tell apart from a file without reading it. So the reading is left to the action, which
+/// resolves it the same way opening one does; a shortcut to a file lands there and does nothing,
+/// which is what a middle click on any other file does. An archive counts as a folder here, because
+/// it is one to this program — see [`crate::archive`]. Asked by extension and so free, unlike the
+/// shortcut test beside it, which reads the file.
+pub(crate) fn row_clicks(
+    response: &egui::Response,
+    modifiers: egui::Modifiers,
+    pane: PaneId,
+    tab: &mut Tab,
+    position: usize,
+    outcome: &mut Outcome,
+    out: &mut Vec<Action>,
+) {
+    if response.clicked() {
+        if modifiers.command {
+            tab.toggle(position);
+        } else if modifiers.shift {
+            tab.select_range_to(position);
+        } else {
+            tab.select_only(position);
+        }
+        if tab.is_dir_at(position) {
+            outcome.prefetch = tab.target_at(position);
+        }
+    }
+    if response.double_clicked() {
+        out.extend(Action::open_row(pane, tab, position));
+    }
+    if response.middle_clicked() {
+        if let Some(path) = tab.target_at(position) {
+            if tab.is_dir_at(position) {
+                out.push(Action::NavigateNewTab { pane, path });
+            } else if crate::archive::browsable(&path) || tab.is_shortcut_at(position) {
+                out.push(Action::OpenNewTab(path));
+            }
+        }
+    }
+}
+
+/// Pick the files up from the row or tile at `grabbed`.
+///
+/// A drag that starts on something already selected takes the whole selection; one that starts
+/// anywhere else makes that row the selection first, which is what makes dragging a single file
+/// work without clicking it beforehand.
+pub(crate) fn drag_out(pane: PaneId, tab: &mut Tab, grabbed: usize, out: &mut Vec<Action>) {
+    if !tab.is_selected(grabbed) {
+        tab.select_only(grabbed);
+    }
+    out.push(Action::DragOut {
+        pane,
+        items: tab.selection_paths(),
+    });
+}
+
+/// Everything below the last row or tile: the canvas a short listing leaves above the status line,
+/// and the tail a long one leaves once it is scrolled to the end — and the fades at the edges of the
+/// scroll.
+///
+/// That space is part of the list — clicking it cancels the selection, as it does in every file
+/// manager, and right-clicking it is how the folder's own menu is reached — but the one interaction
+/// over the rows covers the rows and nothing else, deliberately, so nothing up there is listening for
+/// it. It is also where a rubber band starts rather than on a row, because a drag *from* a row is how
+/// you pick files up and move them — which is the other half of this gesture and the reason the two
+/// have to start in different places, exactly as they do in Explorer.
+///
+/// `content` is how tall the rows or tiles are, **without** the tail: measured from them rather than
+/// from the scroll area's own extent, because the tail of that extent is deliberately empty. That is
+/// also what the fades are measured against — the design system's rule for the edge of a scrolling
+/// collection, see `azur_egui_theme::components::scroll_fades` — so a listing scrolled to its last
+/// file does not fade at the bottom for the slack under it and say there were more files; the fade
+/// goes out exactly as the last one arrives. `id` names the space's interaction, one per view.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn below_rows(
+    child: &Ui,
+    t: &Theme,
+    body: Rect,
+    output: &egui::scroll_area::ScrollAreaOutput<()>,
+    content: f32,
+    id: &'static str,
+    pane: PaneId,
+    tab: &mut Tab,
+    out: &mut Vec<Action>,
+) {
+    let bottom = body.top() + content - output.state.offset.y;
+    let empty = Rect::from_min_max(
+        pos2(body.left(), bottom.clamp(body.top(), body.bottom())),
+        pos2(output.inner_rect.right(), body.bottom()),
+    );
+    if empty.height() > 1.0 && empty.width() > 1.0 {
+        let response = child.interact(empty, Id::new((id, pane)), Sense::click_and_drag());
+        if response.clicked() {
+            tab.clear_selection();
+            out.push(Action::Focus(pane));
+        }
+        if response.secondary_clicked() {
+            out.push(Action::Focus(pane));
+        }
+        // The folder's own menu, so right-clicking the space below the files offers New and the
+        // rest rather than nothing.
+        context_menu(child, &response, pane, tab, None, out);
+        if response.drag_started_by(egui::PointerButton::Primary)
+            || response.drag_started_by(egui::PointerButton::Secondary)
+        {
+            let origin = child.input(|i| i.pointer.press_origin());
+            start_band(child, body, tab, origin);
+            out.push(Action::Focus(pane));
+        }
+    }
+
+    let above = output.state.offset.y;
+    let below = (content - output.inner_rect.height() - above).max(0.0);
+    azur_egui_theme::components::scroll_fades(
+        &child.painter_at(output.inner_rect),
+        output.inner_rect,
+        t.bg.layer,
+        above,
+        below,
+    );
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn rows(
     ui: &mut Ui,
@@ -341,48 +646,14 @@ pub(crate) fn rows(
     let Some(dir) = tab.dir.clone() else { return };
     let count = tab.order.len();
 
-    let mut child = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(body)
-            .layout(egui::Layout::top_down(egui::Align::Min)),
-    );
-    child.set_clip_rect(body.intersect(ui.clip_rect()));
-    // The extent and the band below are counted in whole [`ROW_HEIGHT`]s, and the installed style's
-    // item spacing is `space-3`. Anything egui adds per item would put the two out of step the moment
-    // something scrolled — rows landing in the wrong place and the pointer hit-testing a different one
-    // than it looks like, which is what this cost when `ScrollArea::show_rows` was reserving
-    // `row_height + item_spacing.y` a row. Rows are painted at exact rects here, so it is nothing.
-    child.spacing_mut().item_spacing = egui::Vec2::ZERO;
+    // The extent and the band below are counted in whole [`ROW_HEIGHT`]s — see
+    // [`crate::ui::rows_child`] for why that means no item spacing.
+    let mut child = crate::ui::rows_child(ui, body);
 
-    let mut scroll = egui::ScrollArea::vertical()
-        .id_salt(("rows", pane))
-        .auto_shrink([false, false]);
-
-    // Keyboard movement has to bring the cursor with it.
-    //
-    // Nudged into view rather than centred: a listing that recentres on every arrow
-    // press is unreadable. `ScrollArea` takes an absolute offset, so the nudge is
-    // computed against last frame's, which the pane records below.
-    if let Some(offset) = tab.scroll_to.take() {
-        // The rubber-band's auto-scroll: an absolute offset, which wins over the
-        // cursor nudge because the pointer is the thing being followed.
-        scroll = scroll.vertical_scroll_offset(offset.max(0.0));
-        tab.scroll_to_cursor = false;
-        tab.scroll_context = false;
-    } else if tab.scroll_to_cursor {
-        if let Some(at) = tab.cursor {
-            let offset = nudge(
-                tab.scroll_y,
-                body.height(),
-                at as f32 * ROW_HEIGHT,
-                ROW_HEIGHT,
-                tab.scroll_context,
-            );
-            scroll = scroll.vertical_scroll_offset(offset);
-        }
-        tab.scroll_to_cursor = false;
-        tab.scroll_context = false;
-    }
+    // Keyboard movement has to bring the cursor with it — see [`listing_scroll`].
+    let scroll = listing_scroll(tab, body.height(), ("rows", pane), |at| {
+        Some((at as f32 * ROW_HEIGHT, ROW_HEIGHT))
+    });
 
     // **`ScrollArea::show_rows`, with a fractional row at the end of it.** That is the whole reason
     // this is `show_viewport` and not the one-liner: `show_rows` counts the extent in whole rows, and
@@ -423,33 +694,18 @@ pub(crate) fn rows(
             pos2(body.right(), ui.min_rect().top() + range.len() as f32 * ROW_HEIGHT),
         );
         // One interaction for the whole visible block, and the row worked out from
-        // the pointer. Forty per-row widgets would cost forty ids, forty hit-tests
-        // and forty animation slots for a hover highlight that arithmetic gives for
-        // nothing.
+        // the pointer — see [`crate::ui::row_under`].
         let response = ui.interact(
             visible,
             Id::new(("rows-hit", pane)),
             Sense::click_and_drag(),
         );
-        let last_visible = range.len().saturating_sub(1);
-        let row_at = |at: egui::Pos2| {
-            (visible.contains(at) && !range.is_empty())
-                .then(|| first + (((at.y - visible.top()) / ROW_HEIGHT) as usize).min(last_visible))
-        };
+        let row_at = |at: egui::Pos2| crate::ui::row_under(visible, &range, ROW_HEIGHT, at);
         let hovered_row = response.hover_pos().and_then(row_at);
 
-        // Where the button went down, while it is down.
-        //
-        // Not the same row as the one under the pointer, and that difference is the whole
-        // point: egui only calls a press a drag once it has *travelled*, by which time the
-        // pointer is a row or two along. Deciding from the pointer would pick up the file
-        // the drag arrived at rather than the one it started on.
-        let press = ui.input(|i| {
-            i.pointer
-                .any_down()
-                .then(|| i.pointer.press_origin())
-                .flatten()
-        });
+        // Where the button went down, while it is down — not the row under the pointer, which
+        // would pick up the file the drag arrived at. See [`crate::ui::held_from`].
+        let press = crate::ui::held_from(ui, false);
         let pressed_row = press.and_then(row_at);
 
         let spans = column_x(visible, widths, order);
@@ -498,9 +754,6 @@ pub(crate) fn rows(
         // The row's own fill travels with it: the badge is punched out of whatever it is sitting on,
         // and on a selected row that is the accent rather than the surface.
         let mut badges: Vec<(Rect, crate::git::State, Color32)> = Vec::new();
-        // What git said about this folder, taken once. An `Arc` clone rather than a borrow, because
-        // the loop below needs `&mut Tab` for the icon and shortcut columns it fills in as it goes.
-        let git = tab.git.clone();
         // A Status glyph per visible row of a synced folder, painted with the badges below and for the
         // same reason — nothing that is not the font atlas gets drawn inside the loop.
         let mut sync_marks: Vec<(Rect, crate::fs::dir::Sync, Color32, bool)> = Vec::new();
@@ -603,38 +856,13 @@ pub(crate) fn rows(
             // for the same edge -- so the one row you are actually looking at is the one that
             // reads worst. Explorer drops the highlight while renaming too.
             //
-            // What the row ends up filled with is kept: a git badge is punched out of it.
-            let mut under = t.bg.layer;
-            if !renaming_here {
-                // A selection in a listing that does not have the keyboard goes quiet. `focused` is
-                // false both when another pane has it and when *this* pane's console does, which is
-                // the same statement either way: these rows are still selected, and the arrow keys
-                // are not about them. See [`crate::ui::row_fill_quiet`].
-                let fill = match (selected, focused) {
-                    (true, false) => Some(row_fill_quiet(t)),
-                    _ => row_fill(t, selected, is_hovered),
-                };
-                if let Some(fill) = fill {
-                    ui.painter().rect_filled(row, CornerRadius::ZERO, fill);
-                    under = fill;
-                }
-                // The 2px accent bar, and **only while this pane does not have the keyboard.**
-                //
-                // On the pane being worked in it said nothing the row was not already saying: the
-                // fill is 24.7 ΔL* off the panel, and the row the cursor is on carries a dashed
-                // ring in the same `accent.mark` the bar was drawn in — two blue marks down one
-                // row's left edge, for one fact.
-                //
-                // A quiet selection is the opposite case and it is why this is a condition rather
-                // than a deletion. [`crate::ui::row_fill_quiet`] is 1.15 ΔL* off the panel in the
-                // dark theme — 1.02:1, which is to say invisible on its own — so with the bar gone
-                // as well, a selection in the pane you are not typing in would be a selection
-                // nothing on screen mentions. The bar is what has been carrying that state all
-                // along; here it is the only thing carrying it.
-                if selected && !focused {
-                    selection_bar(ui.painter(), row, t);
-                }
-            }
+            // What the row ends up filled with is kept: a git badge is punched out of it. The fill
+            // ladder and the accent bar are [`row_surface`]'s, which is where their argument is.
+            let under = if renaming_here {
+                t.bg.layer
+            } else {
+                row_surface(ui.painter(), t, row, true, selected, focused, is_hovered)
+            };
             // The keyboard cursor. Two inks, one for a selected row and one for the rest — see
             // [`cursor_ink`], which is also where the ring's whole argument is written down.
             if focused && tab.cursor == Some(position) {
@@ -699,23 +927,7 @@ pub(crate) fn rows(
                 let has_kids = shut || tab.has_children_below(position);
                 if has_kids {
                     let hit = twisty_rect(name_cell, depth);
-                    let chevron: azur_icons::Icon<'_> = if shut {
-                        &azur_icons::chevron_right
-                    } else {
-                        &azur_icons::chevron_down
-                    };
-                    // `text-secondary`, so the ladder of chevrons down a branch does not compete
-                    // with the names beside it — and `text-primary` under the pointer, which is
-                    // the only affordance a painted glyph with no button around it has.
-                    chevron(
-                        ui.painter(),
-                        icon_rect(row, hit.left(), TWISTY),
-                        if is_hovered {
-                            t.text.primary
-                        } else {
-                            t.text.secondary
-                        },
-                    );
+                    twisty_glyph(ui.painter(), t, row, hit, shut, is_hovered);
                     twisties.push((hit, position));
                 }
             }
@@ -811,7 +1023,7 @@ pub(crate) fn rows(
                     own.or_else(|| icons_cache.kind(ext, entry.is_dir()))
                 }
             }
-            .and_then(|icon| icons_cache.uv(ui.ctx(), icon));
+            .and_then(|icon| icons_cache.uv(icon));
 
             match shell_icon {
                 Some((texture, uv)) => {
@@ -823,14 +1035,8 @@ pub(crate) fn rows(
                         texture,
                         uv,
                         box_rect,
-                        // A hidden entry is faded rather than recoloured: a shell icon
-                        // carries its own colours, and tinting them would misreport
-                        // what kind of file it is.
-                        if dim {
-                            Color32::from_white_alpha(110)
-                        } else {
-                            Color32::WHITE
-                        },
+                        // A hidden entry is faded rather than recoloured — see [`picture_tint`].
+                        picture_tint(dim),
                     ));
                 }
                 None => {
@@ -848,7 +1054,7 @@ pub(crate) fn rows(
             // flattened listing is a path, and git speaks in paths, so both work out of the same
             // lookup. One hash lookup per visible row per frame, against a map built once when the
             // answer landed; nothing here walks the repository's changes.
-            if let Some(state) = git.as_ref().and_then(|repo| repo.state(dir.name(entry_index))) {
+            if let Some(state) = tab.git_of(entry_index) {
                 badges.push((badge_rect(box_rect), state, under));
             }
 
@@ -931,10 +1137,7 @@ pub(crate) fn rows(
                     )
                 };
                 if inked {
-                    ink.push(Rect::from_min_max(
-                        pos2(name_left, row.top()),
-                        pos2((name_left + galley.size().x).min(name_right), row.bottom()),
-                    ));
+                    ink.push(ink_left(row, name_left, name_right, galley.size().x));
                 }
                 text_left(
                     ui.painter(),
@@ -958,7 +1161,7 @@ pub(crate) fn rows(
                 } else {
                     let armed_here = armed == Some(entry_index);
                     if armed_here {
-                        armed_box(ui.painter(), t, keywords_box(cell, row));
+                        armed_box(ui.painter(), t, keywords_box(cell, row), t.stroke.control);
                     }
                     let text = dir.key(entry_index).and_then(|key| store.get(key));
                     let shown = match text {
@@ -972,10 +1175,7 @@ pub(crate) fn rows(
                         let galley =
                             truncated(ui.painter(), shown, meta_font.clone(), color, cell.width());
                         if inked && text.is_some() {
-                            ink.push(Rect::from_min_max(
-                                pos2(cell.left(), row.top()),
-                                pos2((cell.left() + galley.size().x).min(cell.right()), row.bottom()),
-                            ));
+                            ink.push(ink_left(row, cell.left(), cell.right(), galley.size().x));
                         }
                         text_left(ui.painter(), cell, galley);
                     }
@@ -1019,10 +1219,7 @@ pub(crate) fn rows(
                         cell.width(),
                     );
                     if inked {
-                        ink.push(Rect::from_min_max(
-                            pos2((cell.right() - galley.size().x).max(cell.left()), row.top()),
-                            pos2(cell.right(), row.bottom()),
-                        ));
+                        ink.push(ink_right(row, cell.left(), cell.right(), galley.size().x));
                     }
                     text_right(ui.painter(), cell, galley);
                 }
@@ -1063,57 +1260,34 @@ pub(crate) fn rows(
                     );
                     if inked {
                         // Right-aligned, so its ink is against the right edge of the cell.
-                        ink.push(Rect::from_min_max(
-                            pos2((cell.right() - galley.size().x).max(cell.left()), row.top()),
-                            pos2(cell.right(), row.bottom()),
-                        ));
+                        ink.push(ink_right(row, cell.left(), cell.right(), galley.size().x));
                     }
                     text_right(ui.painter(), cell, galley);
                 }
             }
 
-            // ---- Type ----
+            // ---- Type and Modified ----
+            //
+            // One cell twice over, with a different formatter and ink: left-aligned, cut to the
+            // column, and its ink collected for a drag. The ink is what a drag is measured against,
+            // so it is the whole row's height whatever line the text in it sits on.
+            let mut meta_cell = |column: Column, color: Color32, text: &str| {
+                let cell = cell_of(column, meta_row);
+                let galley = truncated(ui.painter(), text, meta_font.clone(), color, cell.width());
+                if inked {
+                    ink.push(ink_left(row, cell.left(), cell.right(), galley.size().x));
+                }
+                text_left(ui.painter(), cell, galley);
+            };
             if widths[Column::Type.index()] > 0.0 {
                 scratch.clear();
                 fmt::type_label(dir.ext(entry_index), entry.is_dir(), scratch);
-                let cell = cell_of(Column::Type, meta_row);
-                let galley = truncated(
-                    ui.painter(),
-                    scratch,
-                    meta_font.clone(),
-                    type_color,
-                    cell.width(),
-                );
-                if inked {
-                    // The ink is what a drag is measured against, so it is the whole row's height
-                    // whatever line the text in it sits on.
-                    ink.push(Rect::from_min_max(
-                        pos2(cell.left(), row.top()),
-                        pos2((cell.left() + galley.size().x).min(cell.right()), row.bottom()),
-                    ));
-                }
-                text_left(ui.painter(), cell, galley);
+                meta_cell(Column::Type, type_color, scratch);
             }
-
-            // ---- Modified ----
             if widths[Column::Modified.index()] > 0.0 {
                 scratch.clear();
                 fmt::modified(entry.modified, zone, scratch);
-                let cell = cell_of(Column::Modified, meta_row);
-                let galley = truncated(
-                    ui.painter(),
-                    scratch,
-                    meta_font.clone(),
-                    modified_color,
-                    cell.width(),
-                );
-                if inked {
-                    ink.push(Rect::from_min_max(
-                        pos2(cell.left(), row.top()),
-                        pos2((cell.left() + galley.size().x).min(cell.right()), row.bottom()),
-                    ));
-                }
-                text_left(ui.painter(), cell, galley);
+                meta_cell(Column::Modified, modified_color, scratch);
             }
         }
 
@@ -1182,31 +1356,12 @@ pub(crate) fn rows(
             // is handled by the field losing focus, not by moving the selection.
             return;
         }
-        if response.clicked() || response.secondary_clicked() {
-            out.push(Action::Focus(pane));
-        }
         // ---- A twisty, before anything else a click could mean ---------------
         //
-        // Opening or shutting a folder in a tree is not selecting it, so this is tested first and
-        // returns: a click that both opened a folder and moved the selection onto it would make
-        // the twisty unusable as a way of *looking* at a branch without disturbing what is picked
-        // out. Explorer's tree draws the same distinction, and so does every other one.
-        //
-        // The whole box is the target rather than the chevron's ink — a 6-point arrowhead is not
-        // something to ask anybody to hit. Nothing here needs a hovered row: a box was only pushed
-        // for a row that drew one.
-        if response.clicked() {
-            let at = response
-                .interact_pointer_pos()
-                .or_else(|| ui.ctx().pointer_interact_pos());
-            if let Some(&(_, position)) = at
-                .and_then(|at| twisties.iter().find(|(hit, _)| hit.contains(at)))
-            {
-                // The keyboard has already been claimed by the `Focus` above, which every click in
-                // the listing pushes — a twisty is still a click in this pane.
-                out.push(Action::ToggleCollapsed { pane, position });
-                return;
-            }
+        // Every click in the listing gives the pane the keyboard, and one on a twisty does nothing
+        // else — see [`twisty_clicked`].
+        if twisty_clicked(ui, &response, pane, &twisties, out) {
+            return;
         }
 
         // ---- An armed Keywords cell --------------------------------------------
@@ -1229,45 +1384,8 @@ pub(crate) fn rows(
         // — the one with `New folder` and `Paste` in it.
         let mut menu_row = hovered_row;
         if let Some(position) = hovered_row {
-            if response.clicked() {
-                if modifiers.command {
-                    tab.toggle(position);
-                } else if modifiers.shift {
-                    tab.select_range_to(position);
-                } else {
-                    tab.select_only(position);
-                }
-                if tab.is_dir_at(position) {
-                    outcome.prefetch = tab.target_at(position);
-                }
-            }
-            if response.double_clicked() {
-                if let Some(path) = tab.target_at(position) {
-                    if tab.is_dir_at(position) {
-                        out.push(Action::Navigate { pane, path });
-                    } else {
-                        out.push(Action::Open(path));
-                    }
-                }
-            }
-            // Middle click opens a folder in its own tab — including a folder *shortcut*, which
-            // is a row this cannot tell apart from a file without reading it. So the reading is
-            // left to the action, which resolves it the same way opening one does; a shortcut to
-            // a file lands there and does nothing, which is what a middle click on any other
-            // file does.
-            //
-            // An archive counts as a folder here, because it is one to this program — see
-            // [`crate::archive`]. Asked by extension and so free, unlike the shortcut test beside
-            // it, which reads the file.
-            if response.middle_clicked() {
-                if let Some(path) = tab.target_at(position) {
-                    if tab.is_dir_at(position) {
-                        out.push(Action::NavigateNewTab { pane, path });
-                    } else if crate::archive::browsable(&path) || tab.is_shortcut_at(position) {
-                        out.push(Action::OpenNewTab(path));
-                    }
-                }
-            }
+            // Select, open, or open in a tab — see [`row_clicks`], which the tiles share.
+            row_clicks(&response, modifiers, pane, tab, position, outcome, out);
             // ---- Right click, on the file or merely in its row -------------
             //
             // A row is mostly space: a 24-point row across a wide pane has ink on perhaps a
@@ -1324,17 +1442,7 @@ pub(crate) fn rows(
                 let on_file = press
                     .is_some_and(|at| ink.iter().any(|rect| rect.expand(1.0).contains(at)));
                 if on_file {
-                    // A drag that starts on something already selected takes the whole
-                    // selection; one that starts anywhere else makes that row the selection
-                    // first, which is what makes dragging a single file work without clicking
-                    // it beforehand.
-                    if !tab.is_selected(grabbed) {
-                        tab.select_only(grabbed);
-                    }
-                    out.push(Action::DragOut {
-                        pane,
-                        items: tab.selection_paths(),
-                    });
+                    drag_out(pane, tab, grabbed, out);
                 } else {
                     start_band(ui, body, tab, press);
                     out.push(Action::Focus(pane));
@@ -1349,66 +1457,18 @@ pub(crate) fn rows(
     // tab keeps its place when the pane it lives in is redrawn elsewhere.
     tab.scroll_y = output.state.offset.y;
 
-    // Everything below the last row: the canvas a short listing leaves above the status line, and
-    // the [`TAIL`] a long one leaves once it is scrolled to the end. That space is part of
-    // the list — clicking it cancels the selection, as it does in every file manager, and
-    // right-clicking it is how the folder's own menu is reached — but the band above covers the rows
-    // and nothing else, deliberately, so nothing up there is listening for it.
-    //
-    // Measured from the rows rather than from `content_size`, which now includes the tail.
-    let rows_bottom = body.top() + count as f32 * ROW_HEIGHT - output.state.offset.y;
-    let empty = Rect::from_min_max(
-        pos2(body.left(), rows_bottom.clamp(body.top(), body.bottom())),
-        pos2(output.inner_rect.right(), body.bottom()),
-    );
-    if empty.height() > 1.0 && empty.width() > 1.0 {
-        let response = child.interact(
-            empty,
-            Id::new(("rows-empty", pane)),
-            Sense::click_and_drag(),
-        );
-        if response.clicked() {
-            tab.clear_selection();
-            out.push(Action::Focus(pane));
-        }
-        if response.secondary_clicked() {
-            out.push(Action::Focus(pane));
-        }
-        // The folder's own menu, so right-clicking the space below the files offers New and
-        // the rest rather than nothing.
-        context_menu(&child, &response, pane, tab, None, out);
-
-        // ---- The rubber band ------------------------------------------------
-        //
-        // It starts here rather than on a row because a drag *from* a row is how you
-        // pick files up and move them — which is the other half of this gesture and
-        // the reason the two have to start in different places, exactly as they do in
-        // Explorer.
-        if response.drag_started_by(egui::PointerButton::Primary)
-            || response.drag_started_by(egui::PointerButton::Secondary)
-        {
-            let origin = child.input(|i| i.pointer.press_origin());
-            start_band(&child, body, tab, origin);
-            out.push(Action::Focus(pane));
-        }
-    }
-
-    // **There is more above, and there is more below.** The design system's rule for the edge of a
-    // scrolling collection — see `azur_egui_theme::components::scroll_fades` — and a file listing is
-    // the collection it was written for.
-    //
-    // Its own two figures rather than the `ScrollArea`'s, because [`TAIL`] of the extent is
-    // deliberately empty: measured off the content, a listing scrolled to its last file would fade at
-    // the bottom for the slack under it and say there were more files. Measured off the rows, the
-    // fade goes out exactly as the last one arrives.
-    let above = output.state.offset.y;
-    let below = (count as f32 * ROW_HEIGHT - output.inner_rect.height() - above).max(0.0);
-    azur_egui_theme::components::scroll_fades(
-        &child.painter_at(output.inner_rect),
-        output.inner_rect,
-        t.bg.layer,
-        above,
-        below,
+    // Everything below the last row, and the fades at the scroll's two edges — see [`below_rows`].
+    // Measured from the rows rather than from `content_size`, which includes the [`TAIL`].
+    below_rows(
+        &child,
+        t,
+        body,
+        &output,
+        count as f32 * ROW_HEIGHT,
+        "rows-empty",
+        pane,
+        tab,
+        out,
     );
 
     if tab.band.is_some() && band_move(&mut child, body, tab, count as f32 * ROW_HEIGHT) {
@@ -1638,11 +1698,7 @@ pub(crate) fn row_tooltip(
     }
 
     // And what git says, which the row itself can only say with a badge.
-    if let Some(state) = tab
-        .git
-        .as_ref()
-        .and_then(|repo| repo.state(dir.name(entry_index)))
-    {
+    if let Some(state) = tab.git_of(entry_index) {
         about.push(("Git", state.describe(entry.is_dir()).to_owned()));
     }
     // And the Status column in words, because a glyph is the one cell nobody can copy the meaning

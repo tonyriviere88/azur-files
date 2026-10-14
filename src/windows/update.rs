@@ -21,6 +21,7 @@ use windows_sys::Win32::Networking::WinHttp::{
 };
 
 use super::split_url;
+use crate::shell::nul_terminated;
 
 /// A WinHTTP handle, closed when it goes. Declared session, connection, request, so they drop in
 /// the reverse order, which is the order WinHTTP wants them closed in.
@@ -33,10 +34,6 @@ impl Drop for Handle {
             unsafe { WinHttpCloseHandle(self.0) };
         }
     }
-}
-
-fn wide(text: &str) -> Vec<u16> {
-    text.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
 /// What went wrong, in words where the error is one somebody could do something about.
@@ -57,11 +54,10 @@ pub(super) fn get(
     sink: &mut super::Sink<'_>,
 ) -> Result<(), String> {
     let (host, port, path) = split_url(url).ok_or_else(|| format!("Not an https address: {url}"))?;
-    let agent = wide(&format!("Azur-Files/{}", super::CURRENT));
-    let host = wide(host);
-    let verb = wide("GET");
-    let path = wide(path);
-    let headers = wide(&format!("Accept: {accept}\r\n"));
+    let agent = nul_terminated(format!("Azur-Files/{}", super::CURRENT));
+    let host = nul_terminated(host);
+    let path = nul_terminated(path);
+    let headers = nul_terminated(format!("Accept: {accept}\r\n"));
 
     // SAFETY: every string is null-terminated and outlives the call it is passed to; every handle
     // is checked before use and closed by `Handle`.
@@ -85,7 +81,7 @@ pub(super) fn get(
         }
         let request = Handle(WinHttpOpenRequest(
             connection.0,
-            verb.as_ptr(),
+            windows_sys::w!("GET"),
             path.as_ptr(),
             null(),
             null(),

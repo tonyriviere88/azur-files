@@ -47,9 +47,7 @@ use std::path::PathBuf;
 /// anything about this one. See `Volumes::discover`, which puts it on a worker.
 #[cfg(windows)]
 pub fn machines() -> Vec<PathBuf> {
-    use windows::Win32::System::Com::{
-        CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED,
-    };
+    use crate::shell::display_name;
     use windows::Win32::UI::Shell::{
         BHID_EnumItems, IEnumShellItems, IShellItem, SHGetKnownFolderItem,
         FOLDERID_NetworkFolder, KF_FLAG_DEFAULT, SIGDN_DESKTOPABSOLUTEPARSING,
@@ -60,13 +58,12 @@ pub fn machines() -> Vec<PathBuf> {
     // [`super::com`]: nothing here hands an interface out, so there is no promise to keep past the
     // last line — and a browse that takes seconds has no business occupying a thread the icons and
     // the context menus share.
-    //
-    // SAFETY: paired with the `CoUninitialize` below, on a thread this function owns.
-    let apartment = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED) };
+    let apartment = crate::shell::Apartment::enter_sta();
     let mut found: Vec<PathBuf> = Vec::new();
 
     // SAFETY: every interface below is checked before use, and every `PWSTR` the shell allocates
-    // is freed by `Name` on the way out of its scope.
+    // is freed by `display_name` as soon as it has been read — the leak if one were not given back
+    // would be per item per browse.
     unsafe {
         if let Ok(network) = SHGetKnownFolderItem::<IShellItem>(
             &FOLDERID_NetworkFolder,
@@ -94,16 +91,16 @@ pub fn machines() -> Vec<PathBuf> {
 
                     // A UNC parsing name is a machine, full stop. This is the row Explorer lets
                     // you open, and it needs no guessing.
-                    let parsing = Name::of(child, SIGDN_DESKTOPABSOLUTEPARSING);
-                    if let Some(text) = parsing.text().filter(|t| t.starts_with("\\\\")) {
+                    let parsing = display_name(child, SIGDN_DESKTOPABSOLUTEPARSING);
+                    if let Some(text) = parsing.filter(|t| t.starts_with("\\\\")) {
                         push(&mut found, text.trim_end_matches('\\'));
                         continue;
                     }
                     // Otherwise a device announcement. Its *name* is a machine name often enough
                     // to be worth offering — a NAS is announced this way and nowhere else — and
                     // the shape of a host name is what decides: one token, no spaces.
-                    let shown = Name::of(child, SIGDN_NORMALDISPLAY);
-                    if let Some(name) = shown.text().filter(|name| host_shaped(name)) {
+                    let shown = display_name(child, SIGDN_NORMALDISPLAY);
+                    if let Some(name) = shown.filter(|name| host_shaped(name)) {
                         push(&mut found, &format!("\\\\{name}"));
                     }
                 }
@@ -111,10 +108,8 @@ pub fn machines() -> Vec<PathBuf> {
         }
     }
 
-    if apartment.is_ok() {
-        // SAFETY: this thread entered the apartment above and hands nothing out of it.
-        unsafe { CoUninitialize() };
-    }
+    // This thread hands nothing out of the apartment, so there is nothing to keep it for.
+    drop(apartment);
     found
 }
 
@@ -142,44 +137,6 @@ fn push(found: &mut Vec<PathBuf>, unc: &str) {
         .any(|had| had.as_os_str().eq_ignore_ascii_case(unc))
     {
         found.push(PathBuf::from(unc));
-    }
-}
-
-/// A display name the shell allocated, freed when this goes out of scope.
-///
-/// `IShellItem::GetDisplayName` hands back a `PWSTR` out of the COM allocator, and the leak if it
-/// is not given back is per item per browse. A guard rather than a call at each exit, because there
-/// are three ways out of the loop above.
-#[cfg(windows)]
-struct Name(windows::core::PWSTR);
-
-#[cfg(windows)]
-impl Name {
-    /// SAFETY: `item` must be live, which it is — it is borrowed from the enumerator's slot.
-    unsafe fn of(
-        item: &windows::Win32::UI::Shell::IShellItem,
-        kind: windows::Win32::UI::Shell::SIGDN,
-    ) -> Self {
-        Self(item.GetDisplayName(kind).unwrap_or_default())
-    }
-
-    fn text(&self) -> Option<String> {
-        if self.0.is_null() {
-            return None;
-        }
-        // SAFETY: a non-null `PWSTR` from the shell is a null-terminated wide string.
-        let text = unsafe { self.0.to_string() }.ok()?;
-        (!text.is_empty()).then_some(text)
-    }
-}
-
-#[cfg(windows)]
-impl Drop for Name {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            // SAFETY: allocated by the shell with the COM allocator, freed once, here.
-            unsafe { windows::Win32::System::Com::CoTaskMemFree(Some(self.0 .0 as *const _)) };
-        }
     }
 }
 

@@ -146,13 +146,7 @@ impl History {
             let _ = std::fs::create_dir_all(parent);
         }
         // Staged and renamed over, as the settings are, so a crash mid-write leaves the old file.
-        let text = to_text(&self.visits);
-        let staged = path.with_extension("tsv.new");
-        if std::fs::write(&staged, &text).is_ok() && std::fs::rename(&staged, &path).is_ok() {
-            return;
-        }
-        let _ = std::fs::remove_file(&staged);
-        let _ = std::fs::write(path, text);
+        crate::config::write_whole(&path, &to_text(&self.visits), false);
     }
 
     /// What the path field offers for `typed`, best first: visited folders and bookmarks, at most
@@ -217,7 +211,8 @@ impl History {
     }
 }
 
-/// Seconds since 1970, which is what the file records.
+/// Seconds since 1970, which is what the file records — and what [`crate::update`] stamps its
+/// checks with.
 pub fn now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)

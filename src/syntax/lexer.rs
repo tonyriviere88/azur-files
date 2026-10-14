@@ -210,11 +210,13 @@ pub(crate) fn line_comment(body: &str, i: usize, r: &Rules, head: bool) -> Optio
 pub(crate) fn block_comment(body: &str, i: usize, r: &Rules) -> Option<usize> {
     let rest = &body[i..];
     let (open, close) = r.block.iter().find(|(open, _)| rest.starts_with(open))?;
-    let from = i + open.len();
-    Some(match body[from..].find(close) {
-        Some(at) => from + at + close.len(),
-        None => body.len(),
-    })
+    Some(through(body, i + open.len(), close))
+}
+
+/// Just past the first `close` at or after `from`, or the end of `body` when it never comes —
+/// which is how an unclosed comment, string or declaration in a truncated preview runs on.
+pub(crate) fn through(body: &str, from: usize, close: &str) -> usize {
+    body[from..].find(close).map_or(body.len(), |at| from + at + close.len())
 }
 
 /// Where a string starting at `i` ends, if one starts there.
@@ -223,9 +225,7 @@ pub(crate) fn string(body: &str, i: usize, r: &Rules) -> Option<usize> {
     if r.triple {
         for delim in ["\"\"\"", "'''"] {
             if body[i..].starts_with(delim) {
-                let from = i + delim.len();
-                let close = body[from..].find(delim).map(|at| from + at + delim.len());
-                return Some(close.unwrap_or(body.len()));
+                return Some(through(body, i + delim.len(), delim));
             }
         }
     }

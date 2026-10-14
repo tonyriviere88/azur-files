@@ -122,6 +122,18 @@ impl Done {
     pub fn worked(&self) -> bool {
         self.error.is_none() && !self.aborted
     }
+
+    /// A job's report, from what it was, what it touched, what comes after it, and how it ran.
+    fn of(job: Option<Job>, touched: Vec<PathBuf>, after: After, ran: Ran) -> Self {
+        Self {
+            job,
+            touched,
+            error: ran.error,
+            aborted: ran.aborted,
+            after,
+            outcome: ran.outcome,
+        }
+    }
 }
 
 /// What the shell reported, once a job is over. See [`Done::worked`] for why `aborted` is not
@@ -130,6 +142,27 @@ pub struct Ran {
     pub error: Option<String>,
     pub outcome: Outcome,
     pub aborted: bool,
+}
+
+impl Ran {
+    /// A job that was never run, and why: nothing done, nothing aborted.
+    fn refused(why: String) -> Self {
+        Self {
+            error: Some(why),
+            outcome: Outcome::default(),
+            aborted: false,
+        }
+    }
+
+    /// A job that did nothing and said nothing against it.
+    #[cfg(test)]
+    fn nothing() -> Self {
+        Self {
+            error: None,
+            outcome: Outcome::default(),
+            aborted: false,
+        }
+    }
 }
 
 /// What an operation actually did, item by item, as the shell reported it.
@@ -678,14 +711,7 @@ impl Operations {
         // the route that was already built for them — and with `job: None`, so a refusal cannot be
         // offered to `Ctrl+Z` as something to undo.
         if let Some(refused) = job.archive_refusal().or_else(|| job.bin_refusal()) {
-            let _ = tx.send(Done {
-                job: None,
-                touched,
-                error: Some(refused.why()),
-                aborted: false,
-                after,
-                outcome: Outcome::default(),
-            });
+            let _ = tx.send(Done::of(None, touched, after, Ran::refused(refused.why())));
             return;
         }
 
@@ -694,14 +720,7 @@ impl Operations {
         // guard is here and not at the five call sites.
         #[cfg(test)]
         if !FOR_REAL.load(std::sync::atomic::Ordering::SeqCst) {
-            let _ = tx.send(Done {
-                job: Some(job),
-                touched,
-                error: None,
-                aborted: false,
-                after,
-                outcome: Outcome::default(),
-            });
+            let _ = tx.send(Done::of(Some(job), touched, after, Ran::nothing()));
             return;
         }
 
@@ -761,33 +780,24 @@ impl Operations {
                 if let Some(scratch) = &mut scratch {
                     scratch.keep = ran.error.is_some() || ran.aborted;
                 }
-                let _ = tx.send(Done {
-                    job: Some(job),
-                    touched,
-                    error: ran.error,
-                    aborted: ran.aborted,
-                    after,
-                    outcome: ran.outcome,
-                });
+                let _ = tx.send(Done::of(Some(job), touched, after, ran));
                 ctx.request_repaint();
             });
         if spawned.is_err() {
             self.running.pop();
-            let _ = self.tx.send(Done {
+            let _ = self.tx.send(Done::of(
                 // No job: it was moved into a closure that will never run, and there is nothing
                 // for the history to offer back anyway. See [`Done::job`].
-                job: None,
-                touched: Vec::new(),
-                error: Some("Could not start the operation".to_owned()),
-                aborted: false,
+                None,
+                Vec::new(),
                 // **The job's own `after`, and not `Nothing`.** A thread that never started still
                 // has to be reported as the thing it was: dropping `After::Settle` here left
                 // [`history::History`] with a reversal permanently in flight, so `undo` and `redo`
                 // both answered `None` and every Ctrl+Z for the rest of the session was told
                 // "Still undoing the last one…". The entry went with it.
-                after: unstarted,
-                outcome: Outcome::default(),
-            });
+                unstarted,
+                Ran::refused("Could not start the operation".to_owned()),
+            ));
         }
     }
 
@@ -885,11 +895,7 @@ impl Drop for Scratch {
 
 #[cfg(not(windows))]
 fn run(_job: &Job, _owner: Owner) -> Ran {
-    Ran {
-        error: Some("File operations are implemented against the Windows shell only".to_owned()),
-        outcome: Outcome::default(),
-        aborted: false,
-    }
+    Ran::refused("File operations are implemented against the Windows shell only".to_owned())
 }
 
 #[cfg(test)]

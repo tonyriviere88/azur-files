@@ -52,8 +52,7 @@ use std::path::PathBuf;
 
 use windows::core::{implement, Ref, BOOL, HRESULT, PCWSTR};
 use windows::Win32::Foundation::{
-    GlobalFree, DV_E_FORMATETC, DV_E_LINDEX, DV_E_TYMED, E_NOTIMPL, E_OUTOFMEMORY,
-    OLE_E_ADVISENOTSUPPORTED, S_OK,
+    DV_E_FORMATETC, DV_E_LINDEX, DV_E_TYMED, E_NOTIMPL, OLE_E_ADVISENOTSUPPORTED, S_OK,
 };
 use windows::Win32::System::Com::{
     IAdviseSink, IDataObject, IDataObject_Impl, IEnumFORMATETC, IEnumSTATDATA, IStream, DATADIR_GET,
@@ -61,9 +60,7 @@ use windows::Win32::System::Com::{
     TYMED_HGLOBAL, TYMED_ISTREAM,
 };
 use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
-use windows::Win32::System::Memory::{
-    GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock, GMEM_MOVEABLE,
-};
+use windows::Win32::System::Memory::{GlobalLock, GlobalSize, GlobalUnlock};
 use windows::Win32::System::Ole::ReleaseStgMedium;
 use windows::Win32::UI::Shell::{
     SHCreateStdEnumFmtEtc, SHCreateStreamOnFileEx, CFSTR_FILECONTENTS, CFSTR_FILEDESCRIPTORW,
@@ -73,9 +70,9 @@ use windows::Win32::UI::Shell::{
 
 use crate::archive::Dragged;
 
-/// `CF_HDROP`, the one predefined format here. Spelled out for the reason [`super`] spells it
-/// out: it is a number rather than a name and the crate does not carry a constant for it.
-const CF_HDROP: u16 = 15;
+// `CF_HDROP`, the one predefined format here: a number rather than a name, and one the crate does
+// not carry a constant for.
+use crate::shell::CF_HDROP;
 
 /// `DROPEFFECT_COPY`. A drag out of an archive is always a copy — there is no move out of a file
 /// this program only reads — and saying so through `CFSTR_PREFERREDDROPEFFECT` is what stops a
@@ -169,19 +166,19 @@ impl Offered {
                 if wanted & TYMED_HGLOBAL.0 as u32 == 0 {
                     return Err(DV_E_TYMED.into());
                 }
-                self.as_global(&self.descriptors())
+                crate::shell::global_medium(&self.descriptors())
             }
             Offer::Effect => {
                 if wanted & TYMED_HGLOBAL.0 as u32 == 0 {
                     return Err(DV_E_TYMED.into());
                 }
-                self.as_global(&COPY.to_le_bytes())
+                crate::shell::global_medium(&COPY.to_le_bytes())
             }
             Offer::Paths => {
                 if wanted & TYMED_HGLOBAL.0 as u32 == 0 {
                     return Err(DV_E_TYMED.into());
                 }
-                self.as_global(&self.dropfiles()?)
+                crate::shell::global_medium(&self.dropfiles()?)
             }
             Offer::Contents => {
                 if wanted & TYMED_ISTREAM.0 as u32 == 0 {
@@ -343,33 +340,6 @@ impl Offered {
         }
     }
 
-    /// Copy bytes into an `HGLOBAL` for a medium.
-    ///
-    /// **Nothing tracks the handle afterwards, and nothing needs to.** A medium handed out of
-    /// `GetData` with a null `pUnkForRelease` belongs to the *target*, which frees it with
-    /// `ReleaseStgMedium`; and the only way out of this function between the allocation and the
-    /// hand-over is the `GlobalLock` failure below, which frees it on the spot. So there is no
-    /// third path for an owner to be in doubt about.
-    fn as_global(&self, bytes: &[u8]) -> windows::core::Result<STGMEDIUM> {
-        // SAFETY: `GMEM_MOVEABLE` is what a clipboard medium requires, and the size is the slice's.
-        let handle = unsafe { GlobalAlloc(GMEM_MOVEABLE, bytes.len())? };
-        // SAFETY: freshly allocated and locked once; the pointer is valid for `bytes.len()`, which
-        // is what it was allocated with. Unlocked before the handle escapes.
-        unsafe {
-            let into = GlobalLock(handle);
-            if into.is_null() {
-                let _ = GlobalFree(Some(handle));
-                return Err(E_OUTOFMEMORY.into());
-            }
-            std::ptr::copy_nonoverlapping(bytes.as_ptr(), into.cast::<u8>(), bytes.len());
-            let _ = GlobalUnlock(handle);
-        }
-        Ok(STGMEDIUM {
-            tymed: TYMED_HGLOBAL.0 as u32,
-            u: STGMEDIUM_0 { hGlobal: handle },
-            pUnkForRelease: std::mem::ManuallyDrop::new(None),
-        })
-    }
 }
 
 /// Which format a target is asking about.
@@ -551,13 +521,7 @@ pub struct Promised {
 /// Ask a data object what it is promising, or `None` if it promises nothing — which is what an
 /// ordinary drag of real files answers, and which sends the caller back to `CF_HDROP`.
 pub fn promised(data: &IDataObject) -> Option<Promised> {
-    let format = FORMATETC {
-        cfFormat: Formats::get().descriptor,
-        ptd: std::ptr::null_mut(),
-        dwAspect: DVASPECT_CONTENT.0,
-        lindex: -1,
-        tymed: TYMED_HGLOBAL.0 as u32,
-    };
+    let format = crate::shell::hglobal_format(Formats::get().descriptor);
     // SAFETY: a live object and a `FORMATETC` that outlives both calls. The medium is released on
     // every path out of this block, there being only the one.
     unsafe {
@@ -630,8 +594,7 @@ unsafe fn top_level(base: *const u8, size: usize) -> Option<Promised> {
             .cast::<FILEDESCRIPTORW>()
             .read_unaligned();
         let units = fd.cFileName;
-        let end = units.iter().position(|unit| *unit == 0).unwrap_or(units.len());
-        let name = String::from_utf16_lossy(&units[..end]);
+        let name = crate::shell::wide_text(&units);
 
         // Both separators, because the format says backslash and a source may write either.
         let (head, has_children) = match name.find(['\\', '/']) {
@@ -712,8 +675,8 @@ mod tests {
     /// and the layout is the part the shell depends on.
     fn descriptors_in(medium: &STGMEDIUM) -> Vec<(String, u64, bool)> {
         assert_eq!(medium.tymed, TYMED_HGLOBAL.0 as u32, "must be an HGLOBAL");
-        // SAFETY: the medium was rendered by `as_global`, so the handle is live and holds the count
-        // followed by that many packed descriptors. Unlocked before returning.
+        // SAFETY: the medium was rendered by `global_medium`, so the handle is live and holds the
+        // count followed by that many packed descriptors. Unlocked before returning.
         unsafe {
             let base = GlobalLock(medium.u.hGlobal).cast::<u8>();
             assert!(!base.is_null(), "the handle should lock");
@@ -731,12 +694,8 @@ mod tests {
                 // struct, which is undefined behaviour and which the compiler refuses. The same
                 // reason `descriptors` fills a local and assigns the field whole.
                 let units = fd.cFileName;
-                let end = units
-                    .iter()
-                    .position(|unit| *unit == 0)
-                    .unwrap_or(units.len());
                 out.push((
-                    String::from_utf16_lossy(&units[..end]),
+                    crate::shell::wide_text(&units),
                     (fd.nFileSizeHigh as u64) << 32 | fd.nFileSizeLow as u64,
                     // `FILE_ATTRIBUTE_DIRECTORY`.
                     fd.dwFileAttributes & 16 != 0,
@@ -909,7 +868,7 @@ mod tests {
         let what = asking(Formats::get().effect, -1, TYMED_HGLOBAL.0 as u32);
         // SAFETY: as above.
         let medium = unsafe { data.GetData(&what) }.expect("the effect should render");
-        // SAFETY: `as_global` wrote four bytes into it.
+        // SAFETY: `global_medium` wrote four bytes into it.
         let effect = unsafe {
             let base = GlobalLock(medium.u.hGlobal).cast::<u8>();
             let value = u32::from_le_bytes(

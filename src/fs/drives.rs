@@ -183,8 +183,19 @@ impl Drive {
 /// forward-slash form here would quietly turn a directory into a machine.
 pub fn unc_server(path: &Path) -> Option<String> {
     let text = path.to_string_lossy();
-    let inner = text.strip_prefix("\\\\")?.trim_end_matches('\\');
+    let inner = unc_inner(&text)?;
     (!inner.is_empty() && !inner.contains('\\')).then(|| inner.to_owned())
+}
+
+/// What is between a UNC path's leading `\\` and any trailing ones: `fileserver\web` out of
+/// `\\fileserver\web\`. Backslashes only, for the reasons [`unc_server`] gives.
+fn unc_inner(text: &str) -> Option<&str> {
+    Some(text.strip_prefix("\\\\")?.trim_end_matches('\\'))
+}
+
+/// The path that names machine `host` itself: `\\fileserver`.
+pub(super) fn machine_path(host: &str) -> PathBuf {
+    PathBuf::from(format!("\\\\{host}"))
 }
 
 /// The machine a connection points at, if it is one this program can offer to browse.
@@ -230,7 +241,7 @@ pub fn machine_of(remote: &Path) -> Option<String> {
 /// `None` for anything that is not a UNC path, because there is nobody to sign in to on `C:`.
 pub fn connect_target(path: &Path) -> Option<PathBuf> {
     let text = path.to_string_lossy();
-    let inner = text.strip_prefix("\\\\")?.trim_end_matches('\\');
+    let inner = unc_inner(&text)?;
     if inner.is_empty() {
         return None;
     }
@@ -238,7 +249,7 @@ pub fn connect_target(path: &Path) -> Option<PathBuf> {
     let server = parts.next()?;
     Some(match parts.next() {
         Some(share) => PathBuf::from(format!("\\\\{server}\\{share}")),
-        None => PathBuf::from(format!("\\\\{server}")),
+        None => machine_path(server),
     })
 }
 
@@ -302,7 +313,7 @@ pub fn candidates(dead: &[PathBuf], live: &[PathBuf]) -> Vec<PathBuf> {
         let Some(host) = machine_of(connection) else {
             continue;
         };
-        let path = PathBuf::from(format!("\\\\{host}"));
+        let path = machine_path(&host);
         if !holds(live, &path) && !holds(&asking, &path) {
             asking.push(path);
         }

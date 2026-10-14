@@ -9,10 +9,11 @@
 //! version answers.
 
 use super::*;
+use crate::shell::{nul_terminated, wide_text};
 use std::ffi::c_void;
-use std::os::windows::ffi::OsStrExt;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 
-use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+use windows_sys::Win32::Foundation::{HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FindClose, FindFirstFileNameW, FindNextFileNameW, GetFileInformationByHandle,
     GetVolumePathNameW, BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS,
@@ -77,9 +78,9 @@ extern "system" {
     ) -> i32;
 }
 
-/// The folder whose files are being counted.
+/// The folder whose files are being counted, closed when this goes.
 pub(super) struct Counter {
-    folder: HANDLE,
+    folder: OwnedHandle,
     path: PathBuf,
     /// Cleared on the first refusal of the information class, after which every file is opened.
     by_name: std::cell::Cell<bool>,
@@ -87,7 +88,7 @@ pub(super) struct Counter {
 
 impl Counter {
     pub(super) fn open(dir: &Path) -> Option<Self> {
-        let wide = wide(dir);
+        let wide = nul_terminated(dir);
         // SAFETY: `wide` is NUL-terminated and outlives the call.
         let folder = unsafe {
             CreateFileW(
@@ -101,7 +102,8 @@ impl Counter {
             )
         };
         (folder != INVALID_HANDLE_VALUE).then(|| Self {
-            folder,
+            // SAFETY: a handle just opened, and owned from here on.
+            folder: unsafe { OwnedHandle::from_raw_handle(folder) },
             path: dir.to_owned(),
             by_name: std::cell::Cell::new(true),
         })
@@ -132,7 +134,7 @@ impl Counter {
         };
         let attributes = ObjectAttributes {
             length: std::mem::size_of::<ObjectAttributes>() as u32,
-            root: self.folder,
+            root: self.folder.as_raw_handle(),
             name: &text,
             attributes: OBJ_CASE_INSENSITIVE,
             security: std::ptr::null(),
@@ -164,7 +166,7 @@ impl Counter {
     }
 
     fn by_handle(&self, name: &str) -> Option<u32> {
-        let wide = wide(&self.path.join(name));
+        let wide = nul_terminated(self.path.join(name));
         // SAFETY: as in [`Counter::open`]. Opened for its attributes only and as itself, so nothing
         // is read and nothing is followed.
         let file = unsafe {
@@ -181,18 +183,12 @@ impl Counter {
         if file == INVALID_HANDLE_VALUE {
             return None;
         }
+        // SAFETY: a handle just opened, and owned from here on; closed when this goes.
+        let file = unsafe { OwnedHandle::from_raw_handle(file) };
         // SAFETY: an open handle, and a local of the size the call writes.
         let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
-        let ok = unsafe { GetFileInformationByHandle(file, &mut info) } != 0;
-        unsafe { CloseHandle(file) };
+        let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } != 0;
         ok.then_some(info.nNumberOfLinks)
-    }
-}
-
-impl Drop for Counter {
-    fn drop(&mut self) {
-        // SAFETY: opened by `open` and closed only here.
-        unsafe { CloseHandle(self.folder) };
     }
 }
 
@@ -201,13 +197,13 @@ impl Drop for Counter {
 /// `FindFirstFileNameW` gives each name relative to the volume's root, without the drive — so the
 /// root is asked for once and put back in front.
 pub(super) fn names(path: &Path) -> Vec<String> {
-    let wide = wide(path);
+    let wide = nul_terminated(path);
     let mut root = [0u16; 1024];
     // SAFETY: `wide` is NUL-terminated; the buffer is as long as said.
     if unsafe { GetVolumePathNameW(wide.as_ptr(), root.as_mut_ptr(), root.len() as u32) } == 0 {
         return Vec::new();
     }
-    let root = text(&root);
+    let root = wide_text(&root);
     let root = root.trim_end_matches('\\');
 
     let mut names = Vec::new();
@@ -219,7 +215,7 @@ pub(super) fn names(path: &Path) -> Vec<String> {
         return names;
     }
     loop {
-        names.push(format!("{root}{}", text(&buffer)));
+        names.push(format!("{root}{}", wide_text(&buffer)));
         length = buffer.len() as u32;
         // SAFETY: an open find handle and the same buffer.
         if unsafe { FindNextFileNameW(find, &mut length, buffer.as_mut_ptr()) } == 0 {
@@ -229,13 +225,4 @@ pub(super) fn names(path: &Path) -> Vec<String> {
     // SAFETY: opened above, closed once.
     unsafe { FindClose(find) };
     names
-}
-
-fn wide(path: &Path) -> Vec<u16> {
-    path.as_os_str().encode_wide().chain(Some(0)).collect()
-}
-
-fn text(units: &[u16]) -> String {
-    let len = units.iter().position(|&unit| unit == 0).unwrap_or(units.len());
-    String::from_utf16_lossy(&units[..len])
 }

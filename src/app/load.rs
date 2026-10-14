@@ -173,18 +173,13 @@ impl App {
         // Doing that sixty times a second to hand over a set that is almost always identical would
         // stall the walk to say nothing. Cancellation stays immediate, because the *difference* is the
         // cancellation.
-        let live: Vec<u64> = self
-            .panes
-            .iter()
-            .flat_map(|pane| pane.tabs.iter())
-            .filter_map(|tab| tab.sizes.live())
-            .collect();
+        let live: Vec<u64> = self.tabs().filter_map(|tab| tab.sizes.live()).collect();
         if live != self.measuring {
             self.sizes.only(&live);
             self.measuring = live;
         }
 
-        for tab in self.panes.iter_mut().flat_map(|pane| pane.tabs.iter_mut()) {
+        for tab in tabs_mut(&mut self.panes) {
             // This PC has nothing to count — see `filelist::status_line`, where the button that says
             // so is drawn disabled. The same answer from the other end. Nor has the Recycle Bin.
             if crate::fs::is_synthetic(&tab.path) {
@@ -202,17 +197,14 @@ impl App {
             // answer belongs to the one that asked. `take` checks it, and stopping at the first match
             // is what `deliver_icons` and `deliver_links` beside this do — a generation is unique, so
             // there is never a second tab to offer it to.
-            self.panes
-                .iter_mut()
-                .flat_map(|pane| pane.tabs.iter_mut())
-                .any(|tab| tab.sizes.take(&answer, now));
+            tabs_mut(&mut self.panes).any(|tab| tab.sizes.take(&answer, now));
         }
 
         // And the frame that would notice a re-sort has come due. Nothing else would ask for it once
         // the last answer has landed: this program is idle between events. The same booking
         // `start_scans` makes for `SLOW_SCAN`, and `breadcrumb::show` for the filter.
         let mut soonest: Option<f64> = None;
-        for tab in self.panes.iter_mut().flat_map(|pane| pane.tabs.iter_mut()) {
+        for tab in tabs_mut(&mut self.panes) {
             if let Some(left) = tab.settle_sizes(now) {
                 soonest = Some(soonest.map_or(left, |best: f64| best.min(left)));
             }
@@ -234,12 +226,7 @@ impl App {
             return;
         }
         for (view, row, index) in answers {
-            let Some(tab) = self
-                .panes
-                .iter_mut()
-                .flat_map(|pane| pane.tabs.iter_mut())
-                .find(|tab| tab.view == view)
-            else {
+            let Some(tab) = tabs_mut(&mut self.panes).find(|tab| tab.view == view) else {
                 continue;
             };
             if let Some(slot) = tab.file_icons.get_mut(row as usize) {
@@ -258,12 +245,7 @@ impl App {
             return;
         }
         for (view, row, target) in answers {
-            let Some(tab) = self
-                .panes
-                .iter_mut()
-                .flat_map(|pane| pane.tabs.iter_mut())
-                .find(|tab| tab.view == view)
-            else {
+            let Some(tab) = tabs_mut(&mut self.panes).find(|tab| tab.view == view) else {
                 continue;
             };
             // Only if the row is still asking. A refresh clears the map, and an answer that
@@ -304,20 +286,13 @@ impl App {
     /// left a row behind. And a stale row is worse than wrong — dragging one cannot start a
     /// drag, so the window looked like it had stopped responding.
     pub(super) fn collect_changes(&mut self, ctx: &egui::Context) {
-        let mut folders: Vec<PathBuf> = self
-            .panes
-            .iter()
-            .flat_map(|pane| pane.tabs.iter())
-            .map(|tab| tab.path.clone())
-            .collect();
+        let mut folders: Vec<PathBuf> = self.tabs().map(|tab| tab.path.clone()).collect();
         // **And every `.git` behind a folder on screen.** A commit, a pull, a branch switch or a
         // rebase changes what git says about a folder without changing the folder, so watching the
         // folder alone would leave the marks describing the last read and nothing to disprove them.
         // See [`crate::git::Repo::dot_git`].
         folders.extend(
-            self.panes
-                .iter()
-                .flat_map(|pane| pane.tabs.iter())
+            self.tabs()
                 .filter_map(|tab| tab.git.as_ref())
                 .map(|repo| repo.dot_git.clone()),
         );
@@ -362,15 +337,13 @@ impl App {
             // folder. See [`crate::git::stamp`], which is what the answer carries so that its own
             // write compares equal and everything else does not.
             let watching_git = self
-                .panes
-                .iter()
-                .flat_map(|pane| pane.tabs.iter())
+                .tabs()
                 .any(|tab| tab.git.as_ref().is_some_and(|repo| repo.dot_git == path));
             if watching_git {
                 // Once per notification rather than once per tab: two panes in one repository ask
                 // the same question of the same directory.
                 let stamp = crate::git::stamp(&path);
-                for tab in self.panes.iter_mut().flat_map(|pane| pane.tabs.iter_mut()) {
+                for tab in tabs_mut(&mut self.panes) {
                     if tab
                         .git
                         .as_ref()
@@ -383,11 +356,7 @@ impl App {
                 // it is a listing to re-read as well, and the rest of this loop is what does that.
                 // The old spelling stopped here unconditionally, so a file appearing in the `.git`
                 // you were looking at did not show up.
-                let on_screen = self
-                    .panes
-                    .iter()
-                    .flat_map(|pane| pane.tabs.iter())
-                    .any(|tab| tab.path == path);
+                let on_screen = self.tabs().any(|tab| tab.path == path);
                 if !on_screen {
                     continue;
                 }
@@ -403,16 +372,14 @@ impl App {
             // consumed by the very re-read this lets through — one extra read, once, and then the
             // filter applies again as before. See [`crate::pane::Tab::name_the_new`].
             let expected = self
-                .panes
-                .iter()
-                .flat_map(|pane| pane.tabs.iter())
+                .tabs()
                 .any(|tab| tab.path == path && tab.name_the_new.is_some());
             // The folder itself, echoing the same write back through its own watch. A real change to
             // this folder's own contents landing in the same short window is missed rather than
             // acted on immediately — recoverable by `F5`, or by the next thing that touches it — which
             // is the cheaper mistake next to a loop that never stops on its own.
             let echo = !expected
-                && self.panes.iter().flat_map(|pane| pane.tabs.iter()).any(|tab| {
+                && self.tabs().any(|tab| {
                     tab.path == path
                         && now - tab.git_settled_at.unwrap_or(f64::NEG_INFINITY) <= GIT_WRITE_SETTLE
                 });
@@ -438,7 +405,7 @@ impl App {
     pub(super) fn folder_changed(&mut self, path: &Path) {
         self.loader.invalidate(path);
         let Self { panes, loader, .. } = self;
-        for tab in panes.iter_mut().flat_map(|pane| pane.tabs.iter_mut()) {
+        for tab in tabs_mut(panes) {
             if tab.path == path {
                 // Replacing a token that is already out means the older answer is dropped when
                 // it arrives, which is what should happen: it read the folder as it was.
@@ -457,7 +424,7 @@ impl App {
             // end of this body — deciding what Ctrl+Z does next needs both what the operation did
             // and whether it worked.
             if let Some(why) = done.error.as_deref().filter(|why| !why.is_empty()) {
-                self.notice = Some(why.to_owned());
+                self.report(why.to_owned());
             }
             // The documented end of a cut, and only when the move actually happened.
             if let crate::shell::ops::After::FinishCut(was) = done.after {
@@ -503,11 +470,9 @@ impl App {
             }
             // Only a tab showing an affected folder re-reads. A tab elsewhere is left
             // alone, which is the point of tracking this by path.
-            for pane in &mut self.panes {
-                for tab in &mut pane.tabs {
-                    if done.touched.contains(&tab.path) || bin.as_ref() == Some(&tab.path) {
-                        tab.refresh();
-                    }
+            for tab in tabs_mut(&mut self.panes) {
+                if done.touched.contains(&tab.path) || bin.as_ref() == Some(&tab.path) {
+                    tab.refresh();
                 }
             }
             // What Ctrl+Z will take back, or — when this *was* a Ctrl+Z — which stack its entry
@@ -552,41 +517,31 @@ impl App {
         } = self;
         let seconds = crate::history::now();
         let mut asked = false;
-        for pane in panes.iter_mut() {
-            for tab in pane.tabs.iter_mut() {
-                if tab.dir.is_some() || tab.awaiting.is_some() {
-                    continue;
+        for tab in tabs_mut(panes) {
+            if tab.dir.is_some() || tab.awaiting.is_some() {
+                continue;
+            }
+            // A flattened tab never looks in the cache, in either direction: the
+            // cache holds the folder's own children under this very path, and handing
+            // those over would put a shallow listing on screen with the button lit.
+            // It is not put *in* the cache either — see [`Loader::request_deep`].
+            let cached = if tab.flat { None } else { loader.cached(&tab.path) };
+            match cached {
+                Some(dir) => {
+                    // A visit, like a worker's answer is — see [`Tab::take_visit`].
+                    if let Some(path) = tab.take_visit(dir.error.is_none()) {
+                        visits.visit(&path, seconds);
+                    }
+                    tab.apply(dir);
+                    // The cache's answer is a listing arriving, exactly as a worker's is — and
+                    // this is the path Back, Forward and a revisited folder take, which is
+                    // rather more than half of the openings there are. Missing it here would
+                    // make the rule work only on folders that happened to be cold.
+                    tab.choose_view(auto, providers);
                 }
-                // A flattened tab never looks in the cache, in either direction: the
-                // cache holds the folder's own children under this very path, and handing
-                // those over would put a shallow listing on screen with the button lit.
-                // It is not put *in* the cache either — see [`Loader::request_deep`].
-                if tab.flat {
-                    tab.awaiting = Some(ask_for(tab, loader));
-                    tab.asked_at = Some(now);
+                None => {
+                    ask_now(tab, loader, now);
                     asked = true;
-                    continue;
-                }
-                match loader.cached(&tab.path) {
-                    Some(dir) => {
-                        // A visit, like a worker's answer is — see [`Tab::take_visit`].
-                        if let Some(path) = tab.take_visit(dir.error.is_none()) {
-                            visits.visit(&path, seconds);
-                        }
-                        tab.apply(dir);
-                        // The cache's answer is a listing arriving, exactly as a worker's is — and
-                        // this is the path Back, Forward and a revisited folder take, which is
-                        // rather more than half of the openings there are. Missing it here would
-                        // make the rule work only on folders that happened to be cold.
-                        tab.choose_view(auto, providers);
-                    }
-                    None => {
-                        tab.awaiting = Some(ask_for(tab, loader));
-                        // When it was asked for, which is what decides whether the listing
-                        // says anything about waiting. See [`crate::pane::SLOW_SCAN`].
-                        tab.asked_at = Some(now);
-                        asked = true;
-                    }
                 }
             }
         }

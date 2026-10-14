@@ -134,7 +134,7 @@ impl Kind {
     /// The label rather than a second spelling of the same three names: a settings key and a dropdown
     /// entry that can drift apart is a settings key that silently stops matching.
     pub fn parse(text: &str) -> Option<Self> {
-        Self::ALL.into_iter().find(|kind| kind.label() == text)
+        Self::ALL.into_iter().find(|kind| kind.label().eq_ignore_ascii_case(text))
     }
 
     /// The statement that closes a command: prints the marker, this command's status, and where the
@@ -473,11 +473,7 @@ impl Session {
     /// about, it can be scrolled back to, and it is the same shape as every other answer the panel
     /// gives. Closed on arrival, because there is nothing to wait for.
     fn refuse(&mut self, command: &str, why: String) {
-        let id = self.next_id;
-        self.next_id += 1;
-        if self.blocks.len() >= BLOCKS {
-            self.blocks.remove(0);
-        }
+        let id = self.next_block();
         self.blocks.push(Block {
             command: command.to_owned(),
             id,
@@ -487,9 +483,37 @@ impl Session {
         });
     }
 
-    fn dispatch_with(&mut self, before: Option<String>, command: String) {
+    /// The id for a block about to be pushed, with room made for it under [`BLOCKS`] by dropping the
+    /// oldest — first, so the log never holds one more than the cap, even for a moment.
+    fn next_block(&mut self) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
+        if self.blocks.len() >= BLOCKS {
+            self.blocks.remove(0);
+        }
+        id
+    }
+
+    /// Forget any part-line either pipe was holding, and that either was redrawing one: the state of
+    /// a fresh shell, or of a block nothing has been written to yet.
+    fn reset_lines(&mut self) {
+        self.partial = [String::new(), String::new()];
+        self.redrawing = [false, false];
+    }
+
+    /// End the job, then the shell, and wait for the shell to be gone.
+    ///
+    /// The job first, or a shell with children outlives the window that owned it.
+    fn kill_child(&mut self) {
+        self.job.end();
+        if let Some(child) = self.child.as_mut() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+
+    fn dispatch_with(&mut self, before: Option<String>, command: String) {
+        let id = self.next_block();
         // **Anything written without a newline behind it belongs to nobody.** Nothing is running or
         // this would have been queued, so a part-line still waiting for its ending was written by the
         // shell itself rather than by a command — and the next newline to arrive will be the new
@@ -498,11 +522,7 @@ impl Session {
         // That is not hypothetical: `cmd` opens by writing a prompt, a prompt has no newline, and so
         // the first line of the first block came out as `D:\src>hello`. Cleared for every shell,
         // because a part-line outliving the command that started it is wrong in all of them.
-        self.partial = [String::new(), String::new()];
-        self.redrawing = [false, false];
-        if self.blocks.len() >= BLOCKS {
-            self.blocks.remove(0);
-        }
+        self.reset_lines();
         // The closing statement goes down the pipe in the same write as the command, so nothing can be
         // interleaved between them by a second `send` — and, wherever it can, on the same *line*, so
         // the pipe is empty for the command to read from. See [`Kind::needs_its_own_line`].
@@ -622,11 +642,7 @@ impl Session {
     /// reporting it all along — so the replacement starts where the old one was, and the only thing
     /// actually lost is whatever was `export`ed by hand.
     pub fn stop(&mut self, ctx: &egui::Context) {
-        self.job.end();
-        if let Some(child) = self.child.as_mut() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        self.kill_child();
         self.stdin = None;
         self.child = None;
         self.queued.clear();
@@ -645,8 +661,7 @@ impl Session {
                 self.job = job;
                 self.gone = false;
                 self.stdin = self.child.as_mut().and_then(|child| child.stdin.take());
-                self.partial = [String::new(), String::new()];
-                self.redrawing = [false, false];
+                self.reset_lines();
                 self.prepare();
             }
             Err(why) => {
@@ -821,11 +836,7 @@ impl Session {
 impl Drop for Session {
     /// End the job before the child, or a shell with children outlives the window that owned it.
     fn drop(&mut self) {
-        self.job.end();
-        if let Some(child) = self.child.as_mut() {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+        self.kill_child();
     }
 }
 
@@ -1041,13 +1052,17 @@ pub fn needs_a_terminal(command: &str) -> Option<String> {
 }
 
 /// The bare name of a program: no folder, no `.exe`, lower case.
+///
+/// Lowered *before* the extension comes off, because Windows does not care how `.exe` is spelt and
+/// so neither can this: trimming `.exe` and `.EXE` alone let `vim.Exe` through as a program the
+/// panel can host, and it hung there waiting for a terminal.
 fn bare_name(word: &str) -> String {
     word.rsplit(['/', '\\'])
         .next()
         .unwrap_or(word)
-        .trim_end_matches(".exe")
-        .trim_end_matches(".EXE")
         .to_ascii_lowercase()
+        .trim_end_matches(".exe")
+        .to_owned()
 }
 
 /// Run a command in a terminal of its own, for the things a pipe cannot carry.
@@ -1061,8 +1076,7 @@ fn bare_name(word: &str) -> String {
 /// and a console of this program's own making otherwise. No new dependency either way: the whole cost
 /// of this is picking the right arguments.
 pub fn in_terminal(kind: Kind, dir: &Path, command: &str) -> Result<(), String> {
-    let (program, args) =
-        interactive(kind, command).ok_or_else(|| format!("{} is not installed", kind.label()))?;
+    let (program, args) = interactive(kind, command).ok_or_else(|| not_installed(kind))?;
 
     // **A `;` is Windows Terminal's own argument separator**, for splitting a window into panes — so a
     // command with one in it would be cut in half at it and half of it run somewhere unexpected.
@@ -1085,10 +1099,17 @@ pub fn in_terminal(kind: Kind, dir: &Path, command: &str) -> Result<(), String> 
         launch.current_dir(dir);
     }
     crate::shell::new_console(&mut launch);
-    launch
-        .spawn()
-        .map(|_| ())
-        .map_err(|why| format!("Cannot start {}: {why}", kind.label()))
+    launch.spawn().map(|_| ()).map_err(|why| cannot_start(kind, why))
+}
+
+/// What the panel says when there is no such shell on this machine.
+fn not_installed(kind: Kind) -> String {
+    format!("{} is not installed", kind.label())
+}
+
+/// What the panel says when the shell is there and would not start.
+fn cannot_start(kind: Kind, why: std::io::Error) -> String {
+    format!("Cannot start {}: {why}", kind.label())
 }
 
 /// A shell told to run one command interactively.
@@ -1102,10 +1123,7 @@ fn interactive(kind: Kind, command: &str) -> Option<(PathBuf, Vec<String>)> {
     // and the `-i` that a program looking for a terminal wants to find.
     let (path, flags): (PathBuf, Vec<&str>) = match kind {
         Kind::Bash => (bash()?, vec!["--login", "-i", "-c"]),
-        Kind::PowerShell => (
-            which("pwsh.exe").or_else(|| which("powershell.exe"))?,
-            vec!["-NoLogo", "-Command"],
-        ),
+        Kind::PowerShell => (powershell()?, vec!["-NoLogo", "-Command"]),
         Kind::Cmd => (PathBuf::from("cmd.exe"), vec!["/C"]),
     };
     let mut args: Vec<String> = flags.into_iter().map(str::to_owned).collect();
@@ -1119,7 +1137,7 @@ fn spawn(
     dir: &Path,
     ctx: &egui::Context,
 ) -> Result<(Child, Receiver<Chunk>, Job), String> {
-    let (program, args) = program(kind).ok_or_else(|| format!("{} is not installed", kind.label()))?;
+    let (program, args) = program(kind).ok_or_else(|| not_installed(kind))?;
 
     let mut command = Command::new(&program);
     command
@@ -1144,9 +1162,7 @@ fn spawn(
         .env("CHERE_INVOKING", "1");
     crate::shell::no_window(&mut command);
 
-    let mut child = command
-        .spawn()
-        .map_err(|why| format!("Cannot start {}: {why}", kind.label()))?;
+    let mut child = command.spawn().map_err(|why| cannot_start(kind, why))?;
 
     let job = Job::holding(&child);
 
@@ -1285,9 +1301,7 @@ fn program(kind: Kind) -> Option<(PathBuf, Vec<&'static str>)> {
         // `--login` is what builds the MSYS environment — `PATH`, `HOME`, `/usr/bin`. It also ends
         // by changing to the home directory unless `CHERE_INVOKING` is set, which `spawn` does.
         Kind::Bash => bash().map(|path| (path, vec!["--login", "-s"])),
-        Kind::PowerShell => which("pwsh.exe")
-            .or_else(|| which("powershell.exe"))
-            .map(|path| (path, vec!["-NoLogo", "-Command", "-"])),
+        Kind::PowerShell => powershell().map(|path| (path, vec!["-NoLogo", "-Command", "-"])),
         // `/Q` is echo off, without which every command appears twice. `/V:ON` turns on delayed
         // expansion, which is what makes `!ERRORLEVEL!` in [`Kind::closing`] mean anything — without
         // it every block reports the status of the command before it. See the comment there.
@@ -1315,6 +1329,11 @@ fn bash() -> Option<PathBuf> {
         }
     }
     which("bash.exe")
+}
+
+/// PowerShell 7 where it is installed, and the Windows PowerShell every machine has otherwise.
+fn powershell() -> Option<PathBuf> {
+    which("pwsh.exe").or_else(|| which("powershell.exe"))
 }
 
 /// Where a program is, by the search the shell would do.

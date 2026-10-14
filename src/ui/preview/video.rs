@@ -314,7 +314,6 @@ fn strip(
         },
         true,
         false,
-        surface,
     )
     .clicked()
     {
@@ -350,7 +349,6 @@ fn strip(
         },
         true,
         false,
-        surface,
     )
     .clicked()
     {
@@ -380,7 +378,6 @@ fn strip(
             if muted { "Unmute" } else { "Mute" },
             true,
             false,
-            surface,
         )
         .clicked()
         {

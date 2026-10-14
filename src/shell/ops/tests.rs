@@ -228,7 +228,7 @@ fn the_sink_reports_what_the_shell_actually_did() {
     let _serialised = crate::shell::serialised();
     crate::shell::init();
 
-    let root = sandbox("sink");
+    let root = crate::sandbox::fresh("sink");
     let from = root.join("from");
     let into = root.join("into");
     std::fs::create_dir_all(&from).expect("sandbox");
@@ -351,7 +351,7 @@ fn a_replace_reports_no_item_and_no_name_without_crashing() {
     let _serialised = crate::shell::serialised();
     crate::shell::init();
 
-    let root = sandbox("landed");
+    let root = crate::sandbox::fresh("landed");
     std::fs::create_dir_all(&root).expect("sandbox");
 
     // SAFETY: a pure lookup; the item is dropped at the end of the test.
@@ -391,7 +391,7 @@ fn a_move_and_a_rename_can_be_put_back() {
     let _serialised = crate::shell::serialised();
     crate::shell::init();
 
-    let root = sandbox("put-back");
+    let root = crate::sandbox::fresh("put-back");
     let a = root.join("a");
     let b = root.join("b");
     let dest = root.join("dest");
@@ -472,7 +472,7 @@ fn a_recycled_file_comes_back_from_the_bin() {
     let _serialised = crate::shell::serialised();
     crate::shell::init();
 
-    let root = sandbox("recycle");
+    let root = crate::sandbox::fresh("recycle");
     let exact = root.join("recycled.txt");
     let searched = root.join("searched.txt");
     std::fs::write(&exact, b"from the id list").expect("write");
@@ -614,7 +614,7 @@ fn a_move_can_be_undone_and_redone_through_the_history() {
     let _for_real = for_real();
 
     let ctx = egui::Context::default();
-    let root = sandbox("history");
+    let root = crate::sandbox::fresh("history");
     let from = root.join("from");
     let dest = root.join("dest");
     std::fs::create_dir_all(&from).expect("sandbox");
@@ -709,7 +709,7 @@ fn a_batch_rename_is_one_undo() {
     let _for_real = for_real();
 
     let ctx = egui::Context::default();
-    let root = sandbox("batch-rename");
+    let root = crate::sandbox::fresh("batch-rename");
     std::fs::create_dir_all(&root).expect("sandbox");
     let names = ["a.txt", "b.txt", "c.txt"];
     for name in names {
@@ -783,7 +783,7 @@ fn shortcuts_from_a_drop_can_be_undone() {
     let _for_real = for_real();
 
     let ctx = egui::Context::default();
-    let root = sandbox("link-undo");
+    let root = crate::sandbox::fresh("link-undo");
     let from = root.join("from");
     let into = root.join("into");
     std::fs::create_dir_all(&from).expect("sandbox");
@@ -903,7 +903,7 @@ fn links_from_a_drop_are_undone_as_links() {
     let _for_real = for_real();
 
     let ctx = egui::Context::default();
-    let root = sandbox("link-kinds-undo");
+    let root = crate::sandbox::fresh("link-kinds-undo");
     let into = root.join("into");
     let folder = root.join("folder");
     std::fs::create_dir_all(&into).expect("sandbox");
@@ -1080,14 +1080,14 @@ fn what_the_shell_puts_on_screen() {
             },
         ),
     ] {
-        let before = windows_of_this_process();
+        let before = crate::shell::windows_of_this_process();
         let handle = std::thread::spawn(move || super::run(&job, Owner::default()).error);
 
         // Watch for anything new for a couple of seconds, then shut it.
         let mut seen: Vec<(String, String)> = Vec::new();
         let deadline = Instant::now() + Duration::from_secs(3);
         while Instant::now() < deadline {
-            for (hwnd, class, title) in windows_of_this_process() {
+            for (hwnd, class, title) in crate::shell::windows_of_this_process() {
                 if before.iter().any(|(h, _, _)| *h == hwnd) {
                     continue;
                 }
@@ -1096,7 +1096,7 @@ fn what_the_shell_puts_on_screen() {
                 }
                 seen.push((class.clone(), title.clone()));
                 println!("  {what}: `{title}` [{class}]");
-                close(hwnd);
+                crate::shell::close_window(hwnd);
             }
             if handle.is_finished() {
                 break;
@@ -1119,7 +1119,7 @@ fn what_the_shell_puts_on_screen() {
 fn run_watching(job: Job) -> (Option<String>, Vec<(String, String)>) {
     use std::time::{Duration, Instant};
 
-    let before = windows_of_this_process();
+    let before = crate::shell::windows_of_this_process();
     let handle = std::thread::spawn(move || super::run(&job, Owner::default()).error);
     let mut seen: Vec<(String, String)> = Vec::new();
     // Watched for a while before anything is closed. A shell operation raises a progress
@@ -1130,7 +1130,7 @@ fn run_watching(job: Job) -> (Option<String>, Vec<(String, String)>) {
     let deadline = Instant::now() + Duration::from_secs(8);
     while Instant::now() < deadline {
         let mut fresh = Vec::new();
-        for (hwnd, class, title) in windows_of_this_process() {
+        for (hwnd, class, title) in crate::shell::windows_of_this_process() {
             if before.iter().any(|(h, _, _)| *h == hwnd) {
                 continue;
             }
@@ -1145,7 +1145,7 @@ fn run_watching(job: Job) -> (Option<String>, Vec<(String, String)>) {
         if Instant::now() > patience {
             // Still going, so something is waiting to be answered.
             for hwnd in fresh {
-                close(hwnd);
+                crate::shell::close_window(hwnd);
             }
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -1154,60 +1154,6 @@ fn run_watching(job: Job) -> (Option<String>, Vec<(String, String)>) {
         handle.join().expect("the operation thread panicked"),
         seen,
     )
-}
-
-/// Every visible top-level window this process owns, with its class and title.
-#[cfg(all(test, windows))]
-fn windows_of_this_process() -> Vec<(isize, String, String)> {
-    use windows::core::BOOL;
-    use windows::Win32::Foundation::{HWND, LPARAM, TRUE};
-    use windows::Win32::System::Threading::GetCurrentProcessId;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        EnumWindows, GetClassNameW, GetWindowTextW, GetWindowThreadProcessId, IsWindowVisible,
-    };
-
-    unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
-        let found = &mut *(lparam.0 as *mut Vec<(isize, String, String)>);
-        let mut pid = 0u32;
-        GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        if pid != GetCurrentProcessId() || !IsWindowVisible(hwnd).as_bool() {
-            return TRUE;
-        }
-        let mut class = [0u16; 256];
-        let n = GetClassNameW(hwnd, &mut class);
-        let mut title = [0u16; 512];
-        let m = GetWindowTextW(hwnd, &mut title);
-        found.push((
-            hwnd.0 as isize,
-            String::from_utf16_lossy(&class[..n.max(0) as usize]),
-            String::from_utf16_lossy(&title[..m.max(0) as usize]),
-        ));
-        TRUE
-    }
-
-    let mut found: Vec<(isize, String, String)> = Vec::new();
-    // SAFETY: the callback only writes through the pointer it is handed, which outlives
-    // the enumeration.
-    unsafe {
-        let _ = EnumWindows(Some(visit), LPARAM(&mut found as *mut _ as isize));
-    }
-    found
-}
-
-/// Ask a window to go away, which for a shell dialog is a cancel.
-#[cfg(all(test, windows))]
-fn close(hwnd: isize) {
-    use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-    use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
-    // SAFETY: posting is asynchronous and safe against a window that has already gone.
-    unsafe {
-        let _ = PostMessageW(
-            Some(HWND(hwnd as *mut std::ffi::c_void)),
-            WM_CLOSE,
-            WPARAM(0),
-            LPARAM(0),
-        );
-    }
 }
 
 /// A path with forward slashes in it has to work, because one can get this far.
@@ -1223,7 +1169,7 @@ fn the_shell_takes_a_path_with_forward_slashes() {
     let _serialised = crate::shell::serialised();
     crate::shell::init();
 
-    let root = sandbox("slashes");
+    let root = crate::sandbox::fresh("slashes");
     let one = root.join("one.txt");
     std::fs::write(&one, b"one").expect("write");
 
@@ -1278,7 +1224,7 @@ fn a_copy_into_its_own_folder_renames_rather_than_asking() {
     let _serialised = crate::shell::serialised();
     crate::shell::init();
 
-    let root = sandbox("same-folder");
+    let root = crate::sandbox::fresh("same-folder");
     let one = root.join("one.txt");
     std::fs::write(&one, b"one").expect("write");
 
@@ -1307,20 +1253,6 @@ fn a_copy_into_its_own_folder_renames_rather_than_asking() {
     );
 
     crate::sandbox::remove(&root);
-}
-
-/// A fresh, empty folder under `target/sandbox`, which is expendable.
-#[cfg(all(test, windows))]
-fn sandbox(name: &str) -> PathBuf {
-    // Joined a component at a time: `join("target/sandbox")` would keep the forward
-    // slashes, and half of what is tested here is about exactly that.
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("target")
-        .join("sandbox")
-        .join(name);
-    crate::sandbox::remove(&root);
-    std::fs::create_dir_all(&root).expect("sandbox");
-    root
 }
 
 #[test]

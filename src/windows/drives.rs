@@ -535,8 +535,7 @@ pub fn connect(target: &Path, owner: crate::shell::Owner) -> Result<(), u32> {
         return Err(ERROR_CANCELLED);
     }
 
-    let mut name: Vec<u16> = target.as_os_str().encode_wide().collect();
-    name.push(0);
+    let mut name = crate::shell::nul_terminated(target);
     let resource = NETRESOURCEW {
         dwType: RESOURCETYPE_DISK,
         // The only field the call reads besides the type: no local name, because this is not
@@ -592,11 +591,7 @@ pub fn reconnect(letter: &str, owner: crate::shell::Owner) -> Result<(), u32> {
     }
 
     // `H:`, without the backslash: a device name, which is what the profile is keyed on.
-    let device: Vec<u16> = letter
-        .trim_end_matches('\\')
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
+    let device = crate::shell::nul_terminated(letter.trim_end_matches('\\'));
     match unsafe { WNetRestoreSingleConnectionW(owner.raw(), device.as_ptr(), 1) } {
         NO_ERROR => Ok(()),
         code => Err(code),
@@ -621,8 +616,7 @@ pub fn disconnect(remote: &Path) -> Result<(), u32> {
         return Err(ERROR_CANCELLED);
     }
 
-    let mut name: Vec<u16> = remote.as_os_str().encode_wide().collect();
-    name.push(0);
+    let name = crate::shell::nul_terminated(remote);
     match unsafe { WNetCancelConnection2W(name.as_ptr(), 0, 0) } {
         NO_ERROR => Ok(()),
         code => Err(code),
@@ -666,10 +660,7 @@ pub fn shares_on(server: &str) -> Result<Vec<String>, u32> {
     /// a page-by-page walk.
     const MAX_PREFERRED_LENGTH: u32 = u32::MAX;
 
-    let name: Vec<u16> = format!("\\\\{server}")
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
+    let name = crate::shell::nul_terminated(format!("\\\\{server}"));
 
     let mut shares = Vec::new();
     let mut resume = 0u32;
@@ -753,7 +744,7 @@ pub fn describe(drive: &mut Drive) {
     } != 0;
 
     if ok {
-        let text = wide_to_string(&label_buf);
+        let text = crate::shell::wide_text(&label_buf);
         // **A lettered volume is named by its label; a network location is not.** What a server
         // hands back for `\\fileserver\web` is the label of the volume the share happens to
         // live on — `Data`, for a share called `web` — and a row reading *Data on fileserver*
@@ -797,14 +788,7 @@ pub(super) fn wide_root(path: &Path) -> Vec<u16> {
     text
 }
 
-/// A null-terminated wide buffer as a `String`.
-#[cfg(windows)]
-pub(super) fn wide_to_string(buf: &[u16]) -> String {
-    let len = buf.iter().position(|&u| u == 0).unwrap_or(buf.len());
-    String::from_utf16_lossy(&buf[..len])
-}
-
-/// The same, for a pointer the system filled in — which may be null.
+/// A NUL-terminated string the system filled in, as a `String` — and the pointer may be null.
 ///
 /// `NETRESOURCEW` leaves every string it has nothing to say about as a null pointer, and a
 /// missing local name is precisely what [`list_shares`] is looking for, so this has to answer
@@ -814,12 +798,8 @@ fn from_wide_ptr(ptr: *const u16) -> String {
     if ptr.is_null() {
         return String::new();
     }
-    let mut len = 0;
+    let text = windows::core::PCWSTR(ptr);
     // SAFETY: the system guarantees a null terminator within the buffer it filled, and the
     // buffer outlives this call — it is the caller's, and nothing here holds the pointer.
-    while unsafe { *ptr.add(len) } != 0 {
-        len += 1;
-    }
-    let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
-    String::from_utf16_lossy(slice)
+    String::from_utf16_lossy(unsafe { text.as_wide() })
 }

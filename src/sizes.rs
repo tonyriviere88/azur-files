@@ -79,13 +79,14 @@
 //! be a store of numbers that go quietly wrong as files are written, which is the same argument
 //! [`crate::git`] makes about a status cache.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering as Atomic};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as Atomic};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Mutex};
 
 use crate::fs::{scan, Dir};
+use crate::pool::{self, WorkQueue};
 
 /// A folder nothing has asked about yet.
 ///
@@ -672,14 +673,12 @@ struct Task {
 }
 
 struct Queue {
-    pending: Mutex<VecDeque<Task>>,
+    pending: WorkQueue<Task>,
     /// The measurements still wanted.
     ///
     /// Checked by every worker before it reads a directory, which is the whole of how the work is
     /// cancelled — there is nothing to signal and nothing to join. See [`Sizes::only`].
     live: Mutex<HashSet<u64>>,
-    wake: Condvar,
-    shutdown: AtomicBool,
 }
 
 impl Queue {
@@ -712,23 +711,16 @@ impl Sizes {
     /// worker is the serial walk the figures in this module's header are measured against.
     fn with_hands(ctx: &egui::Context, hands: usize) -> Self {
         let queue = Arc::new(Queue {
-            pending: Mutex::new(VecDeque::new()),
+            pending: WorkQueue::new(),
             live: Mutex::new(HashSet::new()),
-            wake: Condvar::new(),
-            shutdown: AtomicBool::new(false),
         });
         let (tx, answers) = channel();
-        let workers = (0..hands.max(1))
-            .map(|i| {
-                let queue = queue.clone();
-                let tx = tx.clone();
-                let ctx = ctx.clone();
-                std::thread::Builder::new()
-                    .name(format!("measure-{i}"))
-                    .spawn(move || worker(queue, tx, ctx))
-                    .expect("the OS refused a thread")
-            })
-            .collect();
+        let workers = pool::spawn("measure", hands.max(1), || {
+            let queue = queue.clone();
+            let tx = tx.clone();
+            let ctx = ctx.clone();
+            move || worker(queue, tx, ctx)
+        });
         Self {
             queue,
             answers,
@@ -749,7 +741,7 @@ impl Sizes {
         if let Ok(mut live) = self.queue.live.lock() {
             live.insert(gen);
         }
-        if let Ok(mut pending) = self.queue.pending.lock() {
+        self.queue.pending.push_all(|pending| {
             for (row, path) in folders {
                 pending.push_back(Task {
                     job: Arc::new(Job {
@@ -763,8 +755,7 @@ impl Sizes {
                     path,
                 });
             }
-        }
-        self.queue.wake.notify_all();
+        });
     }
 
     /// Keep only these measurements, and abandon every piece of work belonging to any other.
@@ -781,9 +772,9 @@ impl Sizes {
         if let Ok(mut live) = self.queue.live.lock() {
             live.retain(|gen| gens.contains(gen));
         }
-        if let Ok(mut pending) = self.queue.pending.lock() {
-            pending.retain(|task| gens.contains(&task.job.gen));
-        }
+        self.queue
+            .pending
+            .edit(|pending| pending.retain(|task| gens.contains(&task.job.gen)));
     }
 
     /// Every total that has arrived since the last call.
@@ -799,16 +790,8 @@ impl Drop for Sizes {
         if let Ok(mut live) = self.queue.live.lock() {
             live.clear();
         }
-        // The flag is set *while holding the queue lock*, which is what makes the handshake sound:
-        // a worker checks `shutdown` with the lock held and then calls `wait`, which releases it.
-        // Setting it without the lock leaves a window where the notify lands before the worker is
-        // waiting for it, and the worker then sleeps for ever on a queue nothing will push to. The
-        // same handshake as [`crate::loader::Loader`] and [`crate::git::Git`], for the same reason.
-        {
-            let _held = self.queue.pending.lock();
-            self.queue.shutdown.store(true, Atomic::SeqCst);
-        }
-        self.queue.wake.notify_all();
+        // See [`WorkQueue::close`] for why the flag is set under the queue's lock.
+        self.queue.pending.close();
         // Detached rather than joined, for the reason [`crate::loader::Loader::drop`] sets out: a
         // walk inside a directory read on a share that has gone away cannot see the flag above, so
         // joining it is a redirector timeout spent with no window left to show the answer in. The
@@ -823,25 +806,7 @@ fn worker(queue: Arc<Queue>, tx: Sender<Answer>, ctx: egui::Context) {
     // "Please insert a disk" from inside a syscall.
     scan::silence_device_dialogs();
 
-    loop {
-        let task = {
-            let Ok(mut pending) = queue.pending.lock() else {
-                return;
-            };
-            loop {
-                if queue.shutdown.load(Atomic::SeqCst) {
-                    return;
-                }
-                if let Some(task) = pending.pop_front() {
-                    break task;
-                }
-                let Ok(next) = queue.wake.wait(pending) else {
-                    return;
-                };
-                pending = next;
-            }
-        };
-
+    while let Some(task) = queue.pending.next() {
         // Nobody is waiting for this any more. Dropped **without retiring it**, so the folder's
         // counter never reaches zero and no half-counted total is ever reported.
         if !queue.wanted(task.job.gen) {
@@ -875,7 +840,7 @@ fn worker(queue: Arc<Queue>, tx: Sender<Answer>, ctx: egui::Context) {
             task.job
                 .outstanding
                 .fetch_add(children.len(), Atomic::SeqCst);
-            if let Ok(mut pending) = queue.pending.lock() {
+            queue.pending.push_all(|pending| {
                 for path in children {
                     // On the front: the queue expands depth-first, so the frontier is one path's
                     // siblings rather than a level of the tree. See the module header.
@@ -884,8 +849,7 @@ fn worker(queue: Arc<Queue>, tx: Sender<Answer>, ctx: egui::Context) {
                         path,
                     });
                 }
-            }
-            queue.wake.notify_all();
+            });
         }
         if task.job.outstanding.fetch_sub(1, Atomic::SeqCst) != 1 {
             continue;

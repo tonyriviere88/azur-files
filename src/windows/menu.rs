@@ -5,12 +5,13 @@
 //! stays platform-neutral and only the filling of it lives here.
 
 use super::*;
+use crate::shell::{pidl_of, Pidl};
 use windows::core::{Interface, PCSTR, PCWSTR, PSTR, PWSTR};
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
 use windows::Win32::UI::Shell::{
-    IContextMenu, IContextMenu2, IShellFolder, SHBindToObject, SHBindToParent,
-    SHParseDisplayName, CMF_EXPLORE, CMF_NORMAL, CMINVOKECOMMANDINFOEX, GCS_VERBW,
+    IContextMenu, IContextMenu2, IShellFolder, SHBindToObject, SHBindToParent, CMF_EXPLORE,
+    CMF_NORMAL, CMINVOKECOMMANDINFOEX, GCS_VERBW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     CreatePopupMenu, DestroyMenu, GetMenuItemCount, GetMenuItemInfoW, HMENU, MENUITEMINFOW,
@@ -25,27 +26,6 @@ const FIRST: u32 = 0x1000;
 const LAST: u32 = 0x7FFF;
 /// Deep enough for anything real; a guard against a malformed extension.
 const MAX_DEPTH: u32 = 4;
-
-/// A PIDL that frees itself.
-struct Pidl(*mut ITEMIDLIST);
-
-impl Drop for Pidl {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            // SAFETY: allocated by `SHParseDisplayName`, freed exactly once.
-            unsafe { windows::Win32::UI::Shell::ILFree(Some(self.0)) };
-        }
-    }
-}
-
-fn pidl_of(path: &Path) -> Option<Pidl> {
-    let wide = crate::shell::wide(path);
-    let mut raw: *mut ITEMIDLIST = std::ptr::null_mut();
-    // SAFETY: `wide` is null-terminated and outlives the call.
-    let ok =
-        unsafe { SHParseDisplayName(PCWSTR(wide.as_ptr()), None, &mut raw, 0, None).is_ok() };
-    (ok && !raw.is_null()).then_some(Pidl(raw))
-}
 
 /// The `IContextMenu` for a selection, or for the folder's background when the selection
 /// is empty — which is where New comes from.
@@ -614,39 +594,11 @@ fn packaged_handler(clsid: &str) -> Option<Handler> {
 /// For `PackagedCom\ClassIndex\{CLSID}`, whose *only* content is one subkey named after the package
 /// — the value is in the key's name, which is why this reads a name and not a value.
 fn first_subkey(path: &str) -> Option<String> {
-    use windows_sys::Win32::System::Registry::{
-        RegCloseKey, RegEnumKeyExW, RegOpenKeyExW, HKEY, HKEY_CLASSES_ROOT, KEY_READ,
-    };
+    use crate::shell::registry::Key;
+    use windows_sys::Win32::System::Registry::{HKEY_CLASSES_ROOT, KEY_READ};
 
-    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
-    let mut key: HKEY = std::ptr::null_mut();
-    // SAFETY: `wide` is NUL-terminated and outlives the call; `key` is closed on every path out.
-    if unsafe { RegOpenKeyExW(HKEY_CLASSES_ROOT, wide.as_ptr(), 0, KEY_READ, &mut key) } != 0 {
-        return None;
-    }
-    // A package full name. 256 is the documented maximum for a key name.
-    let mut buffer = [0u16; 256];
-    let mut units = buffer.len() as u32;
-    // SAFETY: `buffer` and `units` describe the same allocation, and `units` is updated by the call
-    // to the length written, not counting the terminator.
-    let read = unsafe {
-        RegEnumKeyExW(
-            key,
-            0,
-            buffer.as_mut_ptr(),
-            &mut units,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-        )
-    };
-    // SAFETY: opened above, and not used again.
-    unsafe { RegCloseKey(key) };
-    if read != 0 {
-        return None;
-    }
-    let name = String::from_utf16_lossy(&buffer[..(units as usize).min(buffer.len())]);
+    // A package full name, which fits a key name's documented maximum.
+    let name = Key::open(HKEY_CLASSES_ROOT, path, KEY_READ).ok()?.subkey(0)?;
     (!name.is_empty()).then_some(name)
 }
 
@@ -656,42 +608,15 @@ fn first_subkey(path: &str) -> Option<String> {
 /// ProgIDs and perceived types it reads, wrong here: an `InprocServer32` is a path, and a path in
 /// the registry is as likely to be written `%SystemRoot%\system32\…` as spelled out.
 fn hkcr(path: &str) -> Option<String> {
-    use windows_sys::Win32::System::Registry::{
-        RegCloseKey, RegOpenKeyExW, RegQueryValueExW, HKEY, HKEY_CLASSES_ROOT, KEY_READ,
-        REG_EXPAND_SZ, REG_SZ,
-    };
+    use crate::shell::registry::Key;
+    use windows_sys::Win32::System::Registry::{HKEY_CLASSES_ROOT, KEY_READ, REG_EXPAND_SZ, REG_SZ};
 
-    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
-    let mut key: HKEY = std::ptr::null_mut();
-    // SAFETY: `wide` is NUL-terminated and outlives the call; `key` is only used once the call has
-    // reported success, and is closed on every path out.
-    if unsafe { RegOpenKeyExW(HKEY_CLASSES_ROOT, wide.as_ptr(), 0, KEY_READ, &mut key) } != 0 {
-        return None;
-    }
+    let key = Key::open(HKEY_CLASSES_ROOT, path, KEY_READ).ok()?;
     // A path, so `MAX_PATH` doubled for the `\\?\` case. Anything longer is not one.
-    let mut buffer = [0u16; 560];
-    let mut bytes = std::mem::size_of_val(&buffer) as u32;
-    let mut kind = 0u32;
-    // SAFETY: `buffer` and `bytes` describe the same allocation and `bytes` is updated to what was
-    // written; the value name is null, which asks for the key's own default.
-    let read = unsafe {
-        RegQueryValueExW(
-            key,
-            std::ptr::null(),
-            std::ptr::null_mut(),
-            &mut kind,
-            buffer.as_mut_ptr() as *mut u8,
-            &mut bytes,
-        )
-    };
-    // SAFETY: opened above, and not used again.
-    unsafe { RegCloseKey(key) };
-    if read != 0 || (kind != REG_SZ && kind != REG_EXPAND_SZ) {
+    let (kind, text) = key.string::<560>(None)?;
+    if kind != REG_SZ && kind != REG_EXPAND_SZ {
         return None;
     }
-    let units = (bytes as usize / 2).min(buffer.len());
-    let text: String = String::from_utf16_lossy(&buffer[..units]);
-    let text = text.trim_end_matches('\0').trim().to_owned();
     (!text.is_empty()).then_some(text)
 }
 
@@ -772,7 +697,7 @@ fn file_description(module: &Path) -> Option<String> {
     blocks.push("\\StringFileInfo\\000004b0\\FileDescription".to_owned());
 
     for path in blocks {
-        let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+        let wide = crate::shell::nul_terminated(&path);
         let mut value: *mut std::ffi::c_void = std::ptr::null_mut();
         let mut units = 0u32;
         // SAFETY: `block` outlives the call and every pointer out of it; `value` points into
@@ -826,18 +751,14 @@ fn without_boilerplate(name: &str) -> String {
 fn translations(block: &[u8]) -> Vec<(u16, u16)> {
     use windows_sys::Win32::Storage::FileSystem::VerQueryValueW;
 
-    let wide: Vec<u16> = "\\VarFileInfo\\Translation"
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
     let mut value: *mut std::ffi::c_void = std::ptr::null_mut();
     let mut bytes = 0u32;
     // SAFETY: as `file_description` above — `block` outlives the call, and both out-params are
-    // written by it.
+    // written by it; the name is a static, NUL-terminated literal.
     let ok = unsafe {
         VerQueryValueW(
             block.as_ptr() as *const _,
-            wide.as_ptr(),
+            windows_sys::w!("\\VarFileInfo\\Translation"),
             &mut value,
             &mut bytes,
         )
@@ -1485,7 +1406,7 @@ unsafe fn run(
         Named::Id(_) => None,
     };
     let verb_wide: Option<Vec<u16>> = match named {
-        Named::Verb(verb) => Some(verb.encode_utf16().chain(std::iter::once(0)).collect()),
+        Named::Verb(verb) => Some(crate::shell::nul_terminated(verb)),
         Named::Id(_) => None,
     };
     let id = match named {

@@ -227,10 +227,11 @@ pub(super) fn show(
                     vec2(ui.available_width(), ROW_HEIGHT),
                     Sense::hover(),
                 );
-                let under = row_fill(t, false, response.hovered()).unwrap_or(t.bg.layer);
-                if let Some(fill) = row_fill(t, false, response.hovered()) {
+                let fill = row_fill(t, false, response.hovered());
+                if let Some(fill) = fill {
                     ui.painter().rect_filled(row, CornerRadius::ZERO, fill);
                 }
+                let under = fill.unwrap_or(t.bg.layer);
                 let item = &batch.items[i];
                 let planned = &plan.rows[i];
                 let (old, new) = columns(row);

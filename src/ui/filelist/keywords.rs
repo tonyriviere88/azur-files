@@ -38,17 +38,18 @@ pub(crate) fn keywords_box(cell: Rect, row: Rect) -> Rect {
     )
 }
 
-/// The armed cell: the field's outline, before there is a field.
+/// The armed cell: the field's outline, before there is a field — and the editor's frame, once
+/// there is one.
 ///
 /// `background-layer` inside, which is the rename field's fill and what the editor will be drawn on,
-/// and `stroke-control` round it — the outline every text box in the design system has at rest. The
-/// focus stroke is kept for when there really is a caret in it.
-pub(crate) fn armed_box(painter: &egui::Painter, t: &Theme, rect: Rect) {
+/// and `edge` round it: `stroke-control` while armed, the outline every text box in the design system
+/// has at rest, and `stroke-focus` for when there really is a caret in it.
+pub(crate) fn armed_box(painter: &egui::Painter, t: &Theme, rect: Rect, edge: Color32) {
     painter.rect_filled(rect, CornerRadius::ZERO, t.bg.layer);
     painter.rect_stroke(
         rect,
         CornerRadius::ZERO,
-        Stroke::new(1.0, t.stroke.control),
+        Stroke::new(1.0, edge),
         StrokeKind::Inside,
     );
 }
@@ -88,43 +89,30 @@ pub(crate) fn keywords_field(
         .size();
 
     // Where `text_left` puts the label's first pixel, snapped to device pixels the same way — see
-    // `rename_field`, where the half a point this is about was measured.
-    use egui::emath::GuiRounding as _;
-    let baseline = (cell.center().y - line.y * 0.5).round_to_pixels(ui.painter().pixels_per_point());
-    let field = Rect::from_min_size(
-        pos2(cell.left(), baseline - (FIELD_HEIGHT - line.y) * 0.5),
-        vec2(cell.width().max(MIN_FIELD), FIELD_HEIGHT),
+    // [`field_at`], where the half a point this is about is written down.
+    let field = field_at(
+        ui.painter(),
+        line,
+        cell.left(),
+        cell.center().y,
+        cell.width().max(MIN_FIELD),
     );
 
-    let outline = keywords_box(cell, row);
-    ui.painter().rect_filled(outline, CornerRadius::ZERO, t.bg.layer);
-    ui.painter().rect_stroke(
-        outline,
-        CornerRadius::ZERO,
-        Stroke::new(1.0, t.stroke.focus),
-        StrokeKind::Inside,
-    );
+    armed_box(ui.painter(), t, keywords_box(cell, row), t.stroke.focus);
 
     let id = Id::new(("keywords", pane, entry));
-    // The same swap the rename field makes, for the same reason: the outline above is the field's
-    // frame, and egui's own ring on top of it would be a second one.
-    let ring = ui.visuals().selection.stroke;
-    ui.visuals_mut().selection.stroke = Stroke::new(0.0, ring.color);
-    let response = crate::ui::squared(ui, |ui| {
-        ui.put(
-            field,
-            egui::TextEdit::singleline(text)
-                .id(id)
-                .font(font)
-                .text_color(t.text.primary)
-                .margin(egui::Margin::ZERO)
-                .vertical_align(egui::Align::Center)
-                .background_color(t.bg.layer)
-                .frame(egui::Frame::NONE)
-                .desired_width(field.width()),
-        )
-    });
-    ui.visuals_mut().selection.stroke = ring;
+    // The same field the rename makes, ring and all: the outline above is the field's frame, and
+    // egui's own ring on top of it would be a second one.
+    let response = inline_edit(
+        ui,
+        t,
+        field,
+        id,
+        egui::TextEdit::singleline(text)
+            .font(font)
+            .text_color(t.text.primary)
+            .frame(egui::Frame::NONE),
+    );
     if fresh {
         response.request_focus();
         caret_at_end(ui.ctx(), id, text);

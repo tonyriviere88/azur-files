@@ -51,6 +51,8 @@ mod win;
 use win::scan_real;
 #[cfg(windows)]
 pub use win::{expose_placeholders, silence_device_dialogs};
+#[cfg(windows)]
+pub(crate) use win::verbatim;
 
 /// Read `path` into a [`Dir`]. Never fails: an unreadable directory comes back as
 /// an empty one carrying the reason.
@@ -72,14 +74,8 @@ pub use win::{expose_placeholders, silence_device_dialogs};
 /// volume's `$Recycle.Bin`. See [`super::recycle`].
 pub fn scan(path: &Path) -> Dir {
     let started = Instant::now();
-    if path.as_os_str().is_empty() {
-        return super::drives::this_pc(started);
-    }
-    if super::recycle::is_bin(path) {
-        return super::recycle::listing(started);
-    }
-    if let Some(server) = super::drives::unc_server(path) {
-        return super::drives::server_dir(&server, path, started);
+    if let Some(dir) = synthetic(path, started) {
+        return dir;
     }
     // Ahead of the real scan, because `D:\pkg.zip\src` is a path the filesystem has no answer for
     // at all — and `None` here means the archive was only ever an extension's worth of a guess, so
@@ -88,6 +84,24 @@ pub fn scan(path: &Path) -> Dir {
         return dir;
     }
     scan_real(path, started)
+}
+
+/// The listing for a path that is not a directory at all — This PC, the Recycle Bin, a bare
+/// `\\server` — or `None` for one that is worth reading.
+///
+/// The same answer for [`scan`] and [`scan_deep_counting`]: none of the three has a tree to walk,
+/// so flattening one gives back exactly what listing it does. The three tests cannot overlap — an
+/// empty path, the bin's one spelling, and a path that starts with `\\` — so their order is not a
+/// decision.
+fn synthetic(path: &Path, started: Instant) -> Option<Dir> {
+    if path.as_os_str().is_empty() {
+        return Some(super::drives::this_pc(started));
+    }
+    if super::recycle::is_bin(path) {
+        return Some(super::recycle::listing(started));
+    }
+    let server = super::drives::unc_server(path)?;
+    Some(super::drives::server_dir(&server, path, started))
 }
 
 /// The handful of failures a file manager actually meets, in words.
@@ -238,20 +252,16 @@ pub fn scan_deep_counting(
     // "This PC" is not a folder and has no tree: its rows are volumes, each of which is
     // a place to flatten of its own. Flattening it would mean walking every drive in the
     // machine, which is not what anybody means by the button.
-    if root.as_os_str().is_empty() {
-        return super::drives::this_pc(started);
-    }
+    //
     // A machine is the same kind of thing one level down: its rows are shares, each a tree of its
     // own, and flattening it would mean walking every share on the server. So the button gives
     // back the shares, exactly as it gives back the volumes for This PC.
-    if let Some(server) = super::drives::unc_server(root) {
-        return super::drives::server_dir(&server, root, started);
-    }
+    //
     // The bin has no tree to walk: its rows are items from all over the machine, each already
     // carrying the whole path it came from. The button is refused there, and this is the answer
     // for anything that asks regardless.
-    if super::recycle::is_bin(root) {
-        return super::recycle::listing(started);
+    if let Some(dir) = synthetic(root, started) {
+        return dir;
     }
     // An archive's [`crate::archive::Index`] is *already* the flattened form — every entry with its
     // full interior path — so this is the one place where flattening is cheaper than listing a
@@ -547,21 +557,11 @@ fn scan_real(path: &Path, started: Instant) -> Dir {
         if meta.permissions().readonly() {
             flags |= FLAG_READONLY;
         }
-        builder.push(name, meta.len(), unix_to_filetime(&meta), flags);
+        builder.push(name, meta.len(), super::time::filetime_of(&meta), flags);
     }
     builder.finish(elapsed_micros(started))
 }
 
-/// Modification time as a `FILETIME`, so both platforms sort and format the same
-/// integer.
-#[cfg(not(windows))]
-fn unix_to_filetime(meta: &std::fs::Metadata) -> u64 {
-    let Ok(time) = meta.modified() else { return 0 };
-    let Ok(since) = time.duration_since(std::time::UNIX_EPOCH) else {
-        return 0;
-    };
-    super::time::UNIX_EPOCH_FILETIME + since.as_secs() * 10_000_000 + since.subsec_nanos() as u64 / 100
-}
 
 fn elapsed_micros(started: Instant) -> u64 {
     started.elapsed().as_micros() as u64

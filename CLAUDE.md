@@ -17,10 +17,11 @@ pinned by `Cargo.lock`; `cargo update -p azur-egui-theme` moves it to the latest
 **Always build into `target/claude`, via the aliases in `.cargo/config.toml`:**
 
 ```powershell
-cargo claude-build     # -> target/claude/debug/azur-files.exe
+cargo claude-build     # -> target/claude/debug/azur-files.exe (with devtools)
 cargo claude-clippy    # all targets; reports rustc errors too
 cargo claude-test      # shares the compiled dependencies
 cargo claude-run
+cargo claude-devtools  # -> target/claude/devtools/azur-files.exe: release + developer flags
 ```
 
 - `target/debug` and `target/release` belong to the user. They keep an instance of the app
@@ -43,6 +44,16 @@ cargo claude-run
 
 `cargo run --release` is the build to judge anything by. `cargo deploy` builds release and
 copies to `D:\Programs` (or `$AZUR_DEPLOY_DIR`); it can replace a copy that is running.
+
+**The release build has no developer flags, and that is the user's rule.** Everything on the
+command line but `--open=`, the `YAFE_PROFILE` / `YAFE_UPDATE_AS` hooks, and every counter or
+wait that only a capture or `--trace` reads sit behind `#[cfg(any(test, feature = "devtools"))]`
+([`devtools.rs`](src/devtools.rs), [`app/capture.rs`](src/app/capture.rs),
+[`inflight.rs`](src/inflight.rs)). A capture or a measurement is taken with
+`cargo claude-devtools`: the release profile under the name `devtools`, so it is optimised the
+same and never overwrites `target/release`. A new diagnostic goes behind the same gate; the
+shipped configuration is checked by `cargo claude-clippy` (its bin target has no feature), and
+dead code there means something dev-only escaped the gate.
 
 **Never run `cargo fmt`.** This repo is hand-formatted; `fmt` churns dozens of untouched
 files and `--check` is not a gate.
@@ -75,7 +86,9 @@ cargo claude-test <filter> -- --ignored --nocapture --test-threads=1
 - **`Config::save` returns early under `cfg!(test)`.** A test process has no business
   writing a user's settings. For a real launch, set `YAFE_PROFILE=<dir>` to move the
   settings directory — otherwise the run overwrites the user's window size, tabs and
-  bookmarks. Every save keeps `config.ini.bak`.
+  bookmarks. Every save keeps `config.ini.bak`. **`YAFE_PROFILE` is only read by a devtools
+  build** (`claude-build`, `claude-run`, `claude-devtools` all have it); a plain
+  `cargo build --release` ignores it and writes the real settings.
 - **Never run `probe_invokable` (or `probe_invoking`) against a real path.** They invoke
   real context-menu verbs. Run once with `YAFE_PROBE` pointing at this repository, it
   enumerated eighteen verbs, ran them, and permanently deleted the entire working tree.
@@ -251,7 +264,8 @@ The window is `../azur-egui-theme` throughout, with the dense-window preset appl
   `line_numbers`, `diff`, `regroup`, `auto_tiles`.
 - Test/diagnostic env vars: `YAFE_PROFILE` (settings dir), `YAFE_WALK`, `YAFE_THUMBS`,
   `YAFE_FLATTEN_ROOT`, `YAFE_NO_FLUSH`, `YAFE_PROBE`, `YAFE_PROBE_TYPED`.
-- The CLI exists largely so that things behind a click can be captured or driven:
+- The CLI exists largely so that things behind a click can be captured or driven, and all of
+  it but `--open=` needs a devtools build:
   `--open=` (repeatable, one pane each), `--reveal=`, `--filter=`, `--lens=git|images`,
   `--size=WxH`, `--theme=<name>`, `--shot=<file>`, `--menu`, `--rename`, `--preview`,
   `--deps=<module>`, `--compare`, `--console[=a;b;c]`, `--flat[=list|tree]`, `--tiles`,

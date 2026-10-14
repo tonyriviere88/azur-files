@@ -3,18 +3,13 @@
 //! The Windows half of [`crate::shell::clipboard`].
 
 use super::*;
-use windows::core::PCWSTR;
-use windows::Win32::System::Com::{IDataObject, FORMATETC, STGMEDIUM, TYMED_HGLOBAL};
+use crate::shell::{global_medium, hglobal_format, pidl_of, Pidl, CF_HDROP};
+use windows::Win32::System::Com::{IDataObject, STGMEDIUM};
 use windows::Win32::System::DataExchange::RegisterClipboardFormatW;
-use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+use windows::Win32::System::Memory::{GlobalLock, GlobalUnlock};
 use windows::Win32::System::Ole::{OleGetClipboard, OleSetClipboard};
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
-use windows::Win32::UI::Shell::{
-    SHCreateShellItemArrayFromIDLists, SHParseDisplayName, BHID_DataObject,
-};
-
-/// `CF_HDROP`, which is a fixed value rather than a registered one.
-const CF_HDROP: u16 = 15;
+use windows::Win32::UI::Shell::{SHCreateShellItemArrayFromIDLists, BHID_DataObject};
 
 /// The registered format that says whether a paste should copy or move.
 fn preferred_effect_format() -> u16 {
@@ -22,29 +17,6 @@ fn preferred_effect_format() -> u16 {
     // to call as often as it is convenient.
     let id = unsafe { RegisterClipboardFormatW(windows::core::w!("Preferred DropEffect")) };
     id as u16
-}
-
-/// A PIDL that frees itself.
-struct Pidl(*mut ITEMIDLIST);
-
-impl Drop for Pidl {
-    fn drop(&mut self) {
-        if !self.0.is_null() {
-            // SAFETY: allocated by `SHParseDisplayName`, freed exactly once.
-            unsafe { windows::Win32::UI::Shell::ILFree(Some(self.0)) };
-        }
-    }
-}
-
-fn pidl_of(path: &Path) -> Option<Pidl> {
-    let wide = crate::shell::wide(path);
-    let mut raw: *mut ITEMIDLIST = std::ptr::null_mut();
-    // SAFETY: `wide` is null-terminated and outlives the call; `raw` is only read
-    // when the call succeeded.
-    let ok = unsafe {
-        SHParseDisplayName(PCWSTR(wide.as_ptr()), None, &mut raw, 0, None).is_ok()
-    };
-    (ok && !raw.is_null()).then_some(Pidl(raw))
 }
 
 /// The shell's own data object for these paths, carrying the cut-or-copy flag.
@@ -88,15 +60,8 @@ pub fn data_object(paths: &[PathBuf], effect: Effect) -> Result<IDataObject, Str
             Effect::Link => DROPEFFECT_LINK,
         };
         if let Some(medium) = global_dword(value) {
-            let format = FORMATETC {
-                cfFormat: preferred_effect_format(),
-                ptd: std::ptr::null_mut(),
-                dwAspect: 1, // DVASPECT_CONTENT
-                lindex: -1,
-                tymed: TYMED_HGLOBAL.0 as u32,
-            };
             // `release: true` hands the block to the data object, which frees it.
-            let _ = data.SetData(&format, &medium, true);
+            let _ = data.SetData(&hglobal_format(preferred_effect_format()), &medium, true);
         }
         Ok(data)
     }
@@ -127,7 +92,7 @@ pub fn read(data: &IDataObject) -> Option<Pasteable> {
     unsafe {
         // The shell first, so a copy taken from inside an archive is not invisible; see
         // the note at the top of this file.
-        let items = read_shell_items(data).or_else(|| read_hdrop(data))?;
+        let items = read_shell_items(data).or_else(|| crate::shell::hdrop_paths(data))?;
         if items.is_empty() {
             return None;
         }
@@ -142,7 +107,6 @@ pub fn read(data: &IDataObject) -> Option<Pasteable> {
 /// an entry inside a `.zip` comes back as `C:\bundle.zip\inner.txt`, and
 /// `SHCreateItemFromParsingName` takes that straight back.
 unsafe fn read_shell_items(data: &IDataObject) -> Option<Vec<PathBuf>> {
-    use windows::Win32::System::Com::CoTaskMemFree;
     use windows::Win32::UI::Shell::{
         IShellItemArray, SHCreateShellItemArrayFromDataObject, SIGDN_DESKTOPABSOLUTEPARSING,
     };
@@ -154,15 +118,9 @@ unsafe fn read_shell_items(data: &IDataObject) -> Option<Vec<PathBuf>> {
         let Ok(shell_item) = array.GetItemAt(index) else {
             continue;
         };
-        let Ok(name) = shell_item.GetDisplayName(SIGDN_DESKTOPABSOLUTEPARSING) else {
-            continue;
-        };
-        if !name.is_null() {
-            if let Ok(text) = name.to_string() {
-                items.push(PathBuf::from(text));
-            }
-            // The shell allocated it; this frees it.
-            CoTaskMemFree(Some(name.0 as *const std::ffi::c_void));
+        // An item with no such name is skipped rather than abandoning the rest.
+        if let Some(text) = crate::shell::display_name(&shell_item, SIGDN_DESKTOPABSOLUTEPARSING) {
+            items.push(PathBuf::from(text));
         }
     }
     (!items.is_empty()).then_some(items)
@@ -187,14 +145,7 @@ pub fn cut_pasted(was: u32) {
             return;
         };
         if let Some(medium) = global_dword(DROPEFFECT_MOVE) {
-            let format = FORMATETC {
-                cfFormat: paste_succeeded_format(),
-                ptd: std::ptr::null_mut(),
-                dwAspect: 1,
-                lindex: -1,
-                tymed: TYMED_HGLOBAL.0 as u32,
-            };
-            let _ = data.SetData(&format, &medium, true);
+            let _ = data.SetData(&hglobal_format(paste_succeeded_format()), &medium, true);
         }
         clear();
     }
@@ -269,21 +220,11 @@ unsafe fn answering_calls(ms: u64) {
 }
 
 /// A `DWORD` in a moveable global block, which is what `SetData` wants.
-unsafe fn global_dword(value: u32) -> Option<STGMEDIUM> {
-    let handle = GlobalAlloc(GMEM_MOVEABLE, 4).ok()?;
-    let locked = GlobalLock(handle);
-    if locked.is_null() {
-        return None;
-    }
-    std::ptr::copy_nonoverlapping(value.to_le_bytes().as_ptr(), locked.cast(), 4);
-    let _ = GlobalUnlock(handle);
-    Some(STGMEDIUM {
-        tymed: TYMED_HGLOBAL.0 as u32,
-        u: windows::Win32::System::Com::STGMEDIUM_0 {
-            hGlobal: handle,
-        },
-        pUnkForRelease: std::mem::ManuallyDrop::new(None),
-    })
+///
+/// Through [`global_medium`], which frees the block when it cannot be locked — where this used to
+/// return `None` and leave it allocated.
+fn global_dword(value: u32) -> Option<STGMEDIUM> {
+    global_medium(&value.to_le_bytes()).ok()
 }
 
 pub fn has_files() -> bool {
@@ -324,56 +265,8 @@ pub fn get() -> Option<Pasteable> {
 /// *previous* contents in place and the next paste would use them.
 const READ_TRIES: u64 = 12;
 
-unsafe fn read_hdrop(data: &IDataObject) -> Option<Vec<PathBuf>> {
-    use windows::Win32::UI::Shell::{DragQueryFileW, HDROP};
-
-    let format = FORMATETC {
-        cfFormat: CF_HDROP,
-        ptd: std::ptr::null_mut(),
-        dwAspect: 1,
-        lindex: -1,
-        tymed: TYMED_HGLOBAL.0 as u32,
-    };
-    let medium = data.GetData(&format).ok()?;
-    let handle = medium.u.hGlobal;
-    if handle.is_invalid() {
-        return None;
-    }
-
-    let drop = HDROP(handle.0);
-    // Index `0xFFFF_FFFF` asks how many there are rather than for one of them.
-    let count = DragQueryFileW(drop, u32::MAX, None);
-    let mut items = Vec::with_capacity(count as usize);
-    for index in 0..count {
-        // Ask for the length first: a path can be longer than `MAX_PATH`, and a
-        // fixed buffer would silently truncate one.
-        let len = DragQueryFileW(drop, index, None);
-        if len == 0 {
-            continue;
-        }
-        let mut buffer = vec![0u16; len as usize + 1];
-        let written = DragQueryFileW(drop, index, Some(&mut buffer));
-        if written > 0 {
-            buffer.truncate(written as usize);
-            items.push(PathBuf::from(String::from_utf16_lossy(&buffer)));
-        }
-    }
-
-    // `ReleaseStgMedium` is what frees the block the clipboard handed over.
-    let mut medium = medium;
-    windows::Win32::System::Ole::ReleaseStgMedium(&mut medium);
-    Some(items)
-}
-
 unsafe fn read_effect(data: &IDataObject) -> Option<Effect> {
-    let format = FORMATETC {
-        cfFormat: preferred_effect_format(),
-        ptd: std::ptr::null_mut(),
-        dwAspect: 1,
-        lindex: -1,
-        tymed: TYMED_HGLOBAL.0 as u32,
-    };
-    let medium = data.GetData(&format).ok()?;
+    let medium = data.GetData(&hglobal_format(preferred_effect_format())).ok()?;
     let handle = medium.u.hGlobal;
     let mut effect = None;
     if !handle.is_invalid() {

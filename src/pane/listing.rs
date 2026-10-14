@@ -16,17 +16,8 @@ impl Tab {
         // Whatever [`Tab::refresh`] put aside, plus the live selection when the listing is being
         // replaced under a tab that still has one.
         let mut held = std::mem::take(&mut self.keep_selected);
-        if held.is_empty() {
-            if let Some(old) = self.dir.as_ref().filter(|_| self.selected_count > 0) {
-                held = self
-                    .selected
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, &on)| on)
-                    .filter(|&(entry, _)| entry < old.len())
-                    .map(|(entry, _)| old.name(entry).to_owned())
-                    .collect();
-            }
+        if held.is_empty() && self.selected_count > 0 {
+            held = self.selected_names();
         }
 
         // The row being renamed, remembered by *name* before the listing it is indexed into goes
@@ -122,17 +113,7 @@ impl Tab {
         // Whatever was selected and is still there. Anything that has gone -- moved, renamed,
         // deleted -- simply is not selected any more, which is the only sensible answer.
         if !held.is_empty() {
-            if let Some(dir) = self.dir.clone() {
-                for (position, &entry) in self.order.iter().enumerate() {
-                    if held.iter().any(|name| name == dir.name(entry as usize)) {
-                        self.selected[entry as usize] = true;
-                        self.selected_count += 1;
-                        self.selected_size += Self::size_at(Some(&dir), entry as usize);
-                        self.cursor.get_or_insert(position);
-                        self.anchor.get_or_insert(position);
-                    }
-                }
-            }
+            self.reselect_by_name(&held);
         }
 
         // Highlight and scroll to whatever we came out of.
@@ -321,8 +302,7 @@ impl Tab {
         if self.filter.is_empty() && self.before_filter.is_some() {
             return None;
         }
-        self.scroll_y = 0.0;
-        self.scroll_to = Some(0.0);
+        self.scroll_to_top();
         None
     }
 
@@ -383,18 +363,8 @@ impl Tab {
         if self.filter.is_empty() || self.before_filter.is_some() {
             return;
         }
-        let selected = match &self.dir {
-            Some(dir) => self
-                .selected
-                .iter()
-                .enumerate()
-                .filter(|&(entry, &on)| on && entry < dir.len())
-                .map(|(entry, _)| dir.name(entry).to_owned())
-                .collect(),
-            None => Vec::new(),
-        };
         self.before_filter = Some(BeforeFilter {
-            selected,
+            selected: self.selected_names(),
             scroll_y: self.scroll_y,
         });
     }
@@ -418,20 +388,11 @@ impl Tab {
     /// [`Tab::apply`] reselects from. The scroll as an offset to go to, which waits for the listing
     /// either way.
     pub fn restore_before_filter(&mut self, before: BeforeFilter) {
-        match self.dir.clone().filter(|_| self.awaiting.is_none()) {
-            Some(dir) => {
-                self.clear_selection();
-                for (position, &entry) in self.order.iter().enumerate() {
-                    if before.selected.iter().any(|name| name == dir.name(entry as usize)) {
-                        self.selected[entry as usize] = true;
-                        self.selected_count += 1;
-                        self.selected_size += Self::size_at(Some(&dir), entry as usize);
-                        self.cursor.get_or_insert(position);
-                        self.anchor.get_or_insert(position);
-                    }
-                }
-            }
-            None => self.keep_selected = before.selected,
+        if self.dir.is_some() && self.awaiting.is_none() {
+            self.clear_selection();
+            self.reselect_by_name(&before.selected);
+        } else {
+            self.keep_selected = before.selected;
         }
         self.scroll_y = before.scroll_y;
         self.scroll_to = Some(before.scroll_y);
@@ -581,6 +542,17 @@ impl Tab {
             return Some(answer);
         }
         self.dir.as_ref()?.entries.get(entry)?.sync()
+    }
+
+    /// What git says about one entry, by the name the row is showing — which in a flattened listing
+    /// is a path, and git speaks in paths, so both work out of the same lookup. `None` outside a
+    /// repository, before the answer has landed, and for a file git has nothing to say about.
+    ///
+    /// One hash lookup against a map built once when the answer landed; nothing here walks the
+    /// repository's changes, so the row loops can ask it of every visible row every frame.
+    pub fn git_of(&self, entry: usize) -> Option<crate::git::State> {
+        let repo = self.git.as_ref()?;
+        repo.state(self.dir.as_ref()?.name(entry))
     }
 
     /// Whether the listing is showing a question only git can answer. See [`Lens::Git`].
@@ -856,11 +828,8 @@ pub(crate) fn filter_matcher(
     dir: &Dir,
     query: azur_egui_theme::filter::Query,
 ) -> impl FnMut(usize) -> bool + '_ {
-    let mut path = dir.path.to_string_lossy().into_owned();
-    if !path.is_empty() && !path.ends_with(['\\', '/']) {
-        path.push('\\');
-    }
-    let base = path.len();
+    let mut path = String::new();
+    let base = crate::fs::sort::prefix(dir, &mut path);
     move |entry| {
         path.truncate(base);
         path.push_str(dir.name(entry));

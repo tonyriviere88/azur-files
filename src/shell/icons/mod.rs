@@ -87,8 +87,8 @@ const SMALL: usize = 16;
 /// Dropping `dll` and `ocx` from this list was tried, on the grounds that scrolling all of
 /// System32 asked about 4,345 files and got 20 distinct icons back. It cut the questions to
 /// 710 and did not measurably cut the memory — the cost is the shell's own cache, which it
-/// keeps whether or not this program does — so the fidelity was not worth spending. The
-/// [`Recent`] cap is what bounds it instead.
+/// keeps whether or not this program does — so the fidelity was not worth spending. What
+/// bounds it instead is that an answer lives in the view that asked: see the module header.
 #[cfg(windows)]
 fn has_own_icon(ext: &str) -> bool {
     matches!(
@@ -97,72 +97,15 @@ fn has_own_icon(ext: &str) -> bool {
     )
 }
 
+/// The most per-file questions that may be waiting on the worker at once. See
+/// [`Icons::request_file`].
+const QUEUE_CAP: usize = 64;
+
 /// One atlas cell, and the grid: 16x16 icons, 32 across and 8 down.
 const CELL: usize = 16;
 const ATLAS_COLUMNS: usize = 32;
 const ATLAS_ROWS: usize = 8;
 const ATLAS_SLOTS: usize = ATLAS_COLUMNS * ATLAS_ROWS;
-
-/// A map that remembers when each entry was last read, so the least useful can go when
-/// there are too many of them or when nothing has wanted them for a while.
-///
-/// The two caches below are keyed by *path* and by *texture*, and both are unbounded in the
-/// thing that grows: files, and GL objects. Measured, scrolling `C:\Windows\System32` — 4,910
-/// files, nearly all of them `.dll` — put **4,345 entries** in the path map and cost 8.7 MB,
-/// and twenty folders like it would be most of a memory budget. The same measurement is the
-/// argument for the size of the caps: those 4,345 lookups produced **20 distinct icons**, so
-/// the path map is a lookup table for a handful of answers and holding thousands of its keys
-/// buys nothing.
-///
-/// A plain `HashMap` plus a stamp rather than an intrusive list: an eviction happens once
-/// every few hundred lookups, and one sort of a thousand stamps is cheaper to run than a
-/// doubly-linked list is to maintain — or to read.
-struct Recent<K, V> {
-    items: HashMap<K, (V, std::time::Instant)>,
-    /// Trim back to three-quarters of this when it is passed.
-    cap: usize,
-}
-
-impl<K: std::hash::Hash + Eq + Clone, V> Recent<K, V> {
-    fn new(cap: usize) -> Self {
-        Self {
-            items: HashMap::new(),
-            cap,
-        }
-    }
-
-    /// Read an entry, marking it as used now.
-    fn get(&mut self, key: &K) -> Option<&V> {
-        let (value, used) = self.items.get_mut(key)?;
-        *used = std::time::Instant::now();
-        Some(value)
-    }
-
-    fn insert(&mut self, key: K, value: V) {
-        self.items.insert(key, (value, std::time::Instant::now()));
-        if self.items.len() > self.cap {
-            self.evict_oldest(self.items.len() - self.cap * 3 / 4);
-        }
-    }
-
-    fn len(&self) -> usize {
-        self.items.len()
-    }
-
-    /// Drop the `count` least recently read entries.
-    fn evict_oldest(&mut self, count: usize) {
-        let mut stamps: Vec<(std::time::Instant, K)> = self
-            .items
-            .iter()
-            .map(|(key, (_, used))| (*used, key.clone()))
-            .collect();
-        stamps.sort_unstable_by_key(|(used, _)| *used);
-        for (_, key) in stamps.into_iter().take(count) {
-            self.items.remove(&key);
-        }
-    }
-
-}
 
 /// What a row needs to draw an icon: which texture, and where in it.
 #[derive(Clone, Copy, Debug)]
@@ -231,13 +174,20 @@ pub struct Icons {
     /// 4,910 of them, each with its own stack, and the burst was visible as megabytes
     /// arriving and leaving. One thread with a queue does the same work with one stack.
     jobs: Option<Sender<Job>>,
-    queued: Arc<std::sync::atomic::AtomicUsize>,
+    queued: crate::inflight::Capped,
     /// Diagnostics for `--trace`: how many bitmaps have been pulled out of the image list and
     /// how many textures uploaded. Both should stop climbing almost immediately.
+    #[cfg(any(test, feature = "devtools"))]
     pub bitmaps: u64,
+    #[cfg(any(test, feature = "devtools"))]
     pub uploads: u64,
-    /// Image-list index → its slot in the atlas, least recently drawn first.
-    slots: Recent<i32, u32>,
+    /// Image-list index → its slot in the atlas, and when it was last drawn.
+    ///
+    /// Bounded by the atlas rather than by a cap of its own: [`Icons::claim_slot`] takes the slot
+    /// drawn longest ago once every one is in use, so this never holds more than [`ATLAS_SLOTS`].
+    /// Shared across folders, because an icon is not folder-scoped: one bitmap serves every `.dll`
+    /// on the machine.
+    slots: HashMap<i32, (u32, std::time::Instant)>,
     /// The one texture every shell icon is drawn from. See [`Icons::uv`].
     atlas: Option<TextureHandle>,
     /// The next never-used slot, until the grid is full.
@@ -265,8 +215,9 @@ pub struct Icons {
     /// The views on screen. A per-file question for a view that has gone is dropped by the
     /// worker before it costs anything — which is what makes changing folder cancel the old
     /// folder's questions rather than queue behind them.
-    live: Arc<Mutex<std::collections::HashSet<u64>>>,
-    /// To wake the window when an answer lands. See [`Self::nudge`].
+    live: crate::service::LiveViews,
+    /// To wake the window when an answer lands, and to make the atlas in. See
+    /// [`crate::shell::nudge`].
     ctx: egui::Context,
 }
 
@@ -279,12 +230,12 @@ impl Icons {
             places_seen: HashMap::new(),
             answers: Vec::new(),
             jobs: None,
-            queued: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            queued: crate::inflight::Capped::new(QUEUE_CAP),
+            #[cfg(any(test, feature = "devtools"))]
             bitmaps: 0,
+            #[cfg(any(test, feature = "devtools"))]
             uploads: 0,
-            // As many as the atlas has slots. Shared across folders, because an icon is not
-            // folder-scoped: one bitmap serves every `.dll` on the machine.
-            slots: Recent::new(ATLAS_SLOTS),
+            slots: HashMap::new(),
             atlas: None,
             next_slot: 0,
             pending: Arc::new(Mutex::new(std::collections::HashSet::new())),
@@ -294,13 +245,13 @@ impl Icons {
             places: None,
             pixels: None,
             asked_bitmaps: std::collections::HashSet::new(),
-            live: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            live: Default::default(),
         }
     }
 
     /// Take delivery of anything resolved since the last frame, and let go of anything
     /// nothing has asked about for a while.
-    pub fn poll(&mut self, ctx: &egui::Context) {
+    pub fn poll(&mut self) {
         while let Ok(ready) = self.rx.try_recv() {
             match ready {
                 Ready::Kind { key, index } => {
@@ -315,8 +266,11 @@ impl Icons {
                     // into a texture, with none of the shell behind it.
                     self.asked_bitmaps.remove(&index);
                     let slot = self.claim_slot(index);
-                    self.blit(ctx, slot, &image);
-                    self.uploads += 1;
+                    self.blit(slot, &image);
+                    #[cfg(any(test, feature = "devtools"))]
+                    {
+                        self.uploads += 1;
+                    }
                 }
             }
         }
@@ -389,8 +343,7 @@ impl Icons {
         if !self.available {
             return false;
         }
-        const QUEUE_CAP: usize = 64;
-        if self.queued.load(std::sync::atomic::Ordering::Relaxed) >= QUEUE_CAP {
+        if !self.queued.try_take() {
             return false;
         }
         // **A view that is asking is live, by definition, and saying so here is what makes the
@@ -408,15 +361,9 @@ impl Icons {
         // Registering it here rather than reordering the frame: the frame's order is not this
         // module's to depend on, and "asking about a view keeps it alive" is true whatever that
         // order becomes. `only` still prunes it the moment no tab holds it.
-        if let Ok(mut live) = self.live.lock() {
-            live.insert(view);
-        }
-        let jobs = self.worker().clone();
-        self.queued
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        if jobs.send(Job::File { view, row, path }).is_err() {
-            self.queued
-                .fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+        self.live.add(view);
+        if self.worker().send(Job::File { view, row, path }).is_err() {
+            self.queued.give_back();
             return false;
         }
         true
@@ -465,10 +412,12 @@ impl Icons {
     /// nicety — pulling the bitmap out of the image list is a shell call that reaches the
     /// network, and doing it here is what froze the window for two and a half seconds on a
     /// mapped share. See [`Ready::Bitmap`].
-    pub fn uv(&mut self, ctx: &egui::Context, icon: Icon) -> Option<(egui::TextureId, egui::Rect)> {
-        let _ = ctx;
-        let slot = match self.slots.get(&icon.index) {
-            Some(&slot) => slot,
+    pub fn uv(&mut self, icon: Icon) -> Option<(egui::TextureId, egui::Rect)> {
+        let slot = match self.slots.get_mut(&icon.index) {
+            Some((slot, drawn)) => {
+                *drawn = std::time::Instant::now();
+                *slot
+            }
             None => {
                 self.request_bitmap(icon.index);
                 return None;
@@ -489,7 +438,10 @@ impl Icons {
         if !self.available || !self.asked_bitmaps.insert(index) {
             return;
         }
-        self.bitmaps += 1;
+        #[cfg(any(test, feature = "devtools"))]
+        {
+            self.bitmaps += 1;
+        }
         if self.pixels().send(Wanted(index)).is_err() {
             self.asked_bitmaps.remove(&index);
         }
@@ -502,13 +454,7 @@ impl Icons {
     /// share, a slow one. Skipping them is the difference between a new folder's icons arriving
     /// now and arriving after the old folder's have all been answered.
     pub fn only(&mut self, views: &[u64]) {
-        if let Ok(mut live) = self.live.lock() {
-            if live.len() == views.len() && views.iter().all(|view| live.contains(view)) {
-                return;
-            }
-            live.clear();
-            live.extend(views.iter().copied());
-        }
+        self.live.set(views);
     }
 
     /// The next slot for an icon: an unused one, or the one drawn longest ago.
@@ -522,25 +468,25 @@ impl Icons {
             // owner ask again if it reappears.
             let victim = self
                 .slots
-                .items
                 .iter()
                 .min_by_key(|(_, (_, used))| *used)
                 .map(|(key, (slot, _))| (*key, *slot));
             match victim {
                 Some((key, slot)) => {
-                    self.slots.items.remove(&key);
+                    self.slots.remove(&key);
                     slot
                 }
                 // Cannot happen: the grid is full, so something is in it.
                 None => 0,
             }
         };
-        self.slots.insert(index, slot);
+        self.slots.insert(index, (slot, std::time::Instant::now()));
         slot
     }
 
     /// Copy one icon into its slot, creating the atlas on first use.
-    fn blit(&mut self, ctx: &egui::Context, slot: u32, image: &ColorImage) {
+    fn blit(&mut self, slot: u32, image: &ColorImage) {
+        let ctx = &self.ctx;
         let atlas = self.atlas.get_or_insert_with(|| {
             ctx.load_texture(
                 "shell-icons",
@@ -555,13 +501,7 @@ impl Icons {
         });
         // Padded into the cell rather than scaled: the shell's small list is 16×16, and a
         // bitmap of another size is rare enough that clipping it beats resampling every one.
-        let mut cell = ColorImage::filled([CELL, CELL], egui::Color32::TRANSPARENT);
-        let [w, h] = image.size;
-        for y in 0..h.min(CELL) {
-            for x in 0..w.min(CELL) {
-                cell[(x, y)] = image[(x, y)];
-            }
-        }
+        let (cell, _) = crate::shell::into_cell(image, CELL);
         let (column, row) = ((slot as usize) % ATLAS_COLUMNS, (slot as usize) / ATLAS_COLUMNS);
         atlas.set_partial([column * CELL, row * CELL], cell, TextureOptions::LINEAR);
     }
@@ -592,6 +532,7 @@ impl Icons {
     /// own per-object overhead behind it, which is invisible to a Rust allocator counter and
     /// is exactly the kind of thing that turns "memory grows as I browse" into a number
     /// nobody can find.
+    #[cfg(any(test, feature = "devtools"))]
     pub fn held(&self) -> (usize, usize, usize) {
         (self.kinds.len(), self.places_seen.len(), self.slots.len())
     }
@@ -669,11 +610,7 @@ impl Icons {
                                 // answered and discarded, because the answering is the
                                 // expensive part — it opens the file, and on a network share
                                 // that is the whole of the cost.
-                                let wanted = live
-                                    .lock()
-                                    .map(|live| live.contains(&view))
-                                    .unwrap_or(true);
-                                if wanted {
+                                if live.has(view) {
                                     // Not `use_attributes`: the whole point of this branch is
                                     // that the icon is inside the file, so it has to be opened.
                                     if let Some(index) = index_of(&path, false, false) {
@@ -681,7 +618,7 @@ impl Icons {
                                         nudge(&ctx);
                                     }
                                 }
-                                queued.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                                queued.give_back();
                             }
                         }
                     }
@@ -728,24 +665,21 @@ impl Icons {
     }
 }
 
-/// Ask for a frame, because an answer that lands with nothing to draw it is not an answer.
-///
-/// **This was missing, and these were the one background service in the program with no way to wake
-/// the window.** Every sibling does it — the loader, git, sizes, thumbs, links, the preview and the
-/// console all book a repaint when they have something. The case it shows in is Back, or re-entering
-/// a folder: that takes the loader's synchronous cache path, so the frame is drawn without anything
-/// having been asked for asynchronously and nothing books a repaint. The rows then ask for their
-/// per-file icons *during* that frame, the answers arrive a few milliseconds later, and every `.exe`
-/// and `.lnk` kept its generic type glyph until the pointer happened to move.
-///
-/// A free function rather than a method on [`Icons`], because the callers are the worker threads:
-/// each holds a `Context` of its own and none of them can reach the `Icons` that started it.
-///
-/// Delayed rather than immediate, as `crate::shell::thumbs::Thumbs::nudge` does it: answers arrive
-/// in bursts of up to sixty-four, and one frame after the burst is worth sixty-four during it.
-fn nudge(ctx: &egui::Context) {
-    ctx.request_repaint_after(std::time::Duration::from_millis(100));
-}
+// Ask for a frame, because an answer that lands with nothing to draw it is not an answer.
+//
+// **This was missing, and these were the one background service in the program with no way to wake
+// the window.** Every sibling does it — the loader, git, sizes, thumbs, links, the preview and the
+// console all book a repaint when they have something. The case it shows in is Back, or re-entering
+// a folder: that takes the loader's synchronous cache path, so the frame is drawn without anything
+// having been asked for asynchronously and nothing books a repaint. The rows then ask for their
+// per-file icons *during* that frame, the answers arrive a few milliseconds later, and every `.exe`
+// and `.lnk` kept its generic type glyph until the pointer happened to move.
+//
+// The callers are the worker threads: each holds a `Context` of its own and none of them can reach
+// the `Icons` that started it. Delayed rather than immediate — see [`crate::shell::nudge`] — because
+// answers arrive in bursts of up to sixty-four, and one frame after the burst is worth sixty-four
+// during it.
+use crate::shell::nudge;
 
 /// The key a place lookup is claimed under.
 ///

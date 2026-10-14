@@ -48,22 +48,61 @@ impl Tab {
         self.anchor = Some(position);
     }
 
+    /// Add entry `entry` to the selection, keeping the count and the size in step with it. Nothing
+    /// if it is already selected, so a row is never counted twice.
+    pub(super) fn mark_selected(&mut self, entry: usize) {
+        if !self.selected[entry] {
+            self.selected[entry] = true;
+            self.selected_count += 1;
+            self.selected_size += Self::size_at(self.dir.as_ref(), entry);
+        }
+    }
+
+    /// Flip entry `entry`, keeping the count and the size in step with it.
+    fn flip_selected(&mut self, entry: usize) {
+        let now = !self.selected[entry];
+        let size = Self::size_at(self.dir.as_ref(), entry);
+        self.selected[entry] = now;
+        if now {
+            self.selected_count += 1;
+            self.selected_size += size;
+        } else {
+            self.selected_count = self.selected_count.saturating_sub(1);
+            self.selected_size = self.selected_size.saturating_sub(size);
+        }
+    }
+
+    /// The names of everything selected, for putting the selection back by name once the listing
+    /// it indexes into has been replaced. Empty when there is no listing.
+    pub(super) fn selected_names(&self) -> Vec<String> {
+        let Some(dir) = &self.dir else { return Vec::new() };
+        self.selected
+            .iter()
+            .enumerate()
+            .filter(|&(entry, &on)| on && entry < dir.len())
+            .map(|(entry, _)| dir.name(entry).to_owned())
+            .collect()
+    }
+
+    /// Select every row on show whose name is one of `names`, the cursor and the anchor going to the
+    /// first of them unless they are already somewhere. A name no longer in the listing is simply
+    /// not selected.
+    pub(super) fn reselect_by_name(&mut self, names: &[String]) {
+        let Some(dir) = self.dir.clone() else { return };
+        for position in 0..self.order.len() {
+            let entry = self.order[position] as usize;
+            if names.iter().any(|name| name == dir.name(entry)) {
+                self.mark_selected(entry);
+                self.cursor.get_or_insert(position);
+                self.anchor.get_or_insert(position);
+            }
+        }
+    }
+
     /// Flip one row. Ctrl-click.
     pub fn toggle(&mut self, position: usize) {
         if let Some(entry) = self.entry_at(position) {
-            let now = !self.selected[entry];
-            let size = Self::size_at(self.dir.as_ref(), entry);
-            self.selected[entry] = now;
-            let (count, bytes) = if now {
-                (self.selected_count + 1, self.selected_size + size)
-            } else {
-                (
-                    self.selected_count.saturating_sub(1),
-                    self.selected_size.saturating_sub(size),
-                )
-            };
-            self.selected_count = count;
-            self.selected_size = bytes;
+            self.flip_selected(entry);
         }
         self.cursor = Some(position);
         self.anchor = Some(position);
@@ -76,11 +115,7 @@ impl Tab {
         let (lo, hi) = (from.min(position), from.max(position));
         for at in lo..=hi.min(self.order.len().saturating_sub(1)) {
             if let Some(entry) = self.entry_at(at) {
-                if !self.selected[entry] {
-                    self.selected[entry] = true;
-                    self.selected_count += 1;
-                    self.selected_size += Self::size_at(self.dir.as_ref(), entry);
-                }
+                self.mark_selected(entry);
             }
         }
         self.cursor = Some(position);
@@ -112,10 +147,9 @@ impl Tab {
         if self.band.is_none() {
             return;
         }
-        let dir = self.dir.clone();
         self.reset_to_band_base();
         for position in covered {
-            self.band_select(dir.as_ref(), position);
+            self.band_select(position);
         }
     }
 
@@ -142,16 +176,11 @@ impl Tab {
     }
 
     /// And the second half: one position the band covers.
-    pub(crate) fn band_select(&mut self, dir: Option<&Arc<Dir>>, position: usize) {
+    pub(crate) fn band_select(&mut self, position: usize) {
         let Some(&entry) = self.order.get(position) else {
             return;
         };
-        let entry = entry as usize;
-        if !self.selected[entry] {
-            self.selected[entry] = true;
-            self.selected_count += 1;
-            self.selected_size += Self::size_at(dir, entry);
-        }
+        self.mark_selected(entry as usize);
     }
 
     /// Begin renaming the row under the cursor.
@@ -217,19 +246,8 @@ impl Tab {
     /// inverting what you cannot see is not something you can check before acting on it. The cursor
     /// and the anchor stay where they are, as they do for [`Tab::select_all`].
     pub fn invert_selection(&mut self) {
-        let dir = self.dir.clone();
-        for &entry in &self.order {
-            let entry = entry as usize;
-            let size = Self::size_at(dir.as_ref(), entry);
-            let now = !self.selected[entry];
-            self.selected[entry] = now;
-            if now {
-                self.selected_count += 1;
-                self.selected_size += size;
-            } else {
-                self.selected_count = self.selected_count.saturating_sub(1);
-                self.selected_size = self.selected_size.saturating_sub(size);
-            }
+        for position in 0..self.order.len() {
+            self.flip_selected(self.order[position] as usize);
         }
     }
 
@@ -250,17 +268,13 @@ impl Tab {
         let dir = self.dir.clone()?;
         let mut matches = super::listing::filter_matcher(&dir, query);
         let mut first = None;
-        for (position, &entry) in self.order.iter().enumerate() {
-            let entry = entry as usize;
+        for position in 0..self.order.len() {
+            let entry = self.order[position] as usize;
             if !matches(entry) {
                 continue;
             }
             first.get_or_insert(position);
-            if !self.selected[entry] {
-                self.selected[entry] = true;
-                self.selected_count += 1;
-                self.selected_size += Self::size_at(Some(&dir), entry);
-            }
+            self.mark_selected(entry);
         }
         first
     }
@@ -280,15 +294,10 @@ impl Tab {
             return;
         }
         let ext = dir.ext(at);
-        for &entry in &self.order {
-            let entry = entry as usize;
-            if !self.selected[entry]
-                && !dir.entries[entry].is_dir()
-                && dir.ext(entry).eq_ignore_ascii_case(ext)
-            {
-                self.selected[entry] = true;
-                self.selected_count += 1;
-                self.selected_size += Self::size_at(Some(&dir), entry);
+        for position in 0..self.order.len() {
+            let entry = self.order[position] as usize;
+            if !dir.entries[entry].is_dir() && dir.ext(entry).eq_ignore_ascii_case(ext) {
+                self.mark_selected(entry);
             }
         }
     }
@@ -300,6 +309,35 @@ impl Tab {
             .iter()
             .filter(|&&i| self.selected.get(i as usize).copied().unwrap_or(false))
             .map(|&i| dir.target(i as usize))
+            .collect()
+    }
+
+    /// The paths of everything selected, or the folder itself when nothing is — the answer to "the
+    /// path of what?" that `Ctrl+Shift+C` gives: asked with nothing selected, it is asking about the
+    /// folder you are in.
+    pub fn selection_or_here(&self) -> Vec<PathBuf> {
+        let mut paths = self.selection_paths();
+        if paths.is_empty() {
+            paths.push(self.path.clone());
+        }
+        paths
+    }
+
+    /// The display positions of everything selected, top to bottom.
+    pub fn selected_rows(&self) -> Vec<usize> {
+        (0..self.order.len()).filter(|&row| self.is_selected(row)).collect()
+    }
+
+    /// The paths of the selected entries that are folders, in the listing's own order rather than
+    /// the display order. Asked of the listing and not of the disk: each row already says whether it
+    /// is a folder. Empty when there is no listing.
+    pub fn selected_folders(&self) -> Vec<PathBuf> {
+        let Some(dir) = &self.dir else { return Vec::new() };
+        self.selected
+            .iter()
+            .enumerate()
+            .filter(|&(entry, &on)| on && dir.entries.get(entry).is_some_and(|e| e.is_dir()))
+            .map(|(entry, _)| dir.target(entry))
             .collect()
     }
 

@@ -42,7 +42,7 @@
 //! *finishes*: doing it when the paste starts loses the cut for anyone who answers the
 //! conflict dialog with Cancel.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// What a paste or a drop is asking for.
 ///

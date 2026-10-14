@@ -6,9 +6,7 @@
 use super::*;
 use windows::core::PCWSTR;
 use windows::Win32::Foundation::PROPERTYKEY;
-use windows::Win32::UI::Shell::{
-    IShellItem, IShellItem2, SHCreateItemFromParsingName, SHCreateItemFromRelativeName,
-};
+use windows::Win32::UI::Shell::{IShellItem, IShellItem2, SHCreateItemFromRelativeName};
 
 /// `PKEY_StorageProviderState`, spelled out rather than taken from the `windows` crate, which only
 /// has it behind `Win32_Storage_EnhancedStorage` — a feature for one constant.
@@ -22,18 +20,15 @@ pub(super) struct Parent(IShellItem);
 
 impl Parent {
     pub(super) fn open(dir: &Path) -> Option<Self> {
-        let wide = crate::shell::wide(dir);
-        // SAFETY: `wide` is NUL-terminated and outlives the call; the item releases itself on drop.
-        unsafe { SHCreateItemFromParsingName::<_, _, IShellItem>(PCWSTR(wide.as_ptr()), None) }
-            .ok()
-            .map(Self)
+        // SAFETY: nothing beyond the parse itself; the item releases itself on drop.
+        unsafe { crate::shell::parse_item::<IShellItem>(dir) }.ok().map(Self)
     }
 
     /// What the provider says about one child, by name. `None` for a name it has no state for —
     /// excluded from sync, not a placeholder at all, or gone since the listing was read.
     pub(super) fn state(&self, name: &str) -> Option<Sync> {
-        let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-        // SAFETY: as above; the property key is a constant that outlives the call.
+        let wide = crate::shell::nul_terminated(name);
+        // SAFETY: `wide` is NUL-terminated and outlives the call; the property key is a constant that outlives the call.
         let value = unsafe {
             let item = SHCreateItemFromRelativeName::<_, _, _, IShellItem2>(
                 &self.0,

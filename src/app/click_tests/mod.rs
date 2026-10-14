@@ -878,6 +878,17 @@ fn pane_body(h: &Harness) -> Rect {
     )
 }
 
+/// A key pressed with nothing held, as the one event — [`tap`] is the same as a frame's worth.
+fn key(key: egui::Key) -> Event {
+    Event::Key {
+        key,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: Modifiers::NONE,
+    }
+}
+
 /// One key, with nothing held.
 fn tap(key: egui::Key) -> Vec<Event> {
     held(key, Modifiers::NONE)

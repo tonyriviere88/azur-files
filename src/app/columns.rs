@@ -18,12 +18,10 @@ impl App {
     /// and [`App::collect_hard_links`].
     pub(super) fn columns_changed(&mut self) {
         let columns = self.columns;
-        for pane in &mut self.panes {
-            for tab in pane.tabs.iter_mut() {
-                tab.widths_measured = false;
-                if !columns.shown(tab.sort_by) {
-                    tab.sort_by_column(Column::Name);
-                }
+        for tab in tabs_mut(&mut self.panes) {
+            tab.widths_measured = false;
+            if !columns.shown(tab.sort_by) {
+                tab.sort_by_column(Column::Name);
             }
         }
         if !columns.shown(self.sort.by) {

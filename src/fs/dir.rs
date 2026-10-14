@@ -530,18 +530,14 @@ impl DirBuilder {
     /// Push an entry that leads somewhere other than `path/name` — a drive row
     /// under "This PC".
     pub fn push_link(&mut self, name: &str, target: PathBuf, size: u64, flags: u16) {
-        // `targets` is indexed in lockstep with `entries`, so a builder that
-        // mixes plain and linked entries has to pad it.
-        while self.targets.len() < self.entries.len() {
-            self.targets.push(PathBuf::new());
-        }
-        self.push(name, size, 0, flags);
-        self.targets.push(target);
+        self.push_held(name, target, size, 0, flags);
     }
 
     /// Push an item of the Recycle Bin: named by the path it was deleted from, leading to the file
     /// the bin holds it as, and dated when it went. See [`crate::fs::recycle`].
     pub fn push_held(&mut self, original: &str, held: PathBuf, size: u64, deleted: u64, flags: u16) {
+        // `targets` is indexed in lockstep with `entries`, so a builder that
+        // mixes plain and linked entries has to pad it.
         while self.targets.len() < self.entries.len() {
             self.targets.push(PathBuf::new());
         }

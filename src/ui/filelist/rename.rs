@@ -25,6 +25,81 @@ pub(crate) const MIN_FIELD: f32 = 60.0;
 /// to click into. Nothing to do with where the *text* goes — that is `text_row`'s centre.
 pub(crate) const FIELD_HEIGHT: f32 = 20.0;
 
+/// Where an in-place field goes so that the text in it does not move: `width` wide from `left`, and
+/// placed so that a `line` of text centred in it lands where [`crate::ui::text_left`] would have put
+/// the label centred on `middle`.
+///
+/// The same arithmetic as `text_left`, including the snap to *device* pixels, which is the part that
+/// matters and the part that is easy to miss: centring the field on the row and leaving egui to
+/// divide by two got within half a point, and half a point is a blurred word rather than a sharp one.
+/// Then the field is placed so that `Align::Center` inside it lands the line exactly there: egui
+/// centres the galley in the field's inner rect, and the margin is nothing, so the line sits
+/// `(FIELD_HEIGHT - line) / 2` below the top.
+///
+/// Every in-place editor in the window: a rename here, the Keywords cell, a bookmark group's name.
+pub(crate) fn field_at(
+    painter: &egui::Painter,
+    line: egui::Vec2,
+    left: f32,
+    middle: f32,
+    width: f32,
+) -> Rect {
+    use egui::emath::GuiRounding as _;
+    let top = (middle - line.y * 0.5).round_to_pixels(painter.pixels_per_point());
+    Rect::from_min_size(
+        pos2(left, top - (FIELD_HEIGHT - line.y) * 0.5),
+        vec2(width, FIELD_HEIGHT),
+    )
+}
+
+/// An in-place text field over `field`, which [`field_at`] placed: no margin, the line centred,
+/// `background-layer` under it, square corners, and **no focus ring**.
+///
+/// Not the accent ring egui puts round a focused field. The field is already an obviously editable
+/// box — a filled rectangle with a caret in it, sitting on a row that has had its own highlight taken
+/// away for exactly this reason — and the ring on top of that was the loudest thing in the window
+/// while renaming. Swapped rather than scoped, so nothing about the layout of the row changes with
+/// it.
+///
+/// The *width* and not the whole stroke, and the difference is the whole name being unreadable.
+/// `Visuals::selection::stroke` is two unrelated things in one field: the frame round a focused
+/// `TextEdit` — `builder.rs` reads all of it — and, in `text_selection::visuals`, `stroke.color`
+/// alone, which is **the colour selected text is drawn in**. `Stroke::NONE` is transparent, so
+/// zeroing the field took the frame off and painted the selected stem in nothing: a solid accent
+/// block with the name invisible inside it, which is what a rename opens with every time. A
+/// zero-width stroke draws no frame and leaves the colour where it was.
+///
+/// The colour it leaves is right because the design system was wrong too, and got fixed: it pointed
+/// that field at `stroke-focus`, for the border, which put selected text at 2.3:1 on the selection
+/// behind it. It is `text-on_accent` now — see
+/// `azur_egui_theme::style::tests::selected_text_reads_on_the_selection_behind_it`.
+///
+/// `edit` comes with whatever else its caller wants of it — a font, a frame — and the keys that end
+/// the edit are the caller's too.
+pub(crate) fn inline_edit(
+    ui: &mut Ui,
+    t: &Theme,
+    field: Rect,
+    id: Id,
+    edit: egui::TextEdit<'_>,
+) -> egui::Response {
+    let ring = ui.visuals().selection.stroke;
+    ui.visuals_mut().selection.stroke = Stroke::new(0.0, ring.color);
+    // Square, like the row it is standing in for. See [`crate::ui::squared`].
+    let response = crate::ui::squared(ui, |ui| {
+        ui.put(
+            field,
+            edit.id(id)
+                .margin(egui::Margin::ZERO)
+                .vertical_align(egui::Align::Center)
+                .background_color(t.bg.layer)
+                .desired_width(field.width()),
+        )
+    });
+    ui.visuals_mut().selection.stroke = ring;
+    response
+}
+
 /// The same field, over a rect a caller already knows — which is what [`crate::ui::grid`] has: the
 /// label under a tile, or the name cell of a folder's row in a tree.
 ///
@@ -120,56 +195,11 @@ pub(crate) fn rename_field(
         .size();
     let width = rename_width(line.x, left, right, text_row.right());
 
-    // Where `text_left` would have put the label's first pixel — the same arithmetic, including
-    // the snap to *device* pixels, which is the part that matters and the part that is easy to
-    // miss. Centring the field on `text_row` and leaving egui to divide by two got within half a
-    // point, and half a point is a blurred word rather than a sharp one.
-    //
-    // Then the field is placed so that `Align::Center` inside it lands the line exactly there:
-    // egui centres the galley in the field's inner rect, and the margin is nothing, so the line
-    // sits `(FIELD_HEIGHT - line) / 2` below the top.
-    use egui::emath::GuiRounding as _;
-    let baseline = (text_row.center().y - line.y * 0.5).round_to_pixels(ui.painter().pixels_per_point());
-    let field = Rect::from_min_size(
-        pos2(left, baseline - (FIELD_HEIGHT - line.y) * 0.5),
-        vec2(width, FIELD_HEIGHT),
-    );
+    // Where `text_left` would have put the label's first pixel — see [`field_at`].
+    let field = field_at(ui.painter(), line, left, text_row.center().y, width);
 
     let id = Id::new(("rename", pane, entry));
-    // Not the accent ring egui puts round a focused field. The field is already an obviously
-    // editable box — a filled rectangle with a caret in it, sitting on a row that has had its
-    // own highlight taken away for exactly this reason — and the ring on top of that was the
-    // loudest thing in the window while renaming. Swapped rather than scoped, so nothing about
-    // the layout of this row changes with it.
-    //
-    // The *width* and not the whole stroke, and the difference is the whole name being
-    // unreadable. `Visuals::selection::stroke` is two unrelated things in one field: the frame
-    // round a focused `TextEdit` — `builder.rs` reads all of it — and, in
-    // `text_selection::visuals`, `stroke.color` alone, which is **the colour selected text is
-    // drawn in**. `Stroke::NONE` is transparent, so zeroing the field took the frame off and
-    // painted the selected stem in nothing: a solid accent block with the name invisible inside
-    // it, which is what a rename opens with every time. A zero-width stroke draws no frame and
-    // leaves the colour where it was.
-    //
-    // The colour it leaves is right because the design system was wrong too, and got fixed: it
-    // pointed that field at `stroke-focus`, for the border, which put selected text at 2.3:1 on
-    // the selection behind it. It is `text-on_accent` now — see
-    // `azur_egui_theme::style::tests::selected_text_reads_on_the_selection_behind_it`.
-    let ring = ui.visuals().selection.stroke;
-    ui.visuals_mut().selection.stroke = Stroke::new(0.0, ring.color);
-    // Square, like the row it is standing in for. See [`crate::ui::squared`].
-    let response = crate::ui::squared(ui, |ui| {
-        ui.put(
-            field,
-            egui::TextEdit::singleline(text)
-                .id(id)
-                .margin(egui::Margin::ZERO)
-                .vertical_align(egui::Align::Center)
-                .background_color(t.bg.layer)
-                .desired_width(width),
-        )
-    });
-    ui.visuals_mut().selection.stroke = ring;
+    let response = inline_edit(ui, t, field, id, egui::TextEdit::singleline(text));
     if fresh {
         response.request_focus();
         select_stem(ui.ctx(), id, &whole, is_dir);

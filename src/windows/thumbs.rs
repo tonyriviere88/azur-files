@@ -47,27 +47,19 @@ pub(crate) enum Want {
 /// tile's answer and [`crate::preview::visual`]'s `load` for the panel's.
 #[cfg(windows)]
 pub(crate) fn image(path: &Path, size: u32, want: Want) -> Option<ColorImage> {
-    use windows::core::PCWSTR;
     use windows::Win32::Foundation::SIZE;
     use windows::Win32::Graphics::Gdi::DeleteObject;
     use windows::Win32::UI::Shell::{
-        IShellItemImageFactory, SHCreateItemFromParsingName, SIIGBF_RESIZETOFIT,
-        SIIGBF_THUMBNAILONLY,
+        IShellItemImageFactory, SIIGBF_RESIZETOFIT, SIIGBF_THUMBNAILONLY,
     };
 
-    let wide = crate::shell::wide(path);
-
-    // SAFETY: `wide` is null-terminated and outlives the call. The factory is a COM interface
-    // released by its own `Drop`; the bitmap is ours to free and is freed on both paths out.
+    // SAFETY: the factory is a COM interface released by its own `Drop`; the bitmap is ours to
+    // free and is freed on both paths out.
     unsafe {
         // Usually a failure here means the file has been moved or deleted since the listing was
         // read — but the shell namespace refuses under load too, which is why this is not
         // distinguished from the `GetImage` failure below.
-        let factory = SHCreateItemFromParsingName::<_, _, IShellItemImageFactory>(
-            PCWSTR(wide.as_ptr()),
-            None,
-        )
-        .ok()?;
+        let factory = crate::shell::parse_item::<IShellItemImageFactory>(path).ok()?;
         let asked = SIZE {
             cx: size as i32,
             cy: size as i32,

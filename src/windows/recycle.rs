@@ -44,35 +44,16 @@ fn user_sid() -> Option<&'static str> {
 }
 
 fn read_sid() -> Option<String> {
-    use windows_sys::Win32::Foundation::CloseHandle;
     use windows_sys::Win32::Security::{
-        GetSidIdentifierAuthority, GetSidSubAuthority, GetSidSubAuthorityCount,
-        GetTokenInformation, TokenUser, TOKEN_QUERY, TOKEN_USER,
+        GetSidIdentifierAuthority, GetSidSubAuthority, GetSidSubAuthorityCount, TokenUser,
+        TOKEN_USER,
     };
-    use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
-    // SAFETY: the token is closed on every path out; the buffer is sized by the first call and
-    // aligned for `TOKEN_USER` by being `u64`s; the SID pointer points into that buffer and is only
+    // Sized by asking, and aligned for `TOKEN_USER` by being `u64`s.
+    let buffer = crate::shell::token_information(TokenUser)?;
+    // SAFETY: the buffer holds a `TOKEN_USER`; the SID pointer points into that buffer and is only
     // read while it is alive.
     unsafe {
-        let mut token = std::ptr::null_mut();
-        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
-            return None;
-        }
-        let mut needed = 0u32;
-        GetTokenInformation(token, TokenUser, std::ptr::null_mut(), 0, &mut needed);
-        let mut buffer = vec![0u64; (needed as usize).div_ceil(8).max(1)];
-        let read = GetTokenInformation(
-            token,
-            TokenUser,
-            buffer.as_mut_ptr().cast(),
-            (buffer.len() * 8) as u32,
-            &mut needed,
-        );
-        CloseHandle(token);
-        if read == 0 {
-            return None;
-        }
         let sid = (*(buffer.as_ptr() as *const TOKEN_USER)).User.Sid;
         if sid.is_null() {
             return None;

@@ -167,14 +167,20 @@ pub fn stream(file: &Path, format: Format) -> io::Result<Box<dyn Read>> {
 // The formats
 // ---------------------------------------------------------------------------
 
+/// A zip opened for reading, or why it could not be, in the words the pane shows.
+///
+/// The one place a zip is opened, for its listing and for an extraction alike, so the same broken
+/// file is described the same way whichever of the two found it out.
+pub(super) fn open_zip(file: &Path) -> Result<zip::ZipArchive<BufReader<File>>, String> {
+    let handle = File::open(file).map_err(|why| reason(&why))?;
+    zip::ZipArchive::new(BufReader::new(handle))
+        .map_err(|why| format!("This is not a readable zip file ({why})"))
+}
+
 fn zip_index(file: &Path) -> Index {
-    let handle = match File::open(file) {
-        Ok(handle) => handle,
-        Err(why) => return Index::failed(reason(&why)),
-    };
-    let mut archive = match zip::ZipArchive::new(BufReader::new(handle)) {
+    let mut archive = match open_zip(file) {
         Ok(archive) => archive,
-        Err(why) => return Index::failed(format!("This is not a readable zip file ({why})")),
+        Err(why) => return Index::failed(why),
     };
 
     // Once per archive, for the reason [`LocalZone::filetime_from_local`] exists: a zip stores
@@ -224,12 +230,7 @@ fn zip_index(file: &Path) -> Index {
         });
     }
 
-    Index {
-        items,
-        error: None,
-        truncated,
-        micros: 0,
-    }
+    Index::listed(items, truncated)
 }
 
 fn sevenz_index(file: &Path) -> Index {
@@ -243,7 +244,7 @@ fn sevenz_index(file: &Path) -> Index {
     // and touching one entry can mean decompressing several.
     let archive = match sevenz_rust2::Archive::read(&mut handle, &sevenz_rust2::Password::empty()) {
         Ok(archive) => archive,
-        Err(why) => return Index::failed(format!("This 7z archive could not be read ({why})")),
+        Err(why) => return Index::failed(super::unreadable_7z(why)),
     };
 
     let mut truncated = false;
@@ -278,12 +279,7 @@ fn sevenz_index(file: &Path) -> Index {
         });
     }
 
-    Index {
-        items,
-        error: None,
-        truncated,
-        micros: 0,
-    }
+    Index::listed(items, truncated)
 }
 
 /// Walk a tar, through whatever is wrapped around it.
@@ -322,11 +318,7 @@ fn tar_index(file: &Path, format: Format) -> Index {
             break;
         };
 
-        // The raw bytes rather than `entry.path()`, which goes through `Path` and would normalise
-        // away the very things [`interior`] has to see — a leading `/`, a `..`, a trailing
-        // separator on a directory.
-        let raw = String::from_utf8_lossy(&entry.path_bytes()).into_owned();
-        let Some(path) = interior(&raw) else {
+        let Some(path) = tar_name(&entry) else {
             continue;
         };
 
@@ -356,12 +348,7 @@ fn tar_index(file: &Path, format: Format) -> Index {
     if items.is_empty() && truncated {
         return Index::failed("This archive is damaged and could not be read");
     }
-    Index {
-        items,
-        error: None,
-        truncated,
-        micros: 0,
-    }
+    Index::listed(items, truncated)
 }
 
 /// A `.gz`, `.bz2`, `.xz`, `.zst` or `.lzma` on its own: one file, compressed, with no container
@@ -397,8 +384,8 @@ fn stream_index(file: &Path, format: Format) -> Index {
         _ => (0, true),
     };
 
-    Index {
-        items: vec![Item {
+    Index::listed(
+        vec![Item {
             path: name,
             size,
             modified: std::fs::metadata(file)
@@ -410,10 +397,8 @@ fn stream_index(file: &Path, format: Format) -> Index {
             link: false,
             at: 0,
         }],
-        error: None,
-        truncated: false,
-        micros: 0,
-    }
+        false,
+    )
 }
 
 /// The uncompressed length in a gzip's footer: the last four bytes, little-endian.
@@ -442,6 +427,16 @@ fn gzip_size(file: &Path) -> Option<u64> {
 // ---------------------------------------------------------------------------
 // Paths, and not trusting them
 // ---------------------------------------------------------------------------
+
+/// A tar entry's name, through [`interior`], or `None` for one that names nothing.
+///
+/// The raw bytes rather than `entry.path()`, which goes through `Path` and would normalise away the
+/// very things [`interior`] has to see — a leading `/`, a `..`, a trailing separator on a directory.
+/// One function because listing and extracting have to agree on every name, or an entry listed
+/// under one name is looked for under another and never found.
+pub(super) fn tar_name<R: Read>(entry: &tar::Entry<'_, R>) -> Option<String> {
+    interior(&String::from_utf8_lossy(&entry.path_bytes()))
+}
 
 /// An entry's name as this program will use it: `/`-separated, relative, and incapable of naming
 /// anything outside the archive.
@@ -507,17 +502,23 @@ pub fn interior(raw: &str) -> Option<String> {
 ///
 /// [`crate::fs::scan::error_text`] is the equivalent for a Win32 code and is the better answer
 /// where there is one; this is for [`std::io`], which is what these crates return.
-fn reason(why: &io::Error) -> String {
+///
+/// For the archive *itself* — opening it, reading it. A failure writing out what was extracted is
+/// about the destination, and "this archive is no longer there" would be the wrong thing to say.
+pub(super) fn reason(why: &io::Error) -> String {
     match why.kind() {
-        io::ErrorKind::NotFound => "This archive is no longer there".to_owned(),
+        io::ErrorKind::NotFound => super::GONE.to_owned(),
         io::ErrorKind::PermissionDenied => "Access to this archive was denied".to_owned(),
         _ => {
-            let mut text = why.to_string();
-            // `io::Error`'s messages are sentences already, but not capitalised ones.
-            if let Some(first) = text.get_mut(..1) {
-                first.make_ascii_uppercase();
+            // `io::Error`'s messages are sentences already, but not capitalised ones — and the
+            // first letter of one in a translated Windows can be `é`, which an ASCII upper-casing
+            // leaves alone.
+            let text = why.to_string();
+            let mut chars = text.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().chain(chars).collect(),
+                None => text,
             }
-            text
         }
     }
 }

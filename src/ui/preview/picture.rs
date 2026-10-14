@@ -94,6 +94,13 @@ impl Picture {
         }
     }
 
+    /// Back to *fit*, and back to the middle: the zoom forgotten and the pan with it, because an
+    /// offset dragged at one scale means nothing at another.
+    pub(super) fn refit(&mut self) {
+        self.zoom = None;
+        self.pan = Vec2::ZERO;
+    }
+
     /// The scale the canvas is showing it at, fit included.
     ///
     /// `fit` is not the stored answer: it depends on the canvas, the canvas depends on the pane,
@@ -198,8 +205,7 @@ pub(super) fn pictures(ui: &mut Ui, t: &Theme, canvas: Rect, spot: Spot, picture
         picture.zoom = Some(picture.scale());
     }
     if response.double_clicked() {
-        picture.zoom = None;
-        picture.pan = Vec2::ZERO;
+        picture.refit();
     }
     let wheel = ui.input(|i| i.smooth_scroll_delta.y);
     if response.hovered() && wheel != 0.0 {
@@ -233,16 +239,8 @@ pub(super) fn pictures(ui: &mut Ui, t: &Theme, canvas: Rect, spot: Spot, picture
     for (frame, (cell, area)) in picture.showing().iter().zip(cells.iter().zip(&areas)) {
         if captioned {
             let strip = Rect::from_min_max(cell.min, pos2(cell.right(), cell.top() + CAPTION));
-            let galley = truncated(
-                ui.painter(),
-                &frame.label,
-                t.fonts.caption.clone(),
-                t.text.secondary,
-                (strip.width() - PAD * 2.0).max(0.0),
-            );
-            let baseline =
-                ink_baseline(ui.painter(), &t.fonts.caption, strip.top(), strip.height());
-            galley_on_baseline(ui.painter(), strip.left() + PAD, baseline, galley);
+            let room = strip.shrink2(vec2(PAD, 0.0));
+            crate::ui::caption_line(ui.painter(), t, room, &frame.label, t.text.secondary);
         }
 
         // The checkerboard, so an alpha channel is visible as absence rather than as whatever the

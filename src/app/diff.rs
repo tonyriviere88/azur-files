@@ -42,7 +42,7 @@ impl App {
     pub(super) fn diff_partner(&self, id: PaneId) -> Option<PaneId> {
         self.host_of(id)
             .map(|(at, _)| self.panes[at].id)
-            .or_else(|| self.panes.iter().find(|p| p.id == id)?.tab().diff.as_ref()?.twin)
+            .or_else(|| self.pane_ref(id)?.tab().diff.as_ref()?.twin)
     }
 
     /// An action from the right half of a diff, sent where it belongs.
@@ -89,10 +89,7 @@ impl App {
             Action::SetView { pane, .. } | Action::SetLens { pane, .. } => *pane,
             _ => return false,
         };
-        self.panes
-            .iter()
-            .find(|p| p.id == pane)
-            .is_some_and(|p| p.tab().diff.is_some())
+        self.pane_ref(pane).is_some_and(|p| p.tab().diff.is_some())
     }
 
     /// `Folder diff...` from the application menu.
@@ -104,12 +101,7 @@ impl App {
     /// stays where it was**: see [`crate::diff::Flash`].
     pub(super) fn open_folder_diff(&mut self) {
         let host = self.outer(self.focused);
-        let Some(left) = self
-            .panes
-            .iter()
-            .find(|p| p.id == host)
-            .map(|p| p.tab().path.clone())
-        else {
+        let Some(left) = self.path_of(host) else {
             return;
         };
         let mut order = Vec::new();
@@ -117,8 +109,7 @@ impl App {
         let other = order
             .iter()
             .filter(|id| **id != host)
-            .filter_map(|id| self.panes.iter().find(|p| p.id == *id))
-            .map(|p| p.tab().path.clone())
+            .filter_map(|id| self.path_of(*id))
             .find(|path| *path != left);
         self.diff_folders(host, left, other);
     }
@@ -139,8 +130,7 @@ impl App {
             p.twin = true;
         }
         let Some(p) = self.pane_mut(host) else { return };
-        p.tabs.push(Tab::diff_side(left, hidden, show, Some(twin)));
-        p.show_tab(p.tabs.len() - 1);
+        p.push_tab(Tab::diff_side(left, hidden, show, Some(twin)));
         self.focused = host;
     }
 
@@ -162,9 +152,7 @@ impl App {
 
         // ---- Twins nobody owns ------------------------------------------
         let owned: Vec<PaneId> = self
-            .panes
-            .iter()
-            .flat_map(|p| p.tabs.iter())
+            .tabs()
             .filter_map(|tab| tab.diff.as_ref().and_then(|d| d.twin))
             .collect();
         self.panes.retain(|p| !p.twin || owned.contains(&p.id));
@@ -303,8 +291,7 @@ impl App {
             }
             side.show = show;
             tab.rebuild_order();
-            tab.scroll_y = 0.0;
-            tab.scroll_to = Some(0.0);
+            tab.scroll_to_top();
         }
     }
 

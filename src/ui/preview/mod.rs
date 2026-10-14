@@ -83,8 +83,7 @@ use crate::preview::{self, Ask, Payload};
 use crate::syntax;
 use crate::theme::Theme;
 use crate::ui::{
-    control_fills, deps, icon_rect, seam, snap, text_center, tool_button, truncated, SEAM,
-    TOOL_SIZE,
+    deps, icon_rect, seam, snap, text_center, tool_button, truncated, SEAM, TOOL_SIZE,
 };
 
 mod diff;
@@ -105,7 +104,7 @@ use find::{find_bar, Find, FIND_H};
 use document::{CHIP, GUTTER_GAP};
 use header::{header, CAPTION, ZOOM_MAX, ZOOM_MIN, ZOOM_STEP, ZOOM_W};
 use picture::{pictures, Frame, Picture};
-use text::{ink, overlay, reveal, text_canvas, Faces, Marks, Text};
+use text::{cover, ink, overlay, reveal, text_canvas, tinted, Faces, Marks, Text};
 
 /// The panel's own bar: the file's name, what it turned out to be, and the controls.
 ///
@@ -513,6 +512,7 @@ impl Slot {
     /// capture of a video panel is a photograph of the word `Opening…`. It stops counting the moment
     /// there is a frame *or* a complaint, so a file Media Foundation cannot play does not hold a
     /// capture open until its patience runs out.
+    #[cfg(any(test, feature = "devtools"))]
     pub fn busy(&self) -> bool {
         if let Content::Video(player) = &self.content {
             if player.opening() {
@@ -598,6 +598,7 @@ impl Slot {
     /// For `--find=`, so a capture can photograph the bar doing its job — the same reason
     /// `--preview` and `--compare` exist, and for the same reason: a screenshot run has no keyboard.
     /// The tests use it too, for the parts that are not about whether a keystroke lands.
+    #[cfg(any(test, feature = "devtools"))]
     pub fn look_for(&mut self, text: &str) {
         self.find.open = true;
         self.find.search.text = text.to_owned();
@@ -1060,6 +1061,7 @@ impl Preview {
 
     /// Whether **any** slot is still waiting, which is what `--shot --preview` holds a capture open
     /// for: a photograph of four tiles is only worth taking once all four have something in them.
+    #[cfg(any(test, feature = "devtools"))]
     pub fn busy(&self) -> bool {
         self.slots.iter().any(Slot::busy)
     }
@@ -1196,6 +1198,7 @@ impl Preview {
     ///
     /// For `--find=`, so a capture can photograph the bar doing its job — the same reason
     /// `--preview` and `--compare` exist.
+    #[cfg(any(test, feature = "devtools"))]
     pub fn look_for(&mut self, text: &str) {
         self.focused_mut().look_for(text);
     }
@@ -1213,6 +1216,7 @@ impl Preview {
     /// pointer, so the gesture has to be reachable without one. The latch still dies with the
     /// selection — see [`Self::allow_compare`], which runs every frame either way, so this cannot
     /// blend two files it was not asked about.
+    #[cfg(any(test, feature = "devtools"))]
     pub fn set_compare(&mut self, on: bool) {
         self.compare = on;
     }
@@ -1260,6 +1264,7 @@ impl Preview {
     ///
     /// For `--deps=<module>` — see [`crate::ui::deps::View::pick_named`], which says why a flag has
     /// to exist for this at all.
+    #[cfg(any(test, feature = "devtools"))]
     pub fn pick_dependency(&mut self, name: &str) -> bool {
         let at = self.focused_at();
         match &mut self.slots[at].content {
@@ -1401,32 +1406,9 @@ pub fn split(body: Rect, open: bool, layout: Layout) -> (Rect, Option<Rect>) {
     if !open {
         return (body, None);
     }
-    let side = layout.at.side(body);
-    let (span, least) = match side {
-        Side::Right => (body.width(), MIN_PANEL_W),
-        Side::Bottom => (body.height(), MIN_PANEL_H),
-    };
-    let room = span - MIN_LIST - SEAM;
-    if room < least {
-        return (body, None);
-    }
-    let take = (span * layout.share).clamp(least, room);
-    match side {
-        Side::Right => {
-            let edge = body.right() - take;
-            (
-                Rect::from_min_max(body.min, pos2(edge - SEAM, body.bottom())),
-                Some(Rect::from_min_max(pos2(edge - SEAM, body.top()), body.max)),
-            )
-        }
-        Side::Bottom => {
-            let edge = body.bottom() - take;
-            (
-                Rect::from_min_max(body.min, pos2(body.right(), edge - SEAM)),
-                Some(Rect::from_min_max(pos2(body.left(), edge - SEAM), body.max)),
-            )
-        }
-    }
+    let sideways = layout.at.side(body) == Side::Right;
+    let least = if sideways { MIN_PANEL_W } else { MIN_PANEL_H };
+    crate::ui::take_panel(body, sideways, layout.share, least, MIN_LIST)
 }
 
 /// Cut the canvas into one tile per file on show.
@@ -1514,7 +1496,7 @@ pub fn show(
     ui.painter()
         .rect_filled(inside, egui::CornerRadius::ZERO, t.bg.layer);
 
-    grip(ui, rect, pane, side, layout, body);
+    grip(ui, t, rect, pane, side, layout, body);
 
     let bar = Rect::from_min_size(inside.min, vec2(inside.width(), HEADER));
     let canvas = Rect::from_min_max(bar.left_bottom(), inside.max);
@@ -1602,15 +1584,7 @@ fn strip_for(ui: &Ui, t: &Theme, whole: Rect, slot: &Slot, focused: bool) -> Rec
     };
     // On its baseline rather than centred in the strip's box — see [`ink_baseline`], which is what
     // puts the name and the rule under it on one grid.
-    let baseline = ink_baseline(ui.painter(), &t.fonts.caption, strip.top(), strip.height());
-    let galley = truncated(
-        ui.painter(),
-        &name,
-        t.fonts.caption.clone(),
-        ink,
-        (strip.width() - PAD * 2.0).max(0.0),
-    );
-    galley_on_baseline(ui.painter(), strip.left() + PAD, baseline, galley);
+    crate::ui::caption_line(ui.painter(), t, strip.shrink2(vec2(PAD, 0.0)), &name, ink);
     if focused {
         // The line under the focused name, which is what says the header above is about this tile.
         ui.painter().hline(
@@ -1900,23 +1874,13 @@ fn chip(
 ) -> Response {
     let response = ui.interact(rect, id, Sense::click());
     let corner = CornerRadius::same(radius::SMALL);
-    let (hover, pressed) = control_fills(t, t.bg.layer);
-    let latched = azur_egui_theme::desktop::latched(t, response.hovered());
-    let fill = if active {
-        latched.0
-    } else if response.is_pointer_button_down_on() {
-        pressed
-    } else if response.hovered() {
-        hover
-    } else {
-        t.bg.control
-    };
-    ui.painter().rect_filled(rect, corner, fill);
+    let (fill, latched_ink) = crate::ui::control_look(t, &response, true, active);
+    ui.painter().rect_filled(rect, corner, fill.unwrap_or(t.bg.control));
 
     // The glyph and the word on one line — the glyph centred on its own ink by `azur::icons`, and the
     // word put on the baseline that matches it. `crate::ui::deps` has the reasoning at length; the
     // short version is that a galley centred in the same box sits a point and a half lower.
-    let ink = if active { latched.1 } else { t.text.primary };
+    let ink = if active { latched_ink } else { t.text.primary };
     let box_rect = icon_rect(rect, rect.left() + PICK_PAD, GLYPH);
     glyph(ui.painter(), box_rect, ink);
     let baseline = ink_baseline(ui.painter(), &t.fonts.caption, rect.top(), rect.height());
@@ -1938,8 +1902,18 @@ fn chip(
 ///
 /// The same gesture as the sidebar's splitter and the column edges in the listing: drag to size,
 /// double click to put it back. Reaching a few points either side of the one-point seam, because
-/// a one-point grab target is a one-point grab target.
-fn grip(ui: &mut Ui, rect: Rect, pane: PaneId, side: Side, layout: &mut Layout, body: Rect) {
+/// a one-point grab target is a one-point grab target — and lit in the accent while it is held or
+/// under the pointer, as the console's seam and a column edge are, so the thing about to move is
+/// the thing that shows it.
+fn grip(
+    ui: &mut Ui,
+    t: &Theme,
+    rect: Rect,
+    pane: PaneId,
+    side: Side,
+    layout: &mut Layout,
+    body: Rect,
+) {
     let band = match side {
         Side::Right => Rect::from_min_max(
             pos2(rect.left() - 3.0, rect.top()),
@@ -1973,5 +1947,12 @@ fn grip(ui: &mut Ui, rect: Rect, pane: PaneId, side: Side, layout: &mut Layout, 
     }
     if response.double_clicked() {
         layout.share = SHARE;
+    }
+    if response.hovered() || response.dragged() {
+        let line = match side {
+            Side::Right => Rect::from_min_size(rect.min, vec2(SEAM, rect.height())),
+            Side::Bottom => Rect::from_min_size(rect.min, vec2(rect.width(), SEAM)),
+        };
+        ui.painter().rect_filled(line, CornerRadius::ZERO, t.accent.default);
     }
 }

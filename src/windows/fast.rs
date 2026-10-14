@@ -25,16 +25,17 @@
 
 use std::ffi::c_void;
 use std::ffi::OsString;
-use std::os::windows::ffi::{OsStrExt, OsStringExt};
+use std::os::windows::ffi::OsStringExt;
+use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::Mutex;
 
 use windows_sys::Win32::Foundation::{
-    CloseHandle, GetLastError, ERROR_ALREADY_EXISTS, ERROR_DIR_NOT_EMPTY, ERROR_ENCRYPTION_FAILED,
+    GetLastError, ERROR_ALREADY_EXISTS, ERROR_DIR_NOT_EMPTY, ERROR_ENCRYPTION_FAILED,
     ERROR_FILE_EXISTS, ERROR_FILE_NOT_FOUND, ERROR_LOCK_VIOLATION, ERROR_NOT_SAME_DEVICE,
     ERROR_NO_MORE_FILES, ERROR_PATH_NOT_FOUND, ERROR_REQUEST_ABORTED, ERROR_SHARING_VIOLATION,
-    FILETIME, HANDLE, INVALID_HANDLE_VALUE,
+    FILETIME, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CopyFile2, CreateDirectoryExW, CreateDirectoryW, CreateFileW, DeleteFileW, FindClose,
@@ -56,6 +57,8 @@ use crate::shell::ops::fast::{
     Transfer, Trouble,
 };
 use crate::shell::ops::{Job, Outcome, Ran};
+use crate::fs::scan::verbatim;
+use crate::shell::{until_nul, FSCTL_SET_REPARSE_POINT};
 
 /// From this size up a file is copied unbuffered: it would only push everything else out of the
 /// cache to be read once, and unbuffered is what `robocopy /J` measures faster for large files.
@@ -901,7 +904,8 @@ fn stamp(folder: &Path, found: &Found) {
     else {
         return;
     };
-    unsafe { SetFileTime(handle.0, &found.created, &found.accessed, &found.written) };
+    let raw = handle.as_raw_handle();
+    unsafe { SetFileTime(raw, &found.created, &found.accessed, &found.written) };
 }
 
 /// Tell every Explorer window — and the desktop, and the file dialogs — which folders changed.
@@ -943,11 +947,8 @@ fn tell_the_shell<'a>(folders: impl IntoIterator<Item = &'a Path>) {
 // ---------------------------------------------------------------------------
 
 const FSCTL_GET_REPARSE_POINT: u32 = 0x0009_00A8;
-const FSCTL_SET_REPARSE_POINT: u32 = 0x0009_00A4;
 /// `MAXIMUM_REPARSE_DATA_BUFFER_SIZE`.
 const REPARSE_MAX: usize = 16 * 1024;
-const GENERIC_READ: u32 = 0x8000_0000;
-const GENERIC_WRITE: u32 = 0x4000_0000;
 
 /// Copy a junction or a directory link *as* one: a new empty folder carrying the same reparse data.
 ///
@@ -965,7 +966,7 @@ fn copy_link(from: &Path, to: &Path) -> Result<(), String> {
     // SAFETY: an open handle; the buffer is as long as said.
     unsafe {
         DeviceIoControl(
-            source.raw(),
+            windows::Win32::Foundation::HANDLE(source.as_raw_handle()),
             FSCTL_GET_REPARSE_POINT,
             None,
             0,
@@ -992,7 +993,7 @@ fn copy_link(from: &Path, to: &Path) -> Result<(), String> {
             // SAFETY: as above.
             unsafe {
                 DeviceIoControl(
-                    target.raw(),
+                    windows::Win32::Foundation::HANDLE(target.as_raw_handle()),
                     FSCTL_SET_REPARSE_POINT,
                     Some(data.as_ptr() as *const c_void),
                     length,
@@ -1194,7 +1195,7 @@ fn real(path: &Path) -> Option<String> {
     [VOLUME_NAME_GUID, VOLUME_NAME_DOS].into_iter().find_map(|volume| {
         let len = unsafe {
             GetFinalPathNameByHandleW(
-                handle.0,
+                handle.as_raw_handle(),
                 buffer.as_mut_ptr(),
                 buffer.len() as u32,
                 FILE_NAME_NORMALIZED | volume,
@@ -1283,13 +1284,13 @@ pub(crate) fn may(path: &Path, wanted: u32) -> bool {
         if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY | TOKEN_DUPLICATE, &mut process) == 0 {
             return true;
         }
-        let process = Handle(process);
+        let process = OwnedHandle::from_raw_handle(process);
         // `AccessCheck` wants an impersonation token, and a process's own is a primary one.
         let mut token: HANDLE = std::ptr::null_mut();
-        if DuplicateToken(process.0, SecurityImpersonation, &mut token) == 0 {
+        if DuplicateToken(process.as_raw_handle(), SecurityImpersonation, &mut token) == 0 {
             return true;
         }
-        let token = Handle(token);
+        let token = OwnedHandle::from_raw_handle(token);
         let mapping = GENERIC_MAPPING {
             GenericRead: FILE_GENERIC_READ,
             GenericWrite: FILE_GENERIC_WRITE,
@@ -1305,7 +1306,7 @@ pub(crate) fn may(path: &Path, wanted: u32) -> bool {
         let mut status = 0;
         let checked = AccessCheck(
             descriptor_ptr,
-            token.0,
+            token.as_raw_handle(),
             wanted,
             &mapping,
             privileges.as_mut_ptr() as *mut _,
@@ -1353,7 +1354,7 @@ fn largest_file(into: &Path) -> Option<u64> {
     if asked == 0 {
         return None;
     }
-    let name = String::from_utf16_lossy(until_nul(&name));
+    let name = crate::shell::wide_text(&name);
     matches!(name.as_str(), "FAT" | "FAT32").then_some(u32::MAX as u64)
 }
 
@@ -1399,15 +1400,12 @@ fn seeks(path: &Path) -> bool {
     let Some(root) = volume_root(path) else {
         return false;
     };
-    let root = String::from_utf16_lossy(until_nul(&root));
+    let root = crate::shell::wide_text(&root);
     let letter = root.trim_start_matches(r"\\?\").as_bytes();
     if letter.len() != 3 || letter[1] != b':' {
         return false;
     }
-    let device: Vec<u16> = format!(r"\\.\{}:", letter[0] as char)
-        .encode_utf16()
-        .chain(std::iter::once(0))
-        .collect();
+    let device = crate::shell::nul_terminated(format!(r"\\.\{}:", letter[0] as char));
     let Some(handle) = open(&device, 0, 0) else {
         return false;
     };
@@ -1420,7 +1418,7 @@ fn seeks(path: &Path) -> bool {
     // SAFETY: an open handle, and two buffers of the sizes said.
     let asked = unsafe {
         DeviceIoControl(
-            handle.raw(),
+            windows::Win32::Foundation::HANDLE(handle.as_raw_handle()),
             IOCTL_STORAGE_QUERY_PROPERTY,
             Some(&query as *const Query as *const c_void),
             std::mem::size_of::<Query>() as u32,
@@ -1445,25 +1443,9 @@ fn volume_root(path: &Path) -> Option<Vec<u16>> {
 // Plumbing
 // ---------------------------------------------------------------------------
 
-/// A handle that is closed when it goes.
-struct Handle(HANDLE);
-
-impl Handle {
-    /// The same handle, as the `windows` crate's type, for `DeviceIoControl`.
-    fn raw(&self) -> windows::Win32::Foundation::HANDLE {
-        windows::Win32::Foundation::HANDLE(self.0)
-    }
-}
-
-impl Drop for Handle {
-    fn drop(&mut self) {
-        unsafe { CloseHandle(self.0) };
-    }
-}
-
 /// Open a file, a folder or a device — given null-terminated — for `access`, sharing it every way
-/// so that nothing else is kept out by this program looking.
-fn open(wide: &[u16], access: u32, flags: u32) -> Option<Handle> {
+/// so that nothing else is kept out by this program looking. Closed when the handle goes.
+fn open(wide: &[u16], access: u32, flags: u32) -> Option<OwnedHandle> {
     let handle = unsafe {
         CreateFileW(
             wide.as_ptr(),
@@ -1475,45 +1457,9 @@ fn open(wide: &[u16], access: u32, flags: u32) -> Option<Handle> {
             std::ptr::null_mut(),
         )
     };
-    (handle != INVALID_HANDLE_VALUE).then_some(Handle(handle))
+    // SAFETY: a handle just opened, and owned from here on.
+    (handle != INVALID_HANDLE_VALUE).then(|| unsafe { OwnedHandle::from_raw_handle(handle) })
 }
 
-/// A path in the `\\?\` form, null-terminated: no 260-character limit, and no Win32 parsing of
-/// names that end in a dot or a space.
-fn verbatim(path: &Path) -> Vec<u16> {
-    let raw: Vec<u16> = path
-        .as_os_str()
-        .encode_wide()
-        .map(|c| if c == b'/' as u16 { b'\\' as u16 } else { c })
-        .collect();
-    let text = String::from_utf16_lossy(&raw);
-    let mut out: Vec<u16> = Vec::with_capacity(raw.len() + 9);
-    if text.starts_with(r"\\?\") || text.starts_with(r"\\.\") {
-        out.extend_from_slice(&raw);
-    } else if text.starts_with(r"\\") {
-        out.extend(r"\\?\UNC".encode_utf16());
-        out.extend_from_slice(&raw[1..]);
-    } else if raw.len() >= 2 && raw[1] == b':' as u16 {
-        out.extend(r"\\?\".encode_utf16());
-        out.extend_from_slice(&raw);
-    } else {
-        out.extend_from_slice(&raw);
-    }
-    out.push(0);
-    out
-}
-
-/// The part of a fixed-size wide buffer before its terminator.
-fn until_nul(wide: &[u16]) -> &[u16] {
-    let len = wide.iter().position(|&c| c == 0).unwrap_or(wide.len());
-    &wide[..len]
-}
-
-/// A Win32 error as a sentence, without the `(os error 5)` the standard library adds.
-fn message(code: u32) -> String {
-    let text = std::io::Error::from_raw_os_error(code as i32).to_string();
-    match text.rfind(" (os error") {
-        Some(at) => text[..at].trim_end_matches('.').to_owned(),
-        None => text,
-    }
-}
+// A Win32 error as a sentence; shared with the junction writer, which says its failures the same way.
+use crate::shell::win32_message as message;

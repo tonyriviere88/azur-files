@@ -528,17 +528,8 @@ fn inline(src: &str, out: &mut String, runs: &mut Vec<Run>, base: Style, depth: 
             let open = &src[i..i + ticks];
             if let Some(at) = src[i + ticks..].find(open) {
                 push(out, runs, &mut from);
-                let mut style = base;
-                style.code = true;
                 let text = src[i + ticks..i + ticks + at].trim();
-                let start = out.len();
-                out.push_str(text);
-                if out.len() > start {
-                    runs.push(Run {
-                        at: start..out.len(),
-                        style,
-                    });
-                }
+                styled(out, runs, text, Style { code: true, ..base });
                 from = out.len();
                 i += ticks + at + ticks;
                 continue;
@@ -551,16 +542,7 @@ fn inline(src: &str, out: &mut String, runs: &mut Vec<Run>, base: Style, depth: 
             let open = i + usize::from(image);
             if let Some((text, skip)) = link(&src[open..]) {
                 push(out, runs, &mut from);
-                let mut style = base;
-                style.link = true;
-                let start = out.len();
-                out.push_str(text);
-                if out.len() > start {
-                    runs.push(Run {
-                        at: start..out.len(),
-                        style,
-                    });
-                }
+                styled(out, runs, text, Style { link: true, ..base });
                 from = out.len();
                 i = open + skip;
                 continue;
@@ -575,14 +557,7 @@ fn inline(src: &str, out: &mut String, runs: &mut Vec<Run>, base: Style, depth: 
                     || inner.starts_with("mailto:")
                 {
                     push(out, runs, &mut from);
-                    let mut style = base;
-                    style.link = true;
-                    let start = out.len();
-                    out.push_str(inner);
-                    runs.push(Run {
-                        at: start..out.len(),
-                        style,
-                    });
+                    styled(out, runs, inner, Style { link: true, ..base });
                     from = out.len();
                     i += at + 1;
                     continue;
@@ -637,11 +612,26 @@ fn inline(src: &str, out: &mut String, runs: &mut Vec<Run>, base: Style, depth: 
         }
         // Anything else is a character of text, and it is stepped over by character
         // rather than by byte so an accent does not land inside itself.
-        let step = src[i..].chars().next().map_or(1, char::len_utf8);
-        out.push_str(&src[i..i + step]);
-        i += step;
+        let next = crate::syntax::step(src, i);
+        out.push_str(&src[i..next]);
+        i = next;
     }
     push(out, runs, &mut from);
+}
+
+/// One run of `text` in a style of its own, unless there is no text.
+///
+/// Pushed and never merged into the run before it, unlike `inline`'s own accumulator: code and
+/// link text are each one span, and two links side by side are two links.
+fn styled(out: &mut String, runs: &mut Vec<Run>, text: &str, style: Style) {
+    let start = out.len();
+    out.push_str(text);
+    if out.len() > start {
+        runs.push(Run {
+            at: start..out.len(),
+            style,
+        });
+    }
 }
 
 /// `[text](dest)` or `[text][ref]`: the text, and how many bytes the whole thing took.
@@ -649,15 +639,13 @@ fn link(src: &str) -> Option<(&str, usize)> {
     let close = balanced(src)?;
     let text = &src[1..close];
     let rest = &src[close + 1..];
-    if let Some(after) = rest.strip_prefix('(') {
-        let end = after.find(')')?;
-        return Some((text, close + 1 + 1 + end + 1));
-    }
-    // A reference link. There is no definition table here, so the label is dropped and
-    // the text stands on its own — which is what it does on the page as well.
-    if let Some(after) = rest.strip_prefix('[') {
-        let end = after.find(']')?;
-        return Some((text, close + 1 + 1 + end + 1));
+    // The second form is a reference link. There is no definition table here, so the label is
+    // dropped and the text stands on its own — which is what it does on the page as well.
+    for (open, shut) in [('(', ')'), ('[', ']')] {
+        if let Some(after) = rest.strip_prefix(open) {
+            let end = after.find(shut)?;
+            return Some((text, close + 1 + 1 + end + 1));
+        }
     }
     None
 }

@@ -46,7 +46,7 @@ pub(crate) fn segments(
     // straight off the theme: the bar these sit on is `crate::ui::seam`, not `background-layer`,
     // and in the light theme where the seam and `control-active` are the same grey a pressed
     // segment was the same colour as the bar, so the press showed as the fill going away.
-    let (_, pressed_fill) = crate::ui::control_fills(t, crate::ui::bar(t));
+    let (_, pressed_fill) = crate::ui::control_fills(t);
 
     const CHEVRON: f32 = 16.0;
     const OVERFLOW: f32 = 22.0;
@@ -170,12 +170,10 @@ pub(crate) fn segments(
             "",
             true,
             false,
-            crate::ui::bar(t),
         );
         if response.clicked() {
             clicked = true;
-            menu.open = (menu.open != Some((pane, OVERFLOW_MENU)))
-                .then_some((pane, OVERFLOW_MENU));
+            menu.toggle((pane, OVERFLOW_MENU));
         } else if tracking && response.hovered() {
             wanted = Some(OVERFLOW_MENU);
         }
@@ -204,9 +202,7 @@ pub(crate) fn segments(
                     }
                 }
             });
-        if !open && menu.open == Some((pane, OVERFLOW_MENU)) {
-            menu.open = None;
-        }
+        menu.closed_itself((pane, OVERFLOW_MENU), open);
         x += OVERFLOW;
     }
 
@@ -242,7 +238,7 @@ pub(crate) fn segments(
                 clicked = true;
                 // A click on the chevron whose dropdown is already up closes it, which is what
                 // clicking an open menu's button does everywhere.
-                menu.open = (menu.open != Some((pane, index))).then_some((pane, index));
+                menu.toggle((pane, index));
                 // Ask again on each open: the folder may have gained a subfolder since the
                 // last time this chevron was used. See [`CrumbMenu::reopen`] for what that
                 // means now that the answer comes from the loader.
@@ -327,43 +323,17 @@ pub(crate) fn segments(
                 // the segment itself is what puts the folder — and its error — in the pane, in
                 // the one place with room to word it.
                 if !listed {
-                    ui.add(
-                        azur_egui_theme::components::Text::new("Reading…")
-                            .color(azur_egui_theme::components::TextColor::Tertiary),
-                    );
+                    menu_note(ui, "Reading…");
                 } else if menu.items.is_empty() {
-                    ui.add(
-                        azur_egui_theme::components::Text::new("No subfolders")
-                            .color(azur_egui_theme::components::TextColor::Tertiary),
-                    );
+                    menu_note(ui, "No subfolders");
                 }
                 for (name, target) in &menu.items {
                     let here = *target == *path;
                     // Windows' icon, which for the leading chevron — the one that lists
                     // the volumes — is the difference between a row of drives and a row of
-                    // identical folders.
-                    //
-                    // A *drive* is asked about by path, because that is the only way to get
-                    // its own icon, and there are at most twenty-six of them. A folder is
-                    // asked about by kind, which is one lookup shared by every folder for
-                    // the rest of the session: this menu can hold two hundred rows, and a
-                    // per-path lookup each would be two hundred questions for the
-                    // generic folder icon two hundred times over.
-                    let icon = if target.parent().is_none() {
-                        icons_cache.place(target)
-                    } else {
-                        icons_cache.kind("", true)
-                    };
-                    let texture = icon
-                        .and_then(|icon| icons_cache.uv(ui.ctx(), icon));
-                    let paint = |painter: &egui::Painter, rect: Rect, color: egui::Color32| {
-                        match texture {
-                            Some((texture, uv)) => {
-                                painter.image(texture, rect, uv, egui::Color32::WHITE);
-                            }
-                            None => icons::folder(painter, rect, color),
-                        }
-                    };
+                    // identical folders. See [`crumb_icon`] for why a drive is asked about
+                    // by path and a folder by kind.
+                    let paint = texture_or_folder(crumb_icon(icons_cache, target));
                     if ui
                         .add(MenuItem::new(name.clone()).icon(&paint).selected(here))
                         .clicked()
@@ -375,19 +345,12 @@ pub(crate) fn segments(
                     }
                 }
                 if menu.truncated {
-                    azur_egui_theme::components::menu_divider(ui);
-                    ui.add(
-                        azur_egui_theme::components::Text::new(format!("First {MENU_LIMIT} shown"))
-                            .color(azur_egui_theme::components::TextColor::Tertiary),
-                    );
+                    truncated_note(ui);
                 }
             });
-            // The popup has closed itself: an entry was clicked, or something outside it was, or
-            // `Escape`. That is the end of the bar's tracking mode, and this is the only place
-            // it is reported.
-            if !open && menu.open == Some((pane, index)) {
-                menu.open = None;
-            }
+            // The popup may have closed itself, which ends the bar's tracking mode. See
+            // [`CrumbMenu::closed_itself`].
+            menu.closed_itself((pane, index), open);
             x += CHEVRON;
         }
 

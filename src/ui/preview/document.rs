@@ -55,12 +55,7 @@ pub(super) fn draw(
 ) {
     use markdown::Kind;
 
-    let mut child = ui.new_child(
-        egui::UiBuilder::new()
-            .max_rect(canvas.shrink2(vec2(PAD * 2.0, 0.0)))
-            .layout(egui::Layout::top_down(egui::Align::Min)),
-    );
-    child.set_clip_rect(canvas.intersect(ui.clip_rect()));
+    let mut child = crate::ui::clipped_child(ui, canvas.shrink2(vec2(PAD * 2.0, 0.0)), canvas);
     let output = egui::ScrollArea::vertical()
         .id_salt(("preview-doc", spot))
         .auto_shrink([false, false])
@@ -152,21 +147,30 @@ pub(super) fn paragraph(
     marks: &mut Marks<'_>,
 ) {
     let quoted = block.quote > 0;
-    let mut parts: Vec<(Range<usize>, egui::TextFormat)> = Vec::with_capacity(block.runs.len());
-    let mut cut = block.at.start;
-    for run in &block.runs {
-        // A gap between runs cannot happen — `inline` covers the block end to end — but a covering
-        // is what `overlay` needs and the cost of insisting on it here is one comparison.
-        if run.at.start > cut {
-            parts.push((cut..run.at.start, ink(t, faces, Default::default(), quoted)));
-        }
-        parts.push((run.at.clone(), ink(t, faces, run.style, quoted)));
-        cut = run.at.end;
-    }
-    if cut < block.at.end {
-        parts.push((cut..block.at.end, ink(t, faces, Default::default(), quoted)));
-    }
-    let mut job = overlay(&doc.text, &block.at, &parts, marks.hits, marks.at, t);
+    // A gap between runs cannot happen — `inline` covers the block end to end — but a covering is
+    // what `overlay` needs and the cost of insisting on it here is one comparison.
+    let parts = cover(
+        block.at.clone(),
+        block
+            .runs
+            .iter()
+            .map(|run| (run.at.clone(), ink(t, faces, run.style, quoted))),
+        &ink(t, faces, Default::default(), quoted),
+    );
+    selectable_block(ui, t, doc, block, &parts, marks);
+}
+
+/// A block's text with the find bar's hits laid over `parts`, wrapped to the room there is, as a label
+/// that can be selected — and brought into view if the current hit is in it.
+fn selectable_block(
+    ui: &mut Ui,
+    t: &Theme,
+    doc: &markdown::Doc,
+    block: &markdown::Block,
+    parts: &[(Range<usize>, egui::TextFormat)],
+    marks: &mut Marks<'_>,
+) {
+    let mut job = overlay(&doc.text, &block.at, parts, marks.hits, marks.at, t);
     job.wrap = egui::text::TextWrapping {
         max_width: ui.available_width().max(16.0),
         ..Default::default()
@@ -192,30 +196,13 @@ pub(super) fn code_block(
     };
     // The fence's own language, already worked out — see `markdown::Doc::spans`. Sliced rather than
     // recomputed, and by the same walk `overlay` does over the hits.
-    let mut parts = Vec::new();
-    let mut cut = block.at.start;
-    for span in &doc.spans {
-        if span.at.end <= block.at.start {
-            continue;
-        }
-        if span.at.start >= block.at.end {
-            break;
-        }
-        if span.at.start > cut {
-            parts.push((cut..span.at.start, plain.clone()));
-        }
-        parts.push((
-            span.at.clone(),
-            egui::TextFormat {
-                color: t.tok(span.tok),
-                ..plain.clone()
-            },
-        ));
-        cut = span.at.end;
-    }
-    if cut < block.at.end {
-        parts.push((cut..block.at.end, plain.clone()));
-    }
+    let spans = doc
+        .spans
+        .iter()
+        .filter(|span| span.at.end > block.at.start)
+        .take_while(|span| span.at.start < block.at.end)
+        .map(|span| tinted(span, &plain, t));
+    let parts = cover(block.at.clone(), spans, &plain);
 
     egui::Frame::new()
         .fill(t.syntax.fill)
@@ -225,14 +212,7 @@ pub(super) fn code_block(
             // Full width whatever the code is: a band that stops at the longest line makes a
             // three-line block look like three separate ones.
             ui.set_min_width(ui.available_width());
-            let mut job = overlay(&doc.text, &block.at, &parts, marks.hits, marks.at, t);
-            job.wrap = egui::text::TextWrapping {
-                max_width: ui.available_width().max(16.0),
-                ..Default::default()
-            };
-            let galley = ui.painter().layout_job(job);
-            let shown = ui.add(egui::Label::new(galley.clone()).selectable(true));
-            reveal(ui, marks, &block.at, &galley, shown.rect.min, &doc.text);
+            selectable_block(ui, t, doc, block, &parts, marks);
         });
 }
 

@@ -50,6 +50,7 @@ use std::path::{Path, PathBuf};
 
 use super::win::friendly;
 use super::{Owner, Recycled};
+use crate::shell::{display_name, take_co_string, Pidl};
 use windows::core::Interface;
 use windows::Win32::Foundation::{HWND, PROPERTYKEY};
 use windows::Win32::UI::Shell::Common::ITEMIDLIST;
@@ -158,7 +159,7 @@ pub(crate) fn restore(items: &[Recycled], owner: Owner) -> Option<String> {
 /// # Safety
 ///
 /// COM must be initialised on the calling thread. Every ID list taken from the shell here is owned
-/// by an `Ids`, which frees it; each child list points into one of those and is used only while it
+/// by a [`Pidl`], which frees it; each child list points into one of those and is used only while it
 /// is alive, and `GetUIObjectOf` copies what it keeps.
 #[cfg(windows)]
 unsafe fn menu_of(items: &[Recycled]) -> Result<IContextMenu, Option<String>> {
@@ -169,10 +170,12 @@ unsafe fn menu_of(items: &[Recycled]) -> Result<IContextMenu, Option<String>> {
         return Err(Some("Those items are no longer in the Recycle Bin".to_owned()));
     }
 
-    // Each item's own absolute ID list, kept alive for as long as the children point into it.
-    let lists: Vec<Ids> = found
+    // Each item's own absolute ID list, kept alive for as long as the children point into it —
+    // which is the invoke's lifetime, so every path out of [`restore`] between taking them and
+    // returning has to free them, and the guard is what does.
+    let lists: Vec<Pidl> = found
         .iter()
-        .filter_map(|item| SHGetIDListFromObject(item).ok().map(Ids))
+        .filter_map(|item| SHGetIDListFromObject(item).ok().map(Pidl))
         .filter(|list| !list.0.is_null())
         .collect();
     let Some(first) = lists.first() else {
@@ -332,40 +335,23 @@ fn came_from(was: &Path, folder: &Path, wanted: &Path) -> bool {
         && was.file_name().is_some_and(|shown| Some(shown) == wanted.file_stem())
 }
 
-/// One of an item's names, freed on the way out.
+/// One of an item's names, as a path.
 ///
-/// `pub(crate)` for `crate::fs::places`, which reads a `shell:` name's folder the same way and
-/// needs the same guard.
+/// `pub(crate)` for `crate::fs::places`, which reads a `shell:` name's folder the same way. It runs
+/// once or twice per item on every restore out of the Recycle Bin, and the null check in
+/// [`display_name`] is the one that matters here: see [`take_co_string`] for the crash behind it.
 #[cfg(windows)]
 pub(crate) unsafe fn name_of(
     item: &IShellItem,
     which: windows::Win32::UI::Shell::SIGDN,
 ) -> Option<PathBuf> {
-    let wide = item.GetDisplayName(which).ok()?;
-    // An `S_OK` with nothing at the pointer, which is the one shape of answer that takes the process
-    // with it: `to_string` is `wcslen` on whatever it is handed and there is no check inside it. Not
-    // a theory here — `crate::windows::ops::landed` carries the stack from a real crash of exactly
-    // this, faulting in `ucrtbase!wcslen` on a replace over a network share, and [`read_string`] ten
-    // lines below has guarded it since. This is the one call the lesson had not reached, and it runs
-    // once or twice per item on every restore out of the Recycle Bin.
-    if wide.is_null() {
-        return None;
-    }
-    let text = wide.to_string().ok();
-    windows::Win32::System::Com::CoTaskMemFree(Some(wide.0 as *const std::ffi::c_void));
-    text.map(PathBuf::from)
+    display_name(item, which).map(PathBuf::from)
 }
 
 /// One string property, freed on the way out.
 #[cfg(windows)]
 unsafe fn read_string(item: &IShellItem2, key: &PROPERTYKEY) -> Option<String> {
-    let wide = item.GetString(key).ok()?;
-    if wide.is_null() {
-        return None;
-    }
-    let text = wide.to_string().ok();
-    windows::Win32::System::Com::CoTaskMemFree(Some(wide.0 as *const std::ffi::c_void));
-    text
+    take_co_string(item.GetString(key).ok()?)
 }
 
 /// Whether two paths name the same thing, the way Windows means it.
@@ -383,22 +369,6 @@ fn same(a: &Path, b: &Path) -> bool {
             .to_lowercase()
     };
     fold(a) == fold(b)
-}
-
-/// An absolute ID list from the shell, freed when this goes.
-///
-/// A guard rather than a pair of statements because the child lists handed to `GetUIObjectOf`
-/// point *into* these, so their lifetime is the invoke's — and every path out of [`restore`]
-/// between taking them and returning has to free them.
-#[cfg(windows)]
-struct Ids(*mut ITEMIDLIST);
-
-#[cfg(windows)]
-impl Drop for Ids {
-    fn drop(&mut self) {
-        // SAFETY: allocated by `SHGetIDListFromObject`, freed exactly once.
-        unsafe { windows::Win32::UI::Shell::ILFree(Some(self.0)) };
-    }
 }
 
 /// Every verb on a menu that has been queried, for the one message worth printing when a verb
@@ -431,8 +401,7 @@ unsafe fn verbs_of(
             )
             .is_ok()
         {
-            let end = wide.iter().position(|unit| *unit == 0).unwrap_or(wide.len());
-            found.push(String::from_utf16_lossy(&wide[..end]));
+            found.push(crate::shell::wide_text(&wide));
         }
     }
     found
