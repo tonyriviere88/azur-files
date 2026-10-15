@@ -130,6 +130,10 @@ fn dragging_a_name_picks_the_file_up_and_dragging_beside_it_bands() {
     // last column is fitted to its content, so a date long enough fills it right up to
     // the edge — and a press there is genuinely on the row's ink, as this test used to
     // discover the hard way when the glyph advances moved by a pixel.
+    //
+    // From a row that is *not* selected: the drag above selected this one, and a selected row is a
+    // handle all the way across — see the next test.
+    h.app.panes[0].tab_mut().clear_selection();
     h.wait();
     let blank = pos2(pane.left() + pane.width() * 0.45, row.y);
     let done = h.drag(blank, pos2(blank.x - 40.0, blank.y + crate::pane::ROW_HEIGHT * 3.5));
@@ -142,6 +146,34 @@ fn dragging_a_name_picks_the_file_up_and_dragging_beside_it_bands() {
         "the band should have swept the rows it crossed, got {}",
         h.tab(0).selected_count
     );
+}
+
+/// A drag from a selected row picks the selection up wherever in the row it starts — between two
+/// columns as much as on the name. Banding there would throw away files already picked out.
+#[test]
+fn dragging_beside_a_selected_name_picks_the_selection_up() {
+    let mut h = Harness::new();
+    assert!(h.tab(0).order.len() > 4, "the crate root has rows to drag");
+    let pane = h.pane_rect(0);
+
+    // The first two rows selected, by name.
+    let name = |h: &Harness, i: usize| pos2(pane.left() + 46.0, h.row_center(0, i).y);
+    h.click_at(name(&h, 0));
+    h.wait();
+    h.click_with(name(&h, 1), PointerButton::Primary, Modifiers::SHIFT);
+    assert_eq!(h.tab(0).selected_count, 2, "two rows to drag");
+
+    // From the blank stretch of the second one, the same spot the test above bands from.
+    h.wait();
+    let row = h.row_center(0, 1);
+    let blank = pos2(pane.left() + pane.width() * 0.45, row.y);
+    let done = h.drag(blank, pos2(blank.x - 40.0, blank.y + crate::pane::ROW_HEIGHT * 3.5));
+    assert!(
+        done.contains(&"DragOut"),
+        "a drag beside a selected name has to pick the selection up, got {done:?}"
+    );
+    assert!(h.tab(0).band.is_none(), "and draw no band");
+    assert_eq!(h.tab(0).selected_count, 2, "the whole selection, unchanged");
 }
 
 /// Ctrl+C then Ctrl+V, in the folder you are already looking at.

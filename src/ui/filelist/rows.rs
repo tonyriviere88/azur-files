@@ -1458,6 +1458,11 @@ pub(crate) fn rows(
         // as a drag handle is what makes a band a gesture you can only start by finding
         // the bottom of the listing first.
         //
+        // **A selected row is a handle all the way across**, the rule a right click follows: the
+        // files are picked out already, so a drag that starts between two columns of one of them
+        // is about them, and banding there would throw the selection away. A row is selected on
+        // release, so `is_selected` here is the selection as it stood before this press.
+        //
         // Keyed on the *pressed* row and not the hovered one. egui only calls a press a
         // drag once it has travelled, and by then the pointer is a row or two along — so
         // the hovered row is the row the drag arrived at, and using it would both test the
@@ -1472,7 +1477,7 @@ pub(crate) fn rows(
             if let Some(grabbed) = pressed_row {
                 let on_file = press
                     .is_some_and(|at| ink.iter().any(|rect| rect.expand(1.0).contains(at)));
-                if on_file {
+                if on_file || tab.is_selected(grabbed) {
                     drag_out(pane, tab, grabbed, out);
                 } else {
                     start_band(ui, body, tab, press);
