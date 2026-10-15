@@ -460,7 +460,7 @@ impl Volumes {
             arrivals,
             sender,
         };
-        volumes.probe(ctx);
+        volumes.probe(ctx, false);
         volumes.confirm(ctx);
         volumes
     }
@@ -491,7 +491,10 @@ impl Volumes {
         let (sender, arrivals) = channel();
         self.sender = sender;
         self.arrivals = arrivals;
-        self.probe(ctx);
+        // **Every volume again, described or not**: the old measurement is what the row shows while
+        // the new one is taken, not a reason to skip taking it. Skipping it was why a disk that
+        // filled up kept its startup gauge through every F5.
+        self.probe(ctx, true);
         // **The confirmation channel is not replaced**, unlike the one above. A description is
         // about a volume that is still in the list and a late one would land on the wrong round; a
         // confirmation says "this machine answered a moment ago", which is exactly the claim its row
@@ -746,11 +749,13 @@ impl Volumes {
         }
     }
 
-    fn probe(&self, ctx: &egui::Context) {
+    /// Describe each volume on its own thread. `again` re-describes the ones already described,
+    /// which is what a refresh is for — free space is the one part of a description that goes stale.
+    fn probe(&self, ctx: &egui::Context, again: bool) {
         for drive in self.drives.iter().chain(self.shares.iter()) {
             // A mapping Windows has not reconnected is listed and left alone: describing it is
             // what would make Windows try, and that is the hang this split exists to avoid.
-            if drive.described || drive.disconnected {
+            if (drive.described && !again) || drive.disconnected {
                 continue;
             }
             let mut drive = drive.clone();
