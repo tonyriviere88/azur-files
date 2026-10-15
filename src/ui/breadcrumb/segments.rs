@@ -17,6 +17,38 @@ use super::*;
 /// pen rather than running underneath it.
 pub(crate) const PEN: f32 = 18.0;
 
+/// Where a click on the segment at `index` goes: that folder if it is still there, and otherwise
+/// nowhere — unless the folder on show has gone with it, when it is the deepest folder above both
+/// that is still standing, so the pane is not left showing a folder that no longer exists.
+///
+/// **The second line of defence.** A folder deleted from the one on show leaves the bar on its own,
+/// when the watch has the listing re-read — see [`Tab::trim_trail`]. What that cannot see is a
+/// folder deeper down the trail, which nothing watches: walking up two levels out of `a\b\c` and
+/// deleting `c` from inside `b` changes nothing in `a`. So the click is checked here, and the
+/// segments that have gone **stay on the bar, struck through in red** — [`Tab::trail_gone`] — which
+/// is the answer to the click: a segment that silently left the bar would leave you wondering
+/// whether the click had missed. Only [`fs::gone`]'s *not found* counts: see there for what is let
+/// through.
+///
+/// Asked again on every click, so a folder that has come back is no longer marked.
+fn standing(tab: &mut Tab, crumbs: &[(String, PathBuf)], index: usize) -> Option<PathBuf> {
+    let at = (0..=index)
+        .rev()
+        .find(|&at| !fs::gone(&crumbs[at].1))
+        .unwrap_or(0);
+    let found = &crumbs[at].1;
+    if at == index {
+        if tab.trail_gone.as_ref().is_some_and(|gone| found.starts_with(gone)) {
+            tab.trail_gone = None;
+        }
+        return Some(found.clone());
+    }
+    // Everything under a folder that has gone has gone with it, so the mark is its shallowest
+    // segment and covers the rest of the trail.
+    tab.trail_gone = Some(crumbs[at + 1].1.clone());
+    (*found != tab.path && tab.path.starts_with(found)).then(|| found.clone())
+}
+
 /// The segmented breadcrumb.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn segments(
@@ -193,12 +225,13 @@ pub(crate) fn segments(
             .show(ui.ctx(), |ui| {
                 // `start` rather than nothing: what the `…` holds is the part of the *trail*
                 // that did not fit, and This PC is not on the bar to be collapsed into it.
-                for (label, path) in crumbs[start..first].iter() {
-                    if ui.add(MenuItem::new(label.clone())).clicked() {
-                        out.push(Action::Navigate {
-                            pane,
-                            path: path.clone(),
-                        });
+                for (index, (label, path)) in crumbs.iter().enumerate().take(first).skip(start) {
+                    // Red for one that has gone, as on the bar. A menu entry has no strikethrough.
+                    let gone = tab.trail_gone.as_ref().is_some_and(|gone| path.starts_with(gone));
+                    if ui.add(MenuItem::new(label.clone()).danger(gone)).clicked() {
+                        if let Some(to) = standing(tab, &crumbs, index) {
+                            out.push(Action::Navigate { pane, path: to });
+                        }
                     }
                 }
             });
@@ -406,13 +439,18 @@ pub(crate) fn segments(
         } else {
             (t.fonts.body.clone(), t.text.secondary)
         };
-        let galley = truncated(
-            ui.painter(),
-            label,
-            font,
-            color,
-            width - space::S3 * 2.0,
-        );
+        // A folder found deleted when it was clicked: red and struck through, in place, so the bar
+        // says what became of it. See [`standing`].
+        let gone = tab.trail_gone.as_ref().is_some_and(|gone| path.starts_with(gone));
+        let galley = if gone {
+            let mut format = egui::TextFormat::simple(font, t.status.danger);
+            format.strikethrough = egui::Stroke::new(1.0, t.status.danger);
+            let mut job = egui::text::LayoutJob::single_section(label.clone(), format);
+            job.wrap = egui::text::TextWrapping::truncate_at_width((width - space::S3 * 2.0).max(0.0));
+            ui.painter().layout_job(job)
+        } else {
+            truncated(ui.painter(), label, font, color, width - space::S3 * 2.0)
+        };
         text_left(
             ui.painter(),
             Rect::from_min_max(
@@ -422,13 +460,13 @@ pub(crate) fn segments(
             galley,
         );
         if response.clicked() && !current {
-            out.push(Action::Navigate {
-                pane,
-                path: path.clone(),
-            });
+            if let Some(to) = standing(tab, &crumbs, index) {
+                out.push(Action::Navigate { pane, path: to });
+            }
         }
-        // Middle click opens an ancestor in its own tab, as it does everywhere.
-        if response.middle_clicked() {
+        // Middle click opens an ancestor in its own tab, as it does everywhere — but only the one
+        // clicked: a tab of some other folder is not what was asked for.
+        if response.middle_clicked() && standing(tab, &crumbs, index).as_ref() == Some(path) {
             out.push(Action::NavigateNewTab {
                 pane,
                 path: path.clone(),

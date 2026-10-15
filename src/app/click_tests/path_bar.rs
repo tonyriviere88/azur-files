@@ -260,6 +260,101 @@ fn after_going_up_the_folder_left_is_still_on_the_breadcrumb() {
     assert_eq!(h.tab(0).path, was, "and it goes back where it came from");
 }
 
+/// **A folder left on the trail and then deleted leaves the bar** when the folder on show is
+/// re-read — which deleting it causes, since the folder on show is watched. See `Tab::trim_trail`.
+///
+/// Driven through `folder_changed`, as `deep_reads_survive_a_folder_changing_underneath_them` is:
+/// what is tested is what the program does with the notification, not that Windows sends one.
+#[test]
+fn a_folder_deleted_off_the_end_of_the_trail_leaves_the_bar() {
+    let root = crate::sandbox::fresh("trail-gone");
+    let gone = root.join("gone");
+    std::fs::create_dir_all(gone.join("deeper")).expect("a directory in the sandbox");
+    std::fs::create_dir_all(root.join("kept")).expect("a directory in the sandbox");
+
+    let mut h = Harness::opening(vec![gone.join("deeper")]);
+    h.app.panes[0].tab_mut().go_up();
+    h.app.panes[0].tab_mut().go_up();
+    h.settle();
+    assert_eq!(h.tab(0).trail, gone.join("deeper"), "the trail has to outlive the move");
+
+    // A change that leaves the trail standing leaves it alone.
+    std::fs::remove_dir(root.join("kept")).expect("the folder to delete");
+    h.app.folder_changed(&root);
+    h.settle();
+    assert_eq!(h.tab(0).trail, gone.join("deeper"), "a different folder going cut the trail");
+
+    // **Retried**, because something may still hold `deeper` open for a moment — the pane was
+    // showing it a few frames ago, and its watch handle and the shell's look at its icon are released
+    // on threads of their own. A sharing violation here is the harness, not the code under test.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while let Err(error) = std::fs::remove_dir_all(&gone) {
+        assert!(std::time::Instant::now() < deadline, "the folder to delete: {error}");
+        h.frame(Vec::new());
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    h.app.folder_changed(&root);
+    h.settle();
+    assert_eq!(h.tab(0).path, root, "the pane has to stay where it was");
+    assert_eq!(h.tab(0).trail, root, "the deleted folder is still on the bar");
+
+    crate::sandbox::remove(&root);
+}
+
+/// **A segment for a folder deleted deeper down the trail is not entered, and is marked.** Two
+/// levels below the folder on show, which no watch sees — the case [`Tab::trim_trail`] cannot
+/// cover — so clicking it marks it gone, red and struck through, rather than landing in a pane that
+/// says the folder no longer exists. Nor in its parent, which was not what was clicked. See
+/// `breadcrumb::standing`.
+#[test]
+fn a_segment_for_a_deleted_folder_is_not_entered() {
+    let root = crate::sandbox::fresh("crumb-gone");
+    let kept = root.join("kept");
+    let gone = kept.join("gone");
+    std::fs::create_dir_all(&gone).expect("a directory in the sandbox");
+
+    let mut h = Harness::opening(vec![gone.clone()]);
+    // Wide, because the sandbox is ten segments deep and the end of the trail past the folder on
+    // show is the first thing a narrow bar drops.
+    h.size = vec2(1800.0, 650.0);
+    let pane = h.app.panes[0].id;
+    h.app.panes[0].tab_mut().go_up();
+    h.app.panes[0].tab_mut().go_up();
+    h.settle();
+    assert_eq!(h.tab(0).trail, gone, "the trail has to outlive the move");
+    std::fs::remove_dir(&gone).expect("the folder to delete");
+    // What the watch would do if `root` reported the change, which proves the re-read leaves alone
+    // what it cannot see: `kept` is still there.
+    h.app.folder_changed(&root);
+    h.settle();
+    assert_eq!(h.tab(0).trail, gone, "a re-read of `root` knows nothing about `gone`");
+
+    let deepest = crate::fs::breadcrumb_segments(&h.tab(0).trail).len() - 1;
+    let y = h.path_bar_y(0);
+    let left = h.pane_rect(0).left();
+    let at = (0..1700)
+        .step_by(2)
+        .map(|dx| pos2(left + dx as f32, y))
+        .find(|at| h.hovers(Id::new(("crumb", pane, deepest)), *at))
+        .expect("the segment for the deleted folder cannot be reached");
+    let done = h.click_at(at);
+    assert!(
+        !done.contains(&"Navigate"),
+        "a folder that has gone must not be entered, nor its parent, got {done:?}"
+    );
+    assert_eq!(h.tab(0).path, root, "the pane has to stay where it was");
+    assert_eq!(h.tab(0).trail, gone, "the deleted folder stays on the bar");
+    assert_eq!(h.tab(0).trail_gone.as_ref(), Some(&gone), "marked as gone");
+
+    // And comes back unmarked when it does.
+    std::fs::create_dir_all(&gone).expect("a directory in the sandbox");
+    let done = h.click_at(at);
+    assert!(done.contains(&"Navigate"), "a folder that is back has to open, got {done:?}");
+    assert_eq!(h.tab(0).trail_gone, None, "and is no longer marked");
+
+    crate::sandbox::remove(&root);
+}
+
 /// The path bar is the selected tab's colour, and the tab is the same colour it is.
 ///
 /// Both from one frame, because the point of the change is that they *match*: a test that

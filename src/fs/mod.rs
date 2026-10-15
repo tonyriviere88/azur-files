@@ -256,6 +256,24 @@ pub fn resolve_input(text: &str) -> Option<Typed> {
     }
 }
 
+/// Whether a folder the window knows of is **known** to have gone: deleted, renamed, or replaced
+/// by a file since it was listed. Asked of a breadcrumb segment before it is opened, since the
+/// trail can name folders that were deleted after they were walked out of.
+///
+/// One `metadata`, on a click, which is [`resolve_input`]'s cost on `Enter`. And for the same
+/// reason it answers only *not found*: a refusal, an unready drive or a server that will not say
+/// is not a folder that has gone, and is the loader's to report, on a worker. Never a question for
+/// a UNC path or a listing this program assembles — see [`resolve_input`] and [`is_synthetic`].
+pub fn gone(path: &Path) -> bool {
+    if is_synthetic(path) || is_unc(path) {
+        return false;
+    }
+    match std::fs::metadata(path) {
+        Ok(found) => !found.is_dir(),
+        Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+    }
+}
+
 /// The folder a half-typed path names, worked out **without asking the disk anything**.
 ///
 /// [`resolve_input`] stops one step further on than this, and that step is the whole difference:

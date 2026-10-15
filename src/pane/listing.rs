@@ -75,6 +75,9 @@ impl Tab {
         self.cursor = None;
         self.anchor = None;
         self.widths_measured = false;
+        // A folder on the breadcrumb past this one that this listing no longer holds leaves the bar.
+        // See [`Tab::trim_trail`].
+        self.trim_trail(&dir);
         self.dir = Some(dir);
         self.awaiting = None;
         self.asked_at = None;

@@ -69,6 +69,50 @@ impl Tab {
         }
     }
 
+    /// Drop the end of [`Tab::trail`] when the folder after this one on it is no longer in `dir`,
+    /// this folder's own listing — deleted or renamed from under the bar since it was walked out of.
+    ///
+    /// **Free, because the listing has already been read.** The folder on show is watched, so a
+    /// child deleted from it by anybody is a re-read of it, and this is one pass over the names that
+    /// re-read brought back: no handle and no question of the disk. A deeper segment on the trail is
+    /// not watched and is not checked here; a listing that failed or stopped short says nothing about
+    /// what is missing from it, and leaves the trail alone.
+    ///
+    /// By name and ignoring case, as Windows names a folder, and over every entry rather than the
+    /// rows on show, so a filter or a hidden folder does not count as deleted. An archive on the trail
+    /// is a file in this listing and is matched the same way. A flattened listing holds its top-level
+    /// children under their own names, so it answers too.
+    pub(crate) fn trim_trail(&mut self, dir: &Dir) {
+        if dir.path != self.path || dir.error.is_some() || dir.truncated || dir.recycled {
+            return;
+        }
+        if self.trail == self.path || crate::fs::is_synthetic(&self.path) {
+            return;
+        }
+        let crumbs = crate::fs::breadcrumb_segments(&self.trail);
+        let Some(here) = crumbs.iter().position(|(_, at)| *at == self.path) else {
+            return;
+        };
+        let Some((_, next)) = crumbs.get(here + 1) else {
+            return;
+        };
+        let Some(child) = next.file_name().and_then(|name| name.to_str()) else {
+            return;
+        };
+        // Lower-cased only for a name that is not ASCII, so a folder of 100,000 names is not 100,000
+        // allocations.
+        let lower = child.to_lowercase();
+        let there = (0..dir.len()).any(|i| {
+            let name = dir.name(i);
+            name.eq_ignore_ascii_case(child) || !name.is_ascii() && name.to_lowercase() == lower
+        });
+        if !there {
+            self.trail = self.path.clone();
+            // And whatever the bar had marked gone along it, which was on the part just cut.
+            self.trail_gone = None;
+        }
+    }
+
     /// The folder this tab has just gone to, once, if its listing `opened` — a visit for
     /// [`crate::history`]. See [`Self::visiting`].
     ///
@@ -93,6 +137,11 @@ impl Tab {
         // there is going up rather than going somewhere else.
         if !self.trail.starts_with(&path) {
             self.trail = path.clone();
+            self.trail_gone = None;
+        }
+        // Arriving inside the part marked gone, by any route, is a folder that is there again.
+        if self.trail_gone.as_ref().is_some_and(|gone| path.starts_with(gone)) {
+            self.trail_gone = None;
         }
         // **The child of this folder that the breadcrumb still shows, selected on arrival.**
         // Standing in `a/b` with `a/b/c` on the bar, `c` is the one thing you are most likely to

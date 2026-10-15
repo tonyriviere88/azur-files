@@ -403,6 +403,13 @@ pub struct Tab {
     /// a moment ago. This keeps it on screen. The folder actually being *shown* is still
     /// obvious: it is the bold segment, wherever along the trail it sits.
     pub trail: PathBuf,
+    /// The shallowest segment of [`Tab::trail`] found deleted when it was clicked, so it and
+    /// everything under it are drawn struck through in red rather than quietly dropped — the bar
+    /// says what happened to the folder, where an empty end of trail would only say it went.
+    ///
+    /// Learnt on a click and never by watching: the bar does not ask the disk while it draws. Goes
+    /// with the trail it describes, in [`Tab::go_to`]. See `breadcrumb::standing`.
+    pub trail_gone: Option<PathBuf>,
     /// What the tab strip shows.
     pub title: String,
 
@@ -867,6 +874,7 @@ impl Tab {
             history: vec![path.clone()],
             at: 0,
             trail: path.clone(),
+            trail_gone: None,
             path,
             dir: None,
             awaiting: None,
@@ -1011,6 +1019,7 @@ impl Tab {
         // The bar comes across as it looks, or a duplicate of a tab you had walked up
         // would silently lose the trail the original still shows.
         tab.trail = self.trail.clone();
+        tab.trail_gone = self.trail_gone.clone();
         tab.sort_by = self.sort_by;
         tab.ascending = self.ascending;
         tab.show_hidden = self.show_hidden;
