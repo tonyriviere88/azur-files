@@ -540,6 +540,12 @@ pub fn row_fill(t: &Theme, selected: bool, hovered: bool) -> Option<Color32> {
     azur_egui_theme::desktop::row_fill(t, selected, hovered)
 }
 
+/// The corners of a row's highlight: square, and rounded in a Fluent palette. See
+/// `azur::desktop::row_radius`.
+pub fn row_radius(t: &Theme) -> CornerRadius {
+    azur_egui_theme::desktop::row_radius(t)
+}
+
 /// The fill under a selected row in a listing that does **not** have the keyboard.
 ///
 /// A window with two panes and a console in one of them can show three selections at once, only one
@@ -560,7 +566,10 @@ pub fn row_fill(t: &Theme, selected: bool, hovered: bool) -> Option<Color32> {
 /// pattern rather than a file manager's idea. It is here until something other than this window wants
 /// it, so that the design system is not given an API with one caller and no second opinion.
 pub fn row_fill_quiet(t: &Theme) -> Color32 {
-    if t.dark {
+    if let Some(f) = t.fluent {
+        // A Fluent palette selects in grey, so its quiet selection is a grey of its own as well.
+        f.quiet
+    } else if t.dark {
         t.accent.subtle
     } else {
         t.bg.control_active

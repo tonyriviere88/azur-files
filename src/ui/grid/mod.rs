@@ -836,7 +836,9 @@ pub fn show(
                 // width of the pane here too, so the scrollbar's gutter cropped the dashes down its
                 // right edge. See [`filelist::ring_rect`].
                 let ring = filelist::ring_rect(cell.hit, ui.painter().clip_rect());
-                filelist::cursor_ring(ui.painter(), ring, ink);
+                // A tile's ring stays square, as it always was; a band's follows the row's fill.
+                let radius = if cell.row { crate::ui::row_radius(t).nw as f32 } else { 0.0 };
+                filelist::cursor_ring(ui.painter(), ring, ink, radius);
             }
 
             let pending_cut = crate::ui::is_cut(cut, &dir.path, dir.name(entry_index));

@@ -229,7 +229,7 @@ pub(super) fn show(
                 );
                 let fill = row_fill(t, false, response.hovered());
                 if let Some(fill) = fill {
-                    ui.painter().rect_filled(row, CornerRadius::ZERO, fill);
+                    ui.painter().rect_filled(row, crate::ui::row_radius(t), fill);
                 }
                 let under = fill.unwrap_or(t.bg.layer);
                 let item = &batch.items[i];

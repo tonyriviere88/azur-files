@@ -669,7 +669,7 @@ fn group_row(
     // renamed wears none of it: the field standing in the row is what says which one is being
     // named, and a hover fill under it reads as two states at once.
     if let Some(fill) = row_fill(t, false, response.hovered() && !naming) {
-        ui.painter().rect_filled(rect, CornerRadius::ZERO, fill);
+        ui.painter().rect_filled(rect, crate::ui::row_radius(t), fill);
     }
     if editing.drag == Some(Spot::top(index)) {
         ui.painter()

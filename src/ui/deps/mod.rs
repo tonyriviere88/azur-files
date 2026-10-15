@@ -1334,7 +1334,7 @@ fn tree(ui: &mut Ui, t: &Theme, whole: Rect, id: Id, view: &mut View) {
             // its left edge, which is what this window means by "selected" everywhere else.
             let picked = view.is_picked(row);
             if let Some(fill) = crate::ui::row_fill(t, picked, hovered == Some(at)) {
-                ui.painter().rect_filled(rect, egui::CornerRadius::ZERO, fill);
+                ui.painter().rect_filled(rect, crate::ui::row_radius(t), fill);
             }
             if picked {
                 crate::ui::selection_bar(ui.painter(), rect, t);

@@ -151,12 +151,13 @@ pub const TAIL: f32 = ROW_HEIGHT * 1.5;
 /// keys appear to do nothing at all.
 ///
 /// Square corners, because it is drawn one pixel inside a row whose fill has none — a rounded
-/// ring inside a square edge reads as a mistake at this size.
+/// ring inside a square edge reads as a mistake at this size. `radius` is the fill's: a Fluent
+/// palette rounds its rows, and the ring follows the fill round, a pixel tighter.
 ///
 /// One closed polyline rather than four dashed edges: `dashed_line` walks the points it is
 /// given, so a rectangle handed over as five points comes back with its dashes in step all the
 /// way round instead of restarting at every corner.
-pub(crate) fn cursor_ring(painter: &egui::Painter, rect: Rect, color: Color32) {
+pub(crate) fn cursor_ring(painter: &egui::Painter, rect: Rect, color: Color32, radius: f32) {
     const DASH: f32 = 2.0;
     const GAP: f32 = 2.0;
     // Half-pixel centres, so a one-pixel stroke lands on one row of pixels rather than
@@ -165,14 +166,38 @@ pub(crate) fn cursor_ring(painter: &egui::Painter, rect: Rect, color: Color32) {
         pos2(rect.left() + 0.5, rect.top() + 0.5),
         pos2(rect.right() - 0.5, rect.bottom() - 0.5),
     );
-    painter.extend(egui::Shape::dashed_line(
-        &[
+    let corner = (radius - 1.0).clamp(0.0, r.height() * 0.5);
+    let points = if corner == 0.0 {
+        vec![
             r.left_top(),
             r.right_top(),
             r.right_bottom(),
             r.left_bottom(),
             r.left_top(),
-        ],
+        ]
+    } else {
+        // Each corner a quarter turn about its own centre, clockwise from the top edge, so the
+        // path is still one closed polyline and the dashes stay in step round it.
+        use std::f32::consts::{FRAC_PI_2, PI};
+        const STEPS: usize = 4;
+        let centres = [
+            (pos2(r.right() - corner, r.top() + corner), -FRAC_PI_2),
+            (pos2(r.right() - corner, r.bottom() - corner), 0.0),
+            (pos2(r.left() + corner, r.bottom() - corner), FRAC_PI_2),
+            (pos2(r.left() + corner, r.top() + corner), PI),
+        ];
+        let mut points = vec![pos2(r.left() + corner, r.top())];
+        for (centre, from) in centres {
+            for step in 0..=STEPS {
+                let angle = from + FRAC_PI_2 * step as f32 / STEPS as f32;
+                points.push(centre + vec2(angle.cos(), angle.sin()) * corner);
+            }
+        }
+        points.push(pos2(r.left() + corner, r.top()));
+        points
+    };
+    painter.extend(egui::Shape::dashed_line(
+        &points,
         Stroke::new(1.0, color),
         DASH,
         GAP,
@@ -384,6 +409,9 @@ pub(crate) fn listing_scroll(
 /// are not typing in would be a selection nothing on screen mentions. The bar is what has been
 /// carrying that state all along; there it is the only thing carrying it. A tile never had one.
 ///
+/// A Fluent palette is the exception: it selects in grey, as WinUI does, so its band wears the pill
+/// whenever it is selected — there it is the only blue the selection has.
+///
 /// The row being renamed is not handed here at all: it wears none of it — see [`rows`].
 #[inline]
 pub(crate) fn row_surface(
@@ -402,14 +430,16 @@ pub(crate) fn row_surface(
     let mut under = t.bg.layer;
     if let Some(fill) = fill {
         let corners = if band {
-            CornerRadius::ZERO
+            crate::ui::row_radius(t)
         } else {
             CornerRadius::same(radius::SMALL)
         };
         painter.rect_filled(rect, corners, fill);
         under = fill;
     }
-    if band && selected && !focused {
+    // A Fluent palette selects in grey, so there the pill is what says "selected" in the pane being
+    // worked in as well — it is WinUI's selection indicator, and the fill alone is only a grey.
+    if band && selected && (!focused || t.fluent.is_some()) {
         selection_bar(painter, rect, t);
     }
     under
@@ -870,6 +900,7 @@ pub(crate) fn rows(
                     ui.painter(),
                     ring_rect(row, ui.painter().clip_rect()),
                     cursor_ink(t, selected),
+                    crate::ui::row_radius(t).nw as f32,
                 );
             }
 

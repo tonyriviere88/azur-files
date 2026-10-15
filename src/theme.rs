@@ -508,7 +508,8 @@ mod tests {
     /// is the fourth, and in a grey palette it is the one at risk of vanishing into the listing.
     #[test]
     fn the_hueless_palettes_tell_a_selected_row_from_a_hovered_one() {
-        for palette in [Palette::Onyx, Palette::Silver] {
+        // WinUI 3 is the third: it has a hue, but it selects in grey, as the platform does.
+        for palette in [Palette::Onyx, Palette::Silver, Palette::WinUi3] {
             let t = Theme::of(palette);
             let name = palette.key();
             let hover = crate::ui::hover_fill(&t);
@@ -542,7 +543,8 @@ mod tests {
         // surface ramp, that lands two rungs from the hover.
         for palette in Palette::ALL {
             let t = Theme::of(palette);
-            if matches!(palette, Palette::Onyx | Palette::Silver) || !palette.is_dark() {
+            let grey = matches!(palette, Palette::Onyx | Palette::Silver | Palette::WinUi3);
+            if grey || !palette.is_dark() {
                 continue;
             }
             let picked = crate::ui::row_fill(&t, true, false).expect("a picked row has a fill");

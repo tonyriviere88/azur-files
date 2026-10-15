@@ -657,9 +657,9 @@ pub fn show(ui: &mut Ui, t: &Theme, menu: &mut Open) -> Outcome {
                 // vertical `space-1`, and `measure` below is written to `popover_frame`'s `space-2`
                 // either side — a menu measured against one frame and drawn in another is a menu
                 // placed a few points out, which is the failure the whole of `measure` exists to
-                // avoid.
+                // avoid. A Fluent palette takes WinUI's rounded flyout from the same place.
                 popover_frame(t.azur())
-                    .corner_radius(egui::CornerRadius::ZERO)
+                    .corner_radius(azur_egui_theme::desktop::menu_radius(t.azur()).0)
                     .show(ui, |ui| {
                         // An explicit rect for the rows, rather than whatever the `Ui`
                         // says is available.

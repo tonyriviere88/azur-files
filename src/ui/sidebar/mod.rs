@@ -1037,7 +1037,7 @@ fn row(
     // selected. Where you are is still said — the label goes `text-primary`, and the breadcrumb
     // above the listing is the bar whose entire job that is.
     if let Some(fill) = row_fill(t, false, response.hovered()) {
-        ui.painter().rect_filled(rect, CornerRadius::ZERO, fill);
+        ui.painter().rect_filled(rect, crate::ui::row_radius(t), fill);
     }
     // The row being dragged stays where it is and goes quiet, so the list does not reflow
     // under the pointer mid-gesture — the same treatment a tab gets.
@@ -1180,7 +1180,7 @@ fn drive_row(
     // As on every other row here: the pointer's highlight only, never a mark for the folder that
     // happens to be open. See `row`.
     if let Some(fill) = row_fill(t, false, response.hovered()) {
-        ui.painter().rect_filled(rect, CornerRadius::ZERO, fill);
+        ui.painter().rect_filled(rect, crate::ui::row_radius(t), fill);
     }
 
     let glyph = icon_rect(rect, rect.left() + GLYPH_X, GLYPH);

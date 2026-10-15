@@ -90,6 +90,13 @@ const TAB_CORNER: CornerRadius = CornerRadius {
     sw: 0,
     se: 0,
 };
+/// The same tab in a Fluent palette: WinUI's `TabView`, whose top corners take the overlay radius.
+const FLUENT_TAB_CORNER: CornerRadius = CornerRadius {
+    nw: radius::LARGE,
+    ne: radius::LARGE,
+    sw: 0,
+    se: 0,
+};
 const TAB_MIN: f32 = 52.0;
 const TAB_MAX: f32 = 220.0;
 /// Two points off the top of a tab's name, and of every other name on this bar.
@@ -621,7 +628,11 @@ fn paint_tab(
     // `hovered()` also said, so a tab carried across the strip does not light up the ones it passes.
     let pointer_over = response.contains_pointer() && ui.ctx().dragged_id().is_none();
 
-    let corner = TAB_CORNER;
+    let corner = if t.fluent.is_some() {
+        FLUENT_TAB_CORNER
+    } else {
+        TAB_CORNER
+    };
     // Whether this tab has a surface of its own, which is what decides whether it needs a
     // divider from its neighbour: touching tabs with no fill between them would read as one
     // long row of labels.
