@@ -150,7 +150,7 @@ dependencies = [
 
 [[package]]
 name = "azur-files"
-version = "1.4.1"
+version = "1.4.2"
 dependencies = [
  "azur-egui-theme",
  "bzip2",
