@@ -333,7 +333,12 @@ pub(super) fn header(
     scratch.clear();
     let size = scratch;
     let mut mark = None;
+    let reading = slot.reading();
     match &slot.content {
+        // **While a read is out, that is the detail**: a turning ring and `Reading…`. The canvas is
+        // still showing the last file — see [`Slot::asked`] — so anything the arms below could say
+        // would be that file's size beside this file's name.
+        _ if reading => size.push_str("Reading…"),
         Content::Picture(picture) => {
             // The dimensions, and both of them when two files are being compared and disagree —
             // because that *is* a difference.
@@ -432,6 +437,11 @@ pub(super) fn header(
         }
         _ => {}
     }
+    let badge = if reading {
+        Some(Badge::Turning)
+    } else {
+        mark.map(Badge::Mark)
+    };
 
     // ---- The title, and what the details have left it --------------------
     let mut x = rect.left() + PAD;
@@ -472,16 +482,20 @@ pub(super) fn header(
                 + PAD * 2.0
         }
     };
-    let mark_w = if mark.is_some() { MARK + PAD } else { 0.0 };
+    let badge_w = if badge.is_some() { MARK + PAD } else { 0.0 };
     let (show_comment, show_size) = what_fits(
         wanted,
         costs(&comment),
-        costs(size) + mark_w,
+        costs(size) + badge_w,
         (right - x).max(0.0),
     );
+    // **Except while a read is out**, when the ring is the one thing on the bar that must not go:
+    // the canvas under it is the last file's, and the ring is all that says so. A long name is
+    // cropped for it instead — the name is still there to read, the ring would simply be missing.
+    let show_size = show_size || reading;
 
     {
-        let mut detail = |ui: &Ui, text: &str, with_mark: bool| {
+        let mut detail = |ui: &Ui, text: &str, badge: Option<&Badge>| {
             if text.is_empty() {
                 return;
             }
@@ -490,7 +504,8 @@ pub(super) fn header(
                 text,
                 t.fonts.caption.clone(),
                 // The one carrying the mark is the headline, so it is the one in the readable ink.
-                if with_mark {
+                // `Reading…` is not news about the file, and stays in the quieter one.
+                if matches!(badge, Some(Badge::Mark(_))) {
                     t.text.primary
                 } else {
                     t.text.secondary
@@ -500,18 +515,20 @@ pub(super) fn header(
             let w = galley.size().x;
             galley_on_baseline(ui.painter(), right - w, baseline, galley);
             right -= w + PAD;
-            if with_mark {
-                if let Some(ink) = mark {
-                    azur_icons::error(ui.painter(), icon_rect(rect, right - MARK, MARK), ink);
-                    right -= MARK + PAD;
+            if let Some(badge) = badge {
+                let at = icon_rect(rect, right - MARK, MARK);
+                match badge {
+                    Badge::Mark(ink) => azur_icons::error(ui.painter(), at, *ink),
+                    Badge::Turning => crate::ui::spinner(ui, t, at),
                 }
+                right -= MARK + PAD;
             }
         };
         if show_size {
-            detail(ui, size, mark.is_some());
+            detail(ui, size, badge.as_ref());
         }
         if show_comment {
-            detail(ui, &comment, false);
+            detail(ui, &comment, None);
         }
     }
 
@@ -537,6 +554,14 @@ pub(super) fn header(
             azur_egui_theme::components::tooltip(response, view.about());
         }
     }
+}
+
+/// What stands before the headline detail on the bar.
+enum Badge {
+    /// The status mark, in this hue: something differs, or is missing.
+    Mark(Color32),
+    /// The ring, while a read is out. See [`Slot::reading`].
+    Turning,
 }
 
 /// Which of the two details survive: the comment, and the size.

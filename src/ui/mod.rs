@@ -1225,6 +1225,46 @@ pub fn menu_note<'a>(ui: &mut Ui, text: impl Into<std::borrow::Cow<'a, str>>) {
     );
 }
 
+/// A turning ring in `rect`, for as long as something is being waited for: the network browse on the
+/// sidebar's heading, a read in the preview's header.
+///
+/// Drawn at a rect rather than with Azur's `Spinner`, which allocates its own space in a layout and
+/// cannot be put on top of a heading or into a bar laid out by hand. Its shape though: a
+/// `stroke-subtle` ring with one accent three-quarter arc, 0.8 s a turn. The stroke thins with the
+/// ring, so the 12-point one in a bar of text is not drawn as heavily as the 18-point one standing in
+/// for a button.
+///
+/// It asks for the repaint that keeps it turning — without that, an idle window draws the arc once
+/// and leaves it stopped, which reads as a hang rather than as work.
+pub fn spinner(ui: &Ui, t: &Theme, rect: Rect) {
+    /// A turn every 0.8 seconds, which is Azur's `azur-spinner-spin`.
+    const PERIOD: f32 = 0.8;
+    const STEPS: usize = 24;
+    let width = (rect.width() / 9.0).clamp(1.5, 2.0);
+    let radius = (rect.width() - width) * 0.5;
+    ui.painter().circle_stroke(
+        rect.center(),
+        radius,
+        Stroke::new(width, t.stroke.subtle),
+    );
+
+    let time = ui.input(|i| i.time) as f32;
+    let start = (time / PERIOD) * std::f32::consts::TAU;
+    let sweep = std::f32::consts::TAU * 0.75;
+    let points: Vec<egui::Pos2> = (0..=STEPS)
+        .map(|step| {
+            let angle = start + sweep * (step as f32 / STEPS as f32);
+            rect.center() + vec2(angle.cos(), angle.sin()) * radius
+        })
+        .collect();
+    ui.painter().add(egui::Shape::line(
+        points,
+        Stroke::new(width, t.accent.mark),
+    ));
+    // It turns, so the next frame has to come.
+    ui.ctx().request_repaint();
+}
+
 /// Centre a single line in a rect — for the empty and error states.
 pub fn text_center(painter: &Painter, rect: Rect, font: FontId, color: Color32, text: &str) {
     painter.text(rect.center(), Align2::CENTER_CENTER, text, font, color);

@@ -12,7 +12,29 @@ use std::path::Path;
 #[path = "../windows/verbs.rs"]
 mod win;
 #[cfg(windows)]
-use win::{run, run_ok};
+use win::{launch_among, run, run_ok};
+
+/// Open a file from a listing, telling a viewer which files are beside it and in what order, so
+/// that its previous and next walk the folder the way the pane shows it — as they do for a file
+/// opened in Explorer.
+///
+/// Only for pictures, clips and tracks, which are the files a viewer steps through. Everything else
+/// goes to [`open`] unchanged: a document has no "next", and what this costs — a hidden Explorer
+/// view of the whole folder, for half a minute — is only worth paying for the files that do.
+pub fn open_among(path: &Path, sort: super::Sort) {
+    #[cfg(windows)]
+    {
+        use super::fmt::Kind;
+        let ext = path.extension().unwrap_or_default().to_string_lossy();
+        if matches!(super::fmt::kind_of(&ext, false), Kind::Image | Kind::Video | Kind::Audio) {
+            launch_among(path, sort);
+            return;
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = sort;
+    open(path);
+}
 
 /// Open a file or folder with whatever the shell thinks owns it.
 pub fn open(path: &Path) {

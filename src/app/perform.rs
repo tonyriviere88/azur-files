@@ -1093,7 +1093,17 @@ impl App {
                         let pane = self.focused;
                         self.perform(ctx, Action::Navigate { pane, path: folder });
                     }
-                    None => fs::shell::open(&path),
+                    // In the order the pane is sorted in, which is what a viewer's "next" is about.
+                    None => match self.focused_pane().map(|pane| pane.tab()) {
+                        Some(tab) => fs::shell::open_among(
+                            &path,
+                            fs::Sort {
+                                by: tab.sort_by,
+                                ascending: tab.ascending,
+                            },
+                        ),
+                        None => fs::shell::open(&path),
+                    },
                 },
             },
             // The same, in a tab of its own — a middle click on a folder shortcut. A shortcut to

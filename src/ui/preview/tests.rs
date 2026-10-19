@@ -565,6 +565,57 @@ fn the_panel_waits_for_the_selection_to_stop_moving() {
     assert_eq!(it.settle(70.0).0, Some(one));
 }
 
+/// **Stepping from one file to the next does not pass through `Reading…`.** The last file's view
+/// stays up until the next one's answer replaces it, however long that takes, and the slot says it
+/// is reading for exactly as long — which is what the header's ring is drawn from.
+#[test]
+fn the_last_view_stays_up_while_the_next_is_read() {
+    let ctx = egui::Context::default();
+    let text = |body: &str| {
+        Payload::Text(preview::Text {
+            body: body.to_owned(),
+            truncated: false,
+            code: false,
+            lang: crate::syntax::Lang::None,
+            changes: None,
+        })
+    };
+    let one = Ask::One(PathBuf::from(r"C:\notes\one.txt"), preview::Kind::Text);
+    let two = Ask::One(PathBuf::from(r"C:\notes\two.txt"), preview::Kind::Text);
+    let body = |it: &Preview| match &it.focused().content {
+        Content::Text(text) => Some(text.body.clone()),
+        _ => None,
+    };
+    let mut it = Preview {
+        open: true,
+        ..Default::default()
+    };
+
+    // The first file has nothing to hold, so the canvas is empty under the header's ring.
+    it.asked(0, one, 1);
+    assert!(matches!(it.focused().content, Content::Reading));
+    assert!(it.focused().reading());
+    it.arrived(1, text("one"), &ctx);
+    assert!(!it.focused().reading());
+
+    // The second: the first one's text stays on the canvas while it is read — for as long as it is
+    // read, with no deadline that would blank it — and the slot says it is reading.
+    it.asked(0, two.clone(), 2);
+    assert_eq!(body(&it).as_deref(), Some("one"), "it went blank between two files");
+    assert_eq!(it.showing(), Some(two.first()));
+    assert!(it.focused().reading(), "a stale view with nothing saying so");
+    assert_eq!(it.settle(1000.0), (None, None), "a frame was booked for nothing");
+    assert_eq!(body(&it).as_deref(), Some("one"));
+    it.arrived(2, text("two"), &ctx);
+    assert_eq!(body(&it).as_deref(), Some("two"));
+    assert!(!it.focused().reading());
+
+    // And a sentence is never held: next to the next file it would read as being about that one.
+    it.focused_mut().content = Content::Failed("Format error".to_owned());
+    it.asked(0, two, 3);
+    assert!(matches!(it.focused().content, Content::Reading));
+}
+
 /// **A view somebody picked for a file beats the classifier, and only for that file.**
 ///
 /// The button under `No preview for a .zip` is one call to [`Preview::force`], and everything that

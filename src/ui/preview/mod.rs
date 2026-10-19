@@ -865,11 +865,35 @@ impl Slot {
     }
 
     /// A read has been started for what [`Self::settle`] handed back.
+    ///
+    /// **The view on show stays up until the answer replaces it**, rather than giving way to
+    /// `Reading…`. A read is tens of milliseconds, so stepping from one picture to the next used to
+    /// be picture, a blank canvas with a word on it for a frame or two, picture — a flash on every
+    /// keystroke, in the exact place the eye is. What says a read is out instead is the header: a
+    /// turning ring and `Reading…` beside the new file's name, see [`Slot::reading`]. That is also
+    /// why there is no time limit on the hold — the ring is there for as long as the view is stale,
+    /// so the old picture is never left looking like the new file's, and a blank canvas after some
+    /// fraction of a second would only bring the flash back for every read slower than that.
+    ///
+    /// Only a view *of a file* is held. A video is not, because holding it is holding a player — the
+    /// sound would go on under the next file — and a sentence (`No preview for a .zip`, a decoder's
+    /// complaint) is not, because next to the next file it reads as being about that one.
     pub fn asked(&mut self, ask: Ask, token: u64) {
         self.of = Some(ask);
         self.choosing = false;
         self.awaiting = Some(token);
-        self.content = Content::Reading;
+        if !matches!(
+            self.content,
+            Content::Picture(_) | Content::Text(_) | Content::Binary(_)
+        ) {
+            self.content = Content::Reading;
+        }
+    }
+
+    /// Whether a read is out for this tile: the header turns its ring and says `Reading…`, whatever
+    /// the canvas under it is still showing. See [`Self::asked`].
+    fn reading(&self) -> bool {
+        self.awaiting.is_some()
     }
 
     /// A player has been opened for it instead — see [`preview::Kind::Video`].
@@ -1387,9 +1411,15 @@ fn frame(ctx: &egui::Context, pixels: egui::ColorImage, label: String, mask: boo
         texture: ctx.load_texture(
             "preview",
             pixels,
-            // Linear, because a preview is nearly always shown at some scale other than 1:1 and
-            // nearest would make every one of them a staircase.
-            egui::TextureOptions::LINEAR,
+            // **Linear down, nearest up.** Fitted, a preview is nearly always shown smaller than it
+            // is, and nearest there would make every one of them a staircase. Larger only ever
+            // happens because somebody zoomed in — fit never goes past 1:1 — and zooming in is
+            // asking to see the pixels: linear smears each one across its neighbours, which is a
+            // picture of nothing in the file.
+            egui::TextureOptions {
+                magnification: egui::TextureFilter::Nearest,
+                ..egui::TextureOptions::LINEAR
+            },
         ),
         pixels: vec2(size[0] as f32, size[1] as f32),
         label,
@@ -1584,7 +1614,15 @@ fn strip_for(ui: &Ui, t: &Theme, whole: Rect, slot: &Slot, focused: bool) -> Rec
     };
     // On its baseline rather than centred in the strip's box — see [`ink_baseline`], which is what
     // puts the name and the rule under it on one grid.
-    crate::ui::caption_line(ui.painter(), t, strip.shrink2(vec2(PAD, 0.0)), &name, ink);
+    let mut room = strip.shrink2(vec2(PAD, 0.0));
+    // A tile being read turns the header's ring at the end of its own strip: the header speaks for
+    // the focused tile only, and the others are read just as often. See [`Slot::asked`].
+    if slot.reading() {
+        let at = icon_rect(strip, room.right() - MARK, MARK);
+        crate::ui::spinner(ui, t, at);
+        room.max.x = at.left() - PAD;
+    }
+    crate::ui::caption_line(ui.painter(), t, room, &name, ink);
     if focused {
         // The line under the focused name, which is what says the header above is about this tile.
         ui.painter().hline(
@@ -1652,9 +1690,10 @@ fn tile_content(
             };
             picked = nothing_to_show(ui, t, canvas, spot, &what, one, forced);
         }
-        // Nothing is drawn but the word. A read takes tens of milliseconds and a spinner that
-        // appears and vanishes inside three frames is worse than nothing.
-        Content::Reading => note(ui, t, canvas, "Reading…"),
+        // **Nothing at all**: the header is already turning its ring and saying `Reading…` — see
+        // [`Slot::reading`] — and the same word again in the middle of an empty canvas is the flash
+        // the held view exists to avoid, for the one read that has no view to hold.
+        Content::Reading => {}
         Content::Failed(why) => {
             let why = why.clone();
             // **The chooser stays up while a view somebody picked is the thing that failed**, so a

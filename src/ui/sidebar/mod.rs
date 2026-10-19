@@ -39,7 +39,7 @@
 use azur_egui_theme::components::{ContextMenu, MenuItem};
 use azur_egui_theme::icons as azur_icons;
 use azur_egui_theme::tokens::{radius, space, typography};
-use egui::{pos2, vec2, CornerRadius, Id, Rect, Sense, Stroke, Ui};
+use egui::{pos2, vec2, CornerRadius, Id, Rect, Sense, Ui};
 use std::path::Path;
 
 use crate::app::Action;
@@ -779,11 +779,7 @@ fn discover_button(
     // pressed state. A browse takes 14 seconds on this machine — see
     // [`crate::fs::drives::discover::machines`] — and for that long a latched button is
     // indistinguishable from one that has stuck: it is the only thing on screen that could say
-    // work is happening, and a static glyph says the opposite.
-    //
-    // Drawn here rather than with Azur's `Spinner`, which allocates its own space in a layout and
-    // cannot be put at a rect on top of a heading. Its shape though: a `stroke-subtle` ring with
-    // one accent three-quarter arc, 0.8s a turn.
+    // work is happening, and a static glyph says the opposite. See [`crate::ui::spinner`].
     if finding {
         let response = ui.interact(rect, Id::new("network-discover"), Sense::hover());
         if response.hovered() {
@@ -792,7 +788,7 @@ fn discover_button(
                 "Looking for machines on the network…",
             );
         }
-        spinner(ui, t, rect);
+        crate::ui::spinner(ui, t, rect);
         return;
     }
 
@@ -811,40 +807,6 @@ fn discover_button(
     if response.clicked() {
         out.push(Action::DiscoverNetwork);
     }
-}
-
-/// A turning ring, for as long as the browse runs.
-///
-/// The one animation in this panel, and it asks for the repaint that keeps it turning — without
-/// that, an idle window draws the arc once and leaves it stopped, which reads as a hang rather than
-/// as work.
-fn spinner(ui: &Ui, t: &Theme, rect: Rect) {
-    /// A turn every 0.8 seconds, which is Azur's `azur-spinner-spin`.
-    const PERIOD: f32 = 0.8;
-    let width = 2.0;
-    let radius = (rect.width() - width) * 0.5;
-    ui.painter().circle_stroke(
-        rect.center(),
-        radius,
-        Stroke::new(width, t.stroke.subtle),
-    );
-
-    let time = ui.input(|i| i.time) as f32;
-    let start = (time / PERIOD) * std::f32::consts::TAU;
-    let sweep = std::f32::consts::TAU * 0.75;
-    const STEPS: usize = 24;
-    let points: Vec<egui::Pos2> = (0..=STEPS)
-        .map(|step| {
-            let angle = start + sweep * (step as f32 / STEPS as f32);
-            rect.center() + vec2(angle.cos(), angle.sin()) * radius
-        })
-        .collect();
-    ui.painter().add(egui::Shape::line(
-        points,
-        Stroke::new(width, t.accent.mark),
-    ));
-    // It turns, so the next frame has to come.
-    ui.ctx().request_repaint();
 }
 
 /// The square the `+` on the Bookmarks heading takes, and what the label gives up for it.

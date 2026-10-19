@@ -59,31 +59,99 @@ fn open_preview(h: &mut Harness) {
 /// top of `src`: this navigates to the real source tree, so the fixture has to be something a
 /// reorganisation will not move.
 fn open_text_preview(h: &mut Harness) {
-    let pane = h.app.panes[0].id;
     let src = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
+    open_preview_on(h, src, "main.rs");
+}
+
+/// Go to `folder`, select `name` in it, open the preview on it, and let the read land.
+fn open_preview_on(h: &mut Harness, folder: PathBuf, name: &str) {
+    let pane = h.app.panes[0].id;
     h.app
-        .perform(&h.ctx.clone(), Action::Navigate { pane, path: src });
+        .perform(&h.ctx.clone(), Action::Navigate { pane, path: folder });
     h.settle();
-    let at = {
-        let tab = h.app.panes[0].tab();
-        let dir = tab.dir.as_ref().expect("the listing arrived");
-        tab.order
-            .iter()
-            .position(|&i| dir.name(i as usize) == "main.rs")
-            .expect("this program's own `src` has a `main.rs` in it")
-    };
+    let at = row_named(h, name);
     h.app.panes[0].tab_mut().select_only(at);
     h.app.panes[0].tab_mut().preview.open = true;
     h.time += crate::ui::preview::FOLLOW_DELAY * 2.0;
+    until_read(h);
+    h.take_journal();
+}
+
+/// Where `name` is in the focused pane's listing.
+fn row_named(h: &Harness, name: &str) -> usize {
+    let tab = h.app.panes[0].tab();
+    let dir = tab.dir.as_ref().expect("the listing arrived");
+    tab.order
+        .iter()
+        .position(|&i| dir.name(i as usize) == name)
+        .unwrap_or_else(|| panic!("{name} is not in the listing"))
+}
+
+/// Frames until the panel has nothing left to wait for — at least three, so what landed is drawn.
+fn until_read(h: &mut Harness) {
     for attempt in 0..400 {
         h.frame(Vec::new());
         if !h.app.preview_pending() && attempt > 2 {
             break;
         }
+        // Frames are free here; the read is on a worker thread sharing a machine with seven other
+        // test threads.
         std::thread::sleep(std::time::Duration::from_millis(2));
     }
     assert!(!h.app.preview_pending(), "the read never came back");
-    h.take_journal();
+}
+
+/// Select `name` and run the frame its read is asked for in, which is the frame that has to show it
+/// is reading.
+fn step_to(h: &mut Harness, name: &str) {
+    let at = row_named(h, name);
+    h.app.panes[0].tab_mut().select_only(at);
+    h.frame(Vec::new());
+    h.time += crate::ui::preview::FOLLOW_DELAY * 2.0;
+    h.frame(Vec::new());
+    assert!(h.app.preview_pending(), "the read of {name} was not asked for");
+}
+
+/// Text as a frame drew it: where each galley went, and the galley.
+type Drawn = Vec<(Pos2, std::sync::Arc<egui::Galley>)>;
+
+/// Every piece of text the last frame drew in the panel, and where: the header's, then the
+/// canvas's.
+///
+/// Galleys rather than [`Harness::texts`], because a cropped name is cropped at layout — the text a
+/// galley carries is the whole name either way, and only its size says how much of it was drawn.
+/// The canvas stops short of the pane's status bar, which runs under the panel's rect and names the
+/// *selection's* size: the one thing on that strip that is meant to change.
+fn panel_galleys(h: &Harness) -> (Drawn, Drawn) {
+    fn walk(shape: &egui::Shape, into: &mut Drawn) {
+        match shape {
+            egui::Shape::Text(text) => into.push((text.pos, text.galley.clone())),
+            egui::Shape::Vec(shapes) => shapes.iter().for_each(|shape| walk(shape, into)),
+            _ => {}
+        }
+    }
+    let panel = preview_rect(h);
+    let header_bottom = panel.top() + crate::ui::preview::HEADER;
+    let canvas_bottom = panel.bottom() - crate::ui::filelist::STATUS_HEIGHT;
+    let mut drawn = Vec::new();
+    h.shapes.iter().for_each(|shape| walk(shape, &mut drawn));
+    let (header, rest): (Vec<_>, Vec<_>) = drawn
+        .into_iter()
+        .filter(|(at, _)| panel.contains(*at) && at.y < canvas_bottom)
+        .partition(|(at, _)| at.y < header_bottom);
+    (header, rest)
+}
+
+/// The words in [`panel_galleys`]: the header's, then the canvas's.
+fn panel_texts(h: &Harness) -> (Vec<String>, Vec<String>) {
+    let words = |drawn: Drawn| {
+        drawn
+            .into_iter()
+            .map(|(_, galley)| galley.text().to_owned())
+            .collect::<Vec<_>>()
+    };
+    let (header, canvas) = panel_galleys(h);
+    (words(header), words(canvas))
 }
 
 /// Where the panel is, once the layout has looked at the pane it is in.
@@ -412,6 +480,73 @@ fn the_find_bar_searches_the_text_on_show() {
     );
     // The panel is still showing the file, which is the point of a find bar that closes.
     assert!(h.app.panes[0].tab().preview.showing().is_some());
+}
+
+/// **Moving to the next file keeps the last one on the canvas and says `Reading…` in the header**,
+/// with nothing in the middle of the canvas: the flash this replaced was the canvas going blank to
+/// say that word for a frame or two on every keystroke.
+///
+/// Through whole frames rather than the slot's own methods, because what is claimed is where the
+/// word is *drawn* — the header, not the canvas — and the frame the read is asked in is the one that
+/// has to show it.
+#[test]
+fn the_next_file_is_read_under_the_last_one_with_the_word_in_the_header() {
+    let mut h = Harness::new();
+    open_text_preview(&mut h);
+    let (_, before) = panel_texts(&h);
+    assert!(!before.is_empty(), "main.rs drew nothing on the canvas");
+
+    step_to(&mut h, "devtools.rs");
+    let (header, canvas) = panel_texts(&h);
+    assert!(
+        header.iter().any(|text| text.contains("devtools.rs")),
+        "the header does not name the file being read: {header:?}"
+    );
+    assert!(
+        header.iter().any(|text| text == "Reading…"),
+        "the header does not say it is reading: {header:?}"
+    );
+    assert_eq!(canvas, before, "the canvas is not still showing main.rs");
+
+    // And once it lands, the word goes.
+    until_read(&mut h);
+    let (header, canvas) = panel_texts(&h);
+    assert!(
+        !header.iter().any(|text| text.contains("Reading")),
+        "the header still says it is reading: {header:?}"
+    );
+    assert_ne!(canvas, before, "the canvas never moved on to devtools.rs");
+}
+
+/// **A name too long for the bar does not take the ring away.** Every other detail on the bar gives
+/// way to the name, and this one is the exception: the name is cropped instead, because the canvas
+/// under the bar is still the last file's and the ring is the only thing that says so.
+#[test]
+fn a_long_name_is_cropped_for_the_reading_ring_rather_than_hiding_it() {
+    let root = crate::sandbox::dir("preview-long-name");
+    let long = format!("{}.txt", "a-file-name-much-too-long-for-any-preview-bar-".repeat(4));
+    std::fs::write(root.join("first.txt"), "the first file\n").expect("write");
+    std::fs::write(root.join(&long), "the second file\n").expect("write");
+
+    let mut h = Harness::new();
+    open_preview_on(&mut h, root, "first.txt");
+    step_to(&mut h, &long);
+
+    let (header, _) = panel_galleys(&h);
+    let find = |text: &str| header.iter().find(|(_, galley)| galley.text() == text);
+    let (word_at, _) = find("Reading…").unwrap_or_else(|| {
+        let said: Vec<&str> = header.iter().map(|(_, galley)| galley.text()).collect();
+        panic!("a long name hid the reading ring: {said:?}")
+    });
+    // And the name is still there, cropped rather than gone: drawn, and ending before the word.
+    let (name_at, name) = find(&long).expect("the name is not on the bar at all");
+    assert!(name.size().x > 0.0, "the name was cropped away to nothing");
+    assert!(
+        name_at.x + name.size().x <= word_at.x,
+        "the name runs into `Reading…`: it ends at {} and the word starts at {}",
+        name_at.x + name.size().x,
+        word_at.x
+    );
 }
 
 /// **A source file reaches the canvas coloured**, which is a claim about the galley rather than
