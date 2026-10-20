@@ -559,7 +559,8 @@ pub struct Shared {
     /// [`crate::windows::virtual_files`]. `Drop` asked for exactly that, on the UI thread, inside the
     /// message pump: the whole selection came out of the archive with the window unable to paint, and
     /// then the copy started. Seconds of a dead window between letting go and anything happening,
-    /// which is also the one moment the extraction readout would have had something to say.
+    /// which is also the one moment the extraction's card on the transfer panel would have had
+    /// something to say.
     ///
     /// So for its own drags this window does not ask. It already knows what it picked up — these are
     /// the paths [`drag_out`] was given — and handing them straight to the drop lets the extraction

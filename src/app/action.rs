@@ -396,7 +396,8 @@ pub enum Action {
     OpenReleasePage,
     /// The badge's *Skip this version*: hide this offer until a later release is out.
     SkipUpdate,
-    /// A button on a copy's progress panel: pause, cancel, an answer to a conflict, or close.
+    /// A button on a copy's or an extraction's progress panel: pause, cancel, an answer to a
+    /// conflict, or close.
     Steer {
         transfer: u64,
         steer: crate::shell::ops::fast::Steer,

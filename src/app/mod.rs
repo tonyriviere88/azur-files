@@ -355,13 +355,6 @@ pub struct App {
     cut: Vec<PathBuf>,
     /// The last thing that went wrong, for the status line.
     notice: Option<String>,
-    /// How far an archive extraction has got, in words — empty when none is running.
-    ///
-    /// Rebuilt from [`crate::archive::extract::doing`] once a frame rather than pushed from the
-    /// worker, because the worker counts in 8 KB blocks: a message per block would be thousands of
-    /// wake-ups for a readout that can only change sixty times a second. The buffer is kept and
-    /// rewritten for the reason [`crate::fs::fmt`] gives about the listing's own figures.
-    extracting: String,
     /// Where a drag from outside is hovering, in points, for the pane highlight.
     drop_hover: Option<(i32, i32)>,
     /// What a drop where it is hovering would do, in words — see
@@ -739,7 +732,6 @@ impl App {
             visits_saved_at: f64::NEG_INFINITY,
             cut: Vec::new(),
             notice: None,
-            extracting: String::new(),
             drop_hover: None,
             drop_telling: None,
             drop_silent: false,
@@ -984,8 +976,11 @@ impl App {
     /// The only way out of an archive that this program offers, and enough of one: what lands on the
     /// clipboard is real files, so pasting them works in Explorer, in a save dialog, in another copy
     /// of this program, and in anything else that takes a `CF_HDROP`.
+    ///
+    /// Nothing is said on the status line while it runs: the extraction has a card on the transfer
+    /// panel, which appears once the wait is long enough to need one. See
+    /// [`crate::archive::extract::transfers`].
     fn copy_out_of_archive(&mut self, ctx: &egui::Context, paths: Vec<std::path::PathBuf>) {
-        self.report("Copying out of the archive…".to_owned());
         self.out_of_archive(ctx, paths, Then::Clipboard);
     }
 

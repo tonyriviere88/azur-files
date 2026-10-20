@@ -1302,7 +1302,11 @@ impl App {
                     self.config_dirty = true;
                 }
             }
-            Action::Steer { transfer, steer } => self.ops.steer(transfer, steer),
+            // To both: ids are unique across the two, and each ignores one that is not its own.
+            Action::Steer { transfer, steer } => {
+                self.ops.steer(transfer, steer);
+                crate::archive::extract::steer(transfer, steer);
+            }
             Action::Leave(leave) => {
                 use crate::ui::transfers::Leave;
                 self.closing = match leave {

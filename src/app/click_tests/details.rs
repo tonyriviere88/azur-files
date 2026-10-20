@@ -645,18 +645,19 @@ fn the_listing_keeps_room_under_it_for_the_folder() {
     crate::sandbox::remove(&root);
 }
 
-/// **What a several-second decompression has to show for itself**, on the pixels: the figure is on
-/// the status line, it displaces the arithmetic that was there, and it goes when the work does.
+/// **What a several-second decompression has to show for itself**, on the pixels: a card on the
+/// transfer panel, the same one a copy gets, with a Cancel that reaches the extraction — and the
+/// status line left to say what it says about the folder.
 ///
-/// Read off the painted text rather than off [`App::extracting`], because the sentence existing and
-/// the sentence being drawn are different claims and it is the second one that was asked for — the
-/// same reason `the_measured_total_is_on_the_status_line` reads the figure back this way.
+/// Read off the painted text rather than off the snapshot, because the card existing and the card
+/// being drawn are different claims, and clicked rather than steered because a button covered by
+/// something else reads perfectly well at its call site.
 ///
 /// The extraction is a [`crate::archive::extract::pretend`] rather than a real one. Catching a real
 /// decompression mid-flight would mean racing a worker thread from the test, and a test that waits
 /// for a race is one that fails on a faster machine.
 #[test]
-fn an_extraction_in_flight_is_drawn_on_the_status_line() {
+fn an_extraction_in_flight_is_on_the_transfer_panel() {
     let mut h = Harness::new();
     h.settle();
 
@@ -668,40 +669,46 @@ fn an_extraction_in_flight_is_drawn_on_the_status_line() {
             .map(|(_, text)| text.clone())
             .collect()
     };
-    // The figures it is about to replace. Asserted first so that their absence below is a change
-    // rather than a fixture that never had them.
-    assert!(
-        on_the_line(&h).iter().any(|text| text.ends_with(" ms")),
-        "the fixture's status line has no scan figure to displace: {:?}",
-        on_the_line(&h)
-    );
+    let find = |h: &Harness, want: &str| {
+        h.texts()
+            .into_iter()
+            .find(|(_, text)| text == want)
+            .map(|(at, _)| at)
+    };
+    let headline = "Extracting 3 items from pkg.7z";
 
-    let sentence = "Extracting 41.2 MB of 144 MB…";
-    {
-        let _held = crate::archive::extract::pretend(43_200_512, 151_000_000);
-        h.frame(Vec::new());
-        let drawn = on_the_line(&h);
-        assert!(
-            drawn.iter().any(|text| text == sentence),
-            "`{sentence}` is not on the status line; it has {drawn:?}"
-        );
-        assert!(
-            !drawn.iter().any(|text| text.ends_with(" ms")),
-            "how long the folder took is not what somebody waiting on an archive needs: {drawn:?}"
-        );
-    }
-
-    // And off again on the very next frame, so nothing is left claiming work that is over.
+    // Only its name is used: nothing is read, and the pretend extraction never touches it.
+    let archive = crate::sandbox::fresh("extraction-panel").join("pkg.7z");
+    let pretend = crate::archive::extract::pretend(&archive, 3, 43_200_512, 151_000_000);
+    // Two frames: an `Area` spends its first one measuring itself and paints nothing.
     h.frame(Vec::new());
-    let after = on_the_line(&h);
+    h.frame(Vec::new());
+    assert!(find(&h, headline).is_some(), "`{headline}` is not on the panel");
     assert!(
-        !after.iter().any(|text| text == sentence),
-        "the readout outlived the extraction: {after:?}"
+        h.texts().iter().any(|(_, text)| text.starts_with("41.2 MB of 144 MB")),
+        "the panel does not say how far it has got: {:?}",
+        h.texts()
+    );
+    let drawn = on_the_line(&h);
+    assert!(
+        !drawn.iter().any(|text| text.starts_with("Extracting")),
+        "the extraction is on the status line as well as the panel: {drawn:?}"
     );
     assert!(
-        after.iter().any(|text| text.ends_with(" ms")),
-        "and the figures it displaced have to come back: {after:?}"
+        drawn.iter().any(|text| text.ends_with(" ms")),
+        "the status line lost its own figures to an extraction it no longer reports: {drawn:?}"
     );
+
+    let cancel = find(&h, "Cancel").expect("the panel has no Cancel");
+    let pressed = h.click_at(cancel + vec2(4.0, 4.0));
+    assert!(pressed.contains(&"Steer"), "the button did not answer: {pressed:?}");
+    assert!(pretend.0.cancelled(), "Cancel did not reach the extraction");
+
+    // And off the panel on the frame after it ends, so nothing is left offering to stop work that
+    // is over.
+    drop(pretend);
+    h.frame(Vec::new());
+    assert!(find(&h, headline).is_none(), "the card outlived the extraction");
 }
 
 /// **A row found by typing its name lands two rows clear of the bottom edge**, not on it.

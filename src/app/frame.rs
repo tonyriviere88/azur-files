@@ -6,52 +6,17 @@
 
 use super::*;
 
-/// How often a frame is booked while an archive is being extracted.
+/// How often a frame is booked while a copy, move or extraction is running.
 ///
-/// The work is on a worker thread and this window is idle between events, so without a frame asked
-/// for the figure would only advance when something *else* wanted one — a mouse twitch, usually,
+/// The work is on worker threads and this window is idle between events, so without a frame asked
+/// for the figures would only advance when something *else* wanted one — a mouse twitch, usually,
 /// which is exactly the "is it doing anything?" that a readout is there to answer. Ten a second:
 /// faster than a number this size is worth re-reading, and slower than a decompressor fills a buffer.
-const EXTRACTION_STEP: std::time::Duration = std::time::Duration::from_millis(100);
-
-/// What the status line says in place of counting files, if anything.
-///
-/// Three claims on one slot, in order of what the reader most needs. **Progress beats a notice**,
-/// which is not merely a preference: `Ctrl+C` inside an archive sets *Copying out of the archive…*
-/// the moment it starts, and that sentence would otherwise mask the figures saying the copy is
-/// getting somewhere. It has the gap before the first bytes, and then gives way.
-///
-/// A shell operation stays in front of both, because it is the only one of the three that is moving
-/// somebody's files about.
-pub(super) fn status_override<'a>(
-    running: Option<&'a str>,
-    extracting: &'a str,
-    notice: Option<&'a str>,
-) -> Option<&'a str> {
-    running
-        .or((!extracting.is_empty()).then_some(extracting))
-        .or(notice)
-}
+/// An extraction's worker is never the one that asks — it counts in 8 KB blocks, and a wake-up per
+/// block would be thousands for a figure that can only change sixty times a second.
+const TRANSFER_STEP: std::time::Duration = std::time::Duration::from_millis(100);
 
 impl App {
-    /// Refresh [`App::extracting`] from the counter, and say whether a frame should be booked to keep
-    /// it moving.
-    ///
-    /// Pulled from the counter once a frame rather than pushed from the worker, because the worker
-    /// counts in 8 KB blocks: a message per block would be thousands of wake-ups for a readout that
-    /// can only change sixty times a second.
-    pub(super) fn watch_extraction(&mut self) -> bool {
-        self.extracting.clear();
-        match crate::archive::extract::doing() {
-            Some(doing) => {
-                doing.write(&mut self.extracting);
-                true
-            }
-            // Cleared above, so the frame an extraction ends on is the last one that mentions it.
-            None => false,
-        }
-    }
-
     /// Hold the window open while a fast copy is running, and close it once it may.
     ///
     /// **A close during a copy kills the copy mid-file**: the process goes, and every file the pool
@@ -116,12 +81,6 @@ impl App {
         self.drive_devtools(&ctx, shape, now);
         if self.settling.observe(shape, now) {
             ctx.request_repaint();
-        }
-        // **How far an archive extraction has got**, refreshed here and drawn by the pane's status
-        // line — the same place a copy in progress reports from. See [`App::watch_extraction`], which
-        // is also where the interval comes from.
-        if self.watch_extraction() {
-            ctx.request_repaint_after(EXTRACTION_STEP);
         }
         // A drive may have been plugged in or ejected while the window was in the
         // background, and regaining focus is the one moment it is worth re-probing.
@@ -317,13 +276,14 @@ impl App {
             self.tab_slots = slots;
         }
 
-        // A fast copy's panels, over the panes and under any menu. Booked like an extraction's
-        // figures, and for the same reason: the work is on other threads and nothing else would
-        // ask for the frame that shows it moving.
-        let transfers = self.ops.transfers();
+        // A fast copy's panels and an extraction's, over the panes and under any menu. Frames are
+        // booked while any of them runs: the work is on other threads and nothing else would ask for
+        // the frame that shows it moving. See [`TRANSFER_STEP`].
+        let mut transfers = self.ops.transfers();
+        transfers.extend(crate::archive::extract::transfers());
         let closing = self.closing == Closing::Asking;
         if crate::ui::transfers::show(&ctx, &theme, &transfers, closing, &mut self.actions) {
-            ctx.request_repaint_after(EXTRACTION_STEP);
+            ctx.request_repaint_after(TRANSFER_STEP);
         }
 
         // Over everything, and in the root `Ui` so its coordinates are the screen's.
@@ -820,8 +780,10 @@ impl App {
     /// The path bar over the listing over the status line — everything a pane draws that a folder
     /// diff's halves draw too. See [`App::pane`] for where each rect comes from.
     ///
-    /// The status line says what [`status_override`] says, and otherwise, in a diff, what the diff
-    /// found; the counts only when neither has anything to say.
+    /// The status line says what a shell operation in progress says, then the last notice, and
+    /// otherwise, in a diff, what the diff found; the counts only when none has anything to say. An
+    /// extraction is not on it: it has a card on the transfer panel — see
+    /// [`crate::archive::extract::transfers`].
     #[allow(clippy::too_many_arguments)]
     pub(super) fn listing(
         &mut self,
@@ -853,7 +815,6 @@ impl App {
             links,
             cut,
             notice,
-            extracting,
             ops,
             preview,
             flat_mode,
@@ -881,7 +842,9 @@ impl App {
             .diff
             .as_ref()
             .and_then(|d| Some((d.comparison.clone()?, d.is_left())));
-        let status = status_override(ops.in_progress(), extracting, notice.as_deref())
+        let status = ops
+            .in_progress()
+            .or(notice.as_deref())
             .or(found.as_ref().map(|(c, left)| c.half(*left).1.summary.as_str()));
 
         breadcrumb::show(

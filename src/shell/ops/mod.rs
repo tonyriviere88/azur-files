@@ -617,8 +617,6 @@ pub struct Operations {
     /// The copies and moves [`fast`] is doing, for the panel that shows them — and the ones that
     /// finished with something left undone, until that panel is closed.
     transfers: Vec<std::sync::Arc<fast::Transfer>>,
-    /// What the next one is called, so the panel's buttons can say which they are about.
-    next_transfer: u64,
 }
 
 impl Operations {
@@ -629,7 +627,6 @@ impl Operations {
             rx,
             running: Vec::new(),
             transfers: Vec::new(),
-            next_transfer: 0,
         }
     }
 
@@ -749,9 +746,8 @@ impl Operations {
             Job::Copy { .. } | Job::Move { .. } | Job::Delete { to_bin: false, .. }
         );
         let transfer = takes.then(|| {
-            self.next_transfer += 1;
             let transfer = std::sync::Arc::new(fast::Transfer::new(
-                self.next_transfer,
+                fast::next_id(),
                 &job,
                 Some(ctx.clone()),
             ));

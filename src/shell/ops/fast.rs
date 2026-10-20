@@ -201,7 +201,7 @@ pub struct Failure {
     pub why: String,
 }
 
-/// Which of the three jobs a [`Transfer`] is.
+/// Which job a [`Transfer`] is.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Kind {
     Copy,
@@ -209,6 +209,9 @@ pub enum Kind {
     /// A permanent delete. [`Transfer::into`] is then the folder the first item was in, which is
     /// what the panel names.
     Delete,
+    /// Entries coming out of an archive, by [`crate::archive::extract`] and not by this engine at
+    /// all. [`Transfer::into`] is then the archive. See [`Transfer::extracting`].
+    Extract,
 }
 
 impl Kind {
@@ -218,8 +221,19 @@ impl Kind {
             Self::Copy => "copied",
             Self::Move => "moved",
             Self::Delete => "deleted",
+            Self::Extract => "extracted",
         }
     }
+}
+
+/// A name for a new [`Transfer`], unique in the process.
+///
+/// Process-wide rather than per [`super::Operations`], because an extraction makes its own transfer
+/// where no `Operations` can be reached — see [`crate::archive::extract`] — and the panel's buttons
+/// find their job by this number among both kinds at once.
+pub fn next_id() -> u64 {
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 /// How far a job has got: whether it is still this engine's at all, then whether it is done.
@@ -344,26 +358,41 @@ impl Snapshot {
         (secs > 0.5 && self.bytes_done > 0).then(|| self.bytes_done as f64 / secs)
     }
 
-    /// How long is left, once the walk has finished and there is a rate to go on.
+    /// How long is left, once the walk has finished and there is a rate and a total to go on.
     pub fn remaining(&self) -> Option<Duration> {
         let rate = self.rate()?;
-        if !self.counted {
+        if !self.counted || self.bytes_found == 0 {
             return None;
         }
         let left = self.bytes_found.saturating_sub(self.bytes_done) as f64;
         Some(Duration::from_secs_f64(left / rate))
     }
 
-    /// How much of it is done, from `0` to `1`: by bytes, or by files when there are no bytes to
-    /// speak of — a move inside one volume, and a delete.
-    pub fn fraction(&self) -> f32 {
+    /// Whether progress is counted in files rather than bytes: a job with no bytes to speak of — a
+    /// move inside one volume, and a delete. **Never an extraction**, whose bytes are the work even
+    /// when the archive does not say how many there will be — see [`crate::archive::extract`].
+    pub fn by_files(&self) -> bool {
+        self.bytes_found == 0 && self.kind != Kind::Extract
+    }
+
+    /// How much of it is done, from `0` to `1` — or `None` while there is nothing to measure it
+    /// against: no files found yet, or an extraction from an archive that does not record its size.
+    pub fn fraction(&self) -> Option<f32> {
+        let of = |done: u64, found: u64| (done as f64 / found as f64).clamp(0.0, 1.0) as f32;
         if self.bytes_found > 0 {
-            (self.bytes_done as f64 / self.bytes_found as f64).clamp(0.0, 1.0) as f32
-        } else if self.files_found > 0 {
-            (self.files_done as f64 / self.files_found as f64).clamp(0.0, 1.0) as f32
+            Some(of(self.bytes_done, self.bytes_found))
+        } else if self.by_files() && self.files_found > 0 {
+            Some(of(self.files_done, self.files_found))
         } else {
-            0.0
+            None
         }
+    }
+
+    /// Whether the panel offers to pause it. **Not an extraction**: it runs on whichever thread
+    /// asked for the bytes, and one of those is the drag thread rendering a drop — paused, it would
+    /// freeze the program being dropped into, for a wait that Cancel already answers.
+    pub fn pausable(&self) -> bool {
+        self.kind != Kind::Extract
     }
 }
 
@@ -382,11 +411,31 @@ impl Transfer {
             Job::Copy { into, .. } => (Kind::Copy, into.clone()),
             _ => (Kind::Copy, PathBuf::new()),
         };
+        Self::with(id, kind, into, Phase::Starting, ctx)
+    }
+
+    /// An extraction out of `archive`, already running: there is no engine to decide between, so
+    /// nothing to wait for before the panel may draw it.
+    ///
+    /// No context, because the thread extracting has none to give — the drag thread rendering
+    /// `CF_HDROP` is one of them. The window books its own frames while a transfer runs, which is
+    /// what moves the figures; see [`crate::ui::transfers::show`].
+    pub fn extracting(id: u64, archive: PathBuf) -> Self {
+        Self::with(id, Kind::Extract, archive, Phase::Running, None)
+    }
+
+    fn with(
+        id: u64,
+        kind: Kind,
+        into: PathBuf,
+        phase: Phase,
+        ctx: Option<egui::Context>,
+    ) -> Self {
         Self {
             id,
             kind,
             into,
-            phase: AtomicU8::new(Phase::Starting as u8),
+            phase: AtomicU8::new(phase as u8),
             counted: AtomicBool::new(false),
             files_found: AtomicU64::new(0),
             bytes_found: AtomicU64::new(0),
@@ -710,6 +759,14 @@ impl Transfer {
     #[cfg(test)]
     pub(crate) fn always_in_use(&self, mend: Mend) {
         self.talk().every_in_use = Some(mend);
+    }
+
+    /// Started `ago` earlier than it was, so its panel is past [`crate::ui::transfers::DELAY`] from
+    /// the first frame a test draws rather than a sleep later.
+    #[cfg(test)]
+    pub(crate) fn started_ago(mut self, ago: Duration) -> Self {
+        self.started -= ago;
+        self
     }
 
     /// What the job comes back to [`super::Done`] as.

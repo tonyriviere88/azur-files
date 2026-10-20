@@ -25,19 +25,24 @@
 //! - **What comes out is read-only.** Editing an extracted copy cannot change the archive, and a
 //!   silent no-op is the worst possible way to find that out: an application that tries to save
 //!   gets a proper refusal instead.
+//! - **A cancelled extraction leaves nothing half-written.** See [`save`], and [`CANCELLED`] for
+//!   what the caller is told.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use super::{read, Format, Index, Inside};
+use crate::shell::ops::fast::{self, Steer, Transfer};
 
-// ---- Saying how far it has got --------------------------------------
+// ---- Saying how far it has got, and being told to stop ----------------
 
-/// How far the extraction in flight has got, for the status line to say so.
+/// Every extraction in flight, each with the [`Transfer`] the window's transfer panel draws — the
+/// same card in the same corner as a copy, with the same Pause and Cancel.
 ///
 /// # Bytes decompressed, and not files finished
 ///
@@ -45,146 +50,127 @@ use super::{read, Format, Index, Inside};
 /// 3 KB file out of a solid `.7z` takes as long as reading every entry that shares its block — see
 /// [`write_sevenz`] — so a count of files would sit at `0 of 1` for twenty seconds and then jump to
 /// done. Bytes through the decompressor is the one number that moves at the rate the work is being
-/// done, whatever the format and whatever was asked for.
+/// done, whatever the format and whatever was asked for. Files are counted as well, for the
+/// headline, but the bar goes by bytes.
 ///
 /// # The total is an upper bound
 ///
 /// [`upper_bound`] works it out per format, and for a `.7z` it is the whole archive: the walk stops
 /// as soon as the last wanted entry has been seen, and where in the block order that falls is not
-/// knowable in advance. So the readout can finish early. That is the right way round — a wait that
+/// knowable in advance. So the bar can finish early. That is the right way round — a wait that
 /// ends sooner than it promised needs no apology, while one that stalls at 100% looks broken — and
-/// it is why [`Doing::write`] never prints a figure smaller than the one it has already reached.
+/// it is why the panel never prints a total smaller than what has already come out.
 ///
 /// A `0` total means no figure at all was available, which happens for the single-stream formats
-/// that do not record their uncompressed size: `.bz2`, `.xz`, `.zst`. The sentence then counts up
+/// that do not record their uncompressed size: `.bz2`, `.xz`, `.zst`. The panel then counts up
 /// without a denominator, exactly as the Size column goes blank for the same entries — see
 /// [`crate::fs::dir::FLAG_UNSIZED`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Doing {
-    /// Bytes out of the decompressor so far — entries wanted and entries merely read past alike.
-    pub done: u64,
-    /// What that is expected to reach, or `0` when nothing could be worked out.
-    pub total: u64,
-}
-
-impl Doing {
-    /// The sentence for the status line, written into a caller-owned buffer for the reason
-    /// [`crate::fs::fmt`] gives.
-    pub fn write(&self, out: &mut String) {
-        out.push_str("Extracting ");
-        crate::fs::fmt::size(self.done, out);
-        if self.total > 0 {
-            out.push_str(" of ");
-            // Never less than what has already come out: `upper_bound` can be short — a zip entry
-            // whose size is not in its header counts as zero — and *41.2 MB of 30.0 MB* would read
-            // as a bug in the program rather than a gap in the archive.
-            crate::fs::fmt::size(self.total.max(self.done), out);
-        }
-        out.push('…');
-    }
-}
-
-/// The counter behind [`doing`].
-struct Counter {
-    /// Bytes out of the decompressor so far.
-    done: AtomicU64,
-    /// What [`upper_bound`] said that would reach, or `0` for an archive that does not say.
-    total: AtomicU64,
-    /// Whether an extraction holds it. Claimed with [`counting`] and released by its guard.
-    held: AtomicBool,
-}
-
-/// One per process.
 ///
-/// Process-global for the same reason [`super::CACHE`] is, and then for one more: of the four places
-/// that extract, one is the drag thread rendering `CF_HDROP` inside `DoDragDrop` — see
-/// [`crate::windows::dnd`] — which has no reference to the window and could not be given one without
-/// threading a handle through OLE. A global is reported from wherever the work happens to be.
-static COUNT: Counter = Counter {
-    done: AtomicU64::new(0),
-    total: AtomicU64::new(0),
-    held: AtomicBool::new(false),
-};
+/// # Process-global
+///
+/// For the same reason [`super::CACHE`] is, and then for one more: of the four places that extract,
+/// one is the drag thread rendering `CF_HDROP` inside `DoDragDrop` — see [`crate::windows::dnd`] —
+/// which has no reference to the window and could not be given one without threading a handle
+/// through OLE. A global is reported from wherever the work happens to be.
+static RUNNING: Mutex<Vec<Arc<Transfer>>> = Mutex::new(Vec::new());
 
 thread_local! {
-    /// Whether *this* thread is the one whose bytes are being counted.
+    /// The extraction on *this* thread, which its bytes are counted into.
     ///
     /// **What keeps two extractions from adding to one number.** The preview panel materialises on
-    /// its own reading thread while the user is free to `Ctrl+C` something on the UI's; the second to
-    /// arrive claims nothing and reports nothing, rather than both interleaving into a figure that
-    /// belongs to neither. Silence for one of them is the right answer: a status line can only say
-    /// one thing anyway.
-    static MINE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// its own reading thread while the user is free to `Ctrl+C` something on the UI's; each has a
+    /// transfer of its own, and so a card of its own that stops only it.
+    static MINE: RefCell<Option<Arc<Transfer>>> = const { RefCell::new(None) };
 }
 
-/// Claim the counter, or `None` if another extraction already holds it.
-fn counting() -> Option<Counting> {
-    COUNT
-        .held
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_ok()
-        .then(|| {
-            COUNT.done.store(0, Ordering::Relaxed);
-            COUNT.total.store(0, Ordering::Relaxed);
-            MINE.set(true);
-            Counting
-        })
+/// What an extraction that was cancelled answers, in place of whatever the decompressor said on its
+/// way out.
+pub const CANCELLED: &str = "Extraction cancelled";
+
+fn running() -> MutexGuard<'static, Vec<Arc<Transfer>>> {
+    // What is behind it is a list of handles, and still worth drawing after a panic.
+    RUNNING.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Releases the claim however the extraction ends, including through a `?` or a panic.
-struct Counting;
+/// What every extraction in flight is doing, for [`crate::ui::transfers`].
+pub fn transfers() -> Vec<fast::Snapshot> {
+    running().iter().map(|transfer| transfer.snapshot()).collect()
+}
 
-impl Drop for Counting {
+/// Pass a button on an extraction's card to it. An id that is not an extraction's is ignored, as
+/// [`crate::shell::ops::Operations::steer`] ignores one that is not a copy's — the window hands
+/// every press to both.
+///
+/// Cancel is the one button the card has: nothing is ever asked of an extraction, it is not
+/// [`fast::Snapshot::pausable`], and it leaves the panel the moment it ends — a failure goes to the
+/// status line, as it did before there was a panel.
+pub fn steer(id: u64, steer: Steer) {
+    if steer != Steer::Cancel {
+        return;
+    }
+    if let Some(transfer) = running().iter().find(|transfer| transfer.id == id) {
+        transfer.cancel();
+    }
+}
+
+/// Put this thread's extraction on the panel, named after `archive` — or `None` when this thread
+/// already has one, whose figures this call then adds to.
+fn claim(archive: &Path) -> Option<Claim> {
+    if MINE.with_borrow(Option::is_some) {
+        return None;
+    }
+    let transfer = Arc::new(Transfer::extracting(fast::next_id(), archive.to_path_buf()));
+    running().push(transfer.clone());
+    MINE.set(Some(transfer.clone()));
+    Some(Claim(transfer))
+}
+
+/// Takes an extraction off the panel however it ends, including through a `?` or a panic.
+pub(crate) struct Claim(pub(crate) Arc<Transfer>);
+
+impl Drop for Claim {
     fn drop(&mut self) {
-        MINE.set(false);
-        COUNT.held.store(false, Ordering::Release);
+        MINE.with_borrow_mut(|mine| {
+            if mine.as_ref().is_some_and(|transfer| Arc::ptr_eq(transfer, &self.0)) {
+                *mine = None;
+            }
+        });
+        running().retain(|transfer| !Arc::ptr_eq(transfer, &self.0));
     }
 }
 
-/// Add to what the extraction on this thread is expected to reach.
-///
-/// Added rather than set, so a selection spanning two archives ends up with the sum of both.
-fn expect_more(bytes: u64) {
-    if MINE.get() {
-        COUNT.total.fetch_add(bytes, Ordering::Relaxed);
-    }
+/// Ask something of this thread's extraction, if it has one.
+fn mine<R>(with: impl FnOnce(&Transfer) -> R) -> Option<R> {
+    MINE.with_borrow(|mine| mine.as_deref().map(with))
 }
 
-/// Count bytes that have come out of a decompressor on this thread.
-fn tally(bytes: u64) {
-    if MINE.get() {
-        COUNT.done.fetch_add(bytes, Ordering::Relaxed);
-    }
-}
-
-/// How far the extraction in flight has got, or `None` when nothing is being extracted.
+/// An extraction that is not happening, stuck at a figure of its own and already past the panel's
+/// delay — for the tests that are about what the *window* does with one.
 ///
-/// Read from the frame loop every frame while it answers `Some`. The two figures are loaded
-/// separately and so can be a few kilobytes out of step with each other, which is worth nothing to
-/// synchronise: they are on their way to a status line, and the next frame is 16 ms away.
-pub fn doing() -> Option<Doing> {
-    COUNT.held.load(Ordering::Acquire).then(|| Doing {
-        done: COUNT.done.load(Ordering::Relaxed),
-        total: COUNT.total.load(Ordering::Relaxed),
-    })
-}
-
-/// An extraction that is not happening, stuck at a figure of its own — for the tests that are about
-/// what the *window* does with one.
-///
-/// The same seam, for the same reason, as `crate::shell::dnd::Drag::pretend`: what a status line says
+/// The same seam, for the same reason, as `crate::shell::dnd::Drag::pretend`: what the panel says
 /// while work is in flight cannot be asserted by starting real work and hoping to catch it, and a
 /// test that polls for a race is a test that fails on somebody else's machine. Hold the returned
-/// guard for as long as the extraction is meant to be running.
+/// guard for as long as the extraction is meant to be running; its transfer is there to be asked
+/// whether a button reached it. Not this thread's, so nothing extracted here counts into it.
 #[cfg(test)]
-pub fn pretend(done: u64, total: u64) -> impl Drop {
-    let held = counting().expect("nothing else is counting");
-    expect_more(total);
-    tally(done);
-    held
+pub(crate) fn pretend(archive: &Path, files: u64, done: u64, total: u64) -> Claim {
+    let transfer = Arc::new(
+        Transfer::extracting(fast::next_id(), archive.to_path_buf())
+            .started_ago(std::time::Duration::from_secs(1)),
+    );
+    transfer.found(files, total);
+    transfer.moved_bytes(done);
+    transfer.counted();
+    running().push(transfer.clone());
+    Claim(transfer)
 }
 
-/// A reader that counts what comes out of it.
+/// A reader that counts what comes out of it — and the place an extraction is stopped.
+///
+/// **Stopped between reads, by failing the next one.** A decompressor cannot be interrupted from
+/// outside, but every one of them asks its reader for the next few kilobytes, and an error there
+/// comes back up through the format's own code exactly as a truncated archive would: through each
+/// `?`, out of [`save`], which removes what it had written.
 ///
 /// **Wrapped once per format, at the place that format's cost really is** — which is not the same
 /// place for all four, and getting it wrong would either double-count or miss the bulk of the wait:
@@ -199,15 +185,19 @@ struct Counted<R>(R);
 
 impl<R: Read> Read for Counted<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if mine(Transfer::cancelled) == Some(true) {
+            // Not `Interrupted`, which `io::copy` takes as leave to ask again.
+            return Err(io::Error::other(CANCELLED));
+        }
         let read = self.0.read(buf)?;
-        tally(read as u64);
+        mine(|transfer| transfer.moved_bytes(read as u64));
         Ok(read)
     }
 }
 
 /// How many bytes an extraction should expect to pull out of the decompressor.
 ///
-/// An upper bound, and per format — see [`Doing`] for why it is allowed to be one, and [`Counted`]
+/// An upper bound, and per format — see [`RUNNING`] for why it is allowed to be one, and [`Counted`]
 /// for the matching decision about where the bytes are counted. The two have to agree or the readout
 /// either creeps or races.
 fn upper_bound(format: Format, index: &Index, outstanding: &[&Wanted]) -> u64 {
@@ -236,7 +226,7 @@ fn upper_bound(format: Format, index: &Index, outstanding: &[&Wanted]) -> u64 {
                 .sum()
         }
         // One entry and one stream. `0` when the format does not record the size, which is what
-        // [`Doing::write`] drops the denominator for.
+        // the panel drops the denominator for.
         _ => asked_for(),
     }
 }
@@ -314,11 +304,6 @@ pub fn extracted(path: &Path) -> Result<PathBuf, String> {
 /// answer, so this is safe to call on a mixed selection or on one that turns out to contain nothing
 /// virtual at all.
 pub fn all(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
-    // Held for the length of the call, and released on every way out of it including a `?` — see
-    // [`Counting`]. Claimed before anything is read so that the sentence appears at the start of the
-    // wait rather than partway through it, and `None` when another extraction is already being
-    // reported, which costs this one only its readout.
-    let _counting = counting();
     let mut answers: Vec<Option<PathBuf>> = vec![None; paths.len()];
     // Each archive, with the indices of the paths that live in it. A `Vec` and a linear scan: a
     // selection spans one archive in every real case, and two in the contrived one.
@@ -336,7 +321,30 @@ pub fn all(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
         }
     }
 
-    for (inside, members) in &groups {
+    // On the panel for the length of the call, and off it on every way out including a `?` — see
+    // [`Claim`]. Claimed before anything is read, so the card can appear at the start of the wait
+    // rather than partway through it; the grouping above only split strings. Nothing to claim for a
+    // selection with nothing virtual in it.
+    let _claim = groups.first().and_then(|(inside, _)| claim(&inside.file));
+    match write_groups(paths, &groups, &mut answers) {
+        Ok(()) => Ok(answers
+            .into_iter()
+            .map(|answer| answer.expect("every path is answered by one of the arms above"))
+            .collect()),
+        // Whatever the decompressor said as the read under it failed, the reason is the button.
+        Err(_) if mine(Transfer::cancelled) == Some(true) => Err(CANCELLED.to_owned()),
+        Err(why) => Err(why),
+    }
+}
+
+/// The half of [`all`] that reads: each archive in turn, its wanted entries written to disk, and the
+/// folders among `answers` made.
+fn write_groups(
+    paths: &[PathBuf],
+    groups: &[(Inside, Vec<usize>)],
+    answers: &mut [Option<PathBuf>],
+) -> Result<(), String> {
+    for (n, (inside, members)) in groups.iter().enumerate() {
         // The same index the listing was built from, so an extraction asks for entries the pane is
         // actually showing. The read flag is the status line's business and not this function's.
         let (index, _freshly_read) = super::index(&inside.file, inside.format);
@@ -370,11 +378,19 @@ pub fn all(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
         // Everything already on disk at the right size. Covers the second preview of the same
         // picture, and previewing a file and then opening it.
         let outstanding: Vec<&Wanted> = wanted.iter().filter(|item| !item.satisfied()).collect();
+        // What this archive is about to cost, before it costs it. Only what is *outstanding* is
+        // counted, so a second `Ctrl+C` of files already on disk promises nothing and is over
+        // before a frame could have said otherwise. Added to rather than set, so a selection
+        // spanning two archives ends up with the sum of both.
+        let files = outstanding.iter().filter(|item| !item.is_dir).count() as u64;
+        let bytes = upper_bound(inside.format, &index, &outstanding);
+        mine(|transfer| transfer.found(files, bytes));
+        // Every archive's share is known once the last one's is, and from then on the headline's
+        // count is the job's rather than what has been found so far.
+        if n + 1 == groups.len() {
+            mine(Transfer::counted);
+        }
         if !outstanding.is_empty() {
-            // What this archive is about to cost, before it costs it. Only what is *outstanding* is
-            // counted, so a second `Ctrl+C` of files already on disk promises nothing and is over
-            // before a frame could have said otherwise.
-            expect_more(upper_bound(inside.format, &index, &outstanding));
             write_out(inside, &index, &outstanding)?;
         }
         for at in folders {
@@ -385,11 +401,7 @@ pub fn all(paths: &[PathBuf]) -> Result<Vec<PathBuf>, String> {
             }
         }
     }
-
-    Ok(answers
-        .into_iter()
-        .map(|answer| answer.expect("every path is answered by one of the arms above"))
-        .collect())
+    Ok(())
 }
 
 /// One entry to be written, and where.
@@ -560,7 +572,10 @@ fn write_sevenz(inside: &Inside, index: &Index, wanted: &[&Wanted]) -> Result<()
         // that `false` here ends the *current block* and not the walk — the crate discards this
         // answer between blocks — which is what still lets an empty file be written by its own pass
         // at the end.
-        if left == 0 {
+        //
+        // And for the same reason once something has failed — a cancel is a failed read — since
+        // the next block would otherwise be opened, and walked, for an answer that is already `Err`.
+        if left == 0 || failed.is_some() {
             return Ok(false);
         }
         // The stored name normalised the same way the listing normalised it, which is what makes
@@ -688,7 +703,14 @@ fn write_stream(inside: &Inside, wanted: &[&Wanted]) -> Result<(), String> {
 const MOST: u64 = 16 << 30;
 
 /// Write one entry's bytes, then make the copy read-only.
+///
+/// **A write that does not finish is removed**, a cancel included. [`Wanted::satisfied`] goes by
+/// size, and for an entry whose size the archive does not record it cannot: a stub left behind there
+/// would be served as the whole file from then on.
 fn save(dest: &Path, from: &mut dyn Read) -> Result<(), String> {
+    if let Some(name) = dest.file_name() {
+        mine(|transfer| transfer.now_on(&name.to_string_lossy()));
+    }
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|why| {
             format!("Could not make a temporary folder for this file ({why})")
@@ -700,8 +722,14 @@ fn save(dest: &Path, from: &mut dyn Read) -> Result<(), String> {
 
     let mut file = File::create(dest)
         .map_err(|why| format!("Could not write this file to a temporary folder ({why})"))?;
-    let written = io::copy(&mut from.take(MOST), &mut file)
-        .map_err(|why| format!("This entry could not be decompressed ({why})"))?;
+    let written = match io::copy(&mut from.take(MOST), &mut file) {
+        Ok(written) => written,
+        Err(why) => {
+            drop(file);
+            let _ = std::fs::remove_file(dest);
+            return Err(format!("This entry could not be decompressed ({why})"));
+        }
+    };
     // `take` stops silently at its limit, so the only way to notice is to have asked for one byte
     // more than the cap and got it.
     if written >= MOST {
@@ -717,6 +745,7 @@ fn save(dest: &Path, from: &mut dyn Read) -> Result<(), String> {
         how.set_readonly(true);
         let _ = std::fs::set_permissions(dest, how);
     }
+    mine(Transfer::finished_one);
     Ok(())
 }
 
@@ -752,7 +781,7 @@ fn unsupported(why: &str) -> String {
     format!("This entry could not be decompressed ({why})")
 }
 
-/// The counter, driven through real extractions.
+/// The panel's transfer, driven through real extractions.
 ///
 /// Here rather than in [`super::tests`] because what these assert on is private to this module — the
 /// claim, the thread-local that scopes it, and where [`Counted`] is wrapped. The module owning its
@@ -773,51 +802,47 @@ mod tests {
         (pkg, entries.iter().map(|&(_, size)| size as u64).sum())
     }
 
-    /// Claim the counter for this test, waiting for any other test's extraction to have finished with
-    /// it.
+    /// Put an extraction on this thread before the one under test starts.
     ///
     /// **The claim is what makes these deterministic**, and it works because of the thread-local:
-    /// `all` finds the counter already held and reports nothing of its own, while `expect` and
-    /// `tally` — gated on the *thread* rather than on the claim — go on writing into this one. So the
-    /// figures can be read back after the extraction has returned, with no polling and no second
-    /// thread. Another test extracting at the same moment cannot disturb them, being another thread.
-    fn counter() -> Counting {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        loop {
-            if let Some(held) = counting() {
-                return held;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "another extraction has held the counter for thirty seconds"
-            );
-            std::thread::yield_now();
-        }
+    /// `all` finds this thread already has a transfer and claims none of its own, while the counting
+    /// — gated on the *thread* — goes on writing into this one. So the figures can be read back after
+    /// the extraction has returned, with no polling and no second thread. Another test extracting at
+    /// the same moment cannot disturb them, being another thread.
+    fn counter(archive: &Path) -> Claim {
+        claim(archive).expect("nothing else on this test's thread is extracting")
     }
 
-    /// Nothing to say when nothing is being extracted — and, which is the half worth a test, nothing
-    /// to say *afterwards* either. A readout left behind by a finished extraction would sit on the
-    /// status line claiming work that is over.
+    /// Whether an extraction out of `archive` is still on the panel. By archive, because the panel
+    /// is the whole process's and other tests extract at the same time.
+    fn shown(archive: &Path) -> bool {
+        transfers().iter().any(|transfer| transfer.into == archive)
+    }
+
+    /// Nothing on the panel when nothing is being extracted — and, which is the half worth a test,
+    /// nothing *afterwards* either. A card left behind by a finished extraction would sit in the
+    /// corner claiming work that is over, with a Cancel that cancels nothing.
     #[test]
-    fn the_counter_is_released_when_the_extraction_ends() {
+    fn the_panel_is_cleared_when_the_extraction_ends() {
         let (pkg, _) = a_zip("released", &[("a.txt", 100)]);
         {
-            let held = counter();
-            assert!(doing().is_some(), "held, so there is something to say");
+            let held = counter(&pkg);
+            assert!(shown(&pkg), "claimed, so there is something to show");
             drop(held);
         }
-        assert!(doing().is_none(), "released, so there is not");
+        assert!(!shown(&pkg), "released, so there is not");
 
         extracted(&pkg.join("a.txt")).expect("extraction");
         assert!(
-            doing().is_none(),
-            "an extraction that has returned must leave nothing behind on the status line"
+            !shown(&pkg),
+            "an extraction that has returned must leave nothing behind on the panel"
         );
+        assert!(MINE.with_borrow(Option::is_none), "nor on its thread");
 
         // And the failing path, which leaves through a `?` rather than off the end.
         assert!(extracted(&pkg.join("nope.txt")).is_err());
         assert!(
-            doing().is_none(),
+            !shown(&pkg),
             "including when it fails — the guard is what releases it, not the happy path"
         );
     }
@@ -826,26 +851,28 @@ mod tests {
     #[test]
     fn a_zip_counts_the_entries_it_was_asked_for() {
         let (pkg, _) = a_zip("zip", &[("a.txt", 4_000), ("b.txt", 6_000), ("c.txt", 9_000)]);
-        let held = counter();
+        let held = counter(&pkg);
 
         all(&[pkg.join("a.txt"), pkg.join("b.txt")]).expect("extraction");
-        let doing = doing().expect("held for the length of this test");
+        let doing = held.0.snapshot();
 
         assert_eq!(
-            doing.total, 10_000,
+            doing.bytes_found, 10_000,
             "the two entries asked for, and not the third: a zip never decompresses what it was \
              not asked for"
         );
         assert_eq!(
-            doing.done, 10_000,
+            doing.bytes_done, 10_000,
             "and it reached the figure it promised, exactly"
         );
+        assert_eq!((doing.files_found, doing.files_done), (2, 2), "two files, both written");
+        assert!(doing.counted, "one archive, so its count is the job's");
         drop(held);
     }
 
     /// **A solid `.7z` is the case the whole metric was chosen for**: pulling one small entry out of
     /// one costs every entry that shares its block, so the bytes counted have to include the ones
-    /// nobody asked for. See [`write_sevenz`], where they are drained, and [`Doing`].
+    /// nobody asked for. See [`write_sevenz`], where they are drained, and [`RUNNING`].
     #[test]
     fn a_solid_archive_counts_what_it_had_to_read_past() {
         let root = crate::sandbox::fresh("progress-sevenz");
@@ -867,55 +894,71 @@ mod tests {
             writer.finish().expect("7z");
         }
 
-        let held = counter();
+        let held = counter(&pkg);
         all(&[pkg.join("part-2.bin")]).expect("extraction");
-        let doing = doing().expect("held for the length of this test");
+        let doing = held.0.snapshot();
 
         let everything: u64 = sizes.iter().map(|size| *size as u64).sum();
         assert_eq!(
-            doing.total, everything,
+            doing.bytes_found, everything,
             "the whole archive, because which entry the block order puts last is not knowable \
              before the walk"
         );
         assert!(
-            doing.done > sizes[2] as u64,
+            doing.bytes_done > sizes[2] as u64,
             "300 bytes were wanted and {} were read: a count of what was asked for would have sat \
              still for the whole wait",
-            doing.done
+            doing.bytes_done
         );
+        assert_eq!(doing.files_found, 1, "and one file, which is what the headline counts");
         drop(held);
     }
 
-    /// The sentence itself, both ways round — the second being the single-stream formats that do not
-    /// record their size, where a denominator would have to be invented.
+    /// **Cancel stops it, says so, and leaves nothing half-written** — the last being what decides
+    /// whether a cancel can be trusted, since the next extraction of the same entry believes what it
+    /// finds on disk at the right size.
+    ///
+    /// Cancelled before it starts rather than during, which is the same code path — the read under
+    /// the decompressor fails — without a race to catch it mid-file.
     #[test]
-    fn the_sentence_counts_up_and_says_what_it_is_counting_to() {
-        let mut out = String::new();
-        Doing {
-            done: 43_200_512,
-            total: 151_000_000,
-        }
-        .write(&mut out);
-        assert_eq!(out, "Extracting 41.2 MB of 144 MB…");
+    fn a_cancelled_extraction_stops_and_leaves_nothing_behind() {
+        let (pkg, _) = a_zip("cancelled", &[("a.txt", 100_000)]);
+        let held = counter(&pkg);
+        held.0.cancel();
 
-        out.clear();
-        Doing {
-            done: 9_000,
-            total: 0,
-        }
-        .write(&mut out);
         assert_eq!(
-            out, "Extracting 8.79 KB…",
-            "no denominator invented for an archive that does not record one"
+            all(&[pkg.join("a.txt")]),
+            Err(CANCELLED.to_owned()),
+            "the button is the reason, whatever the decompressor said as its read failed"
         );
+        let inside = super::super::split(&pkg.join("a.txt")).expect("inside the zip");
+        let dest = destination(&inside).expect("the archive is there").join("a.txt");
+        assert!(!dest.exists(), "a half-written {} was left behind", dest.display());
+        assert_eq!(held.0.snapshot().files_done, 0);
+        drop(held);
 
-        // An underestimated total is never printed as one: see [`Doing::write`].
-        out.clear();
-        Doing {
-            done: 5_000,
-            total: 1_000,
-        }
-        .write(&mut out);
-        assert_eq!(out, "Extracting 4.88 KB of 4.88 KB…");
+        // And it was the cancel, not the archive: the same entry comes out whole once asked again.
+        let real = extracted(&pkg.join("a.txt")).expect("extraction");
+        assert_eq!(std::fs::metadata(real).expect("extracted").len(), 100_000);
+    }
+
+    /// The panel's buttons reach the extraction they are drawn for, and nothing else's.
+    #[test]
+    fn the_panel_buttons_reach_the_extraction() {
+        let (pkg, _) = a_zip("steered", &[("a.txt", 10)]);
+        let pretend = pretend(&pkg, 1, 0, 10);
+        let id = pretend.0.id;
+
+        steer(id + 1_000_000, Steer::Cancel);
+        assert!(!pretend.0.cancelled(), "another id's Cancel stopped this one");
+
+        // Pause holds whichever thread is extracting, the drag thread rendering a drop among them —
+        // see [`fast::Snapshot::pausable`] — so an extraction does not take one.
+        steer(id, Steer::Pause(true));
+        assert!(!pretend.0.snapshot().paused, "an extraction was paused");
+        assert!(!pretend.0.snapshot().pausable(), "and the card would offer to");
+
+        steer(id, Steer::Cancel);
+        assert!(pretend.0.cancelled());
     }
 }

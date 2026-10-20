@@ -495,8 +495,9 @@ impl App {
         use crate::shell::ops::Job;
 
         // **On a worker, so the window goes on painting** — and painting is what puts the figures on
-        // the status line, which is all somebody who has just dropped 300 files out of a solid `.7z`
-        // has to look at. See [`crate::archive::extract::doing`].
+        // the transfer panel, which is all somebody who has just dropped 300 files out of a solid
+        // `.7z` has to look at, and where they can stop it. See
+        // [`crate::archive::extract::transfers`].
         //
         // `any` and not `all`: a drag can mix an archive's entries with real files only through the
         // right-button menu, and [`crate::archive::extract::all`] hands back a real path unchanged,

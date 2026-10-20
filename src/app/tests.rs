@@ -1180,57 +1180,6 @@ fn split_focused_opens_the_folder_already_showing() {
     assert_eq!(app.panes[1].tab().path, PathBuf::from("/here"));
 }
 
-/// **The extraction readout**, which is the whole of what a several-second decompression has to show
-/// for itself: the sentence is rebuilt every frame, and every frame asks for the next one.
-///
-/// Driven through [`crate::archive::extract::pretend`] rather than by starting a real extraction and
-/// racing it — see there.
-#[test]
-fn an_extraction_in_flight_says_how_far_it_has_got_and_keeps_the_frames_coming() {
-    let (mut app, _ctx) = app(&["."]);
-    assert!(
-        !app.watch_extraction(),
-        "nothing is being extracted, so no frame need be booked for it"
-    );
-    assert!(app.extracting.is_empty());
-
-    {
-        let _held = crate::archive::extract::pretend(43_200_512, 151_000_000);
-        assert!(
-            app.watch_extraction(),
-            "a frame has to be booked or the figure only moves when something else asks"
-        );
-        assert_eq!(app.extracting, "Extracting 41.2 MB of 144 MB…");
-    }
-
-    // The frame after it ends is the last one that mentions it. A readout left behind would sit there
-    // claiming work that is over — see `the_counter_is_released_when_the_extraction_ends`, which is
-    // the other half of this.
-    assert!(!app.watch_extraction());
-    assert!(app.extracting.is_empty());
-}
-
-/// Which of the three things that can claim the status line wins.
-#[test]
-fn progress_is_said_over_a_notice_and_under_a_file_operation() {
-    use super::frame::status_override;
-
-    // `Ctrl+C` inside an archive sets its notice first and the figures arrive after, so this pair is
-    // the ordering that matters: the sentence must give way to the numbers rather than mask them.
-    assert_eq!(
-        status_override(None, "Extracting 4.88 KB…", Some("Copying out of the archive…")),
-        Some("Extracting 4.88 KB…")
-    );
-    // And a shell operation over both, being the only one of the three that is moving files.
-    assert_eq!(
-        status_override(Some("Copying 4 items…"), "Extracting 4.88 KB…", Some("Failed")),
-        Some("Copying 4 items…")
-    );
-    // Then the ordinary cases, so the chain is not just its own precedence.
-    assert_eq!(status_override(None, "", Some("Failed")), Some("Failed"));
-    assert_eq!(status_override(None, "", None), None);
-}
-
 /// **A drop out of an archive is extracted before anything is copied**, and on a worker.
 ///
 /// [`App::land`]'s two passes, asserted as two: the first must start no file operation at all, the

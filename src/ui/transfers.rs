@@ -5,6 +5,10 @@
 //! back to the shell this is never drawn. Otherwise, this is the dialog. It sits in the window's bottom-right corner rather than over the
 //! middle, and nothing behind it is blocked: a copy is something that happens while you work.
 //!
+//! An extraction out of an archive is drawn here too, by the same card — see
+//! [`crate::archive::extract::transfers`]. It is a different engine with the same three things to
+//! say: how far, how fast, and a way to stop it.
+//!
 //! **Nothing is changed from here.** Every button pushes an [`Action::Steer`] and the job hears
 //! about it after the frame, the same as anything else drawn — see [`crate::app::Action`]. The one
 //! piece of state of its own is the tick on *Do this for every conflict*, which is a widget's and
@@ -279,10 +283,9 @@ fn panel(ui: &mut egui::Ui, t: &Theme, s: &Snapshot, out: &mut Vec<Action>) {
         } else {
             ProgressColor::Accent
         };
-        let bar = if s.files_found == 0 {
-            ProgressBar::indeterminate()
-        } else {
-            ProgressBar::new(s.fraction())
+        let bar = match s.fraction() {
+            Some(done) => ProgressBar::new(done),
+            None => ProgressBar::indeterminate(),
         };
         ui.add(bar.color(color).small(true));
         line(ui, figures(s), &t.fonts.caption, t.text.secondary);
@@ -346,7 +349,7 @@ fn panel(ui: &mut egui::Ui, t: &Theme, s: &Snapshot, out: &mut Vec<Action>) {
                 out.push(steer(Steer::Cancel));
             }
             // No pause while a question is up: the job is already waiting, on the question.
-            if s.question.is_none() && s.short.is_none() && !s.cancelled {
+            if s.pausable() && s.question.is_none() && s.short.is_none() && !s.cancelled {
                 let label = if s.paused { "Resume" } else { "Pause" };
                 if ui
                     .add(Button::new(label).size(Size::Small).variant(Variant::Subtle))
@@ -515,6 +518,7 @@ fn headline(s: &Snapshot) -> String {
         Kind::Copy => ("Copying", "Copied", "to"),
         Kind::Move => ("Moving", "Moved", "to"),
         Kind::Delete => ("Deleting", "Deleted", "from"),
+        Kind::Extract => ("Extracting", "Extracted", "from"),
     };
     if s.phase == Phase::Finished {
         let failed = match s.failed {
@@ -541,12 +545,18 @@ fn headline(s: &Snapshot) -> String {
 /// `1.42 GB of 4.80 GB · 212 MB/s · about 16 s left`.
 fn figures(s: &Snapshot) -> String {
     let mut line = String::new();
-    if s.bytes_found > 0 {
-        crate::fs::fmt::size(s.bytes_done.min(s.bytes_found), &mut line);
-        line.push_str(" of ");
-        crate::fs::fmt::size(s.bytes_found, &mut line);
-    } else {
+    if s.by_files() {
         line.push_str(&format!("{} of {}", s.files_done, s.files_found));
+    } else {
+        // The total is never printed below what has already gone through — an extraction's is an
+        // upper bound that can still be short, a zip entry whose header has no size counting as
+        // nought, and *41.2 MB of 30.0 MB* would read as a bug in the program rather than a gap in
+        // the archive. Left off altogether when there is none.
+        crate::fs::fmt::size(s.bytes_done, &mut line);
+        if s.bytes_found > 0 {
+            line.push_str(" of ");
+            crate::fs::fmt::size(s.bytes_found.max(s.bytes_done), &mut line);
+        }
     }
     if s.phase == Phase::Running && !s.paused {
         if let Some(rate) = s.rate() {
@@ -586,5 +596,36 @@ mod tests {
         assert_eq!(about(Duration::from_secs(41)), "about 45 s left");
         assert_eq!(about(Duration::from_secs(61)), "about 2 min left");
         assert_eq!(about(Duration::from_secs(3 * 3600 + 120)), "about 3 h 2 min left");
+    }
+
+    /// An extraction's card, both ways round — the second being the single-stream formats that do
+    /// not record their size, where a denominator would have to be invented.
+    #[test]
+    fn an_extraction_counts_up_and_says_what_it_is_counting_to() {
+        let extracting = |files: u64, done: u64, total: u64| {
+            let transfer = crate::shell::ops::fast::Transfer::extracting(
+                1,
+                std::path::PathBuf::from(r"D:\dl\pkg.7z"),
+            );
+            transfer.found(files, total);
+            transfer.moved_bytes(done);
+            transfer.counted();
+            let mut s = transfer.snapshot();
+            // No rate and no time left, which are the copy's arithmetic and tested there.
+            s.running_for = Duration::ZERO;
+            s
+        };
+
+        let s = extracting(3, 43_200_512, 151_000_000);
+        assert_eq!(headline(&s), "Extracting 3 items from pkg.7z");
+        assert_eq!(figures(&s), "41.2 MB of 144 MB");
+
+        assert_eq!(
+            figures(&extracting(1, 9_000, 0)),
+            "8.79 KB",
+            "no denominator invented for an archive that does not record one"
+        );
+        // An underestimated total is never printed as one: see `figures`.
+        assert_eq!(figures(&extracting(1, 5_000, 1_000)), "4.88 KB of 4.88 KB");
     }
 }
