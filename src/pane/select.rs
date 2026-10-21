@@ -302,6 +302,41 @@ impl Tab {
         }
     }
 
+    /// `count` files picked at random from the rows on screen, in place of the selection:
+    /// `Ctrl+Shift+1`…`4`. All of them when there are no more than that.
+    ///
+    /// **Files, never a folder**, and only rows in `order`, as [`Tab::invert_selection`] — a file the
+    /// filter hid is not one you can see was picked. Pressed again, it picks again.
+    ///
+    /// The position of the first pick in display order, for the cursor to land on; `None` when there
+    /// is no file to pick.
+    pub fn select_random(&mut self, count: usize) -> Option<usize> {
+        let dir = self.dir.clone()?;
+        let mut files: Vec<usize> = (0..self.order.len())
+            .filter(|&position| !dir.entries[self.order[position] as usize].is_dir())
+            .collect();
+        if files.is_empty() {
+            return None;
+        }
+        // A partial Fisher–Yates over a xorshift seeded by std's per-process random keys: there is
+        // no RNG crate here, and picking four rows does not need one.
+        use std::hash::{BuildHasher, Hasher};
+        let mut state = std::collections::hash_map::RandomState::new().build_hasher().finish() | 1;
+        let count = count.min(files.len());
+        for at in 0..count {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let pick = at + (state % (files.len() - at) as u64) as usize;
+            files.swap(at, pick);
+        }
+        self.clear_selection();
+        for &position in &files[..count] {
+            self.mark_selected(self.order[position] as usize);
+        }
+        files[..count].iter().copied().min()
+    }
+
     /// The paths of everything selected, in display order.
     pub fn selection_paths(&self) -> Vec<PathBuf> {
         let Some(dir) = &self.dir else { return Vec::new() };

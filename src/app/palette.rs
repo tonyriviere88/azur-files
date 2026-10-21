@@ -129,6 +129,7 @@ pub(crate) enum Command {
     ClearSelection,
     InvertSelection,
     SelectSameExtension,
+    SelectRandom(usize),
     Compare,
     OpenTerminal,
     Reveal,
@@ -180,6 +181,7 @@ impl Command {
             Self::Sidebar => "sidebar",
             Self::FolderDiff | Self::Compare => "compare",
             Self::Delete | Self::DeletePermanently => "remove",
+            Self::SelectRandom(_) => "pick shuffle sample",
             Self::Theme(_) => "palette colour color dark light",
             Self::WinKey => "default win+e",
             _ => "",
@@ -257,6 +259,7 @@ pub(crate) fn listed(action: &Action) -> bool {
         | Action::ClearSelection(_)
         | Action::InvertSelection(_)
         | Action::SelectSameExtension(_)
+        | Action::SelectRandom { .. }
         | Action::DiffFolders { .. }
         | Action::OpenTerminal(_)
         | Action::Reveal(_)
@@ -598,6 +601,13 @@ impl App {
         if tab.cursor.is_some() && !cursor_dir {
             add(Command::SelectSameExtension, row(FILES, "Select files of the same type"));
         }
+        for count in 1..=4 {
+            let label = match count {
+                1 => "Select a random file".to_owned(),
+                count => format!("Select {count} random files"),
+            };
+            add(Command::SelectRandom(count), row(FILES, label));
+        }
         if self.two_folders_selected().is_some() {
             add(Command::Compare, row(FILES, "Compare the two selected folders"));
         }
@@ -917,6 +927,7 @@ impl App {
             Command::ClearSelection => Action::ClearSelection(pane),
             Command::InvertSelection => Action::InvertSelection(pane),
             Command::SelectSameExtension => Action::SelectSameExtension(pane),
+            Command::SelectRandom(count) => Action::SelectRandom { pane, count },
             Command::Compare => {
                 let (left, right) = self.two_folders_selected()?;
                 Action::DiffFolders { pane, left, right }

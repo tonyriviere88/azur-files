@@ -45,6 +45,10 @@ use egui::{InputState, Key, Modifiers};
 pub(crate) enum Chord {
     /// A key with exactly these modifiers held, read by [`App::keyboard`](super::App).
     Key(Modifiers, Key),
+    /// As [`Self::Key`], but the key is found by where it is on the keyboard rather than by what it
+    /// types. For a digit with Shift held: `egui-winit` reports the *logical* key, which is `!` on a
+    /// QWERTY keyboard and `1` on an AZERTY one, while the physical key is `1` on both.
+    Position(Modifiers, Key),
     /// A key read somewhere this table does not decide (see the module header): printed, never
     /// matched.
     Named(&'static str),
@@ -60,6 +64,11 @@ const fn ctrl(key: Key) -> Chord {
 
 const fn ctrl_shift(key: Key) -> Chord {
     Chord::Key(Modifiers::COMMAND.plus(Modifiers::SHIFT), key)
+}
+
+/// `Ctrl+Shift` and the key in `key`'s place on the keyboard. See [`Chord::Position`].
+const fn ctrl_shift_at(key: Key) -> Chord {
+    Chord::Position(Modifiers::COMMAND.plus(Modifiers::SHIFT), key)
 }
 
 const fn alt(key: Key) -> Chord {
@@ -126,6 +135,10 @@ pub(crate) static BINDINGS: &[(Command, &[Chord])] = &[
     (Command::ClearSelection, &[bare(Key::Escape)]),
     (Command::InvertSelection, &[ctrl(Key::I)]),
     (Command::SelectSameExtension, &[ctrl_shift(Key::A)]),
+    (Command::SelectRandom(1), &[ctrl_shift_at(Key::Num1)]),
+    (Command::SelectRandom(2), &[ctrl_shift_at(Key::Num2)]),
+    (Command::SelectRandom(3), &[ctrl_shift_at(Key::Num3)]),
+    (Command::SelectRandom(4), &[ctrl_shift_at(Key::Num4)]),
     // Window
     (Command::SpanScreens, &[Chord::Named("Ctrl+Win+↑")]),
     (Command::ResetSize, &[Chord::Named("Ctrl+Win+↓")]),
@@ -151,6 +164,13 @@ pub(crate) fn pressed(i: &InputState, command: &Command) -> bool {
     chords(command).iter().any(|chord| chord.pressed(i))
 }
 
+/// A press of the key in `key`'s place, with exactly `modifiers`. By the logical key only when there
+/// is no physical one to go by, which is an event a test made up.
+fn at(event: &egui::Event, modifiers: Modifiers, key: Key) -> bool {
+    matches!(event, egui::Event::Key { key: logical, physical_key, pressed: true, modifiers: held, .. }
+        if physical_key.unwrap_or(*logical) == key && held.matches_exact(modifiers))
+}
+
 /// The text printed beside `command`: its first chord, or nothing.
 pub(crate) fn label(command: &Command) -> String {
     chords(command).first().map(Chord::label).unwrap_or_default()
@@ -169,6 +189,9 @@ impl Chord {
     pub(crate) fn pressed(&self, i: &InputState) -> bool {
         match *self {
             Self::Key(modifiers, key) => i.modifiers.matches_exact(modifiers) && i.key_pressed(key),
+            Self::Position(modifiers, key) => {
+                i.modifiers.matches_exact(modifiers) && i.events.iter().any(|e| at(e, modifiers, key))
+            }
             Self::Named(_) => false,
         }
     }
@@ -179,19 +202,26 @@ impl Chord {
             Self::Key(modifiers, key) => {
                 i.modifiers.matches_exact(modifiers) && i.consume_key(modifiers, key)
             }
+            Self::Position(modifiers, key) => {
+                let before = i.events.len();
+                if i.modifiers.matches_exact(modifiers) {
+                    i.events.retain(|e| !at(e, modifiers, key));
+                }
+                i.events.len() < before
+            }
             Self::Named(_) => false,
         }
     }
 
     /// A key with no modifier, which belongs to whatever field has the caret.
     pub(crate) fn is_bare(&self) -> bool {
-        matches!(self, Self::Key(modifiers, _) if modifiers.is_none())
+        matches!(self, Self::Key(modifiers, _) | Self::Position(modifiers, _) if modifiers.is_none())
     }
 
     /// `Ctrl+Shift+T`, as the window prints it.
     pub(crate) fn label(&self) -> String {
         let (modifiers, key) = match *self {
-            Self::Key(modifiers, key) => (modifiers, key),
+            Self::Key(modifiers, key) | Self::Position(modifiers, key) => (modifiers, key),
             Self::Named(text) => return text.to_owned(),
         };
         let mut text = String::new();
@@ -231,6 +261,37 @@ mod tests {
         assert_eq!(ctrl(Key::Num1).label(), "Ctrl+1");
         assert_eq!(ctrl(Key::Backtick).label(), "Ctrl+²");
         assert_eq!(bare(Key::F5).label(), "F5");
+        assert_eq!(ctrl_shift_at(Key::Num1).label(), "Ctrl+Shift+1");
+    }
+
+    /// `Ctrl+Shift+1` on a QWERTY keyboard arrives as `!` in the `1` key's place, and on an AZERTY one
+    /// as `1`. Both are the chord; a `!` typed from somewhere else is not.
+    #[test]
+    fn a_position_chord_goes_by_the_physical_key() {
+        let held = Modifiers::COMMAND.plus(Modifiers::SHIFT);
+        let press = |key, physical_key| {
+            let ctx = egui::Context::default();
+            let mut pressed = false;
+            let input = egui::RawInput {
+                modifiers: held,
+                events: vec![egui::Event::Key {
+                    key,
+                    physical_key,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: held,
+                }],
+                ..Default::default()
+            };
+            let _ = ctx.run_ui(input, |ui| {
+                pressed = ui.input(|i| ctrl_shift_at(Key::Num1).pressed(i));
+            });
+            pressed
+        };
+        assert!(press(Key::Exclamationmark, Some(Key::Num1)), "QWERTY");
+        assert!(press(Key::Num1, Some(Key::Num1)), "AZERTY");
+        assert!(!press(Key::Exclamationmark, Some(Key::Num8)), "AZERTY's own `!`");
+        assert!(!press(Key::Num1, Some(Key::Num2)), "not the `1` key");
     }
 
     /// Two commands on one chord would both fire, in whatever order `App::keyboard` reads them.

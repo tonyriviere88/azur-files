@@ -86,6 +86,8 @@ pub enum Action {
     InvertSelection(PaneId),
     /// Add every file of the cursor's extension. See [`crate::pane::Tab::select_same_extension`].
     SelectSameExtension(PaneId),
+    /// `count` files at random, in place of the selection. See [`crate::pane::Tab::select_random`].
+    SelectRandom { pane: PaneId, count: usize },
     /// Put the caret in this pane's filter box, as `Ctrl+F` does. See [`crate::pane::Tab::find_wanted`].
     FocusFilter(PaneId),
     /// Show the files Windows marks hidden, or stop — the window's preference, so every pane
@@ -452,6 +454,7 @@ impl Action {
             Self::ClearSelection(_) => "ClearSelection",
             Self::InvertSelection(_) => "InvertSelection",
             Self::SelectSameExtension(_) => "SelectSameExtension",
+            Self::SelectRandom { .. } => "SelectRandom",
             Self::FocusFilter(_) => "FocusFilter",
             Self::ToggleHidden => "ToggleHidden",
             Self::ToggleFlat(_) => "ToggleFlat",

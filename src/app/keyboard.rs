@@ -362,6 +362,11 @@ impl App {
             if on(Command::SelectSameExtension) {
                 push(Action::SelectSameExtension(pane));
             }
+            for count in 1..=4 {
+                if on(Command::SelectRandom(count)) {
+                    push(Action::SelectRandom { pane, count });
+                }
+            }
             // No pane, unlike its neighbours: the window's preference, and every pane follows.
             if on(Command::Hidden) {
                 push(Action::ToggleHidden);

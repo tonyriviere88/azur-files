@@ -327,6 +327,7 @@ fn same(a: &Action, b: &Action) -> bool {
             (Action::Undo { redo: x }, Action::Undo { redo: y }) => x == y,
             (Action::Delete { permanent: x, .. }, Action::Delete { permanent: y, .. }) => x == y,
             (Action::NextTab { delta: x, .. }, Action::NextTab { delta: y, .. }) => x == y,
+            (Action::SelectRandom { count: x, .. }, Action::SelectRandom { count: y, .. }) => x == y,
             _ => true,
         }
 }
@@ -351,7 +352,9 @@ fn every_printed_shortcut_does_what_its_entry_does() {
             continue;
         }
         for chord in *chords {
-            let Chord::Key(modifiers, key) = *chord else { continue };
+            let (Chord::Key(modifiers, key) | Chord::Position(modifiers, key)) = *chord else {
+                continue;
+            };
             pressed += 1;
             let label = chord.label();
             let done = keyboard_alone(&mut h, key, modifiers);

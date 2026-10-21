@@ -393,6 +393,56 @@ fn invert_and_same_extension_select_what_they_say() {
     assert_eq!(tab.selected_count, 0);
 }
 
+/// `Ctrl+Shift+1`…`4`: that many files, never a folder, in place of what was selected — and every
+/// file there is when there are fewer.
+#[test]
+fn a_random_selection_is_files_only() {
+    use crate::fs::dir::{DirBuilder, FLAG_DIR};
+    let mut builder = DirBuilder::new(r"C:\here");
+    for folder in ["d1", "d2", "d3", "d4", "d5"] {
+        builder.push(folder, 0, 0, FLAG_DIR);
+    }
+    for file in ["a.txt", "b.txt", "c.txt", "d.txt", "e.txt", "f.txt"] {
+        builder.push(file, 10, 0, 0);
+    }
+    let mut tab = Tab::new(r"C:\here");
+    tab.apply(Arc::new(builder.finish(0)));
+    let dir = tab.dir.clone().expect("a listing");
+
+    let mut seen = std::collections::HashSet::new();
+    for count in [1, 2, 3, 4, 1, 2, 3, 4, 4, 4, 4, 4] {
+        tab.select_all();
+        let first = tab.select_random(count).expect("there are files to pick");
+        let rows = tab.selected_rows();
+        assert_eq!(rows.len(), count, "asked for {count}");
+        assert_eq!((tab.selected_count, tab.selected_size), (count, 10 * count as u64));
+        assert_eq!(rows.first(), Some(&first), "the first pick is the first row picked");
+        for row in rows {
+            let entry = tab.entry_at(row).unwrap();
+            assert!(!dir.entries[entry].is_dir(), "{} is a folder", dir.name(entry));
+            seen.insert(entry);
+        }
+    }
+    assert!(seen.len() > 4, "twelve draws only ever picked {seen:?}");
+
+    // More asked for than there are: every file, and still no folder.
+    let mut builder = DirBuilder::new(r"C:\here");
+    builder.push("only", 0, 0, FLAG_DIR);
+    builder.push("one.txt", 10, 0, 0);
+    builder.push("two.txt", 10, 0, 0);
+    tab.apply(Arc::new(builder.finish(0)));
+    tab.select_random(4);
+    assert_eq!(tab.selected_count, 2);
+
+    // And no file at all is nothing done.
+    let mut builder = DirBuilder::new(r"C:\here");
+    builder.push("only", 0, 0, FLAG_DIR);
+    tab.apply(Arc::new(builder.finish(0)));
+    tab.select_all();
+    assert_eq!(tab.select_random(1), None);
+    assert_eq!(tab.selected_count, 1, "the selection is left as it was");
+}
+
 /// A temp-free listing of whatever names you name, for the two tests below.
 #[cfg(test)]
 fn listing(folder: &std::path::Path, names: &[&str]) -> Arc<crate::fs::dir::Dir> {

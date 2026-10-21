@@ -296,6 +296,15 @@ impl App {
                     p.tab_mut().select_same_extension();
                 }
             }
+            // The cursor goes to the first pick, so a folder longer than the window shows one.
+            Action::SelectRandom { pane, count } => {
+                let Some(p) = self.pane_mut(pane) else { return };
+                let tab = p.tab_mut();
+                let Some(first) = tab.select_random(count) else { return };
+                tab.cursor = Some(first);
+                tab.anchor = Some(first);
+                tab.scroll_to_cursor = true;
+            }
             // A flag the filter box reads as it is drawn, because the box is the one thing that has
             // the field's id to hand the keyboard to.
             Action::FocusFilter(pane) => {
