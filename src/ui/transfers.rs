@@ -134,6 +134,34 @@ fn line(ui: &mut egui::Ui, text: impl Into<String>, font: &egui::FontId, color: 
     ui.label(RichText::new(text).font(font.clone()).color(color));
 }
 
+/// One line of a card made of pieces, the ones marked blue in `accent.mark` and the rest in
+/// `text.primary` — the drag's sentence, as [`crate::ui::drag_saying`] draws it, on a card. One
+/// galley, so the pieces are kerned and spaced as a single line.
+fn naming(ui: &mut egui::Ui, t: &Theme, runs: &[(String, bool)], font: &egui::FontId) {
+    let mut job = egui::text::LayoutJob::default();
+    for (text, blue) in runs {
+        let color = if *blue { t.accent.mark } else { t.text.primary };
+        job.append(text, 0.0, egui::TextFormat::simple(font.clone(), color));
+    }
+    ui.label(job);
+}
+
+/// A piece of a [`naming`] line that is words rather than a name.
+fn plain(text: &str) -> (String, bool) {
+    (text.to_owned(), false)
+}
+
+/// *Permanently delete one.txt?* in pieces, each with whether it is blue: what would go is named in
+/// the accent, and more than one is *3 items*, as a drag carrying them says it — see
+/// [`crate::shell::dnd::carrying`].
+fn delete_question(confirm: &Confirm) -> [(String, bool); 3] {
+    let (lead, what) = match &confirm.name {
+        Some(name) => ("Permanently delete ", name.clone()),
+        None => ("Permanently delete these ", format!("{} items", confirm.count)),
+    };
+    [plain(lead), (what, true), plain("?")]
+}
+
 /// How far above the component's own placement a tick's label is drawn. See [`tick`].
 const TICK_LIFT: f32 = 2.0;
 
@@ -202,11 +230,7 @@ fn asking_to_delete(
     out: &mut Vec<Action>,
 ) {
     card(ui, t, |ui| {
-        let what = match &confirm.name {
-            Some(name) => format!("Permanently delete {name}?"),
-            None => format!("Permanently delete these {} items?", confirm.count),
-        };
-        line(ui, what, &t.fonts.body_strong, t.text.primary);
+        naming(ui, t, &delete_question(confirm), &t.fonts.body_strong);
         let said = if confirm.folders {
             "They and everything in them will not go to the Recycle Bin, and cannot be put back."
         } else {
@@ -275,7 +299,7 @@ fn panel(ui: &mut egui::Ui, t: &Theme, s: &Snapshot, out: &mut Vec<Action>) {
             steer,
         };
 
-        line(ui, headline(s), &t.fonts.body_strong, t.text.primary);
+        naming(ui, t, &headline(s), &t.fonts.body_strong);
         let color = if s.failed > 0 {
             ProgressColor::Danger
         } else if s.paused {
@@ -365,15 +389,8 @@ fn panel(ui: &mut egui::Ui, t: &Theme, s: &Snapshot, out: &mut Vec<Action>) {
 /// Not enough room where the copy is going: how much short, and whether to look again or go on.
 fn no_room(ui: &mut egui::Ui, t: &Theme, id: u64, short: &Short, out: &mut Vec<Action>) {
     ui.add_space(space::S1);
-    line(
-        ui,
-        format!(
-            "There is not enough room on {}",
-            crate::fs::display_name(&short.into)
-        ),
-        &t.fonts.body,
-        t.text.primary,
-    );
+    let on = crate::fs::display_name(&short.into);
+    naming(ui, t, &[plain("There is not enough room on "), (on, true)], &t.fonts.body);
     let mut needs = String::from("Needs ");
     crate::fs::fmt::size(short.needed, &mut needs);
     needs.push_str(" so far, and ");
@@ -408,21 +425,23 @@ fn stuck(
     out: &mut Vec<Action>,
 ) {
     ui.add_space(space::S1);
-    let name = crate::fs::display_name(&snag.path);
+    let name = (crate::fs::display_name(&snag.path), true);
     let (said, fix) = match snag.trouble {
         Trouble::InUse => (
-            format!("{name} is open in another program"),
+            vec![name, plain(" is open in another program")],
             ("Try again", Mend::TryAgain),
         ),
         Trouble::Encrypted => (
-            format!(
-                "{name} is encrypted, and {} cannot keep it encrypted",
-                crate::fs::display_name(into)
-            ),
+            vec![
+                name,
+                plain(" is encrypted, and "),
+                (crate::fs::display_name(into), true),
+                plain(" cannot keep it encrypted"),
+            ],
             ("Copy without encryption", Mend::Decrypt),
         ),
     };
-    line(ui, said, &t.fonts.body, t.text.primary);
+    naming(ui, t, &said, &t.fonts.body);
     ui.add(
         egui::Label::new(
             RichText::new(&snag.why)
@@ -459,15 +478,15 @@ fn stuck(
 /// The conflict: which file, the two of them side by side, and the three answers.
 fn question(ui: &mut egui::Ui, t: &Theme, id: u64, clash: &Clash, out: &mut Vec<Action>) {
     ui.add_space(space::S1);
-    line(
+    naming(
         ui,
-        format!(
-            "{} is already in {}",
-            clash.name,
-            crate::fs::display_name(&clash.into)
-        ),
+        t,
+        &[
+            (clash.name.clone(), true),
+            plain(" is already in "),
+            (crate::fs::display_name(&clash.into), true),
+        ],
         &t.fonts.body,
-        t.text.primary,
     );
     let zone = crate::fs::time::LocalZone::current();
     for (which, facts) in [("This one", clash.incoming), ("The one there", clash.existing)] {
@@ -507,8 +526,11 @@ fn question(ui: &mut egui::Ui, t: &Theme, id: u64, clash: &Clash, out: &mut Vec<
 ///
 /// **The count is what is left to do, not what was asked for**: it goes down as the job goes on, so
 /// the headline says how far there is still to go rather than repeating the size of the request.
-fn headline(s: &Snapshot) -> String {
-    let into = crate::fs::display_name(&s.into);
+///
+/// In pieces for [`naming`]: the count and the folder are the blue ones, as they are in the drag's
+/// *Copy 2 items into Photos* that started it.
+fn headline(s: &Snapshot) -> Vec<(String, bool)> {
+    let into = (crate::fs::display_name(&s.into), true);
     let files = match s.files_found.saturating_sub(s.files_done) {
         1 => "1 item".to_owned(),
         n => format!("{n} items"),
@@ -526,7 +548,11 @@ fn headline(s: &Snapshot) -> String {
             n => format!("{n} failed"),
         };
         let stopped = if s.cancelled { ", then stopped" } else { "" };
-        return format!("{done} {towards} {into}{stopped} — {failed}");
+        return vec![
+            plain(&format!("{done} {towards} ")),
+            into,
+            plain(&format!("{stopped} — {failed}")),
+        ];
     }
     let verb = if s.cancelled {
         "Stopping"
@@ -536,10 +562,15 @@ fn headline(s: &Snapshot) -> String {
         doing
     };
     if s.files_found == 0 {
-        return format!("{verb} {towards} {into}…");
+        return vec![plain(&format!("{verb} {towards} ")), into, plain("…")];
     }
     let so_far = if s.counted { "" } else { " so far" };
-    format!("{verb} {files}{so_far} {towards} {into}")
+    vec![
+        plain(&format!("{verb} ")),
+        (files, true),
+        plain(&format!("{so_far} {towards} ")),
+        into,
+    ]
 }
 
 /// `1.42 GB of 4.80 GB · 212 MB/s · about 16 s left`.
@@ -598,6 +629,34 @@ mod tests {
         assert_eq!(about(Duration::from_secs(3 * 3600 + 120)), "about 3 h 2 min left");
     }
 
+    /// The delete question names what would go in the accent, and nothing else.
+    #[test]
+    fn the_delete_question_puts_what_would_go_in_the_accent() {
+        let asking = |count, name: Option<&str>| {
+            delete_question(&Confirm {
+                count,
+                name: name.map(str::to_owned),
+                folders: false,
+            })
+        };
+        let one = asking(1, Some("one.txt"));
+        assert_eq!(said(&one), "Permanently delete one.txt?");
+        assert_eq!(blue(&one), ["one.txt"]);
+        let many = asking(3, None);
+        assert_eq!(said(&many), "Permanently delete these 3 items?");
+        assert_eq!(blue(&many), ["3 items"]);
+    }
+
+    /// The whole of a [`naming`] line, as it reads.
+    fn said(runs: &[(String, bool)]) -> String {
+        runs.iter().map(|(text, _)| text.as_str()).collect()
+    }
+
+    /// The pieces of a [`naming`] line drawn in the accent.
+    fn blue(runs: &[(String, bool)]) -> Vec<&str> {
+        runs.iter().filter(|(_, blue)| *blue).map(|(text, _)| text.as_str()).collect()
+    }
+
     /// An extraction's card, both ways round — the second being the single-stream formats that do
     /// not record their size, where a denominator would have to be invented.
     #[test]
@@ -617,7 +676,8 @@ mod tests {
         };
 
         let s = extracting(3, 43_200_512, 151_000_000);
-        assert_eq!(headline(&s), "Extracting 3 items from pkg.7z");
+        assert_eq!(said(&headline(&s)), "Extracting 3 items from pkg.7z");
+        assert_eq!(blue(&headline(&s)), ["3 items", "pkg.7z"]);
         assert_eq!(figures(&s), "41.2 MB of 144 MB");
 
         assert_eq!(
