@@ -900,6 +900,63 @@ fn a_drag_on_a_grip_resizes_rather_than_moving_the_next_column() {
     );
 }
 
+/// **A held edge follows the pointer, and Name takes up the difference only once it is let go.**
+/// Name is the column that flexes, and it used to flex under the drag: the edge being dragged right
+/// stayed put while the column grew out of its left side. See [`crate::ui::filelist::Resizing`].
+#[test]
+fn a_held_edge_follows_the_pointer_and_name_gives_way_on_the_release() {
+    use crate::fs::Column;
+    let mut h = Harness::new();
+    let header = |h: &Harness, column: Column| {
+        h.ctx
+            .read_response(Id::new(("th", h.app.panes[0].id, column.index())))
+            .expect("a header")
+            .rect
+    };
+    // Whichever column is drawn after Name, so Name is the one that would have given way.
+    let order = h.app.columns.order();
+    let after = order[order.iter().position(|&c| c == Column::Name).unwrap() + 1..]
+        .iter()
+        .copied()
+        .find(|c| h.tab(0).widths[c.index()] > 0.0)
+        .expect("a column after Name");
+    let (_, right) = header_span(&mut h, after).expect("its header");
+    let name = header(&h, Column::Name);
+    let edge = header(&h, after).right();
+
+    let from = right + vec2(GRIP_HALF, 0.0);
+    h.drag_and_hold(from, from + vec2(30.0, 0.0));
+    // Still held, and still: the header is drawn before its grip takes the frame's travel, and a
+    // response is read back a pass late.
+    h.frame(Vec::new());
+    h.frame(Vec::new());
+    let held = header(&h, after);
+    assert!(
+        (held.right() - (edge + 30.0)).abs() < 1.0,
+        "the edge is at {}, not {}",
+        held.right(),
+        edge + 30.0
+    );
+    assert_eq!(header(&h, Column::Name), name, "Name moved under the drag");
+
+    h.frame(vec![Event::PointerButton {
+        pos: from + vec2(30.0, 0.0),
+        button: PointerButton::Primary,
+        pressed: false,
+        modifiers: Modifiers::NONE,
+    }]);
+    h.frame(Vec::new());
+    h.frame(Vec::new());
+    let name_after = header(&h, Column::Name);
+    assert!(
+        (name_after.width() - (name.width() - 30.0)).abs() < 1.0,
+        "Name is {} wide, not {}",
+        name_after.width(),
+        name.width() - 30.0
+    );
+    assert!(h.tab(0).resizing.is_none(), "the release left the drag held");
+}
+
 /// Right-click a header, and return the menu that opened as the words it put on screen — the
 /// headers carry the same names, so its entries are what was not there before.
 fn open_columns_menu(h: &mut Harness, at: Pos2) -> Vec<(Pos2, String)> {

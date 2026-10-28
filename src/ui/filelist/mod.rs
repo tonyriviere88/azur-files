@@ -192,10 +192,13 @@ pub fn show(
     // A pane squeezed shorter than its own furniture would give an inverted body
     // rect, which turns into an empty visible range and an underflow downstream. The
     // header and the status line are worth more than a row nobody could read.
+    settle_resizing(ui, pane, tab);
     if rect.bottom() - reserved <= header.bottom() + ROW_HEIGHT {
         if !tiles {
-            let widths = resolved_widths(tab, columns, columns_width(rect.width()));
-            header_strip(ui, t, header, pane, tab, columns, &widths, out);
+            let view = columns_width(rect.width());
+            let widths = resolved_widths(tab, columns, view);
+            let shift = resize_shift(tab, columns, view);
+            header_strip(ui, t, header, pane, tab, columns, &widths, view, shift, out);
         }
         status_line(
             ui, t, floor, pane, tab, console_open, auto_tiles, providers, status, now, subfolders,
@@ -212,15 +215,17 @@ pub fn show(
     // Columns have to be resolved before the header can be drawn, and measuring
     // needs a painter — so this happens first, once per listing. Skipped entirely for tiles: it is a
     // pass over the folder for three widths nothing is going to use.
-    let widths = if tiles {
-        [0.0; Column::COUNT]
+    let view = columns_width(body.width());
+    let (widths, shift) = if tiles {
+        ([0.0; Column::COUNT], 0.0)
     } else {
         if !tab.widths_measured {
             measure_columns(ui, t, tab, columns, scratch);
         }
-        let widths = resolved_widths(tab, columns, columns_width(body.width()));
-        header_strip(ui, t, header, pane, tab, columns, &widths, out);
-        widths
+        let widths = resolved_widths(tab, columns, view);
+        let shift = resize_shift(tab, columns, view);
+        header_strip(ui, t, header, pane, tab, columns, &widths, view, shift, out);
+        (widths, shift)
     };
 
     // Whether any rows were drawn, and so whether anything is listening for a click over
@@ -309,6 +314,7 @@ pub fn show(
             tab,
             focused,
             &widths,
+            shift,
             &columns.order(),
             icons_cache,
             links_cache,
@@ -317,6 +323,7 @@ pub fn show(
             out,
             &mut outcome,
         );
+        resize_bar(ui, t, body, tab, view, shift);
         listed = true;
     }
     if !listed {

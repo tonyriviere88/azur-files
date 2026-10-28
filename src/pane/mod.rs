@@ -644,6 +644,9 @@ pub struct Tab {
     pub widths: [f32; Column::COUNT],
     /// Cleared whenever the listing changes, so the fitted columns are re-measured.
     pub widths_measured: bool,
+    /// A column's edge while it is being dragged, and Name held still under it. See
+    /// [`crate::ui::filelist::Resizing`].
+    pub resizing: Option<crate::ui::filelist::Resizing>,
 
     /// Whether this tab is showing its folder as rows or as tiles. See [`ViewMode`].
     pub view_mode: ViewMode,
@@ -926,6 +929,7 @@ impl Tab {
             anchor: None,
             widths: DEFAULT_WIDTHS,
             widths_measured: false,
+            resizing: None,
             // Details, always: nothing is remembered and nothing is inherited. See [`ViewMode`].
             view_mode: ViewMode::default(),
             // And this folder has not been looked at yet, so the listing that lands may still make

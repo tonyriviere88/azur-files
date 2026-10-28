@@ -187,18 +187,48 @@ pub(crate) const KEYWORDS_MIN: f32 = 120.0;
 /// the names; the rest is elided, and the tooltip has it whole.
 pub(crate) const KEYWORDS_MAX: f32 = 260.0;
 
+/// The least Name is left with. Below it the fitted columns give way — see [`resolved_widths`] —
+/// and a column's edge stops being dragged wider.
+const NAME_MIN: f32 = 120.0;
+
+/// A column's edge being dragged, from the frame the drag began to the frame it is let go.
+///
+/// **Name holds still under it, and takes up the difference on the release.** Name is the one column
+/// that flexes, so resizing anything else used to resize Name the other way in the same frame: the
+/// edge being dragged right stayed where it was and the column grew out of its *left* side, eating
+/// into Name, with the pointer running off ahead of an edge that never came. So every width is
+/// frozen as it was laid out when the button went down, and only the held column's follows the
+/// pointer. The columns past it slide along, off
+/// the right of the view if they have to — with a scrollbar under the rows to say how far, and the
+/// whole strip slid left once the edge itself would go — and the next frame after the release lays
+/// them out again, with Name back to whatever the others leave.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Resizing {
+    column: Column,
+    /// Its width when the drag began, which the pointer's whole travel is added to — not a running
+    /// sum of each frame's, which drifts off the pointer at the first frame the width was clamped.
+    from: f32,
+    /// Every column as it was laid out when the drag began, but the held one as it is now.
+    widths: [f32; Column::COUNT],
+}
+
 /// Widths for this frame: the fitted columns as stored, less any the user has hidden, and whatever
 /// is left for Name. Indexed by [`Column::index`] whatever order they are drawn in.
 ///
 /// When the pane is too narrow for all of them, the fitted columns give way —
 /// Type first, then Modified, then Keywords, then Status, then Hard links — because a name you cannot
 /// read is worse than a date you cannot see.
+///
+/// **While an edge is held, none of that:** the widths are the ones the drag is holding, and they may
+/// add up to more than `total`. See [`Resizing`].
 pub(crate) fn resolved_widths(tab: &Tab, columns: &Columns, total: f32) -> [f32; Column::COUNT] {
+    if let Some(held) = &tab.resizing {
+        return held.widths;
+    }
     let mut widths = tab.widths;
     for column in columns.hidden() {
         widths[column.index()] = 0.0;
     }
-    const NAME_MIN: f32 = 120.0;
     let fitted = |widths: &[f32; Column::COUNT]| widths[1..].iter().sum::<f32>();
 
     let mut spare = total - fitted(&widths);
@@ -221,6 +251,56 @@ pub(crate) fn resolved_widths(tab: &Tab, columns: &Columns, total: f32) -> [f32;
     }
     widths[0] = (total - fitted(&widths)).max(NAME_MIN);
     widths
+}
+
+/// Let go of a [`Resizing`] whose grip is no longer being dragged — one the header never saw
+/// released, because it was not drawn that frame (the view went to tiles under the drag, say). Asked
+/// before [`resolved_widths`], which would otherwise hold Name still for good.
+pub(crate) fn settle_resizing(ui: &Ui, pane: PaneId, tab: &mut Tab) {
+    if let Some(held) = tab.resizing {
+        if !ui.ctx().is_being_dragged(grip_id(pane, held.column)) {
+            tab.resizing = None;
+        }
+    }
+}
+
+fn grip_id(pane: PaneId, column: Column) -> Id {
+    Id::new(("th-grip", pane, column.index()))
+}
+
+/// How far left the columns are slid while an edge is held: as far as it takes to keep the edge
+/// inside `view`, and nothing at all otherwise. An edge dragged right past the end of the pane goes on
+/// widening its column, so this is what keeps the thing being dragged on screen.
+pub(crate) fn resize_shift(tab: &Tab, columns: &Columns, view: f32) -> f32 {
+    let Some(held) = &tab.resizing else { return 0.0 };
+    let mut edge = 0.0;
+    for column in columns.order() {
+        edge += held.widths[column.index()];
+        if column == held.column {
+            break;
+        }
+    }
+    (edge - view).max(0.0)
+}
+
+/// The scrollbar along the bottom of `body` while a held edge has pushed the columns wider than the
+/// `view`: where the view is across them, and how much of them it shows. Painted rather than
+/// scrolled — the pointer is busy holding the edge, and the columns fit again once it lets go.
+pub(crate) fn resize_bar(ui: &Ui, t: &Theme, body: Rect, tab: &Tab, view: f32, shift: f32) {
+    let Some(held) = &tab.resizing else { return };
+    let content: f32 = held.widths.iter().sum();
+    if content <= view + 0.5 || view <= 0.0 {
+        return;
+    }
+    let scroll = ui.spacing().scroll;
+    let bottom = body.bottom() - scroll.bar_outer_margin;
+    let x = |at: f32| body.left() + at / content * view;
+    let thumb = Rect::from_min_max(
+        pos2(x(shift), bottom - scroll.bar_width),
+        pos2(x(shift + view), bottom),
+    );
+    ui.painter()
+        .rect_filled(thumb, CornerRadius::same(radius::CIRCULAR), t.scrollbar.thumb);
 }
 
 /// Where each column runs across `rect`: laid out left to right in `order`, and indexed by
@@ -247,6 +327,9 @@ pub(crate) fn column_x(
 /// the same three gestures the sidebar's group headings have, and egui tells the first two apart by
 /// distance. A move and a tick are pushed as actions, because the arrangement is the window's and
 /// every pane draws it: see [`crate::app::Action::MoveColumn`].
+///
+/// `view` is how wide the columns are laid out to fill, and `shift` how far left of `rect` they start
+/// while an edge is held — see [`Resizing`].
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn header_strip(
     ui: &mut Ui,
@@ -256,11 +339,18 @@ pub(crate) fn header_strip(
     tab: &mut Tab,
     columns: &Columns,
     widths: &[f32; Column::COUNT],
+    view: f32,
+    shift: f32,
     out: &mut Vec<Action>,
 ) {
     ui.painter().rect_filled(rect, CornerRadius::ZERO, t.surfaces.header);
+    // Clipped to the strip, because while an edge is held the columns can run off either end of it,
+    // and a header slid left would be drawn over whatever is beside the pane — and take its clicks.
+    let mut strip = ui.new_child(egui::UiBuilder::new().max_rect(rect));
+    strip.set_clip_rect(rect.intersect(ui.clip_rect()));
+    let ui = &mut strip;
     let order = columns.order();
-    let spans = column_x(rect, widths, &order);
+    let spans = column_x(rect.translate(vec2(-shift, 0.0)), widths, &order);
     // The columns on show, left to right, for a header being dragged to land between.
     let mut shown: Vec<(Column, Rangef)> = Vec::with_capacity(Column::COUNT);
     // The header under the pointer's drag, and whether this is the frame it was let go.
@@ -353,11 +443,7 @@ pub(crate) fn header_strip(
                 pos2(cell.right() - GRIP, rect.top()),
                 pos2(cell.right() + GRIP, rect.bottom()),
             );
-            let drag = ui.interact(
-                grip,
-                Id::new(("th-grip", pane, index)),
-                Sense::click_and_drag(),
-            );
+            let drag = ui.interact(grip, grip_id(pane, column), Sense::click_and_drag());
             if drag.hovered() || drag.dragged() {
                 ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
                 ui.painter().rect_filled(
@@ -367,11 +453,27 @@ pub(crate) fn header_strip(
                 );
             }
             if drag.dragged() {
-                let delta = drag.drag_delta().x;
+                let held = tab.resizing.get_or_insert(Resizing {
+                    column,
+                    from: widths[index],
+                    widths: *widths,
+                });
+                let travel = drag.total_drag_delta().unwrap_or_default().x;
                 // A glyph column fits in less than a drag otherwise stops at, and would jump wider
                 // on the first pixel of one.
                 let least = if column.glyph_only() { GLYPH_COLUMN } else { 48.0 };
-                tab.widths[index] = (tab.widths[index] + delta).clamp(least, 480.0);
+                // And no wider than leaves Name its least once it is let go, which is when Name
+                // takes up the difference — or the release would hide some other column instead.
+                let others: f32 = (0..Column::COUNT)
+                    .filter(|&i| i != index && i != Column::Name.index())
+                    .map(|i| held.widths[i])
+                    .sum();
+                let most = (view - others - NAME_MIN).min(480.0).max(least);
+                held.widths[index] = (held.from + travel).clamp(least, most);
+                tab.widths[index] = held.widths[index];
+            }
+            if drag.drag_stopped() {
+                tab.resizing = None;
             }
             // Double-clicking an edge re-fits the column, which is the gesture every
             // table in every operating system has.

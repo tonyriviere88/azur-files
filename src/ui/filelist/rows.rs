@@ -665,6 +665,9 @@ pub(crate) fn rows(
     tab: &mut Tab,
     focused: bool,
     widths: &[f32; Column::COUNT],
+    // How far left of the body the columns start, while a header's edge is held. See
+    // [`super::Resizing`].
+    shift: f32,
     order: &[Column; Column::COUNT],
     icons_cache: &mut crate::shell::icons::Icons,
     links_cache: &mut crate::shell::links::Links,
@@ -738,7 +741,7 @@ pub(crate) fn rows(
         let press = crate::ui::held_from(ui, false);
         let pressed_row = press.and_then(row_at);
 
-        let spans = column_x(visible, widths, order);
+        let spans = column_x(visible.translate(vec2(-shift, 0.0)), widths, order);
         // A column's cell on a row: its edges less the padding either side, on the line `row` is.
         let cell_of = |column: Column, row: Rect| {
             Rect::from_x_y_ranges(spans[column.index()].shrink(CELL_PAD), row.y_range())
