@@ -211,10 +211,10 @@ pub(crate) fn cursor_ring(painter: &egui::Painter, rect: Rect, color: Color32, r
 /// dashes down the row's right edge were being cropped away and the ring came out open on that
 /// side, which reads as a drawing bug rather than as a cursor.
 ///
-/// **The row itself cannot narrow with the gutter.** The columns are measured against the pane's
-/// width and the header strip is drawn outside the scroll area, so a row that shrank when a
-/// scrollbar appeared would take Size, Type and Modified out of line with the headers above them —
-/// and put them back on the next scroll. It is the ring that stops at what can be seen.
+/// **The row itself cannot narrow with the gutter.** The columns already stop short of it, always —
+/// see `filelist::show` — but the row's fill is a band across the pane, and a band that shrank when a
+/// scrollbar appeared would leave a strip of the pane's surface down the right of every selected
+/// row. It is the ring that stops at what can be seen.
 ///
 /// **The right edge only.** Vertically the clip is the *scroll*: a row half off the bottom of the
 /// viewport is meant to have its bottom edge cut off, and closing the ring at the clip instead would

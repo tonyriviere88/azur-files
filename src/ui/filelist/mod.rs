@@ -173,12 +173,28 @@ pub fn show(
         return outcome;
     }
 
+    // **The columns stop short of the scrollbar's gutter, whether or not there is a bar in it.** The
+    // rows span the pane, but egui takes the last few points of it for the bar once the listing
+    // scrolls and clips everything under them — and that was the last column's text, cut mid-word.
+    // Reserved always rather than while the bar is up, because the header is drawn outside the
+    // scroll area: columns that narrowed with the bar would shift every time a filter took the
+    // listing past one screen and back. Asked of the style, so the gutter is the one egui reserves.
+    //
+    // **Less half the air that leaves.** The text stops a cell's padding short of its column, and
+    // egui keeps its own inner margin between the content and the bar on top of that — 4 and 8
+    // points of nothing, which put the last column visibly further from the bar than from the pane's
+    // edge. So the column runs half that far into the gutter. What it runs into is padding: the
+    // text still ends inside egui's clip, and the cell's last points under it were never painted.
+    let scroll = ui.spacing().scroll;
+    let gutter = (scroll.allocated_width() - (scroll.bar_inner_margin + CELL_PAD) / 2.0).max(0.0);
+    let columns_width = |width: f32| (width - gutter).max(0.0);
+
     // A pane squeezed shorter than its own furniture would give an inverted body
     // rect, which turns into an empty visible range and an underflow downstream. The
     // header and the status line are worth more than a row nobody could read.
     if rect.bottom() - reserved <= header.bottom() + ROW_HEIGHT {
         if !tiles {
-            let widths = resolved_widths(tab, columns, rect.width());
+            let widths = resolved_widths(tab, columns, columns_width(rect.width()));
             header_strip(ui, t, header, pane, tab, columns, &widths, out);
         }
         status_line(
@@ -202,7 +218,7 @@ pub fn show(
         if !tab.widths_measured {
             measure_columns(ui, t, tab, columns, scratch);
         }
-        let widths = resolved_widths(tab, columns, body.width());
+        let widths = resolved_widths(tab, columns, columns_width(body.width()));
         header_strip(ui, t, header, pane, tab, columns, &widths, out);
         widths
     };

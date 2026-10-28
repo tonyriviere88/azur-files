@@ -282,6 +282,44 @@ fn the_listing_leaves_half_a_row_of_slack_under_the_last_file() {
     );
 }
 
+/// **The last column's text stops short of the scrollbar.** The rows span the pane and egui clips
+/// the scroll area's content at the bar's gutter, so a column laid out to the pane's edge had its
+/// last few points of text cut off by the bar, mid-word. Measured off the header, which is laid out
+/// with the same widths as the rows and is outside the scroll area, so nothing clips it to look
+/// right — and against the *text's* edge, a cell's padding in from the column's, because the column
+/// itself is let half that padding into the gutter.
+#[test]
+fn the_last_column_leaves_room_for_the_scrollbar() {
+    let mut h = Harness::new();
+    // Short enough that the folder overflows it, so the bar is up.
+    h.size = egui::vec2(1024.0, 300.0);
+    h.settle();
+
+    let body = h.app.panes[0].drop_area;
+    assert!(
+        h.tab(0).order.len() as f32 * crate::pane::ROW_HEIGHT > body.height(),
+        "this folder fits in the pane, so there is no scrollbar"
+    );
+    let last = h
+        .app
+        .columns
+        .order()
+        .into_iter()
+        .rfind(|column| h.tab(0).widths[column.index()] > 0.0 && h.app.columns.shown(*column))
+        .expect("a column on show");
+    let (_, right) = header_span(&mut h, last).expect("the last column's header");
+    // The scan steps 2 points, so the column's edge is up to 2 past the last point that hit it.
+    let text = right.x + 2.0 - crate::ui::filelist::CELL_PAD;
+    let gutter = h.ctx.global_style().spacing.scroll.allocated_width();
+    assert!(gutter > 0.0, "the listing's scrollbar takes no room, so there is nothing to test");
+    assert!(
+        text <= body.right() - gutter,
+        "{}'s text reaches {text}, under the scrollbar's gutter that starts at {}",
+        last.header(),
+        body.right() - gutter
+    );
+}
+
 /// **A row says what it is when the pointer rests on it**, including what git says.
 ///
 /// The four columns are on the row already; what the tooltip adds is the part a column cannot hold
