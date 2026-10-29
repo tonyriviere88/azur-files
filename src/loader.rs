@@ -64,6 +64,10 @@ struct Cache {
     entries: usize,
     /// When each was last read, for [`Cache::sweep`].
     used: HashMap<PathBuf, std::time::Instant>,
+    /// When each listing was read *off the disk*, as a `FILETIME`, for [`Cache::outdated`].
+    /// Not the same clock as `used`: that one is touched by every cache hit, this one only by
+    /// the scan that made the listing.
+    read: HashMap<PathBuf, u64>,
     /// When the sweep last ran.
     swept: std::time::Instant,
 }
@@ -95,8 +99,29 @@ const CACHE_DIR_BUDGET: usize = 32;
 const CACHE_STALE: std::time::Duration = std::time::Duration::from_secs(120);
 /// How often the sweep is worth running.
 const CACHE_SWEEP: std::time::Duration = std::time::Duration::from_secs(10);
+/// How long before its listing was read a folder must have been written for the listing to be
+/// trusted, in `FILETIME` ticks: two seconds. See [`Cache::outdated`].
+///
+/// Not zero, because the two clocks are not the same clock. A write time is stamped from the
+/// kernel's coarse time, a clock-interrupt tick behind (15.6 ms by default), and the read time is
+/// `SystemTime::now`, which is precise — so a folder made just *after* its namesake was read can
+/// carry a time just before. FAT rounds a write time down to two seconds, which sets the figure. Too
+/// large costs a re-read of a folder written moments before it was read; too small serves a
+/// stale listing.
+const WRITE_SLACK: u64 = 2 * 10_000_000;
 
 impl Cache {
+    fn new() -> Self {
+        Self {
+            dirs: HashMap::new(),
+            order: VecDeque::new(),
+            entries: 0,
+            used: HashMap::new(),
+            read: HashMap::new(),
+            swept: std::time::Instant::now(),
+        }
+    }
+
     fn get(&mut self, path: &Path) -> Option<Arc<Dir>> {
         let dir = self.dirs.get(path)?.clone();
         // Touch: move to the back of the eviction order.
@@ -125,14 +150,20 @@ impl Cache {
         }
     }
 
-    fn insert(&mut self, dir: Arc<Dir>) {
+    /// Hold a listing that was read off the disk at `read` (a `FILETIME`, taken before the scan
+    /// began), and drop whatever it shows to be out of date underneath it.
+    fn insert(&mut self, dir: Arc<Dir>, read: u64) {
         let path = dir.path.clone();
+        for gone in self.outdated(&dir) {
+            self.forget_within(&gone);
+        }
         if let Some(old) = self.dirs.insert(path.clone(), dir.clone()) {
             self.entries -= old.len();
             self.unlist(&path);
         }
         self.entries += dir.len();
         self.used.insert(path.clone(), std::time::Instant::now());
+        self.read.insert(path.clone(), read);
         self.order.push_back(path);
 
         while (self.entries > CACHE_ENTRY_BUDGET || self.order.len() > CACHE_DIR_BUDGET)
@@ -145,6 +176,71 @@ impl Cache {
                 self.entries -= evicted.len();
             }
             self.used.remove(&oldest);
+            self.read.remove(&oldest);
+        }
+    }
+
+    /// The cached subfolders of `dir` that a fresh read of `dir` shows to be out of date.
+    ///
+    /// **A folder deleted and made again under the same name is a different folder**, and its
+    /// cached listing is the old one's. Delete `test` with a file in it, make a new `test`, open
+    /// it, and the file was back — read out of the cache, because nothing that changed had said
+    /// anything about `test` itself: the delete touched the parent, the watch is on the parent,
+    /// and the only listing re-read was the parent's. So that read is where it is caught. A
+    /// subfolder is out of date when it is no longer there, is no longer a folder, or carries a
+    /// write time from after its own listing was read — which a folder made afresh does, its write
+    /// time being when it was made.
+    ///
+    /// **This is not a general freshness check**, and was measured not to be one: a file written
+    /// *inside* a cached folder does not move the write time its parent's listing reports for it,
+    /// because NTFS serves that from its copy in the parent's index and brings the copy up to date
+    /// lazily. Changes inside a folder remain the watch's business, and F5's, as they were.
+    ///
+    /// Asked of the parent rather than of each subfolder, because the parent's listing has
+    /// already been read and carries every subfolder's write time: checking the subfolder itself
+    /// would be a stat on every cache hit, which is the round trip [`crate::fs`] exists to avoid.
+    /// What it cannot see is a folder replaced while its parent is neither on screen nor re-read,
+    /// except where this program did the deleting — see `App::collect_operations`. Comparing names
+    /// is ASCII-case-blind and otherwise exact: a miss only costs a re-read.
+    fn outdated(&self, dir: &Dir) -> Vec<PathBuf> {
+        if dir.recycled {
+            return Vec::new();
+        }
+        let mut under: Vec<(&Path, u64)> = self
+            .read
+            .iter()
+            .filter(|(path, _)| path.parent() == Some(dir.path.as_path()))
+            .map(|(path, read)| (path.as_path(), *read))
+            .collect();
+        if under.is_empty() {
+            return Vec::new();
+        }
+        // What is left at the end is what the listing did not vouch for.
+        for i in 0..dir.len() {
+            let entry = &dir.entries[i];
+            let name = dir.name(i);
+            under.retain(|(path, read)| {
+                let same = path
+                    .file_name()
+                    .and_then(|leaf| leaf.to_str())
+                    .is_some_and(|leaf| leaf.eq_ignore_ascii_case(name));
+                let fresh = entry.is_dir() && entry.modified.saturating_add(WRITE_SLACK) < *read;
+                !(same && fresh)
+            });
+        }
+        under.into_iter().map(|(path, _)| path.to_path_buf()).collect()
+    }
+
+    /// Drop `path` and everything cached beneath it.
+    fn forget_within(&mut self, path: &Path) {
+        let within: Vec<PathBuf> = self
+            .dirs
+            .keys()
+            .filter(|held| held.starts_with(path))
+            .cloned()
+            .collect();
+        for held in within {
+            self.forget(&held);
         }
     }
 
@@ -154,6 +250,7 @@ impl Cache {
         }
         self.unlist(path);
         self.used.remove(path);
+        self.read.remove(path);
     }
 
     /// Take `path` out of the eviction order, handing back the copy it held.
@@ -185,13 +282,7 @@ impl Loader {
             pending: WorkQueue::new(),
             claimed: Mutex::new(HashSet::new()),
         });
-        let cache = Arc::new(Mutex::new(Cache {
-            dirs: HashMap::new(),
-            order: VecDeque::new(),
-            entries: 0,
-            used: HashMap::new(),
-            swept: std::time::Instant::now(),
-        }));
+        let cache = Arc::new(Mutex::new(Cache::new()));
         let (tx, results) = channel();
 
         // Directory reads are kernel- and disk-bound, not compute-bound, so more
@@ -320,6 +411,14 @@ impl Loader {
     pub fn invalidate(&self, path: &Path) {
         if let Ok(mut cache) = self.cache.lock() {
             cache.forget(path);
+        }
+    }
+
+    /// Drop a cached listing and every one beneath it: for a folder that has been deleted, moved
+    /// or renamed, whose listings would otherwise come back if a folder of the same name did.
+    pub fn invalidate_within(&self, path: &Path) {
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.forget_within(path);
         }
     }
 
@@ -802,12 +901,14 @@ fn worker(
         let dir = match cache.lock().ok().and_then(|mut c| c.get(&request.path)) {
             Some(hit) => hit,
             None => {
+                // Before the scan, so a write landing during it reads as after it.
+                let read = crate::fs::time::filetime_now();
                 let dir = Arc::new(scan::scan(&request.path));
                 // A failed read is not cached: the drive may come back, the share
                 // may reconnect, and a retry should actually retry.
                 if dir.error.is_none() {
                     if let Ok(mut cache) = cache.lock() {
-                        cache.insert(dir.clone());
+                        cache.insert(dir.clone(), read);
                     }
                 }
                 dir
@@ -828,5 +929,88 @@ fn worker(
             return; // The UI is gone.
         }
         ctx.request_repaint();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// What the worker does with a folder: read it, and hand the cache the listing with the time
+    /// the read began.
+    fn read(cache: &mut Cache, path: &Path) {
+        let at = crate::fs::time::filetime_now();
+        cache.insert(Arc::new(scan::scan(path)), at);
+    }
+
+    /// Put a folder's write time an hour back, so that only what the test does next can make it
+    /// look changed — rather than [`WRITE_SLACK`], which counts any folder written moments before
+    /// its read as changed, and would pass every test here on its own.
+    fn backdate(dir: &Path) {
+        use std::os::windows::fs::OpenOptionsExt;
+        // `FILE_FLAG_BACKUP_SEMANTICS`, without which a directory cannot be opened at all, and
+        // `FILE_WRITE_ATTRIBUTES`, which is all that setting a time needs.
+        let folder = std::fs::OpenOptions::new()
+            .access_mode(0x100)
+            .custom_flags(0x0200_0000)
+            .open(dir)
+            .unwrap();
+        let hour = std::time::Duration::from_secs(3600);
+        folder.set_modified(std::time::SystemTime::now() - hour).unwrap();
+    }
+
+    /// The reported bug, step for step: a `test` with a file in it is opened, deleted from its
+    /// parent, made again empty — and opening the new one showed the old one's file.
+    #[test]
+    fn a_folder_made_again_does_not_open_onto_the_old_listing() {
+        let root = crate::sandbox::fresh("loader-remade");
+        let test = root.join("test");
+        std::fs::create_dir(&test).unwrap();
+        std::fs::write(test.join("old.txt"), b"x").unwrap();
+        backdate(&test);
+        let mut cache = Cache::new();
+        read(&mut cache, &test);
+        assert_eq!(cache.get(&test).map(|dir| dir.len()), Some(1));
+
+        std::fs::remove_dir_all(&test).unwrap();
+        std::fs::create_dir(&test).unwrap();
+        read(&mut cache, &root);
+
+        assert!(cache.get(&test).is_none(), "the old `test` was still cached");
+    }
+
+    #[test]
+    fn a_deleted_folder_takes_everything_under_it_out_of_the_cache() {
+        let root = crate::sandbox::fresh("loader-deleted");
+        let test = root.join("test");
+        let sub = test.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        backdate(&sub);
+        backdate(&test);
+        let mut cache = Cache::new();
+        read(&mut cache, &test);
+        read(&mut cache, &sub);
+
+        std::fs::remove_dir_all(&test).unwrap();
+        read(&mut cache, &root);
+
+        assert!(cache.get(&test).is_none());
+        assert!(cache.get(&sub).is_none());
+    }
+
+    /// And the point of the cache survives: a folder nobody has touched keeps its listing.
+    #[test]
+    fn a_folder_left_alone_keeps_its_listing() {
+        let root = crate::sandbox::fresh("loader-alone");
+        let test = root.join("test");
+        std::fs::create_dir(&test).unwrap();
+        std::fs::write(test.join("kept.txt"), b"x").unwrap();
+        backdate(&test);
+        let mut cache = Cache::new();
+        read(&mut cache, &test);
+
+        read(&mut cache, &root);
+
+        assert_eq!(cache.get(&test).map(|dir| dir.len()), Some(1));
     }
 }

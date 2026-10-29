@@ -1,4 +1,4 @@
-//! The video canvas: the picture, and the strip of controls under it.
+//! The video canvas: the picture, and the strip of controls over the bottom of it.
 //!
 //! The reading half is [`crate::preview::video`], which owns the engine; this is where a click
 //! becomes a seek. The one thing worth knowing about the pair is that the *canvas* is what drives
@@ -26,6 +26,10 @@ const TRACK: f32 = 4.0;
 
 /// The least track worth drawing. Below this the times give way instead — see [`strip`].
 const TRACK_MIN: f32 = 48.0;
+
+/// How much of the strip's surface covers the picture under it: enough that the ink on it reads over
+/// a white frame, little enough that the bottom of the picture is still seen through it.
+const SCRIM: f32 = 0.8;
 
 /// The knob's radius.
 ///
@@ -126,18 +130,18 @@ fn canvas(
     let bar = (canvas.height() >= STRIP + 24.0).then(|| {
         Rect::from_min_max(pos2(canvas.left(), canvas.bottom() - STRIP), canvas.max)
     });
-    let screen = match bar {
+    // **The strip is drawn over the picture, not beside it.** The picture is fitted to the whole
+    // canvas whether or not there is a strip, so the strip coming and going never resizes the frame:
+    // a picture that grew by thirty points whenever a hand left the mouse would rescale, reallocate
+    // the texture and jump. What does stay clear of the strip is the canvas's notes — `Opening…` and
+    // the like are read, not watched, and a word half under the controls is a word nobody can read.
+    let clear = match bar {
         Some(bar) => Rect::from_min_max(canvas.min, pos2(canvas.right(), bar.top())),
         None => canvas,
     };
 
-    // **The pointer has stopped moving, so the controls get out of the way** — and the room the strip
-    // was in is *not* given back to the picture. `screen` above is the same rect either way, which is
-    // the whole reason this is a separate question from `bar`: a picture that grew by thirty points
-    // whenever a hand left the mouse would rescale the frame, reallocate the texture and jump — five
-    // seconds after you stopped touching anything. So the picture stays where it is and the strip
-    // simply is not there; what shows in its place is the ground, painted below across the whole
-    // canvas rather than only over the picture.
+    // **The pointer has stopped moving, so the controls get out of the way**, and the picture under
+    // them is all there is.
     //
     // Read off the window rather than off this canvas: it is the pointer that has stopped, and the
     // pointer belongs to the window. So moving the mouse anywhere over it brings the controls back,
@@ -161,12 +165,12 @@ fn canvas(
     // **Before anything is drawn**, so the frame this fetches is the frame painted below. It also
     // has to happen even when there is nothing to show yet: the engine's own news — the metadata,
     // a failure — arrives through the same call.
-    if player.tick(ui.ctx(), screen.size(), ui.ctx().pixels_per_point()) {
+    if player.tick(ui.ctx(), canvas.size(), ui.ctx().pixels_per_point()) {
         ui.ctx().request_repaint();
     }
 
     // One interaction over the picture, before it is painted, so the cursor can be set from it.
-    let response = ui.interact(screen, Id::new(("preview-video", spot)), Sense::click());
+    let response = ui.interact(canvas, Id::new(("preview-video", spot)), Sense::click());
 
     // The ground the picture sits on, which is also what shows either side of it.
     //
@@ -175,10 +179,6 @@ fn canvas(
     // Filling a monitor it is **black**, because there the argument runs out — a panel belongs to the
     // window around it and there is no window around this, and every player ever written puts black
     // beside a film.
-    // Across the **whole** canvas, the strip's band included, and not only behind the picture. The
-    // strip paints its own surface over the bottom of it where there is one; where there is not — a
-    // panel too short for it, or a pointer that has come to rest — this is what stands in its place,
-    // and without it those thirty points would be whatever the pane last drew there.
     let ground = if filling { Color32::BLACK } else { t.bg.canvas };
     ui.painter()
         .rect_filled(canvas, CornerRadius::ZERO, ground);
@@ -186,7 +186,7 @@ fn canvas(
     if let Some(why) = player.failed() {
         // The engine's complaint, in the middle, exactly where a decoder's would go. No strip: there
         // is nothing to play, so a play button would be a control that does nothing.
-        note(ui, t, screen, why);
+        note(ui, t, clear, why);
         return;
     }
 
@@ -197,8 +197,8 @@ fn canvas(
             // 1:1 because a 16-pixel icon blown up to fill a panel is a mosaic. A video is not an
             // icon: a 320 × 240 clip shown at a quarter of the panel it was opened in is not a
             // preview of it, and every player ever written scales it up.
-            let scale = (screen.width() / pixels.x.max(1.0)).min(screen.height() / pixels.y.max(1.0));
-            let where_ = Rect::from_center_size(screen.center(), pixels * scale);
+            let scale = (canvas.width() / pixels.x.max(1.0)).min(canvas.height() / pixels.y.max(1.0));
+            let where_ = Rect::from_center_size(canvas.center(), pixels * scale);
             ui.painter().add(egui::Shape::image(
                 texture.id(),
                 where_,
@@ -210,10 +210,10 @@ fn canvas(
         // failure: a `.mp4` holding one AAC track is what a voice memo and a ripped soundtrack look
         // like. The strip below plays it, so the canvas has to say why it is empty — otherwise this
         // is the one case that sits on `Opening…` for ever, since a frame is never coming.
-        None if !player.opening() => note(ui, t, screen, "Sound only — no picture in this file"),
+        None if !player.opening() => note(ui, t, clear, "Sound only — no picture in this file"),
         // Otherwise a handful of frames, while Media Foundation resolves the file and the first
         // frame comes through. The same word the other views use for the same wait.
-        None => note(ui, t, screen, "Opening…"),
+        None => note(ui, t, clear, "Opening…"),
     }
 
     // **A press tells this canvas whether it has the keyboard**, and that is the whole of the focus
@@ -283,8 +283,15 @@ fn strip(
     out: &mut Vec<Action>,
     filling: bool,
 ) {
-    let surface = t.bg.layer;
+    // **Translucent, because it lies over the picture.** The panel's own layer and not a black
+    // scrim, so the ink on it is the ink the palette chose for that surface — a black band would
+    // put a light palette's dark glyphs on black.
+    let surface = t.bg.layer.gamma_multiply(SCRIM);
     ui.painter().rect_filled(bar, CornerRadius::ZERO, surface);
+    // **And it takes the clicks that land on it between the controls.** Registered after the
+    // picture's interaction and before the controls', so it sits between the two: a press beside
+    // the play button is a near miss, not a request to pause.
+    ui.interact(bar, Id::new(("preview-strip", spot)), Sense::click());
 
     let playing = player.playing();
     let at = Rect::from_center_size(

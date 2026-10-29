@@ -59,6 +59,20 @@ pub fn filetime_of(found: &std::fs::Metadata) -> u64 {
     }
 }
 
+/// The time now, as a raw `FILETIME`, to compare against an [`crate::fs::dir::Entry::modified`].
+///
+/// For [`crate::loader`], which stamps each listing it caches with when it was read, so that a
+/// later listing of the parent can tell a folder that has changed since — see `Cache::outdated`.
+pub fn filetime_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| {
+            (since.as_secs() + FILETIME_TO_UNIX_SECS as u64).saturating_mul(10_000_000)
+                + since.subsec_nanos() as u64 / 100
+        })
+        .unwrap_or(0)
+}
+
 #[cfg(windows)]
 #[path = "../windows/time.rs"]
 mod win;

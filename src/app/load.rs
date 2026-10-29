@@ -467,6 +467,13 @@ impl App {
             // external delete is left to the LRU and to F5.
             if let (true, Some(job)) = (worked, &done.job) {
                 crate::archive::forget_each(job.emptied());
+                // And the listings of a folder that is no longer there, and of everything under it,
+                // which a new folder of the same name would otherwise open onto. The loader catches
+                // this too, the next time the parent is read — see `Cache::outdated` — but that
+                // needs the parent re-read, and a job knows outright.
+                for gone in job.emptied() {
+                    self.loader.invalidate_within(gone);
+                }
             }
             // Only a tab showing an affected folder re-reads. A tab elsewhere is left
             // alone, which is the point of tracking this by path.
