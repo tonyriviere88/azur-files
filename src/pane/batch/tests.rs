@@ -75,7 +75,7 @@ fn a_pattern_fills_its_tokens_and_numbers_in_order() {
 
     b.rule.start = 10.0;
     b.rule.step = 5.0;
-    b.rule.pattern = "{name}-{n}".to_owned();
+    b.rule.pattern = "{name}-{n}.{ext}".to_owned();
     assert_eq!(names(&plan(&b, &[])), ["a-10.jpg", "b-15.jpg", "README-20"]);
 
     b.rule.pattern = "{guid}.{ext}".to_owned();
@@ -153,7 +153,7 @@ fn every_problem_is_caught_before_anything_is_renamed() {
     // still has it, so one pass would collide on the way — a swap, owned up to.
     let mut shift = BatchRename::new(vec![item("x1.txt"), item("x2.txt")]);
     shift.rule.mode = Mode::Pattern;
-    shift.rule.pattern = "x{n}".to_owned();
+    shift.rule.pattern = "x{n}.{ext}".to_owned();
     shift.rule.start = 2.0;
     let p = plan(&shift, &[]);
     assert_eq!(names(&p), ["x2.txt", "x3.txt"]);

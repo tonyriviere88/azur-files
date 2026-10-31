@@ -154,7 +154,7 @@ fn a_conflict_blocks_rename_and_a_clear_rule_renames_in_one_job() {
     {
         let batch = h.app.panes[0].tab_mut().batch.as_mut().unwrap();
         batch.rule.mode = crate::pane::batch::Mode::Pattern;
-        batch.rule.pattern = "photo_{n:03}".to_owned();
+        batch.rule.pattern = "photo_{n:03}.{ext}".to_owned();
     }
     h.frame(Vec::new());
     assert!(says(&h, "3 of 3 will be renamed"), "the summary is wrong");

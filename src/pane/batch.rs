@@ -17,8 +17,8 @@
 //! Unless asked. Every mode works on the stem — `IMG_0412` of `IMG_0412.JPG` — and puts the
 //! extension back on, because a find-and-replace that turned `.jpg` into `.jpeg` by accident, or a
 //! pattern that dropped it, changes what the file *is* to Windows. Replace has a toggle to include
-//! it; a pattern keeps it unless the pattern says where `{ext}` goes; Case has a separate toggle
-//! for it. A folder has no extension: `my.photos` is a name with a dot in it.
+//! it; a pattern is the whole name, so it says where `{ext}` goes (the default does); Case has a
+//! separate toggle for it. A folder has no extension: `my.photos` is a name with a dot in it.
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
@@ -79,10 +79,7 @@ pub enum CaseTo {
 /// The tokens Pattern mode understands, for the panel's chips — inserted as written here.
 pub const TOKENS: [(&str, &str); 7] = [
     ("{name}", "the current name, without its extension"),
-    (
-        "{ext}",
-        "the extension, without its dot — leave it out and the extension is kept as it is",
-    ),
+    ("{ext}", "the extension, without its dot — leave it out and the extension is dropped"),
     ("{n}", "a number counting up — {n:03} pads it to three digits"),
     ("{n:03}", "the number, padded to three digits"),
     ("{date}", "the date it was last modified, as 2026-10-12"),
@@ -225,7 +222,7 @@ impl BatchRename {
         Self {
             items,
             rule: Rule {
-                pattern: "{name}_{n:03}".to_owned(),
+                pattern: "{name}_{n:03}.{ext}".to_owned(),
                 start: 1.0,
                 step: 1.0,
                 ..Default::default()
@@ -429,17 +426,12 @@ impl BatchRename {
                     join(&replace(stem), ext)
                 }
             }
-            // **Without `{ext}`, the pattern makes the stem and the extension stays**: `{name}_{n}`
-            // over `a.jpg` is `a_1.jpg`. With it, the pattern is the whole name and says where the
-            // extension goes — which is the only way a pattern can change or drop one.
+            // **The pattern is the whole name**: `{name}_{n}.{ext}` over `a.jpg` is `a_1.jpg`, and
+            // `{name}_{n}` is `a_1`. The extension is part of the rename, so the pattern says where
+            // it goes — and can change or drop it.
             Mode::Pattern => {
                 let number = self.rule.start + self.rule.step * index as f64;
-                let made = expand(&self.rule.pattern, item, stem, ext, number, zone)?;
-                if self.rule.pattern.contains("{ext}") {
-                    made
-                } else {
-                    join(&made, ext)
-                }
+                expand(&self.rule.pattern, item, stem, ext, number, zone)?
             }
             Mode::Case => {
                 let stem = match self.rule.case_to {

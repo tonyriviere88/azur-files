@@ -82,7 +82,7 @@ pub(super) fn show(
             field(&mut line, &mut rule.replace, "Replace with", 200.0);
         }
         Mode::Pattern => {
-            let pattern = field(&mut line, &mut rule.pattern, "{name}_{n:03}", 260.0);
+            let pattern = field(&mut line, &mut rule.pattern, "{name}_{n:03}.{ext}", 260.0);
             if fresh {
                 pattern.request_focus();
             }
