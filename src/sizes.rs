@@ -79,7 +79,7 @@
 //! be a store of numbers that go quietly wrong as files are written, which is the same argument
 //! [`crate::git`] makes about a status cache.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering as Atomic};
 use std::sync::mpsc::{channel, Receiver, Sender};
@@ -130,6 +130,22 @@ pub struct Answer {
     /// The entry index the total is for.
     pub row: u32,
     pub bytes: u64,
+    /// `false` for a progress report: what has been added up *so far*, a lower bound that a later
+    /// answer for the same row replaces. See [`PROGRESS_EVERY`].
+    pub done: bool,
+}
+
+/// The least time between two progress reports for one folder, in microseconds.
+///
+/// Half a second: fast enough that a long count visibly moves, slow enough that a walk of a
+/// million files costs a handful of channel sends rather than a repaint per directory.
+const PROGRESS_EVERY: u64 = 500_000;
+
+/// Microseconds since the first call, for [`Job::reported`].
+fn clock() -> u64 {
+    use std::sync::OnceLock;
+    static BASE: OnceLock<std::time::Instant> = OnceLock::new();
+    BASE.get_or_init(std::time::Instant::now).elapsed().as_micros() as u64
 }
 
 // ---------------------------------------------------------------------------
@@ -281,6 +297,13 @@ pub struct Measurement {
     /// session, long after every folder had answered. The rows on show change only when the order is
     /// rebuilt, and the order already carries a generation that says so.
     scanned: u64,
+    /// The next re-read must not carry totals across. See [`Self::distrust`].
+    distrusted: bool,
+    /// What a folder showed before the re-read that is counting it again, by entry index. Read by
+    /// [`Self::shown`] only while the slot has no answer; the answer replaces it for good.
+    stale: Vec<u64>,
+    /// The rows whose shown figure is a progress report, still climbing: drawn with a `≥`.
+    partial: HashSet<usize>,
 }
 
 /// How long a Size sort waits before it re-orders itself around the totals that have landed.
@@ -347,6 +370,80 @@ impl Measurement {
         self.restart();
     }
 
+    /// The column as it stands, handed over so [`Self::carry`] can read it after
+    /// [`Self::for_listing`] has replaced it.
+    ///
+    /// What each row was *showing*: its total, or — for a folder still being re-counted — the
+    /// previous total it was showing in the meantime.
+    pub fn take_slots(&mut self) -> Vec<u64> {
+        let mut slots = std::mem::take(&mut self.slots);
+        for (entry, slot) in slots.iter_mut().enumerate() {
+            if measured(*slot).is_none() {
+                if let Some(&old) = self.stale.get(entry).filter(|&&s| measured(s).is_some()) {
+                    *slot = old;
+                }
+            }
+        }
+        self.stale = Vec::new();
+        slots
+    }
+
+    /// Do not trust the totals of the listing on show: the next re-read of it measures everything
+    /// again. For a change that can have reached a folder's contents without touching the folder's
+    /// own timestamp — a file operation that wrote two levels down.
+    pub fn distrust(&mut self) {
+        self.distrusted = true;
+    }
+
+    /// **A re-read of the same folder keeps every total that is still true**, and only the folders
+    /// that changed are walked again.
+    ///
+    /// A folder is carried across when its name is still there and its modified time is the one it
+    /// was counted at — which is the same evidence [`crate::watch`] has, since it is not told about
+    /// anything deeper than the folder's own entries. Without this, any change in the folder being
+    /// watched discarded every total and walked every subtree again, and a folder with something
+    /// constantly writing into it did that on a loop. `old` and `before` are the listing and column
+    /// that were on show; call after [`Self::for_listing`].
+    pub fn carry(&mut self, old: &Dir, before: &[u64], new: &Dir) {
+        let trusted = !std::mem::take(&mut self.distrusted);
+        if !self.on || before.len() != old.len() {
+            return;
+        }
+        let mut known = HashMap::new();
+        for (entry, &slot) in before.iter().enumerate() {
+            let record = &old.entries[entry];
+            if record.is_dir() && !record.is_link() {
+                if let Some(bytes) = measured(slot) {
+                    known.insert(old.name(entry), (record.modified, bytes));
+                }
+            }
+        }
+        let mut kept = false;
+        for entry in 0..new.len().min(self.slots.len()) {
+            let record = &new.entries[entry];
+            if !record.is_dir() || record.is_link() {
+                continue;
+            }
+            if let Some(&(modified, bytes)) = known.get(new.name(entry)) {
+                if trusted && modified == record.modified {
+                    self.slots[entry] = bytes;
+                } else {
+                    // **Still shown while it is counted again**, and sorted by. Falling back to
+                    // blank put the folder at the quiet end of a Size sort until its answer landed,
+                    // so every change in the folder shuffled the listing twice.
+                    if self.stale.len() != new.len() {
+                        self.stale.resize(new.len(), UNMEASURED);
+                    }
+                    self.stale[entry] = bytes;
+                }
+                kept = true;
+            }
+        }
+        if kept {
+            self.order_stale = true;
+        }
+    }
+
     /// The listing has gone and there is not a new one yet — a navigation, or a flatten toggling.
     ///
     /// The column is released rather than resized: a flattened tree's is 1.6 MB, and nothing can be
@@ -365,6 +462,8 @@ impl Measurement {
     /// listing first. A fresh generation is part of it, so work under way is abandoned on this frame
     /// rather than at whatever point the next listing lands.
     fn restart(&mut self) {
+        self.stale = Vec::new();
+        self.partial.clear();
         self.gen = next_gen();
         self.total = None;
         self.scanned = 0;
@@ -506,7 +605,13 @@ impl Measurement {
         if !self.on {
             return None;
         }
-        measured(self.slots.get(entry).copied()?)
+        let slot = self.slots.get(entry).copied()?;
+        // Not answered yet: the figure the folder had before this re-read, if there was one.
+        measured(slot).or_else(|| {
+            (slot == UNMEASURED || slot == MEASURING)
+                .then(|| self.stale.get(entry).copied().and_then(measured))
+                .flatten()
+        })
     }
 
     /// The keys a Size sort orders by: what every row's cell is showing, by entry index.
@@ -527,6 +632,11 @@ impl Measurement {
                 .map(|entry| self.shown(dir, entry).unwrap_or(0))
                 .collect(),
         )
+    }
+
+    /// Whether the figure shown for this row is a lower bound from a count still under way.
+    pub fn is_partial(&self, entry: usize) -> bool {
+        self.on && self.partial.contains(&entry)
     }
 
     /// How many folders on show are still being counted, and how long the last round took.
@@ -613,7 +723,29 @@ impl Measurement {
         if answer.gen != self.gen {
             return false;
         }
-        let Some(slot) = self.slots.get_mut(answer.row as usize) else {
+        let row = answer.row as usize;
+        if !answer.done {
+            // A progress report. Only meaningful for a folder still being counted, and only worth
+            // showing once it passes whatever the folder showed before this round — the cell never
+            // visibly shrinks. Kept in `stale`, which `shown` already reads for an unanswered slot.
+            if self.slots.get(row) != Some(&MEASURING) {
+                return false;
+            }
+            let shown = self.stale.get(row).copied().and_then(measured).unwrap_or(0);
+            if answer.bytes > shown {
+                if self.stale.len() != self.slots.len() {
+                    self.stale.resize(self.slots.len(), UNMEASURED);
+                }
+                self.stale[row] = answer.bytes.min(NO_NUMBER - 1);
+                self.partial.insert(row);
+                self.total = None;
+                self.order_stale = true;
+                self.resort_at.get_or_insert(now);
+            }
+            return true;
+        }
+        self.partial.remove(&row);
+        let Some(slot) = self.slots.get_mut(row) else {
             return false;
         };
         let was_waiting = *slot == MEASURING;
@@ -651,6 +783,8 @@ struct Job {
     gen: u64,
     row: u32,
     bytes: AtomicU64,
+    /// When a progress report was last sent, by [`clock`]. See [`PROGRESS_EVERY`].
+    reported: AtomicU64,
     /// Directories pushed for this folder and not yet retired.
     ///
     /// **It reaches zero exactly once**, on whichever thread reads the last directory — and that
@@ -748,6 +882,7 @@ impl Sizes {
                         gen,
                         row,
                         bytes: AtomicU64::new(0),
+                        reported: AtomicU64::new(clock()),
                         // The folder itself. Every subdirectory found under it is added to this
                         // before the directory that found it retires — see [`Job::outstanding`].
                         outstanding: AtomicUsize::new(1),
@@ -832,7 +967,30 @@ fn worker(queue: Arc<Queue>, tx: Sender<Answer>, ctx: egui::Context) {
         // thousand folders where one is denied is not a failed measurement, which is the same
         // judgement [`crate::fs::scan::scan_deep`] makes about the middle of a walk.
         if bytes > 0 {
-            task.job.bytes.fetch_add(bytes, Atomic::SeqCst);
+            let so_far = task.job.bytes.fetch_add(bytes, Atomic::SeqCst).saturating_add(bytes);
+            // A progress report, at most one per folder per [`PROGRESS_EVERY`]: whichever worker
+            // wins the exchange sends it. Sent before this directory retires, so it can never
+            // arrive after the final answer.
+            let (now, last) = (clock(), task.job.reported.load(Atomic::Relaxed));
+            if now.saturating_sub(last) >= PROGRESS_EVERY
+                && task
+                    .job
+                    .reported
+                    .compare_exchange(last, now, Atomic::SeqCst, Atomic::Relaxed)
+                    .is_ok()
+            {
+                let report = Answer {
+                    gen: task.job.gen,
+                    row: task.job.row,
+                    bytes: so_far,
+                    done: false,
+                };
+                if tx.send(report).is_ok() {
+                    ctx.request_repaint();
+                } else {
+                    return;
+                }
+            }
         }
         // **Counted in before this directory retires**, or the count could reach zero with a whole
         // subtree still to read and the folder would answer short.
@@ -860,6 +1018,7 @@ fn worker(queue: Arc<Queue>, tx: Sender<Answer>, ctx: egui::Context) {
                 gen: task.job.gen,
                 row: task.job.row,
                 bytes: task.job.bytes.load(Atomic::SeqCst),
+                done: true,
             })
             .is_ok()
         {
@@ -1173,6 +1332,81 @@ mod tests {
         // The top-level rows partition the tree, which is what makes `Dir::total_size` the
         // denominator a flattened listing's bars are measured against.
         assert_eq!(of("sub") + 100, dir.total_size);
+    }
+
+    /// A re-read keeps the totals of the folders whose timestamp is unchanged, and asks again about
+    /// the one that moved and the one that is new.
+    #[test]
+    fn a_re_read_keeps_the_totals_of_folders_that_did_not_change() {
+        let build = |stamp_b: u64, extra: bool| {
+            let mut builder = DirBuilder::new("D:\\root");
+            builder.push("a", 0, 10, FLAG_DIR);
+            builder.push("b", 0, stamp_b, FLAG_DIR);
+            if extra {
+                builder.push("c", 0, 30, FLAG_DIR);
+            }
+            builder.finish(0)
+        };
+        let old = build(20, false);
+        let new = build(21, true);
+
+        let mut m = Measurement {
+            on: true,
+            slots: vec![111, 222],
+            ..Measurement::default()
+        };
+        let before = m.take_slots();
+        m.for_listing(new.len());
+        m.carry(&old, &before, &new);
+
+        let at = |name: &str| (0..new.len()).find(|&i| new.name(i) == name).unwrap();
+        assert_eq!(m.slots[at("a")], 111, "untouched: its total is still true");
+        assert_eq!(m.slots[at("b")], UNMEASURED, "its timestamp moved");
+        assert_eq!(m.slots[at("c")], UNMEASURED, "new");
+        // The one being counted again keeps showing — and sorting by — what it had.
+        assert_eq!(m.shown(&new, at("b")), Some(222));
+        assert_eq!(m.shown(&new, at("c")), None);
+
+        // And a distrusted re-read carries nothing.
+        let mut m = Measurement {
+            on: true,
+            ..Measurement::default()
+        };
+        m.distrust();
+        m.for_listing(new.len());
+        m.carry(&old, &[111, 222], &new);
+        assert!(m.slots.iter().all(|&s| s == UNMEASURED));
+    }
+
+    /// A progress report shows as a lower bound while the folder is counted, never shrinks the
+    /// figure, and the final answer replaces it.
+    #[test]
+    fn a_progress_report_shows_until_the_answer_replaces_it() {
+        let mut builder = DirBuilder::new("D:\\root");
+        builder.push("a", 0, 1, FLAG_DIR);
+        let dir = builder.finish(0);
+        let mut m = Measurement {
+            on: true,
+            slots: vec![MEASURING],
+            gen: 7,
+            waiting: 1,
+            ..Measurement::default()
+        };
+        let report = |bytes, done| Answer { gen: 7, row: 0, bytes, done };
+
+        assert!(m.take(&report(50, false), 0.0));
+        assert_eq!(m.shown(&dir, 0), Some(50));
+        assert!(m.is_partial(0));
+        // A smaller report never shrinks it.
+        assert!(m.take(&report(40, false), 0.0));
+        assert_eq!(m.shown(&dir, 0), Some(50));
+
+        assert!(m.take(&report(30, true), 0.0));
+        assert_eq!(m.shown(&dir, 0), Some(30), "the final answer wins, even when smaller");
+        assert!(!m.is_partial(0));
+        assert_eq!(m.waiting(), 0);
+        // A late report for an answered row is dropped.
+        assert!(!m.take(&report(99, false), 0.0));
     }
 
     /// The three states are not byte counts, and the boundary between them and a real answer is

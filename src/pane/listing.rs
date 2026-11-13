@@ -34,6 +34,16 @@ impl Tab {
             (entry < old.len()).then(|| (entry, old.leaf(entry).to_owned(), text))
         });
 
+        // The cursor and the anchor, by name, for the same reason as the selection: they are
+        // positions in an order that is about to be rebuilt. A re-read of the folder on show must
+        // leave the keyboard where it was — only a file that has actually gone loses its place.
+        let at = |position: Option<usize>| {
+            let old = self.dir.as_ref()?;
+            let entry = *self.order.get(position?)? as usize;
+            (entry < old.len() && old.path == dir.path).then(|| old.name(entry).to_owned())
+        };
+        let (cursor_name, anchor_name) = (at(self.cursor), at(self.anchor));
+
         self.selected = vec![false; dir.len()];
         // **A new listing is a new view, and that is what makes the icons safe.** `view` is the
         // icon service's staleness key: an answer names the view that asked, and
@@ -56,7 +66,15 @@ impl Tab {
         // beside it: a total is addressed to a *row*, and a row is an index into the listing that was
         // on screen when it was asked for. Kept across a re-read, the answer for entry 40 would land
         // on whatever file entry 40 now is. See [`crate::sizes::Measurement::gen`].
+        let before = self.sizes.take_slots();
         self.sizes.for_listing(dir.len());
+        // But a re-read of the same folder keeps the totals of every subfolder that did not change,
+        // so only what changed is walked again.
+        if let (Some(old), false) = (&self.dir, self.flat) {
+            if old.path == dir.path {
+                self.sizes.carry(old, &before, &dir);
+            }
+        }
         // **A new listing is a new question for git**, and the old answer goes with the old listing
         // rather than being kept while it is checked. A tick that survives the read that would have
         // disproved it is the whole failure this design is avoiding.
@@ -117,6 +135,23 @@ impl Tab {
         // deleted -- simply is not selected any more, which is the only sensible answer.
         if !held.is_empty() {
             self.reselect_by_name(&held);
+        }
+        // And the keyboard put back where it was, over whatever `reselect_by_name` defaulted to.
+        // Only when the row survived; otherwise the default stands.
+        if let Some(dir) = self.dir.clone() {
+            let find = |name: &Option<String>| {
+                let name = name.as_ref()?;
+                self.order
+                    .iter()
+                    .position(|&i| dir.name(i as usize) == name.as_str())
+            };
+            let (cursor, anchor) = (find(&cursor_name), find(&anchor_name));
+            if cursor.is_some() {
+                self.cursor = cursor;
+            }
+            if anchor.is_some() {
+                self.anchor = anchor;
+            }
         }
 
         // Highlight and scroll to whatever we came out of.
@@ -813,6 +848,12 @@ impl Tab {
         };
         self.sizes.set_total(total);
         left
+    }
+
+    /// Whether the figure [`Tab::size_shown`] gives for this row is a lower bound from a count still
+    /// under way, which the cell marks with a `≥`.
+    pub fn size_is_partial(&self, entry: usize) -> bool {
+        self.sizes.is_partial(entry)
     }
 
     /// What a row's Size cell has to say, by entry index — the listing's half of

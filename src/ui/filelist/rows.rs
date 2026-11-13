@@ -1284,6 +1284,10 @@ pub(crate) fn rows(
                         );
                     }
                     scratch.clear();
+                    // A count still under way is a lower bound, and says so.
+                    if tab.size_is_partial(entry_index) {
+                        scratch.push_str("≥ ");
+                    }
                     fmt::size(bytes, scratch);
                     let galley = truncated(
                         ui.painter(),

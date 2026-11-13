@@ -1246,6 +1246,7 @@ fn a_re_read_will_not_take_an_answer_meant_for_the_listing_it_replaced() {
         gen: tab.sizes.gen(),
         row: asked[0].0,
         bytes: 4_000,
+        done: true,
     };
 
     // The folder is read again, with a row inserted at the front of it — so every index has moved.
@@ -1418,7 +1419,7 @@ fn walked(tab: &mut Tab) -> Vec<(u32, PathBuf)> {
 fn answer(tab: &mut Tab, row: u32, bytes: u64) -> bool {
     let gen = tab.sizes.gen();
     tab.sizes
-        .take(&crate::sizes::Answer { gen, row, bytes }, 0.0)
+        .take(&crate::sizes::Answer { gen, row, bytes, done: true }, 0.0)
 }
 
 /// The rows on show, in order.

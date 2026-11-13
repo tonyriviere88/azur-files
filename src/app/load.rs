@@ -477,9 +477,21 @@ impl App {
             }
             // Only a tab showing an affected folder re-reads. A tab elsewhere is left
             // alone, which is the point of tracking this by path.
-            for tab in tabs_mut(&mut self.panes) {
+            //
+            // **Re-read in place**, as [`App::folder_changed`] does for the watcher: the listing on
+            // show stays up and the selection, cursor and scroll with it, until the new one lands
+            // and `Tab::apply` carries them across by name. `Tab::refresh` would blank the pane.
+            // The names put aside for a batch rename are still honoured — `apply` reads them first.
+            let Self { panes, loader, .. } = self;
+            for tab in tabs_mut(panes) {
                 if done.touched.contains(&tab.path) || bin.as_ref() == Some(&tab.path) {
-                    tab.refresh();
+                    if tab.dir.is_some() {
+                        // An operation can have written below a subfolder without touching it.
+                        tab.sizes.distrust();
+                        tab.awaiting = Some(ask_for(tab, loader));
+                    } else {
+                        tab.refresh();
+                    }
                 }
             }
             // What Ctrl+Z will take back, or — when this *was* a Ctrl+Z — which stack its entry
