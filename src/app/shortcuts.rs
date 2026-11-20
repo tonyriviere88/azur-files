@@ -142,6 +142,7 @@ pub(crate) static BINDINGS: &[(Command, &[Chord])] = &[
     // Window
     (Command::SpanScreens, &[Chord::Named("Ctrl+Win+↑")]),
     (Command::ResetSize, &[Chord::Named("Ctrl+Win+↓")]),
+    (Command::Fullscreen, &[bare(Key::F11)]),
     (Command::CloseWindow, &[Chord::Named("Alt+F4")]),
 ];
 

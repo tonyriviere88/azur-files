@@ -61,7 +61,7 @@ impl App {
         // so a window that was maximised reports itself restored for as long as the video is up.
         // Believing that loses the state to go back to, and a session left maximised and closed from
         // fullscreen reopened as a small window in a corner.
-        if self.fullscreen_video.is_none() {
+        if self.fullscreen.is_empty() {
             self.maximized = ctx.input(|i| i.viewport().maximized.unwrap_or(false));
         }
         // `Ctrl` `+` / `-` / `0` are egui's own, so the zoom changes without an action passing
@@ -129,7 +129,7 @@ impl App {
         // makes and a sharper case of it: fullscreen reports itself as neither maximised nor resized,
         // so without this the monitor's size would be written to the settings file as the window's and
         // the program would reopen filling the screen for good.
-        if !self.maximized && self.fullscreen_video.is_none() {
+        if !self.maximized && self.fullscreen.is_empty() {
             // Only a restored window's size is worth remembering; a maximised one is
             // described by the flag, and saving the screen size would pin the window
             // to this monitor.
@@ -331,31 +331,103 @@ impl App {
     /// picture, `Escape`, and this: the player it was about is no longer there. The last one is not a
     /// corner case — closing the panel, switching tabs and a background scan moving the selection all
     /// reach it, and without it the window would be left fullscreen with nothing in it.
+    ///
+    /// # One panel to a screen
+    ///
+    /// The window is the box around the monitors being filled, and each [`Fill`] is one monitor of it:
+    /// its physical rectangle, taken to the window's points through where the drawing surface starts
+    /// on the desktop. **Asked every frame rather than remembered**, so a window the platform placed a
+    /// pixel off is drawn where it is. What lies in the box and belongs to no panel — a monitor between
+    /// two others, the pixel the frame is pushed out by — is black.
+    ///
+    /// A video fills its screen with the player and its controls; any other panel is the ordinary
+    /// panel drawn into the screen's rectangle.
     fn theatre(&mut self, ui: &mut Ui, t: &Theme, screen: Rect) -> bool {
-        let App {
-            panes,
-            preview,
-            actions,
-            fullscreen_video,
-            ..
-        } = self;
-        let Some(id) = *fullscreen_video else {
+        if self.fullscreen.is_empty() {
             return false;
-        };
-        let drew = panes
-            .iter_mut()
-            .find(|pane| pane.id == id)
-            .map(|pane| pane.tab_mut())
-            .is_some_and(|tab| {
-                crate::ui::preview::theatre(ui, t, screen, id, &mut tab.preview, preview, actions)
-            });
-        if !drew {
-            // Through the action rather than by clearing the field, because the *window* has to be
-            // given back as well and that is the action's job. One frame of an empty window is what
-            // it costs, and the alternative is two places that both know how to leave fullscreen.
-            actions.push(Action::ToggleVideoFullscreen(id));
         }
-        drew
+        let ppp = ui.ctx().pixels_per_point();
+        #[cfg(windows)]
+        let origin = crate::win::client_origin(self.owner);
+        #[cfg(not(windows))]
+        let origin: Option<[i32; 2]> = None;
+        ui.painter()
+            .rect_filled(screen, egui::CornerRadius::ZERO, egui::Color32::BLACK);
+
+        let fills = self.fullscreen.clone();
+        let mut gone: Vec<PaneId> = Vec::new();
+        for fill in fills {
+            let rect = match (fill.screen, origin) {
+                (Some([l, tp, r, b]), Some([ox, oy])) => Rect::from_min_max(
+                    pos2((l - ox) as f32 / ppp, (tp - oy) as f32 / ppp),
+                    pos2((r - ox) as f32 / ppp, (b - oy) as f32 / ppp),
+                ),
+                _ => screen,
+            };
+            let App {
+                panes,
+                preview,
+                scratch,
+                actions,
+                ..
+            } = self;
+            let Some(tab) = panes
+                .iter_mut()
+                .find(|pane| pane.id == fill.pane)
+                .map(|pane| pane.tab_mut())
+            else {
+                gone.push(fill.pane);
+                continue;
+            };
+            let mut child = ui.new_child(
+                egui::UiBuilder::new()
+                    .max_rect(rect)
+                    .layout(egui::Layout::top_down(egui::Align::Min)),
+            );
+            child.set_clip_rect(rect.intersect(ui.clip_rect()));
+            let drew = if crate::ui::preview::is_video(&mut tab.preview) {
+                crate::ui::preview::theatre(
+                    &mut child,
+                    t,
+                    rect,
+                    fill.pane,
+                    &mut tab.preview,
+                    preview,
+                    actions,
+                )
+            } else if tab.preview.open {
+                let changed = Self::changed_here(tab);
+                let can_compare = Self::can_compare(tab);
+                crate::ui::preview::show(
+                    &mut child,
+                    t,
+                    rect,
+                    fill.pane,
+                    &mut tab.preview,
+                    preview,
+                    rect,
+                    changed,
+                    can_compare,
+                    scratch,
+                    actions,
+                );
+                true
+            } else {
+                false
+            };
+            if !drew {
+                gone.push(fill.pane);
+            }
+        }
+        if !gone.is_empty() {
+            // Dropped from the state, and the window refitted — or given back, when none is left. The
+            // panel it was about is no longer there: closing it, switching tabs and a scan moving the
+            // selection all reach this, and without it the window would be left filling a screen with
+            // nothing on it. One frame of black is what it costs.
+            self.fullscreen.retain(|f| !gone.contains(&f.pane));
+            self.refit_fullscreen(ui.ctx());
+        }
+        true
     }
 
     /// Divide the window up and lay the panes out, without drawing anything.
@@ -415,6 +487,8 @@ impl App {
 
     /// The sidebar, the splitter between it and the panes, the tab bands, and the panes.
     pub(super) fn body(&mut self, ui: &mut Ui, t: &Theme, full: Rect, plan: &chrome::StripPlan) {
+        // Where the preview panels land this frame, for `F11`. See [`App::preview_panels`].
+        self.preview_panels.clear();
         if full.width() < 80.0 || full.height() < 40.0 {
             return;
         }
@@ -718,6 +792,7 @@ impl App {
         // reaches for the whole body when it measures its own columns, and a panel drawn first
         // would have a row's fill painted across it.
         if let Some(panel) = panel {
+            self.preview_panels.push((id, panel));
             let Self {
                 panes,
                 preview,

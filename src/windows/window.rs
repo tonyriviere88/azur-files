@@ -485,8 +485,14 @@ fn borderless(owner: shell::Owner, on: bool) {
 /// nothing saved leaves the window alone. Without the first of those, entering fullscreen twice —
 /// which two panes each showing a video can ask for — recorded the monitor as the window's own
 /// rectangle and the way out became a move to where the window already was.
+///
+/// # Which screens
+///
+/// `screens` are monitor rectangles in physical pixels — `[left, top, right, bottom]`, see
+/// [`monitor_at`] — and the window becomes the box around them. Empty means the one monitor the
+/// window is on. Called again with a different set while already filling, it only moves.
 #[cfg(windows)]
-pub(crate) fn fill_screen(owner: shell::Owner, on: bool) {
+pub(crate) fn fill_screen(owner: shell::Owner, on: bool, screens: &[[i32; 4]]) {
     use windows::Win32::Foundation::RECT;
     use windows::Win32::Graphics::Gdi::{
         GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
@@ -534,15 +540,39 @@ pub(crate) fn fill_screen(owner: shell::Owner, on: bool) {
         let style = GetWindowLongW(hwnd, GWL_STYLE) as u32;
 
         if on {
-            // Already filling it, so there is nothing to do and — much more to the point — nothing
-            // to record. See [`SAVED`], where what overwriting it costs is written down.
+            // The rectangle to cover: the box around the monitors asked for, or — when the caller
+            // named none — the one the window is on. A box rather than a list because a window is
+            // one rectangle; what is drawn on a monitor in the box that nobody asked for is the
+            // caller's black.
+            let target = if screens.is_empty() {
+                let Some(screen) = monitor() else { return };
+                screen.rcMonitor
+            } else {
+                let mut all = RECT {
+                    left: i32::MAX,
+                    top: i32::MAX,
+                    right: i32::MIN,
+                    bottom: i32::MIN,
+                };
+                for [l, t, r, b] in screens {
+                    all.left = all.left.min(*l);
+                    all.top = all.top.min(*t);
+                    all.right = all.right.max(*r);
+                    all.bottom = all.bottom.max(*b);
+                }
+                all
+            };
+            // **Already filling the screen**, so what is left to do is move — to the new box, when
+            // another monitor has joined or left — and *not* record: the slot holds the shape to go
+            // back to, and overwriting it with the monitor's would make the way out a move to where
+            // the window already is. See [`SAVED`].
             if SAVED.lock().is_ok_and(|slot| slot.is_some()) {
+                place(HWND_TOPMOST, over(target));
                 return;
             }
             // Both reads first, and nothing is changed until they have both answered — the same
             // order `open_maximized` takes, and for the same reason: half of this would be worse
             // than none of it.
-            let Some(screen) = monitor() else { return };
             let mut was = RECT::default();
             if GetWindowRect(hwnd, &mut was).is_err() {
                 return;
@@ -555,7 +585,7 @@ pub(crate) fn fill_screen(owner: shell::Owner, on: bool) {
             // is the bug it exists to prevent.
             SetWindowLongW(hwnd, GWL_STYLE, (style & !WS_MAXIMIZE.0) as i32);
             borderless(owner, true);
-            place(HWND_TOPMOST, over(screen.rcMonitor));
+            place(HWND_TOPMOST, over(target));
             return;
         }
 
@@ -586,6 +616,49 @@ pub(crate) fn fill_screen(owner: shell::Owner, on: bool) {
             },
         );
     }
+}
+
+/// Where the window's drawing surface starts on the desktop, in physical pixels.
+///
+/// The client area's top-left rather than the window's: what egui draws at `(0, 0)` is there, and a
+/// monitor's rectangle is taken to a point of the window by subtracting it. `None` for no window.
+#[cfg(windows)]
+pub(crate) fn client_origin(owner: shell::Owner) -> Option<[i32; 2]> {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::ClientToScreen;
+
+    if owner.0 == 0 {
+        return None;
+    }
+    let mut at = POINT { x: 0, y: 0 };
+    // SAFETY: a window this process owns, and a point on this stack.
+    unsafe { ClientToScreen(owner.hwnd(), &mut at) }
+        .as_bool()
+        .then_some([at.x, at.y])
+}
+
+/// The monitor under a point of the desktop, as `[left, top, right, bottom]` in physical pixels —
+/// the nearest one when the point is on none, which is what a window half off the edge of the
+/// desktop wants. `None` when the platform will not say.
+#[cfg(windows)]
+pub(crate) fn monitor_at(x: i32, y: i32) -> Option<[i32; 4]> {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+
+    let mut screen = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    // SAFETY: a pure query of the desktop, and a `MONITORINFO` told its own size.
+    let monitor = unsafe { MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST) };
+    unsafe { GetMonitorInfoW(monitor, &mut screen) }.as_bool().then_some([
+        screen.rcMonitor.left,
+        screen.rcMonitor.top,
+        screen.rcMonitor.right,
+        screen.rcMonitor.bottom,
+    ])
 }
 
 /// Keep the compositor from showing this window, or stop keeping it.

@@ -22,6 +22,9 @@ pub enum WindowAction {
     /// did not mean, the way back from [`Self::SpanScreens`], and the counterpart of double-clicking
     /// the sidebar splitter. `Ctrl+Win+Down`.
     ResetSize,
+    /// Every open preview panel full screen, each on the monitor its centre is on; or back out of it.
+    /// `F11`. See [`crate::app::App::theatre`].
+    ToggleFullscreen,
     Close,
     Drag,
 }

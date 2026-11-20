@@ -1366,6 +1366,12 @@ impl Preview {
     }
 }
 
+/// Whether the file this panel is on is a video, which is what decides how it fills a screen: the
+/// player and its controls, against the ordinary panel drawn larger.
+pub fn is_video(preview: &mut Preview) -> bool {
+    matches!(preview.focused_mut().content, Content::Video(_))
+}
+
 /// Draw this panel's video over the whole window instead of in its panel. See [`video::theatre`].
 ///
 /// `false` when there is nothing to fill a screen with — no video in this panel any more, or one that

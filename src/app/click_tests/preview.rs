@@ -1943,6 +1943,39 @@ fn a_screen_filled_by_a_video_that_is_not_there_comes_back_by_itself() {
     );
 }
 
+/// **`F11` fills a screen with the open preview panel, and the same key (or `Escape`) gives it back.**
+///
+/// Not the window's own fullscreen: with no panel open there is nothing to fill a screen with, and
+/// the key does nothing. Which *monitor* each panel takes — the one its centre is on — is a question
+/// for a desktop this harness has no window on, so what is pinned here is the state: that the panel
+/// is the one that fills, that the frame keeps it, and that both ways out clear it.
+#[test]
+fn f11_fills_a_screen_with_the_open_panel_and_gives_it_back() {
+    let mut h = Harness::new();
+    h.settle();
+    let pane = h.app.panes[0].id;
+
+    // Nothing open: nothing happens.
+    h.frame(vec![key(egui::Key::F11)]);
+    assert!(!h.app.fullscreen_for_tests(), "F11 filled a screen with no panel open");
+
+    open_text_preview(&mut h);
+    h.frame(vec![key(egui::Key::F11)]);
+    assert_eq!(h.app.fullscreen_panes_for_tests(), vec![pane], "F11 did not fill with the panel");
+
+    // A frame in it keeps it: the panel is open and has something to draw.
+    h.frame(Vec::new());
+    assert_eq!(h.app.fullscreen_panes_for_tests(), vec![pane], "the frame dropped the panel");
+
+    h.frame(vec![key(egui::Key::F11)]);
+    assert!(!h.app.fullscreen_for_tests(), "F11 did not give the screen back");
+
+    h.frame(vec![key(egui::Key::F11)]);
+    assert!(h.app.fullscreen_for_tests());
+    h.frame(vec![key(egui::Key::Escape)]);
+    assert!(!h.app.fullscreen_for_tests(), "Escape did not give the screen back");
+}
+
 /// **Every tile's clip plays, and only the focused one is audible.**
 ///
 /// The rule for four videos at once: silence for three of them would make the panel a still contact

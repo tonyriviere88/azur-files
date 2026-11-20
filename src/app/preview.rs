@@ -315,9 +315,82 @@ impl App {
     /// screen with. See `win::fill_screen` for why the window is moved rather than asked.
     pub(super) fn fill_screen(&self, on: bool) {
         #[cfg(windows)]
-        crate::win::fill_screen(self.owner, on);
+        {
+            // The monitors the panels are on, which is all of them that are filling anything. Empty
+            // for a panel the platform would not place, and the window's own monitor then.
+            let screens: Vec<[i32; 4]> = self.fullscreen.iter().filter_map(|f| f.screen).collect();
+            crate::win::fill_screen(self.owner, on, &screens);
+        }
         #[cfg(not(windows))]
         let _ = on;
+    }
+
+    /// Make the window match [`App::fullscreen`]: cover the monitors it names, or be given back when it
+    /// names none.
+    ///
+    /// **The window follows the state and not the other way round**, and it is called after every
+    /// change to it so that the ways in and out cannot each have their own idea of what the window
+    /// should be doing.
+    pub(super) fn refit_fullscreen(&self, ctx: &egui::Context) {
+        self.fill_screen(!self.fullscreen.is_empty());
+        // Nothing else asks for one: the window is about to change shape underneath a program that
+        // is idle between events, and the frame that notices is this one's successor.
+        ctx.request_repaint();
+    }
+
+    /// The screen a preview panel would fill: the monitor its **centre** is on.
+    ///
+    /// A panel is a rectangle in the window and a window can span monitors, so "which screen" needs a
+    /// rule, and the centre is the one that agrees with what the eye says — a panel half over each of
+    /// two monitors belongs to the one most of it is on. The centre is taken to the desktop through
+    /// where the window's drawing surface starts and the scale it is drawn at, both in physical pixels.
+    ///
+    /// `None` when the platform will not answer, which leaves the panel the whole window.
+    fn screen_of(&self, panel: Rect, ppp: f32) -> Option<[i32; 4]> {
+        #[cfg(windows)]
+        {
+            let [ox, oy] = crate::win::client_origin(self.owner)?;
+            let centre = panel.center();
+            crate::win::monitor_at(
+                ox + (centre.x * ppp).round() as i32,
+                oy + (centre.y * ppp).round() as i32,
+            )
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (panel, ppp);
+            None
+        }
+    }
+
+    /// What each open preview panel would fill, the focused pane's first.
+    ///
+    /// **One panel to a screen**: two on the same monitor would be drawn over each other, so the
+    /// focused one wins it and the other stays in its pane. `only` narrows it to one pane, which is
+    /// what a video's own button asks for. Without a platform to ask, the first panel gets the whole
+    /// window and the rest nothing, for the same reason.
+    pub(super) fn fill_targets(&self, only: Option<PaneId>, ppp: f32) -> Vec<Fill> {
+        let mut panels: Vec<&(PaneId, Rect)> = self
+            .preview_panels
+            .iter()
+            .filter(|(id, _)| only.is_none_or(|only| only == *id))
+            .collect();
+        panels.sort_by_key(|(id, _)| *id != self.focused);
+        let mut out: Vec<Fill> = Vec::new();
+        for &(pane, rect) in panels {
+            let screen = self.screen_of(rect, ppp);
+            let taken = out.iter().any(|f| f.screen == screen);
+            if !taken {
+                out.push(Fill { pane, screen });
+            }
+        }
+        out
+    }
+
+    /// Which panes have a panel filling a screen. For the tests; the frame reads the field.
+    #[cfg(test)]
+    pub fn fullscreen_panes_for_tests(&self) -> Vec<PaneId> {
+        self.fullscreen.iter().map(|f| f.pane).collect()
     }
 
     /// Spread the window across every monitor. Answers whether it did.
@@ -336,7 +409,7 @@ impl App {
     /// Whether a video is filling the screen. For the tests; the frame reads the field.
     #[cfg(test)]
     pub fn fullscreen_for_tests(&self) -> bool {
-        self.fullscreen_video.is_some()
+        !self.fullscreen.is_empty()
     }
 
     /// The window size that would be written to the settings file. For the test that checks the

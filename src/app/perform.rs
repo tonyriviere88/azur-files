@@ -663,7 +663,7 @@ impl App {
                 // has just gone. Nothing else has to be undone — the player went with the content —
                 // but the *window* is still fullscreen, and a fullscreen window with a file listing
                 // in it is not a state anybody asked for.
-                if self.fullscreen_video == Some(pane) {
+                if self.fullscreen.iter().any(|f| f.pane == pane) {
                     self.perform(ctx, Action::ToggleVideoFullscreen(pane));
                 }
                 self.config_dirty = true;
@@ -680,14 +680,29 @@ impl App {
             // window — which carries `WS_MAXIMIZE` and sits on the monitor's work area, so the
             // platform keeps it clamped to the screen minus the taskbar. See `win::fill_screen`, which
             // has both failures and does the whole transition in one move that does not animate.
+            //
+            // One panel's way in or out. The others filling their own screens stay as they are, and
+            // the window is refitted to whichever monitors are left — or given back when none is.
             Action::ToggleVideoFullscreen(pane) => {
-                let filling = self.fullscreen_video != Some(pane);
-                self.fullscreen_video = filling.then_some(pane);
-                self.fill_screen(filling);
-                // Nothing else asks for one: the window is about to change shape underneath a
-                // program that is idle between events, and the frame that notices is this one's
-                // successor.
-                ctx.request_repaint();
+                if self.fullscreen.iter().any(|f| f.pane == pane) {
+                    self.fullscreen.retain(|f| f.pane != pane);
+                } else {
+                    let ppp = ctx.pixels_per_point();
+                    let taken: Vec<_> = self.fullscreen.iter().filter_map(|f| f.screen).collect();
+                    let mut targets = self.fill_targets(Some(pane), ppp);
+                    // A panel that has not been drawn yet is still asked for: it fills the window,
+                    // and the frame that finds nothing to draw gives the window back.
+                    if targets.is_empty() {
+                        targets.push(Fill { pane, screen: None });
+                    }
+                    for fill in targets {
+                        // A monitor that is already filled by another panel is not shared.
+                        if fill.screen.is_none_or(|screen| !taken.contains(&screen)) {
+                            self.fullscreen.push(fill);
+                        }
+                    }
+                }
+                self.refit_fullscreen(ctx);
             }
             // The shell is not started here and not stopped here. Opening the panel is the cheap
             // half — `console_panel` starts one on the frame it first has a rect to draw in, and
@@ -1377,6 +1392,19 @@ impl App {
                         self.maximized = false;
                         self.window_size = Some([w, h]);
                         self.config_dirty = true;
+                    }
+                    // `F11`. Out of it when anything is filling a screen, and otherwise every open
+                    // preview panel onto the monitor its centre is on — so two panes' panels on two
+                    // monitors each take their own. Nothing happens with no panel open: this is the
+                    // preview's full screen, not the window's.
+                    WindowAction::ToggleFullscreen => {
+                        if self.fullscreen.is_empty() {
+                            let ppp = ctx.pixels_per_point();
+                            self.fullscreen = self.fill_targets(None, ppp);
+                        } else {
+                            self.fullscreen.clear();
+                        }
+                        self.refit_fullscreen(ctx);
                     }
                     WindowAction::Close => ctx.send_viewport_cmd(Cmd::Close),
                     WindowAction::Drag => ctx.send_viewport_cmd(Cmd::StartDrag),

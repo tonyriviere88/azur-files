@@ -75,9 +75,9 @@ impl App {
             return;
         }
 
-        let fullscreen = self.fullscreen_video;
+        let filling: Vec<_> = self.fullscreen.iter().map(|f| f.pane).collect();
         for pane in self.panes.iter_mut() {
-            let forced = fullscreen == Some(pane.id);
+            let forced = filling.contains(&pane.id);
             let active = pane.active;
             let Some(tab) = pane.tabs.get_mut(active) else {
                 continue;
@@ -198,8 +198,23 @@ impl App {
         // without the pointer ever leaving the video, so a space typed at the prompt would pause
         // the film instead of arriving. A video filling the screen keeps them regardless — there is
         // nothing else on screen to have typed into.
-        if !typing || self.fullscreen_video.is_some() {
+        if !typing || !self.fullscreen.is_empty() {
             self.video_keys(ctx);
+        }
+
+        // **`F11`: the preview panels full screen, each on its own monitor** — and the same key
+        // out. From anywhere, a field with the caret included: it is not a key a field could mean.
+        // Not over a menu or the palette, which own the keyboard outright.
+        if self.menu.is_none()
+            && self.palette.is_none()
+            && ctx.input_mut(|i| {
+                shortcuts::chords(&Command::Fullscreen)
+                    .iter()
+                    .any(|chord| chord.consume(i))
+            })
+        {
+            self.actions.push(Action::Window(WindowAction::ToggleFullscreen));
+            return;
         }
 
         // **A video filling the screen takes the rest of the keyboard with it**, and gives back one
@@ -210,9 +225,9 @@ impl App {
         // a selection that is the only thing keeping the video open. `Escape` is the way out, and it
         // has to be here rather than further down for the same reason — the handler below it would
         // have used the key for something else first.
-        if let Some(pane) = self.fullscreen_video {
+        if !self.fullscreen.is_empty() {
             if ctx.input(|i| i.key_pressed(K::Escape)) {
-                self.actions.push(Action::ToggleVideoFullscreen(pane));
+                self.actions.push(Action::Window(WindowAction::ToggleFullscreen));
             }
             return;
         }

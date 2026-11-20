@@ -171,6 +171,16 @@ enum Closing {
     WhenDone,
 }
 
+/// One preview panel filling a screen.
+#[derive(Clone, Copy, Debug)]
+struct Fill {
+    pane: PaneId,
+    /// The monitor it fills, as `[left, top, right, bottom]` in physical pixels — the one its centre
+    /// was on when it went full screen. `None` when the platform could not say, which is the whole
+    /// window.
+    screen: Option<[i32; 4]>,
+}
+
 pub struct App {
     theme: Theme,
     /// Set once per theme change; installing a style every frame would throw away
@@ -431,16 +441,19 @@ pub struct App {
     /// [`crate::config::Config::update_every`] and [`crate::config::Config::update_skip`].
     update_every: crate::update::Every,
     update_skip: String,
-    /// Whose video is filling the screen, if one is.
+    /// The preview panels filling a screen each — a video's, or any panel's under `F11`.
     ///
-    /// **The one state in this program that suppresses the rest of the window.** While it is set the
-    /// frame draws the player and nothing else — no panes, no sidebar, no title bar — and the
-    /// keyboard's shortcuts stand down but for the one that gets out. See [`App::theatre`], which is
+    /// **The one state in this program that suppresses the rest of the window.** While anything is in
+    /// it the frame draws those panels and nothing else — no panes, no sidebar, no title bar — and the
+    /// keyboard's shortcuts stand down but for the ones that get out. See [`App::theatre`], which is
     /// also where every way of leaving is listed.
     ///
-    /// Not in the settings file. Where the preview panel goes is a habit worth keeping; a video
+    /// Not in the settings file. Where the preview panel goes is a habit worth keeping; a panel
     /// filling the screen is a thing you were doing a minute ago.
-    fullscreen_video: Option<PaneId>,
+    fullscreen: Vec<Fill>,
+    /// Where each preview panel was drawn this frame, in the window's points, so `F11` can tell which
+    /// monitor each one is on. Rebuilt by [`App::body`] every frame.
+    preview_panels: Vec<(PaneId, Rect)>,
     /// The window's inner size, tracked so it can be restored next launch. In the monitor's points,
     /// not zoomed ones — see [`crate::config::Config::zoom`].
     window_size: Option<[f32; 2]>,
@@ -794,7 +807,8 @@ impl App {
             },
             update_every: config.update_every,
             update_skip: config.update_skip.clone(),
-            fullscreen_video: None,
+            fullscreen: Vec::new(),
+            preview_panels: Vec::new(),
             window_size: config.window,
             zoom: config.zoom,
             window_position: config.position,

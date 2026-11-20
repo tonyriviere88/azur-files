@@ -139,6 +139,7 @@ pub(crate) enum Command {
     ResetSize,
     Minimize,
     Maximize,
+    Fullscreen,
     Theme(crate::theme::Palette),
     CheckForUpdate,
     UpdateEvery(crate::update::Every),
@@ -177,6 +178,7 @@ impl Command {
             Self::Sizes => "measure space",
             Self::Console => "terminal shell",
             Self::Preview => "quick look",
+            Self::Fullscreen => "full screen theatre preview video",
             Self::Flatten => "tree recursive",
             Self::Sidebar => "sidebar",
             Self::FolderDiff | Self::Compare => "compare",
@@ -625,6 +627,15 @@ impl App {
         add(Command::Minimize, row(WINDOW, "Minimize"));
         let label = if self.maximized { "Restore" } else { "Maximize" };
         add(Command::Maximize, row(WINDOW, label));
+        // Only where it does something: with no preview panel open there is nothing to fill a screen.
+        if !self.fullscreen.is_empty() || !self.preview_panels.is_empty() {
+            let label = if self.fullscreen.is_empty() {
+                "Preview full screen"
+            } else {
+                "Leave full screen"
+            };
+            add(Command::Fullscreen, row(WINDOW, label));
+        }
         for palette in crate::theme::Palette::ALL {
             let label = format!("Theme: {}", palette.label());
             let on = self.theme.palette == palette;
@@ -943,6 +954,7 @@ impl App {
             Command::ResetSize => Action::Window(WindowAction::ResetSize),
             Command::Minimize => Action::Window(WindowAction::Minimize),
             Command::Maximize => Action::Window(WindowAction::ToggleMaximize),
+            Command::Fullscreen => Action::Window(WindowAction::ToggleFullscreen),
             Command::Theme(palette) => Action::SetTheme(palette),
             Command::CheckForUpdate => Action::CheckForUpdate,
             Command::UpdateEvery(every) => Action::SetUpdateEvery(every),
