@@ -385,7 +385,10 @@ impl App {
                     .layout(egui::Layout::top_down(egui::Align::Min)),
             );
             child.set_clip_rect(rect.intersect(ui.clip_rect()));
-            let drew = if crate::ui::preview::is_video(&mut tab.preview) {
+            // The player alone only for one video: with several files selected the panel is a tile
+            // per file, and filling the screen with the focused one would hide the rest.
+            let drew = if tab.preview.count() == 1 && crate::ui::preview::is_video(&mut tab.preview)
+            {
                 crate::ui::preview::theatre(
                     &mut child,
                     t,
